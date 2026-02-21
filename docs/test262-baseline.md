@@ -17,12 +17,12 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1585, failed=0
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3019, failed=1981
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。
-- 目前 runner 会跳过明显依赖 harness 全局（`assert` / `Test262Error` / `$262`）的用例，直到 host-harness 机制补齐。
+- runner 目前仅对明显依赖 `$262` host API 的用例做保守跳过；`assert` / `Test262Error` 已接入 baseline 运行路径。
 - 当前轮次新增 statement-list 早期错误校验（`let/const` 重复声明、block/function 冲突、`switch` case block 冲突、`catch` 参数与词法声明冲突），修复 VM `var/function` 重声明与非严格模式下未声明赋值创建全局绑定行为，补齐 ASI 的 `if`/`do-while` 分号细节与 `U+2028/U+2029` 行终止符处理，并增加保留字在 `IdentifierReference/BindingIdentifier` 位置的语法约束（含对象字面量 shorthand 场景）。
 - 新增 `this` 表达式基础支持（解析/编译/执行链路）与 `++/--` 词法区分，并补充前缀 `++/--` 的最小语义转换以减少 parse-negative 误分类。
 - runner 新增 `*_FIXTURE.js` 跳过策略（这些文件为 test262 支撑脚本，不作为独立测试执行），因此 `executed/skipped` 与旧快照不可直接逐项对比；在该口径下当前 `failed` 进一步下降到 `234`。
@@ -56,5 +56,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - bytecode 增加脚本顶层 `var` 预声明提升（最小 hoist），并对全局受限名（`undefined`/`NaN`/`Infinity`）的词法声明注入运行时异常路径（匹配 test262 `negative phase: runtime` 口径）；`language` 基线提升到 `1583/2`。
 - lexer/parser/ast/bytecode/vm 打通 `punctuators` 基线：新增 `%`、位运算（`&`/`|`/`^`/`~`）、移位（`<<`/`>>`/`>>>`）、条件运算符（`?:`）及对应复合赋值（`+=`/`-=`/`*=`/`/=`/`%=`/`<<=`/`>>=`/`>>>=`/`&=`/`|=`/`^=`）的最小可运行链路；`language` 基线提升到 `1584/1`。
 - test-harness 将单 case 执行放入大栈线程（`32MB`）以隔离深递归解析/执行路径；parser 表达式深度阈值上调至 `80`，`statements/function/S13.2.1_A1_T1.js`（32 层嵌套 IIFE）已通过。
-- 在当前 `language max-cases=5000` 口径下，失败已收敛到 `0`（`1585/0`）。
+- bytecode/vm 新增 `delete member` 专用路径（`DeleteProperty` / `DeletePropertyByValue`），修复 getter 内部 `delete this.x` 触发的递归栈溢出。
+- baseline builtins 新增 `String` / `isNaN` 以及 `Error` / `TypeError` / `ReferenceError` / `SyntaxError` 名称注入，降低 `UnknownIdentifier` 噪声失败簇。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3019/1981`（主要剩余在参数语义、块级作用域、class/computed-property、strict 早期错误等）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

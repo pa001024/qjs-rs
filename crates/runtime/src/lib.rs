@@ -10,6 +10,10 @@ pub enum NativeFunction {
     ObjectDefineProperty,
     NumberConstructor,
     RegExpConstructor,
+    StringConstructor,
+    IsNaN,
+    Assert,
+    Test262Error,
 }
 
 #[derive(Debug, Clone, PartialEq)]

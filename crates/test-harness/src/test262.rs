@@ -122,10 +122,7 @@ pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
 }
 
 fn requires_unsupported_harness_globals(source: &str) -> bool {
-    source.contains("assert(")
-        || source.contains("assert.")
-        || source.contains("Test262Error")
-        || source.contains("$262")
+    source.contains("$262")
 }
 
 fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
@@ -493,11 +490,13 @@ import "x";
 
     #[test]
     fn detects_unsupported_harness_globals_in_body() {
-        assert!(super::requires_unsupported_harness_globals("assert(true);"));
-        assert!(super::requires_unsupported_harness_globals(
+        assert!(!super::requires_unsupported_harness_globals(
+            "assert(true);"
+        ));
+        assert!(!super::requires_unsupported_harness_globals(
             "assert.sameValue(x, y);"
         ));
-        assert!(super::requires_unsupported_harness_globals(
+        assert!(!super::requires_unsupported_harness_globals(
             "throw new Test262Error();"
         ));
         assert!(super::requires_unsupported_harness_globals(

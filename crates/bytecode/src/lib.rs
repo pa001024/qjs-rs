@@ -32,6 +32,8 @@ pub enum Opcode {
     DefineSetter(String),
     SetProperty(String),
     SetPropertyByValue,
+    DeleteProperty(String),
+    DeletePropertyByValue,
     EnterScope,
     ExitScope,
     Add,
@@ -975,13 +977,25 @@ impl Compiler {
                     return;
                 }
                 if *op == UnaryOp::Delete {
-                    if matches!(&**expr, Expr::Identifier(_)) {
-                        code.push(Opcode::LoadBool(true));
-                        return;
+                    match &**expr {
+                        Expr::Identifier(_) => {
+                            code.push(Opcode::LoadBool(true));
+                        }
+                        Expr::Member { object, property } => {
+                            self.compile_expr(object, code);
+                            code.push(Opcode::DeleteProperty(property.clone()));
+                        }
+                        Expr::MemberComputed { object, property } => {
+                            self.compile_expr(object, code);
+                            self.compile_expr(property, code);
+                            code.push(Opcode::DeletePropertyByValue);
+                        }
+                        _ => {
+                            self.compile_expr(expr, code);
+                            code.push(Opcode::Pop);
+                            code.push(Opcode::LoadBool(true));
+                        }
                     }
-                    self.compile_expr(expr, code);
-                    code.push(Opcode::Pop);
-                    code.push(Opcode::LoadBool(true));
                     return;
                 }
                 if *op == UnaryOp::Typeof {
@@ -2045,6 +2059,45 @@ mod tests {
             delete_expr,
             Chunk {
                 code: vec![Opcode::LoadBool(true), Opcode::Halt],
+                functions: vec![],
+            }
+        );
+
+        let delete_member = compile_expression(&Expr::Unary {
+            op: UnaryOp::Delete,
+            expr: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+                property: "x".to_string(),
+            }),
+        });
+        assert_eq!(
+            delete_member,
+            Chunk {
+                code: vec![
+                    Opcode::LoadIdentifier("obj".to_string()),
+                    Opcode::DeleteProperty("x".to_string()),
+                    Opcode::Halt,
+                ],
+                functions: vec![],
+            }
+        );
+
+        let delete_member_computed = compile_expression(&Expr::Unary {
+            op: UnaryOp::Delete,
+            expr: Box::new(Expr::MemberComputed {
+                object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+                property: Box::new(Expr::Identifier(Identifier("key".to_string()))),
+            }),
+        });
+        assert_eq!(
+            delete_member_computed,
+            Chunk {
+                code: vec![
+                    Opcode::LoadIdentifier("obj".to_string()),
+                    Opcode::LoadIdentifier("key".to_string()),
+                    Opcode::DeletePropertyByValue,
+                    Opcode::Halt,
+                ],
                 functions: vec![],
             }
         );

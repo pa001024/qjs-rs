@@ -19,7 +19,33 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::NumberConstructor),
     );
     realm.define_global(
+        "String",
+        JsValue::NativeFunction(NativeFunction::StringConstructor),
+    );
+    realm.define_global(
         "RegExp",
         JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+    );
+    realm.define_global("isNaN", JsValue::NativeFunction(NativeFunction::IsNaN));
+    realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
+    realm.define_global(
+        "Test262Error",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "Error",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "TypeError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "ReferenceError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "SyntaxError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
     );
 }

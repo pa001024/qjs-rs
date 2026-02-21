@@ -108,6 +108,26 @@ mod tests {
             run_expression("typeof Number"),
             Ok(JsValue::String("function".to_string()))
         );
+        assert_eq!(
+            run_expression("typeof String"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof isNaN"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof assert"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof Test262Error"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof TypeError"),
+            Ok(JsValue::String("function".to_string()))
+        );
     }
 
     #[test]
@@ -128,6 +148,18 @@ mod tests {
     fn supports_number_constructor_baseline_properties() {
         let result = run_script("Number.NaN !== Number.NaN;", &[]);
         assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_string_and_isnan_baseline() {
+        assert_eq!(
+            run_script("String(123);", &[]),
+            Ok(JsValue::String("123".to_string()))
+        );
+        assert_eq!(
+            run_script("isNaN(Number.NaN);", &[]),
+            Ok(JsValue::Bool(true))
+        );
     }
 
     #[test]
@@ -162,6 +194,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_test262_assert_baseline() {
+        let result = run_script(
+            "assert(true); assert.sameValue(NaN, NaN); assert.notSameValue(0, -0); 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_test262_assert_throws_baseline() {
+        let result = run_script(
+            "assert.throws(Test262Error, function() { throw new Test262Error('x'); }); 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn supports_object_define_property_accessor_baseline() {
         assert_eq!(
             run_script(
@@ -192,6 +242,15 @@ mod tests {
             ),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn delete_member_in_getter_does_not_recurse() {
+        let result = run_script(
+            "var o = { get x() { delete this.x; return 1; } }; var a = o.x; var b = o.x; (a === 1) && (b === undefined);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

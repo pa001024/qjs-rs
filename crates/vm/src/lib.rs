@@ -62,6 +62,10 @@ enum HostFunction {
     StringReplace {
         receiver: String,
     },
+    AssertSameValue,
+    AssertNotSameValue,
+    AssertThrows,
+    AssertCompareArray,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -398,6 +402,18 @@ impl Vm {
                         }
                         _ => return Err(VmError::TypeError("property write expects object")),
                     }
+                }
+                Opcode::DeleteProperty(name) => {
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let deleted = self.delete_property(receiver, name.clone())?;
+                    self.stack.push(JsValue::Bool(deleted));
+                }
+                Opcode::DeletePropertyByValue => {
+                    let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let key = self.coerce_to_property_key(&key);
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let deleted = self.delete_property(receiver, key)?;
+                    self.stack.push(JsValue::Bool(deleted));
                 }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
                 Opcode::ExitScope => {
@@ -862,6 +878,65 @@ impl Vm {
                     Ok(JsValue::String(receiver))
                 }
             }
+            HostFunction::AssertSameValue => {
+                let left = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if self.same_value(&left, &right) {
+                    Ok(JsValue::Undefined)
+                } else {
+                    let detail = if args.len() >= 3 {
+                        self.coerce_to_string(&args[2])
+                    } else {
+                        format!(
+                            "Expected SameValue, got left={} right={}",
+                            self.coerce_to_string(&left),
+                            self.coerce_to_string(&right)
+                        )
+                    };
+                    Err(self.assertion_failure(&detail))
+                }
+            }
+            HostFunction::AssertNotSameValue => {
+                let left = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if !self.same_value(&left, &right) {
+                    Ok(JsValue::Undefined)
+                } else {
+                    let detail = if args.len() >= 3 {
+                        self.coerce_to_string(&args[2])
+                    } else {
+                        format!(
+                            "Expected values to differ but both were {}",
+                            self.coerce_to_string(&left)
+                        )
+                    };
+                    Err(self.assertion_failure(&detail))
+                }
+            }
+            HostFunction::AssertThrows => {
+                let callback = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                match self.execute_callable(callback, Some(JsValue::Undefined), Vec::new(), realm) {
+                    Ok(_) => {
+                        Err(self.assertion_failure("assert.throws expected callback to throw"))
+                    }
+                    Err(VmError::UncaughtException(_)) => Ok(JsValue::Undefined),
+                    Err(err) => Err(err),
+                }
+            }
+            HostFunction::AssertCompareArray => {
+                let actual = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let expected = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if self.compare_array_like(&actual, &expected)? {
+                    Ok(JsValue::Undefined)
+                } else {
+                    let detail = if args.len() >= 3 {
+                        self.coerce_to_string(&args[2])
+                    } else {
+                        "assert.compareArray failed".to_string()
+                    };
+                    Err(self.assertion_failure(&detail))
+                }
+            }
         }
     }
 
@@ -922,6 +997,34 @@ impl Vm {
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
+            }
+            NativeFunction::StringConstructor => {
+                let value = args
+                    .first()
+                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                Ok(JsValue::String(value))
+            }
+            NativeFunction::IsNaN => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Bool(self.to_number(&value).is_nan()))
+            }
+            NativeFunction::Assert => {
+                let condition = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if self.is_truthy(&condition) {
+                    Ok(JsValue::Undefined)
+                } else {
+                    let detail = args.get(1).map_or_else(
+                        || "assert() failed".to_string(),
+                        |value| self.coerce_to_string(value),
+                    );
+                    Err(self.assertion_failure(&detail))
+                }
+            }
+            NativeFunction::Test262Error => {
+                let message = args.first().map_or("Test262Error".to_string(), |value| {
+                    self.coerce_to_string(value)
+                });
+                Ok(JsValue::String(format!("Test262Error: {message}")))
             }
             NativeFunction::RegExpConstructor => {
                 let pattern = args
@@ -1284,6 +1387,31 @@ impl Vm {
         Ok(value)
     }
 
+    fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
+        match receiver {
+            JsValue::Object(object_id) => self.delete_object_property(object_id, &property),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    fn delete_object_property(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+    ) -> Result<bool, VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object.properties.remove(property);
+        object.getters.remove(property);
+        object.setters.remove(property);
+        Ok(true)
+    }
+
     fn get_host_function_property(
         &mut self,
         host_id: u64,
@@ -1372,6 +1500,18 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
+            }
+            (NativeFunction::Assert, "sameValue") => {
+                self.create_host_function_value(HostFunction::AssertSameValue)
+            }
+            (NativeFunction::Assert, "notSameValue") => {
+                self.create_host_function_value(HostFunction::AssertNotSameValue)
+            }
+            (NativeFunction::Assert, "throws") => {
+                self.create_host_function_value(HostFunction::AssertThrows)
+            }
+            (NativeFunction::Assert, "compareArray") => {
+                self.create_host_function_value(HostFunction::AssertCompareArray)
             }
             (_, "call") => self.create_host_function_value(HostFunction::BoundMethod {
                 target: JsValue::NativeFunction(native),
@@ -1482,6 +1622,91 @@ impl Vm {
         } else {
             uint as i32
         }
+    }
+
+    fn same_value(&self, left: &JsValue, right: &JsValue) -> bool {
+        match (left, right) {
+            (JsValue::Number(lhs), JsValue::Number(rhs)) => {
+                if lhs.is_nan() && rhs.is_nan() {
+                    return true;
+                }
+                if lhs == rhs {
+                    if *lhs == 0.0 {
+                        return lhs.is_sign_positive() == rhs.is_sign_positive();
+                    }
+                    return true;
+                }
+                false
+            }
+            (JsValue::Bool(lhs), JsValue::Bool(rhs)) => lhs == rhs,
+            (JsValue::Null, JsValue::Null) => true,
+            (JsValue::String(lhs), JsValue::String(rhs)) => lhs == rhs,
+            (JsValue::Function(lhs), JsValue::Function(rhs)) => lhs == rhs,
+            (JsValue::NativeFunction(lhs), JsValue::NativeFunction(rhs)) => lhs == rhs,
+            (JsValue::HostFunction(lhs), JsValue::HostFunction(rhs)) => lhs == rhs,
+            (JsValue::Object(lhs), JsValue::Object(rhs)) => lhs == rhs,
+            (JsValue::Undefined, JsValue::Undefined) => true,
+            _ => false,
+        }
+    }
+
+    fn assertion_failure(&self, detail: &str) -> VmError {
+        VmError::UncaughtException(JsValue::String(format!("Assertion failed: {detail}")))
+    }
+
+    fn compare_array_like(&self, actual: &JsValue, expected: &JsValue) -> Result<bool, VmError> {
+        let actual_id = match actual {
+            JsValue::Object(id) => *id,
+            _ => return Ok(false),
+        };
+        let expected_id = match expected {
+            JsValue::Object(id) => *id,
+            _ => return Ok(false),
+        };
+
+        let actual_object = self
+            .objects
+            .get(&actual_id)
+            .ok_or(VmError::UnknownObject(actual_id))?;
+        let expected_object = self
+            .objects
+            .get(&expected_id)
+            .ok_or(VmError::UnknownObject(expected_id))?;
+
+        let actual_length = actual_object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        let expected_length = expected_object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        if actual_length != expected_length {
+            return Ok(false);
+        }
+
+        for index in 0..actual_length {
+            let key = index.to_string();
+            let actual_value = actual_object
+                .properties
+                .get(&key)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            let expected_value = expected_object
+                .properties
+                .get(&key)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            if !self.same_value(&actual_value, &expected_value) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     fn is_truthy(&self, value: &JsValue) -> bool {
