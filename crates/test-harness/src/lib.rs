@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod test262;
+
 use bytecode::{compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};

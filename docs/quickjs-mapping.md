@@ -8,7 +8,7 @@
 | VM execution | `crates/vm` | In Progress | Scope stack, lexical shadowing, hoisted function calls, jump-based control flow (`if/while/for/switch`), baseline exception unwinding (`throw`/`try`), realm fallback, and reference-based captures landed. |
 | Value/object model | `crates/runtime` | In Progress | Global identifier lookup via `Realm` landed; lexical env currently lives in VM scopes. |
 | Builtins | `crates/builtins` | Planned | Add core globals first, then advanced builtins. |
-| Compatibility harness | `crates/test-harness` | In Progress | End-to-end expression/function/control-flow smoke tests and `test262-lite` classified pass/fail runner landed. |
+| Compatibility harness | `crates/test-harness` | In Progress | End-to-end expression/function/control-flow smoke tests and frontmatter-aware `test262-lite` classified runner landed. |
 
 ## Immediate Next Slice
 - Expand from `test262-lite` to real test262 frontmatter-aware runner and produce baseline pass-rate report.

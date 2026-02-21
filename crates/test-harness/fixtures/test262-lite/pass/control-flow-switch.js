@@ -1,3 +1,6 @@
+/*---
+description: switch fallthrough baseline
+---*/
 let y = 0;
 switch (1) {
   case 1:

@@ -6,15 +6,15 @@
 - 用例目录：`crates/test-harness/fixtures/test262-lite`
 - 跑批测试：`crates/test-harness/tests/test262_lite.rs`
 
-分类约定：
-- `pass/`: 必须成功执行
-- `fail/parse/`: 解析阶段必须失败
-- `fail/runtime/`: 运行阶段必须失败
+判定规则：
+- 主要依据 frontmatter：`negative.phase` (`parse` / `runtime`)。
+- 当前仍保留目录分类（`pass/`、`fail/parse/`、`fail/runtime/`）用于组织用例，但执行期望由 frontmatter 驱动。
+- 若缺少 frontmatter `negative`，默认视为应通过。
 
 执行方式：
 - `cargo test -p test-harness test262_lite`
 
 后续计划：
-- 接入真实 test262 frontmatter 解析
-- 支持 `negative`/`flags`/`features` 过滤
+- 接入真实 test262 仓库目录并解析更多 frontmatter 字段
+- 支持更完整 `flags` / strict mode / include harness 机制
 - 产出阶段性通过率报告

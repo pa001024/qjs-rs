@@ -1,3 +1,6 @@
+/*---
+description: finally return overrides try return
+---*/
 function f() {
   try {
     return 1;
