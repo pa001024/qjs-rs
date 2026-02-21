@@ -144,6 +144,24 @@ mod tests {
     }
 
     #[test]
+    fn catches_eval_reference_error_with_instanceof() {
+        let result = run_script(
+            "var ok = false; try { eval('missingName'); } catch (err) { ok = err instanceof ReferenceError; } ok;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn catches_eval_syntax_error_with_instanceof() {
+        let result = run_script(
+            "var ok = false; try { eval('if ('); } catch (err) { ok = err instanceof SyntaxError; } ok;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_function_constructor_baseline() {
         let result = run_script(
             "var add = Function('a', 'b', 'return a + b;'); add(20, 22);",

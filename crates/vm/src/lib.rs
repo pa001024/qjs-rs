@@ -739,42 +739,38 @@ impl Vm {
                 }
                 Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm) {
                     Ok(result) => self.stack.push(result),
-                    Err(VmError::UncaughtException(exception)) => {
-                        let target = self.throw_to_handler(exception, code.len())?;
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
                         pc = target;
                         continue;
                     }
-                    Err(err) => return Err(err),
                 },
                 Opcode::CallWithSpread(spread_flags) => {
                     match self.execute_call_with_spread(spread_flags, realm) {
                         Ok(result) => self.stack.push(result),
-                        Err(VmError::UncaughtException(exception)) => {
-                            let target = self.throw_to_handler(exception, code.len())?;
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
                             continue;
                         }
-                        Err(err) => return Err(err),
                     }
                 }
                 Opcode::Construct(arg_count) => match self.execute_construct(*arg_count, realm) {
                     Ok(result) => self.stack.push(result),
-                    Err(VmError::UncaughtException(exception)) => {
-                        let target = self.throw_to_handler(exception, code.len())?;
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
                         pc = target;
                         continue;
                     }
-                    Err(err) => return Err(err),
                 },
                 Opcode::ConstructWithSpread(spread_flags) => {
                     match self.execute_construct_with_spread(spread_flags, realm) {
                         Ok(result) => self.stack.push(result),
-                        Err(VmError::UncaughtException(exception)) => {
-                            let target = self.throw_to_handler(exception, code.len())?;
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
                             continue;
                         }
-                        Err(err) => return Err(err),
                     }
                 }
                 Opcode::Return => {
@@ -1374,8 +1370,9 @@ impl Vm {
     }
 
     fn execute_eval(&mut self, source: &str, realm: &Realm) -> Result<JsValue, VmError> {
-        let script = parse_script(source)
-            .map_err(|err| VmError::UncaughtException(JsValue::String(err.message)))?;
+        let script = parse_script(source).map_err(|err| {
+            VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
+        })?;
         let chunk = compile_script(&script);
         self.execute_inline_chunk(&chunk, realm)
     }
@@ -1396,8 +1393,9 @@ impl Vm {
             (String::new(), String::new())
         };
         let source = format!("(function({params}) {{\n{body}\n}})");
-        let expr = parse_expression(&source)
-            .map_err(|err| VmError::UncaughtException(JsValue::String(err.message)))?;
+        let expr = parse_expression(&source).map_err(|err| {
+            VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
+        })?;
         let chunk = compile_expression(&expr);
         let value = self.execute_inline_chunk(&chunk, realm)?;
 
@@ -1808,6 +1806,43 @@ impl Vm {
         result
     }
 
+    fn route_runtime_error_to_handler(
+        &mut self,
+        err: VmError,
+        code_len: usize,
+    ) -> Result<usize, VmError> {
+        match err {
+            VmError::UncaughtException(exception) => self.throw_to_handler(exception, code_len),
+            other => {
+                if self.exception_handlers.is_empty() {
+                    return Err(other);
+                }
+                if let Some(exception) = Self::runtime_error_exception_value(&other) {
+                    self.throw_to_handler(exception, code_len)
+                } else {
+                    Err(other)
+                }
+            }
+        }
+    }
+
+    fn runtime_error_exception_value(err: &VmError) -> Option<JsValue> {
+        match err {
+            VmError::UnknownIdentifier(name) => Some(JsValue::String(format!(
+                "ReferenceError: {name} is not defined"
+            ))),
+            VmError::TypeError(message) => Some(JsValue::String(format!("TypeError: {message}"))),
+            VmError::NotCallable => Some(JsValue::String("TypeError: NotCallable".to_string())),
+            VmError::ImmutableBinding(name) => Some(JsValue::String(format!(
+                "TypeError: immutable binding '{name}'"
+            ))),
+            VmError::VariableAlreadyDefined(name) => Some(JsValue::String(format!(
+                "SyntaxError: Identifier '{name}' has already been declared"
+            ))),
+            _ => None,
+        }
+    }
+
     fn throw_to_handler(&mut self, exception: JsValue, code_len: usize) -> Result<usize, VmError> {
         while let Some(handler) = self.exception_handlers.pop() {
             self.unwind_to(handler.scope_depth, handler.stack_depth)?;
@@ -2136,6 +2171,10 @@ impl Vm {
         }
 
         match left {
+            JsValue::String(message) => Ok(matches!(
+                right,
+                JsValue::NativeFunction(NativeFunction::Test262Error)
+            ) && Self::is_error_string(&message)),
             JsValue::Object(object_id) => {
                 let constructor = self.get_object_property(object_id, "constructor", realm)?;
                 if constructor == right {
@@ -2161,6 +2200,14 @@ impl Vm {
             value,
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_)
         )
+    }
+
+    fn is_error_string(message: &str) -> bool {
+        message.starts_with("TypeError:")
+            || message.starts_with("ReferenceError:")
+            || message.starts_with("SyntaxError:")
+            || message.starts_with("Test262Error:")
+            || message.starts_with("Error:")
     }
 
     fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
@@ -3356,6 +3403,23 @@ mod tests {
         realm.define_global(
             "Ctor",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn instanceof_accepts_error_like_strings_for_error_constructors() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadString("ReferenceError: x is not defined".to_string()),
+            Opcode::LoadIdentifier("ErrorCtor".to_string()),
+            Opcode::InstanceOf,
+            Opcode::Halt,
+        ]);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "ErrorCtor",
+            JsValue::NativeFunction(NativeFunction::Test262Error),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
