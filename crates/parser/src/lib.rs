@@ -720,6 +720,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Number(value))
             }
+            TokenKind::String(value) => {
+                self.advance();
+                Ok(Expr::String(value))
+            }
             TokenKind::Identifier(name) => {
                 self.advance();
                 match name.as_str() {
@@ -1023,6 +1027,10 @@ mod tests {
         assert_eq!(
             parse_expression("null").expect("parser should succeed"),
             Expr::Null
+        );
+        assert_eq!(
+            parse_expression("'ok'").expect("parser should succeed"),
+            Expr::String("ok".to_string())
         );
     }
 

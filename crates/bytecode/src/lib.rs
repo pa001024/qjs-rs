@@ -10,6 +10,7 @@ pub enum Opcode {
     LoadNumber(f64),
     LoadBool(bool),
     LoadNull,
+    LoadString(String),
     LoadUndefined,
     CreateObject,
     LoadIdentifier(String),
@@ -765,6 +766,7 @@ impl Compiler {
             Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
             Expr::Bool(value) => code.push(Opcode::LoadBool(*value)),
             Expr::Null => code.push(Opcode::LoadNull),
+            Expr::String(value) => code.push(Opcode::LoadString(value.clone())),
             Expr::ObjectLiteral(properties) => {
                 code.push(Opcode::CreateObject);
                 for property in properties {
@@ -882,6 +884,15 @@ mod tests {
             null_chunk,
             Chunk {
                 code: vec![Opcode::LoadNull, Opcode::Halt],
+                functions: vec![],
+            }
+        );
+
+        let string_chunk = compile_expression(&Expr::String("ok".to_string()));
+        assert_eq!(
+            string_chunk,
+            Chunk {
+                code: vec![Opcode::LoadString("ok".to_string()), Opcode::Halt],
                 functions: vec![],
             }
         );

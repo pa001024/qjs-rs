@@ -114,6 +114,7 @@ impl Vm {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadBool(value) => self.stack.push(JsValue::Bool(*value)),
                 Opcode::LoadNull => self.stack.push(JsValue::Null),
+                Opcode::LoadString(value) => self.stack.push(JsValue::String(value.clone())),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::CreateObject => {
                     let object_id = self.next_object_id;
@@ -253,8 +254,22 @@ impl Vm {
                     }
                 }
                 Opcode::Add => {
-                    let result = self.eval_numeric_binary(|lhs, rhs| lhs + rhs)?;
-                    self.stack.push(JsValue::Number(result));
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match (left, right) {
+                        (JsValue::Number(lhs), JsValue::Number(rhs)) => {
+                            self.stack.push(JsValue::Number(lhs + rhs));
+                        }
+                        (JsValue::String(lhs), rhs) => {
+                            let rhs = self.coerce_to_string(&rhs);
+                            self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
+                        }
+                        (lhs, JsValue::String(rhs)) => {
+                            let lhs = self.coerce_to_string(&lhs);
+                            self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
+                        }
+                        _ => return Err(VmError::TypeError("arithmetic expects numeric operands")),
+                    }
                 }
                 Opcode::Sub => {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs - rhs)?;
@@ -526,12 +541,25 @@ impl Vm {
         }
     }
 
+    fn coerce_to_string(&self, value: &JsValue) -> String {
+        match value {
+            JsValue::Number(number) => number.to_string(),
+            JsValue::Bool(boolean) => boolean.to_string(),
+            JsValue::Null => "null".to_string(),
+            JsValue::String(value) => value.clone(),
+            JsValue::Function(_) => "[function]".to_string(),
+            JsValue::Object(_) => "[object Object]".to_string(),
+            JsValue::Undefined => "undefined".to_string(),
+        }
+    }
+
     fn is_truthy(&self, value: &JsValue) -> bool {
         match value {
             JsValue::Undefined => false,
             JsValue::Null => false,
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
+            JsValue::String(value) => !value.is_empty(),
             JsValue::Function(_) => true,
             JsValue::Object(_) => true,
         }
@@ -561,6 +589,18 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn concatenates_when_string_is_present_in_addition() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadString("qjs".to_string()),
+            Opcode::LoadNumber(1.0),
+            Opcode::Add,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("qjs1".to_string())));
     }
 
     #[test]
@@ -883,6 +923,13 @@ mod tests {
         let null_chunk = empty_chunk(vec![Opcode::LoadNull, Opcode::Halt]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&null_chunk), Ok(JsValue::Null));
+
+        let string_chunk = empty_chunk(vec![Opcode::LoadString("ok".to_string()), Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&string_chunk),
+            Ok(JsValue::String("ok".to_string()))
+        );
     }
 
     #[test]
@@ -895,6 +942,17 @@ mod tests {
     #[test]
     fn treats_null_as_falsy() {
         let chunk = empty_chunk(vec![Opcode::LoadNull, Opcode::Not, Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn treats_empty_string_as_falsy() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadString(String::new()),
+            Opcode::Not,
+            Opcode::Halt,
+        ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }

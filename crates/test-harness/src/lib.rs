@@ -76,7 +76,20 @@ mod tests {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));
         assert_eq!(run_expression("null"), Ok(JsValue::Null));
+        assert_eq!(
+            run_expression("'ok'"),
+            Ok(JsValue::String("ok".to_string()))
+        );
         assert_eq!(run_expression("!null"), Ok(JsValue::Bool(true)));
+        assert_eq!(run_expression("!''"), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn evaluates_string_concatenation_with_add_operator() {
+        assert_eq!(
+            run_expression("'qjs' + 1"),
+            Ok(JsValue::String("qjs1".to_string()))
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub struct Span {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Number(f64),
+    String(String),
     Identifier(String),
     Plus,
     Minus,
@@ -297,6 +298,65 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
+        if byte == b'\'' || byte == b'"' {
+            let quote = byte;
+            let start = pos;
+            pos += 1;
+            let mut value = String::new();
+            let mut terminated = false;
+            while pos < bytes.len() {
+                let current = bytes[pos];
+                if current == quote {
+                    pos += 1;
+                    terminated = true;
+                    break;
+                }
+                if current == b'\\' {
+                    pos += 1;
+                    if pos >= bytes.len() {
+                        return Err(LexError {
+                            message: "unterminated string literal".to_string(),
+                            position: start,
+                        });
+                    }
+                    let escaped = bytes[pos];
+                    let ch = match escaped {
+                        b'\'' => '\'',
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        _ => {
+                            return Err(LexError {
+                                message: format!(
+                                    "unsupported escape sequence '\\{}'",
+                                    escaped as char
+                                ),
+                                position: pos.saturating_sub(1),
+                            });
+                        }
+                    };
+                    value.push(ch);
+                    pos += 1;
+                    continue;
+                }
+                value.push(current as char);
+                pos += 1;
+            }
+            if !terminated {
+                return Err(LexError {
+                    message: "unterminated string literal".to_string(),
+                    position: start,
+                });
+            }
+            tokens.push(Token {
+                kind: TokenKind::String(value),
+                span: Span { start, end: pos },
+            });
+            continue;
+        }
+
         if byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' {
             let start = pos;
             while pos < bytes.len() {
@@ -366,6 +426,14 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::Number(3.0));
         assert_eq!(tokens[4].kind, TokenKind::RParen);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_string_literals() {
+        let tokens = lex("'a\\n' \"b\"").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::String("a\n".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
     }
 
     #[test]

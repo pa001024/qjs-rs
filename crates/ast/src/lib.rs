@@ -29,6 +29,7 @@ pub enum Expr {
     Number(f64),
     Bool(bool),
     Null,
+    String(String),
     Identifier(Identifier),
     ObjectLiteral(Vec<ObjectProperty>),
     Unary {

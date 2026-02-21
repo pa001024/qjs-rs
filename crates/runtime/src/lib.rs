@@ -7,6 +7,7 @@ pub enum JsValue {
     Number(f64),
     Bool(bool),
     Null,
+    String(String),
     Function(u64),
     Object(u64),
     Undefined,
