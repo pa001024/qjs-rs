@@ -672,6 +672,17 @@ impl Vm {
                     }
                     Err(err) => return Err(err),
                 },
+                Opcode::CallWithSpread(spread_flags) => {
+                    match self.execute_call_with_spread(spread_flags, realm) {
+                        Ok(result) => self.stack.push(result),
+                        Err(VmError::UncaughtException(exception)) => {
+                            let target = self.throw_to_handler(exception, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
                 Opcode::Construct(arg_count) => match self.execute_construct(*arg_count, realm) {
                     Ok(result) => self.stack.push(result),
                     Err(VmError::UncaughtException(exception)) => {
@@ -681,6 +692,17 @@ impl Vm {
                     }
                     Err(err) => return Err(err),
                 },
+                Opcode::ConstructWithSpread(spread_flags) => {
+                    match self.execute_construct_with_spread(spread_flags, realm) {
+                        Ok(result) => self.stack.push(result),
+                        Err(VmError::UncaughtException(exception)) => {
+                            let target = self.throw_to_handler(exception, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
                 Opcode::Return => {
                     if !allow_return {
                         return Err(VmError::TopLevelReturn);
@@ -704,24 +726,24 @@ impl Vm {
     }
 
     fn execute_call(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
-        let mut args = Vec::with_capacity(arg_count);
-        for _ in 0..arg_count {
-            let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-            args.push(value);
-        }
-        args.reverse();
+        let args = self.pop_call_arguments(arg_count)?;
+        let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        self.execute_callable(callee, None, args, realm)
+    }
 
+    fn execute_call_with_spread(
+        &mut self,
+        spread_flags: &[bool],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let raw_args = self.pop_call_arguments(spread_flags.len())?;
+        let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         self.execute_callable(callee, None, args, realm)
     }
 
     fn execute_construct(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
-        let mut args = Vec::with_capacity(arg_count);
-        for _ in 0..arg_count {
-            let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-            args.push(value);
-        }
-        args.reverse();
+        let args = self.pop_call_arguments(arg_count)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
 
         match callee {
@@ -748,6 +770,105 @@ impl Vm {
                 }
             }
             _ => Err(VmError::NotCallable),
+        }
+    }
+
+    fn execute_construct_with_spread(
+        &mut self,
+        spread_flags: &[bool],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let raw_args = self.pop_call_arguments(spread_flags.len())?;
+        let args = self.expand_spread_arguments(raw_args, spread_flags)?;
+        let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+        match callee {
+            JsValue::Function(closure_id) => {
+                let constructed = self.create_object_value();
+                self.install_constructor_property(&constructed, JsValue::Function(closure_id));
+                let result =
+                    self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(constructed)
+                }
+            }
+            JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
+            JsValue::HostFunction(host_id) => {
+                let constructed = self.create_object_value();
+                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
+                let result = self.execute_host_function_call(host_id, args, realm)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(constructed)
+                }
+            }
+            _ => Err(VmError::NotCallable),
+        }
+    }
+
+    fn pop_call_arguments(&mut self, arg_count: usize) -> Result<Vec<JsValue>, VmError> {
+        let mut args = Vec::with_capacity(arg_count);
+        for _ in 0..arg_count {
+            let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+            args.push(value);
+        }
+        args.reverse();
+        Ok(args)
+    }
+
+    fn expand_spread_arguments(
+        &self,
+        args: Vec<JsValue>,
+        spread_flags: &[bool],
+    ) -> Result<Vec<JsValue>, VmError> {
+        if args.len() != spread_flags.len() {
+            return Err(VmError::TypeError("spread argument metadata mismatch"));
+        }
+        let mut expanded = Vec::new();
+        for (arg, is_spread) in args.into_iter().zip(spread_flags.iter().copied()) {
+            if is_spread {
+                expanded.extend(self.collect_spread_arguments(arg)?);
+            } else {
+                expanded.push(arg);
+            }
+        }
+        Ok(expanded)
+    }
+
+    fn collect_spread_arguments(&self, spread_arg: JsValue) -> Result<Vec<JsValue>, VmError> {
+        match spread_arg {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                let length = object
+                    .properties
+                    .get("length")
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    .max(0.0) as usize;
+                let mut values = Vec::with_capacity(length);
+                for index in 0..length {
+                    let key = index.to_string();
+                    values.push(
+                        object
+                            .properties
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined),
+                    );
+                }
+                Ok(values)
+            }
+            JsValue::String(value) => Ok(value
+                .chars()
+                .map(|ch| JsValue::String(ch.to_string()))
+                .collect()),
+            _ => Err(VmError::TypeError("spread expects array-like object")),
         }
     }
 

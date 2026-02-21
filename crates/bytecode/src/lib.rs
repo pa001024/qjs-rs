@@ -72,7 +72,9 @@ pub enum Opcode {
     RethrowIfException,
     Throw,
     Call(usize),
+    CallWithSpread(Vec<bool>),
     Construct(usize),
+    ConstructWithSpread(Vec<bool>),
     Return,
     Dup,
     Pop,
@@ -1177,17 +1179,39 @@ impl Compiler {
             }
             Expr::Call { callee, arguments } => {
                 self.compile_expr(callee, code);
+                let mut spread_flags = Vec::with_capacity(arguments.len());
                 for argument in arguments {
-                    self.compile_expr(argument, code);
+                    if let Expr::SpreadArgument(inner) = argument {
+                        self.compile_expr(inner, code);
+                        spread_flags.push(true);
+                    } else {
+                        self.compile_expr(argument, code);
+                        spread_flags.push(false);
+                    }
                 }
-                code.push(Opcode::Call(arguments.len()));
+                if spread_flags.iter().any(|is_spread| *is_spread) {
+                    code.push(Opcode::CallWithSpread(spread_flags));
+                } else {
+                    code.push(Opcode::Call(arguments.len()));
+                }
             }
             Expr::New { callee, arguments } => {
                 self.compile_expr(callee, code);
+                let mut spread_flags = Vec::with_capacity(arguments.len());
                 for argument in arguments {
-                    self.compile_expr(argument, code);
+                    if let Expr::SpreadArgument(inner) = argument {
+                        self.compile_expr(inner, code);
+                        spread_flags.push(true);
+                    } else {
+                        self.compile_expr(argument, code);
+                        spread_flags.push(false);
+                    }
                 }
-                code.push(Opcode::Construct(arguments.len()));
+                if spread_flags.iter().any(|is_spread| *is_spread) {
+                    code.push(Opcode::ConstructWithSpread(spread_flags));
+                } else {
+                    code.push(Opcode::Construct(arguments.len()));
+                }
             }
             Expr::Binary { op, left, right } => {
                 if *op == BinaryOp::LogicalAnd {
@@ -1242,6 +1266,10 @@ impl Compiler {
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
                 };
                 code.push(opcode);
+            }
+            Expr::SpreadArgument(inner) => {
+                // Spread arguments are lowered at call/construct sites.
+                self.compile_expr(inner, code);
             }
         }
     }

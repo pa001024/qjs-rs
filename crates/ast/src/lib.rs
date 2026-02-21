@@ -103,6 +103,7 @@ pub enum Expr {
         property: Box<Expr>,
         value: Box<Expr>,
     },
+    SpreadArgument(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

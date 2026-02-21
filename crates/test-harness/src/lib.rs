@@ -531,8 +531,11 @@ mod tests {
 
     #[test]
     fn parses_and_executes_call_with_spread_and_trailing_comma_shape() {
-        let result = run_script("function foo() {} foo(...[],);", &[]);
-        assert_eq!(result, Ok(JsValue::Undefined));
+        let result = run_script(
+            "var arr = [2, 3]; function foo() { return arguments.length === 4 && arguments[2] === 2 && arguments[3] === 3; } foo(42, ...[1], ...arr,);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

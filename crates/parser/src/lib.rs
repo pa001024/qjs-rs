@@ -1898,9 +1898,13 @@ impl Parser {
             return Ok(args);
         }
         loop {
-            let _is_spread = self.matches(&TokenKind::Ellipsis);
-            // Baseline parser accepts spread syntax shape first; runtime treats as plain arg.
-            args.push(self.parse_expression_inner()?);
+            let is_spread = self.matches(&TokenKind::Ellipsis);
+            let argument = self.parse_expression_inner()?;
+            if is_spread {
+                args.push(Expr::SpreadArgument(Box::new(argument)));
+            } else {
+                args.push(argument);
+            }
             if self.matches(&TokenKind::Comma) {
                 if self.check(&TokenKind::RParen) {
                     break;
@@ -2951,7 +2955,7 @@ mod tests {
         let parsed = parse_expression("foo(...[],)").expect("parser should succeed");
         let expected = Expr::Call {
             callee: Box::new(Expr::Identifier(Identifier("foo".to_string()))),
-            arguments: vec![Expr::ArrayLiteral(vec![])],
+            arguments: vec![Expr::SpreadArgument(Box::new(Expr::ArrayLiteral(vec![])))],
         };
         assert_eq!(parsed, expected);
     }
