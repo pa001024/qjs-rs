@@ -62,6 +62,7 @@ enum HostFunction {
     StringReplace {
         receiver: String,
     },
+    ObjectHasOwnProperty(ObjectId),
     AssertSameValue,
     AssertNotSameValue,
     AssertThrows,
@@ -108,6 +109,7 @@ pub struct Vm {
     host_functions: BTreeMap<u64, HostFunction>,
     next_host_function_id: u64,
     global_object_id: Option<ObjectId>,
+    object_prototype_id: Option<ObjectId>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
 }
@@ -131,8 +133,13 @@ impl Vm {
         self.host_functions.clear();
         self.next_host_function_id = 0;
         self.global_object_id = None;
+        self.object_prototype_id = None;
         self.exception_handlers.clear();
         self.pending_exception = None;
+        let object_prototype = self.create_object_value();
+        if let JsValue::Object(id) = object_prototype {
+            self.object_prototype_id = Some(id);
+        }
         let global_object = self.create_object_value();
         if let JsValue::Object(id) = global_object {
             self.global_object_id = Some(id);
@@ -921,6 +928,21 @@ impl Vm {
                     Ok(JsValue::String(receiver))
                 }
             }
+            HostFunction::ObjectHasOwnProperty(object_id) => {
+                let key = args
+                    .first()
+                    .map(|value| self.coerce_to_property_key(value))
+                    .unwrap_or_default();
+                let object = self
+                    .objects
+                    .get(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                Ok(JsValue::Bool(
+                    object.properties.contains_key(&key)
+                        || object.getters.contains_key(&key)
+                        || object.setters.contains_key(&key),
+                ))
+            }
             HostFunction::AssertSameValue => {
                 let left = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -1036,6 +1058,10 @@ impl Vm {
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
             }
+            NativeFunction::ObjectGetOwnPropertyDescriptor => {
+                self.execute_object_get_own_property_descriptor(&args)
+            }
+            NativeFunction::ObjectGetPrototypeOf => self.execute_object_get_prototype_of(&args),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
@@ -1217,6 +1243,89 @@ impl Vm {
         Ok(JsValue::Object(target_id))
     }
 
+    fn execute_object_get_own_property_descriptor(
+        &mut self,
+        args: &[JsValue],
+    ) -> Result<JsValue, VmError> {
+        let target_id = match args.first() {
+            Some(JsValue::Object(id)) => *id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object.getOwnPropertyDescriptor target must be object",
+                ));
+            }
+        };
+        let property = args
+            .get(1)
+            .map(|value| self.coerce_to_property_key(value))
+            .unwrap_or_default();
+        let (data_value, getter_value, setter_value, is_arguments_like) = {
+            let object = self
+                .objects
+                .get(&target_id)
+                .ok_or(VmError::UnknownObject(target_id))?;
+            (
+                object.properties.get(&property).cloned(),
+                object.getters.get(&property).cloned(),
+                object.setters.get(&property).cloned(),
+                object.properties.contains_key("callee")
+                    && object.properties.contains_key("length"),
+            )
+        };
+
+        if let Some(value) = data_value {
+            let enumerable =
+                !(is_arguments_like && matches!(property.as_str(), "length" | "callee"));
+            return Ok(self.create_descriptor_object(vec![
+                ("value", value),
+                ("writable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(enumerable)),
+                ("configurable", JsValue::Bool(true)),
+            ]));
+        }
+        if getter_value.is_some() || setter_value.is_some() {
+            return Ok(self.create_descriptor_object(vec![
+                ("get", getter_value.unwrap_or(JsValue::Undefined)),
+                ("set", setter_value.unwrap_or(JsValue::Undefined)),
+                ("enumerable", JsValue::Bool(true)),
+                ("configurable", JsValue::Bool(true)),
+            ]));
+        }
+        Ok(JsValue::Undefined)
+    }
+
+    fn execute_object_get_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(
+            target,
+            JsValue::Object(_)
+                | JsValue::Function(_)
+                | JsValue::NativeFunction(_)
+                | JsValue::HostFunction(_)
+        ) {
+            return Err(VmError::TypeError(
+                "Object.getPrototypeOf target must be object",
+            ));
+        }
+        Ok(self.object_prototype_value())
+    }
+
+    fn create_descriptor_object(&mut self, entries: Vec<(&str, JsValue)>) -> JsValue {
+        let descriptor = self.create_object_value();
+        let object_id = match descriptor {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .expect("descriptor object should exist");
+        for (key, value) in entries {
+            object.properties.insert(key.to_string(), value);
+        }
+        JsValue::Object(object_id)
+    }
+
     fn execute_inline_chunk(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         let stack_depth = self.stack.len();
         let strict = self.code_is_strict(&chunk.code);
@@ -1326,6 +1435,12 @@ impl Vm {
             .unwrap_or(JsValue::Undefined)
     }
 
+    fn object_prototype_value(&self) -> JsValue {
+        self.object_prototype_id
+            .map(JsValue::Object)
+            .unwrap_or(JsValue::Undefined)
+    }
+
     fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {
         match this_arg {
             None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.global_this_value(),
@@ -1372,6 +1487,11 @@ impl Vm {
         property: &str,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        if property == "hasOwnProperty" {
+            return Ok(
+                self.create_host_function_value(HostFunction::ObjectHasOwnProperty(object_id))
+            );
+        }
         let getter = self
             .objects
             .get(&object_id)
@@ -1570,6 +1690,13 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
             }
+            (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)
+            }
+            (NativeFunction::ObjectConstructor, "getPrototypeOf") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetPrototypeOf)
+            }
+            (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
             (NativeFunction::Assert, "sameValue") => {
                 self.create_host_function_value(HostFunction::AssertSameValue)
             }
@@ -1595,7 +1722,7 @@ impl Vm {
                 method: FunctionMethod::Bind,
             }),
             (_, "length") => JsValue::Number(1.0),
-            (_, "prototype") => self.create_object_value(),
+            (_, "prototype") => self.object_prototype_value(),
             _ => JsValue::Undefined,
         }
     }

@@ -8,6 +8,8 @@ pub enum NativeFunction {
     FunctionConstructor,
     ObjectConstructor,
     ObjectDefineProperty,
+    ObjectGetOwnPropertyDescriptor,
+    ObjectGetPrototypeOf,
     NumberConstructor,
     RegExpConstructor,
     StringConstructor,

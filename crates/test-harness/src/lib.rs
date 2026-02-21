@@ -247,6 +247,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_descriptor_and_prototype_baseline() {
+        assert_eq!(
+            run_script(
+                "function testcase() { var desc = Object.getOwnPropertyDescriptor(arguments, 'callee'); return desc.configurable === true && desc.enumerable === false && desc.writable === true && desc.hasOwnProperty('get') === false && desc.hasOwnProperty('set') === false; } testcase();",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "function testcase() { return Object.getPrototypeOf(arguments) === Object.getPrototypeOf({}); } testcase();",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn supports_object_literal_accessor_this_binding() {
         assert_eq!(
             run_script("var o = { get foo() { return this; } }; o.foo === o;", &[]),
