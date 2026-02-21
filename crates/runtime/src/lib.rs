@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsValue {
     Number(f64),
+    Bool(bool),
     Function(u64),
     Undefined,
 }

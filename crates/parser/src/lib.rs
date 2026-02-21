@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, VariableDeclaration,
+    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
+    VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -183,7 +184,7 @@ impl Parser {
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_additive()?;
+        let left = self.parse_comparison()?;
         if self.matches(&TokenKind::Equal) {
             let assignment_position = self.previous_position();
             let value = self.parse_assignment()?;
@@ -200,6 +201,34 @@ impl Parser {
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_additive()?;
+        loop {
+            let op = if self.matches(&TokenKind::EqualEqual) {
+                BinaryOp::Equal
+            } else if self.matches(&TokenKind::BangEqual) {
+                BinaryOp::NotEqual
+            } else if self.matches(&TokenKind::Less) {
+                BinaryOp::Less
+            } else if self.matches(&TokenKind::LessEqual) {
+                BinaryOp::LessEqual
+            } else if self.matches(&TokenKind::Greater) {
+                BinaryOp::Greater
+            } else if self.matches(&TokenKind::GreaterEqual) {
+                BinaryOp::GreaterEqual
+            } else {
+                break;
+            };
+            let right = self.parse_additive()?;
+            expr = Expr::Binary {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
     }
 
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
@@ -223,7 +252,7 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_postfix()?;
+        let mut expr = self.parse_unary()?;
         loop {
             let op = if self.matches(&TokenKind::Star) {
                 BinaryOp::Mul
@@ -232,7 +261,7 @@ impl Parser {
             } else {
                 break;
             };
-            let right = self.parse_postfix()?;
+            let right = self.parse_unary()?;
             expr = Expr::Binary {
                 op,
                 left: Box::new(expr),
@@ -240,6 +269,31 @@ impl Parser {
             };
         }
         Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        if self.matches(&TokenKind::Plus) {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Plus,
+                expr: Box::new(expr),
+            });
+        }
+        if self.matches(&TokenKind::Minus) {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Minus,
+                expr: Box::new(expr),
+            });
+        }
+        if self.matches(&TokenKind::Bang) {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
+        }
+        self.parse_postfix()
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -318,7 +372,14 @@ impl Parser {
             | TokenKind::Minus
             | TokenKind::Star
             | TokenKind::Slash
+            | TokenKind::Bang
             | TokenKind::Equal
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
             | TokenKind::Comma => Err(ParseError {
                 message: "unexpected operator at expression start".to_string(),
                 position,
@@ -460,7 +521,7 @@ impl Parser {
 mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt,
+        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
         VariableDeclaration,
     };
 
@@ -492,6 +553,38 @@ mod tests {
                     arguments: vec![Expr::Number(2.0), Expr::Number(3.0)],
                 },
             ],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_unary_expression() {
+        let parsed = parse_expression("!-x").expect("parser should succeed");
+        let expected = Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(Expr::Unary {
+                op: UnaryOp::Minus,
+                expr: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+            }),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_comparison_expression() {
+        let parsed = parse_expression("1 + 2 * 3 >= 7").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::GreaterEqual,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Number(1.0)),
+                right: Box::new(Expr::Binary {
+                    op: BinaryOp::Mul,
+                    left: Box::new(Expr::Number(2.0)),
+                    right: Box::new(Expr::Number(3.0)),
+                }),
+            }),
+            right: Box::new(Expr::Number(7.0)),
         };
         assert_eq!(parsed, expected);
     }

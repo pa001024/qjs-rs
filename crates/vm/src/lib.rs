@@ -187,6 +187,43 @@ impl Vm {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs / rhs)?;
                     self.stack.push(JsValue::Number(result));
                 }
+                Opcode::Neg => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match value {
+                        JsValue::Number(number) => self.stack.push(JsValue::Number(-number)),
+                        _ => return Err(VmError::TypeError("unary '-' expects numeric operand")),
+                    }
+                }
+                Opcode::Not => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.stack.push(JsValue::Bool(!self.is_truthy(&value)));
+                }
+                Opcode::Eq => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.stack.push(JsValue::Bool(left == right));
+                }
+                Opcode::Ne => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.stack.push(JsValue::Bool(left != right));
+                }
+                Opcode::Lt => {
+                    let result = self.eval_numeric_compare(|lhs, rhs| lhs < rhs)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
+                Opcode::Le => {
+                    let result = self.eval_numeric_compare(|lhs, rhs| lhs <= rhs)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
+                Opcode::Gt => {
+                    let result = self.eval_numeric_compare(|lhs, rhs| lhs > rhs)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
+                Opcode::Ge => {
+                    let result = self.eval_numeric_compare(|lhs, rhs| lhs >= rhs)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
                 Opcode::Call(arg_count) => {
                     let result = self.execute_call(*arg_count, functions, realm)?;
                     self.stack.push(result);
@@ -292,6 +329,24 @@ impl Vm {
         match (left, right) {
             (JsValue::Number(lhs), JsValue::Number(rhs)) => Ok(op(lhs, rhs)),
             _ => Err(VmError::TypeError("arithmetic expects numeric operands")),
+        }
+    }
+
+    fn eval_numeric_compare(&mut self, op: impl FnOnce(f64, f64) -> bool) -> Result<bool, VmError> {
+        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        match (left, right) {
+            (JsValue::Number(lhs), JsValue::Number(rhs)) => Ok(op(lhs, rhs)),
+            _ => Err(VmError::TypeError("comparison expects numeric operands")),
+        }
+    }
+
+    fn is_truthy(&self, value: &JsValue) -> bool {
+        match value {
+            JsValue::Undefined => false,
+            JsValue::Bool(boolean) => *boolean,
+            JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
+            JsValue::Function(_) => true,
         }
     }
 }
@@ -514,5 +569,37 @@ mod tests {
         let chunk = empty_chunk(vec![Opcode::LoadNumber(1.0), Opcode::Call(0), Opcode::Halt]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Err(VmError::NotCallable));
+    }
+
+    #[test]
+    fn executes_unary_and_comparison_ops() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(2.0),
+            Opcode::Neg,
+            Opcode::LoadNumber(-2.0),
+            Opcode::Eq,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn executes_logical_not_with_truthiness() {
+        let chunk = empty_chunk(vec![Opcode::LoadNumber(0.0), Opcode::Not, Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn executes_relational_comparison() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(3.0),
+            Opcode::LoadNumber(2.0),
+            Opcode::Gt,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 }

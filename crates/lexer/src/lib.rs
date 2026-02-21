@@ -14,7 +14,14 @@ pub enum TokenKind {
     Minus,
     Star,
     Slash,
+    Bang,
     Equal,
+    EqualEqual,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     Comma,
     Semicolon,
     LParen,
@@ -97,14 +104,70 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'=' {
+            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
             tokens.push(Token {
-                kind: TokenKind::Equal,
+                kind: if is_double {
+                    TokenKind::EqualEqual
+                } else {
+                    TokenKind::Equal
+                },
                 span: Span {
                     start: pos,
-                    end: pos + 1,
+                    end: if is_double { pos + 2 } else { pos + 1 },
                 },
             });
-            pos += 1;
+            pos += if is_double { 2 } else { 1 };
+            continue;
+        }
+
+        if byte == b'!' {
+            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
+            tokens.push(Token {
+                kind: if is_double {
+                    TokenKind::BangEqual
+                } else {
+                    TokenKind::Bang
+                },
+                span: Span {
+                    start: pos,
+                    end: if is_double { pos + 2 } else { pos + 1 },
+                },
+            });
+            pos += if is_double { 2 } else { 1 };
+            continue;
+        }
+
+        if byte == b'<' {
+            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
+            tokens.push(Token {
+                kind: if is_double {
+                    TokenKind::LessEqual
+                } else {
+                    TokenKind::Less
+                },
+                span: Span {
+                    start: pos,
+                    end: if is_double { pos + 2 } else { pos + 1 },
+                },
+            });
+            pos += if is_double { 2 } else { 1 };
+            continue;
+        }
+
+        if byte == b'>' {
+            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
+            tokens.push(Token {
+                kind: if is_double {
+                    TokenKind::GreaterEqual
+                } else {
+                    TokenKind::Greater
+                },
+                span: Span {
+                    start: pos,
+                    end: if is_double { pos + 2 } else { pos + 1 },
+                },
+            });
+            pos += if is_double { 2 } else { 1 };
             continue;
         }
 
@@ -319,6 +382,19 @@ mod tests {
         assert_eq!(tokens[6].kind, TokenKind::RParen);
         assert_eq!(tokens[7].kind, TokenKind::LBrace);
         assert_eq!(tokens[8].kind, TokenKind::Identifier("return".to_string()));
+    }
+
+    #[test]
+    fn lexes_unary_and_comparison_operators() {
+        let tokens = lex("!a == b != c < d <= e > f >= g").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Bang);
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::EqualEqual);
+        assert_eq!(tokens[4].kind, TokenKind::BangEqual);
+        assert_eq!(tokens[6].kind, TokenKind::Less);
+        assert_eq!(tokens[8].kind, TokenKind::LessEqual);
+        assert_eq!(tokens[10].kind, TokenKind::Greater);
+        assert_eq!(tokens[12].kind, TokenKind::GreaterEqual);
     }
 
     #[test]

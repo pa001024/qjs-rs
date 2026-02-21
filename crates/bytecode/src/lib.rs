@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, VariableDeclaration,
+    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
+    VariableDeclaration,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,14 @@ pub enum Opcode {
     Sub,
     Mul,
     Div,
+    Neg,
+    Not,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     Call(usize),
     Return,
     Pop,
@@ -189,6 +198,15 @@ impl Compiler {
     fn compile_expr(&mut self, expr: &Expr, code: &mut Vec<Opcode>) {
         match expr {
             Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
+            Expr::Unary { op, expr } => {
+                self.compile_expr(expr, code);
+                let opcode = match op {
+                    UnaryOp::Plus => return,
+                    UnaryOp::Minus => Opcode::Neg,
+                    UnaryOp::Not => Opcode::Not,
+                };
+                code.push(opcode);
+            }
             Expr::Assign {
                 target: Identifier(name),
                 value,
@@ -212,6 +230,12 @@ impl Compiler {
                     BinaryOp::Sub => Opcode::Sub,
                     BinaryOp::Mul => Opcode::Mul,
                     BinaryOp::Div => Opcode::Div,
+                    BinaryOp::Equal => Opcode::Eq,
+                    BinaryOp::NotEqual => Opcode::Ne,
+                    BinaryOp::Less => Opcode::Lt,
+                    BinaryOp::LessEqual => Opcode::Le,
+                    BinaryOp::Greater => Opcode::Gt,
+                    BinaryOp::GreaterEqual => Opcode::Ge,
                 };
                 code.push(opcode);
             }
@@ -223,7 +247,7 @@ impl Compiler {
 mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt,
+        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
         VariableDeclaration,
     };
 
@@ -437,6 +461,34 @@ mod tests {
             }],
         };
 
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_unary_and_comparison_ops() {
+        let expr = Expr::Binary {
+            op: BinaryOp::GreaterEqual,
+            left: Box::new(Expr::Unary {
+                op: UnaryOp::Minus,
+                expr: Box::new(Expr::Number(2.0)),
+            }),
+            right: Box::new(Expr::Unary {
+                op: UnaryOp::Plus,
+                expr: Box::new(Expr::Number(-2.0)),
+            }),
+        };
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(2.0),
+                Opcode::Neg,
+                Opcode::LoadNumber(-2.0),
+                Opcode::Ge,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
         assert_eq!(chunk, expected);
     }
 }

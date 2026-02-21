@@ -9,12 +9,29 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Plus,
+    Minus,
+    Not,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(f64),
     Identifier(Identifier),
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
     Call {
         callee: Box<Expr>,
         arguments: Vec<Expr>,

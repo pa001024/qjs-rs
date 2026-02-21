@@ -64,6 +64,19 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_unary_operators() {
+        assert_eq!(run_expression("-5 + +2"), Ok(JsValue::Number(-3.0)));
+        assert_eq!(run_expression("!0"), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn evaluates_comparison_operators() {
+        assert_eq!(run_expression("1 + 2 * 3 >= 7"), Ok(JsValue::Bool(true)));
+        assert_eq!(run_expression("3 == 4"), Ok(JsValue::Bool(false)));
+        assert_eq!(run_expression("3 != 4"), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn surfaces_unknown_identifier_error() {
         let result = run_expression("foo + 1");
         assert!(result.is_err());
