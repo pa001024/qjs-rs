@@ -128,6 +128,14 @@ mod tests {
             run_expression("typeof TypeError"),
             Ok(JsValue::String("function".to_string()))
         );
+        assert_eq!(
+            run_expression("typeof globalThis"),
+            Ok(JsValue::String("object".to_string()))
+        );
+        assert_eq!(
+            run_script("globalThis === this;", &[]),
+            Ok(JsValue::Bool(true))
+        );
     }
 
     #[test]
@@ -338,6 +346,10 @@ mod tests {
         assert_eq!(run_expression("3 != 4"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("3 === 3"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("3 !== 4"), Ok(JsValue::Bool(true)));
+        assert_eq!(
+            run_script("var o = { x: 1 }; 'x' in o;", &[]),
+            Ok(JsValue::Bool(true))
+        );
     }
 
     #[test]

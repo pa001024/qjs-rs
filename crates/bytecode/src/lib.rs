@@ -58,6 +58,7 @@ pub enum Opcode {
     Le,
     Gt,
     Ge,
+    In,
     JumpIfFalse(usize),
     Jump(usize),
     PushExceptionHandler {
@@ -1133,6 +1134,7 @@ impl Compiler {
                     BinaryOp::LessEqual => Opcode::Le,
                     BinaryOp::Greater => Opcode::Gt,
                     BinaryOp::GreaterEqual => Opcode::Ge,
+                    BinaryOp::In => Opcode::In,
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
                 };
                 code.push(opcode);
@@ -2013,6 +2015,26 @@ mod tests {
                 Opcode::Neg,
                 Opcode::LoadNumber(-2.0),
                 Opcode::Ge,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_in_operator() {
+        let expr = Expr::Binary {
+            op: BinaryOp::In,
+            left: Box::new(Expr::String("x".to_string())),
+            right: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadString("x".to_string()),
+                Opcode::LoadIdentifier("obj".to_string()),
+                Opcode::In,
                 Opcode::Halt,
             ],
             functions: vec![],

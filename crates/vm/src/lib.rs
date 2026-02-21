@@ -182,6 +182,8 @@ impl Vm {
                         JsValue::Number(f64::NAN)
                     } else if name == "Infinity" {
                         JsValue::Number(f64::INFINITY)
+                    } else if name == "globalThis" {
+                        self.global_this_value()
                     } else if name == "this" {
                         realm
                             .resolve_identifier(name)
@@ -528,6 +530,8 @@ impl Vm {
                         JsValue::Number(f64::NAN)
                     } else if name == "Infinity" {
                         JsValue::Number(f64::INFINITY)
+                    } else if name == "globalThis" {
+                        self.global_this_value()
                     } else {
                         realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
                     };
@@ -558,6 +562,13 @@ impl Vm {
                 }
                 Opcode::Ge => {
                     let result = self.eval_numeric_compare(|lhs, rhs| lhs >= rhs)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
+                Opcode::In => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let key = self.coerce_to_property_key(&left);
+                    let result = self.evaluate_in_operator(key, right)?;
                     self.stack.push(JsValue::Bool(result));
                 }
                 Opcode::JumpIfFalse(target) => {
@@ -1386,6 +1397,33 @@ impl Vm {
         Ok(value)
     }
 
+    fn evaluate_in_operator(&mut self, key: String, right: JsValue) -> Result<bool, VmError> {
+        match right {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                Ok(object.properties.contains_key(&key)
+                    || object.getters.contains_key(&key)
+                    || object.setters.contains_key(&key))
+            }
+            JsValue::Function(closure_id) => {
+                let value = self.get_function_property(closure_id, &key)?;
+                Ok(!matches!(value, JsValue::Undefined))
+            }
+            JsValue::NativeFunction(native) => {
+                let value = self.get_native_function_property(native, &key);
+                Ok(!matches!(value, JsValue::Undefined))
+            }
+            JsValue::HostFunction(host_id) => {
+                let value = self.get_host_function_property(host_id, &key)?;
+                Ok(!matches!(value, JsValue::Undefined))
+            }
+            _ => Err(VmError::TypeError("right-hand side of 'in' expects object")),
+        }
+    }
+
     fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
         match receiver {
             JsValue::Object(object_id) => self.delete_object_property(object_id, &property),
@@ -1847,6 +1885,18 @@ mod tests {
         let mut vm = Vm::default();
         let value = vm.execute(&chunk).expect("execution should succeed");
         assert!(matches!(value, JsValue::Object(_)));
+    }
+
+    #[test]
+    fn global_this_alias_matches_this_value() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadIdentifier("globalThis".to_string()),
+            Opcode::LoadIdentifier("this".to_string()),
+            Opcode::Eq,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -2438,6 +2488,40 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(9.0)));
+    }
+
+    #[test]
+    fn executes_in_operator_for_object_properties() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::LoadNumber(1.0),
+            Opcode::DefineProperty("x".to_string()),
+            Opcode::DefineVariable {
+                name: "obj".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadString("x".to_string()),
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::In,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn in_operator_throws_for_non_object_rhs() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadString("x".to_string()),
+            Opcode::LoadNumber(1.0),
+            Opcode::In,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::TypeError("right-hand side of 'in' expects object"))
+        );
     }
 
     #[test]

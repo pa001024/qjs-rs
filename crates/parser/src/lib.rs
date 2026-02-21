@@ -434,6 +434,7 @@ struct Parser {
     source: String,
     pos: usize,
     expression_depth: usize,
+    allow_in: bool,
     function_depth: usize,
     loop_depth: usize,
     breakable_depth: usize,
@@ -446,6 +447,7 @@ impl Parser {
             source: source.to_string(),
             pos: 0,
             expression_depth: 0,
+            allow_in: true,
             function_depth: 0,
             loop_depth: 0,
             breakable_depth: 0,
@@ -752,7 +754,7 @@ impl Parser {
             };
             Some(declaration)
         } else {
-            Some(ForInitializer::Expression(self.parse_expression_inner()?))
+            Some(ForInitializer::Expression(self.parse_expression_no_in()?))
         };
         if self.matches_keyword("in") || self.matches_keyword("of") {
             let _ = self.parse_expression_inner()?;
@@ -1137,6 +1139,14 @@ impl Parser {
         result
     }
 
+    fn parse_expression_no_in(&mut self) -> Result<Expr, ParseError> {
+        let saved_allow_in = self.allow_in;
+        self.allow_in = false;
+        let result = self.parse_expression_inner();
+        self.allow_in = saved_allow_in;
+        result
+    }
+
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
         if let Some(arrow_function) = self.try_parse_arrow_function()? {
             return Ok(arrow_function);
@@ -1246,30 +1256,13 @@ impl Parser {
         let saved_pos = self.pos;
 
         let params = if self.matches(&TokenKind::LParen) {
-            let mut params = Vec::new();
-            if !self.check(&TokenKind::RParen) {
-                loop {
-                    let Some(Token {
-                        kind: TokenKind::Identifier(name),
-                        ..
-                    }) = self.current()
-                    else {
-                        self.pos = saved_pos;
-                        return Ok(None);
-                    };
-                    params.push(Identifier(name.clone()));
-                    self.advance();
-
-                    if self.matches(&TokenKind::Comma) {
-                        if self.check(&TokenKind::RParen) {
-                            break;
-                        }
-                        continue;
-                    }
-                    break;
+            let params = match self.parse_parameter_list() {
+                Ok(params) => params,
+                Err(_) => {
+                    self.pos = saved_pos;
+                    return Ok(None);
                 }
-            }
-
+            };
             if !self.matches(&TokenKind::RParen) {
                 self.pos = saved_pos;
                 return Ok(None);
@@ -1415,6 +1408,8 @@ impl Parser {
                 BinaryOp::Greater
             } else if self.matches(&TokenKind::GreaterEqual) {
                 BinaryOp::GreaterEqual
+            } else if self.allow_in && self.matches_keyword("in") {
+                BinaryOp::In
             } else {
                 break;
             };
@@ -2703,6 +2698,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_arrow_function_with_default_parameters() {
+        let parsed =
+            parse_expression("(p = 1, arguments) => arguments").expect("parser should succeed");
+        let expected = Expr::Function {
+            name: None,
+            params: vec![
+                Identifier("p".to_string()),
+                Identifier("arguments".to_string()),
+            ],
+            body: vec![Stmt::Return(Some(Expr::Identifier(Identifier(
+                "arguments".to_string(),
+            ))))],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
     fn parses_call_with_trailing_comma() {
         let parsed = parse_expression("f(1,)").expect("parser should succeed");
         let expected = Expr::Call {
@@ -2893,6 +2905,17 @@ mod tests {
                 }),
             }),
             right: Box::new(Expr::Number(7.0)),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_in_expression() {
+        let parsed = parse_expression("'arguments' in this").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::In,
+            left: Box::new(Expr::String("arguments".to_string())),
+            right: Box::new(Expr::This),
         };
         assert_eq!(parsed, expected);
     }
@@ -3198,6 +3221,11 @@ mod tests {
     fn parses_for_in_of_with_embedded_let_asi_baseline() {
         parse_script("for (var x in null) let\n{}").expect("script parsing should succeed");
         parse_script("for (var x of []) let\n{}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_in_expression_initializer() {
+        parse_script("for (x in y) {}").expect("script parsing should succeed");
     }
 
     #[test]
