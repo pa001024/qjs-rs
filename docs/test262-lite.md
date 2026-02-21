@@ -13,6 +13,7 @@
 
 执行方式：
 - `cargo test -p test-harness test262_lite`
+- `cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite`
 
 后续计划：
 - 接入真实 test262 仓库目录并解析更多 frontmatter 字段

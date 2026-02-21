@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::Realm;
@@ -39,6 +42,21 @@ pub enum ExecutionOutcome {
     Pass,
     ParseFail(String),
     RuntimeFail(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SuiteOptions {
+    pub max_cases: Option<usize>,
+    pub fail_fast: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SuiteSummary {
+    pub discovered: usize,
+    pub executed: usize,
+    pub skipped: usize,
+    pub passed: usize,
+    pub failed: usize,
 }
 
 pub fn parse_test262_case(source: &str) -> Result<Test262Case<'_>, String> {
@@ -93,6 +111,63 @@ pub fn execute_case(source: &str) -> ExecutionOutcome {
         Ok(_) => ExecutionOutcome::Pass,
         Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
     }
+}
+
+pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
+    let files = collect_js_files(root)?;
+    let mut summary = SuiteSummary {
+        discovered: files.len(),
+        ..SuiteSummary::default()
+    };
+
+    for file in files {
+        if let Some(max_cases) = options.max_cases {
+            if summary.executed >= max_cases {
+                break;
+            }
+        }
+
+        let source = fs::read_to_string(&file)
+            .map_err(|err| format!("failed to read {}: {err}", file.display()))?;
+        let case = parse_test262_case(&source)
+            .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
+
+        if should_skip(&case.frontmatter) {
+            summary.skipped += 1;
+            continue;
+        }
+
+        summary.executed += 1;
+        let expected = expected_outcome(&case.frontmatter);
+        let actual = execute_case(case.body);
+
+        let matched = matches!(
+            (&expected, &actual),
+            (ExpectedOutcome::Pass, ExecutionOutcome::Pass)
+                | (ExpectedOutcome::ParseFail, ExecutionOutcome::ParseFail(_))
+                | (
+                    ExpectedOutcome::RuntimeFail,
+                    ExecutionOutcome::RuntimeFail(_)
+                )
+        );
+
+        if matched {
+            summary.passed += 1;
+            continue;
+        }
+
+        summary.failed += 1;
+        if options.fail_fast {
+            return Err(format!(
+                "test262 mismatch at {}: expected {:?}, got {:?}",
+                file.display(),
+                expected,
+                actual
+            ));
+        }
+    }
+
+    Ok(summary)
 }
 
 fn parse_frontmatter(raw: &str) -> Result<Test262Frontmatter, String> {
@@ -203,12 +278,42 @@ fn parse_negative_phase(value: &str) -> Option<NegativePhase> {
     }
 }
 
+fn collect_js_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    visit_dir(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn visit_dir(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries =
+        fs::read_dir(root).map_err(|err| format!("failed to read {}: {err}", root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to read directory entry in {}: {err}",
+                root.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            visit_dir(&path, files)?;
+            continue;
+        }
+        if matches!(path.extension().and_then(|ext| ext.to_str()), Some("js")) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionOutcome, ExpectedOutcome, NegativePhase, expected_outcome, parse_test262_case,
-        should_skip,
+        ExecutionOutcome, ExpectedOutcome, NegativePhase, SuiteOptions, expected_outcome,
+        parse_test262_case, run_suite, should_skip,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn parses_frontmatter_sections() {
@@ -248,5 +353,17 @@ throw 1;
     fn executes_and_classifies_parse_failure() {
         let result = super::execute_case("throw;");
         assert!(matches!(result, ExecutionOutcome::ParseFail(_)));
+    }
+
+    #[test]
+    fn runs_suite_over_test262_lite_fixture() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("test262-lite");
+        let summary =
+            run_suite(&root, SuiteOptions::default()).expect("suite execution should succeed");
+        assert!(summary.discovered > 0);
+        assert!(summary.executed > 0);
+        assert_eq!(summary.failed, 0);
     }
 }
