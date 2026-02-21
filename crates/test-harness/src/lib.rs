@@ -121,4 +121,22 @@ mod tests {
         let result = run_script("let x = 10; function add(v) { return x + v; } add(1);", &[]);
         assert_eq!(result, Ok(JsValue::Number(11.0)));
     }
+
+    #[test]
+    fn function_call_observes_latest_outer_assignment() {
+        let result = run_script(
+            "let x = 10; function add(v) { return x + v; } x = 20; add(1);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(21.0)));
+    }
+
+    #[test]
+    fn function_assignment_updates_outer_binding() {
+        let result = run_script(
+            "let x = 10; function inc() { x = x + 1; return x; } inc(); x;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(11.0)));
+    }
 }

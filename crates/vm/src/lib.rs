@@ -4,6 +4,9 @@ use bytecode::{Chunk, CompiledFunction, Opcode};
 use runtime::{JsValue, Realm};
 use std::collections::BTreeMap;
 
+type BindingId = u64;
+type Scope = BTreeMap<String, BindingId>;
+
 #[derive(Debug, Clone, PartialEq)]
 struct Binding {
     value: JsValue,
@@ -13,7 +16,7 @@ struct Binding {
 #[derive(Debug, Clone, PartialEq)]
 struct Closure {
     function_id: usize,
-    captured_scopes: Vec<BTreeMap<String, Binding>>,
+    captured_scopes: Vec<Scope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +43,9 @@ enum ExecutionSignal {
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
-    scopes: Vec<BTreeMap<String, Binding>>,
+    scopes: Vec<Scope>,
+    bindings: BTreeMap<BindingId, Binding>,
+    next_binding_id: BindingId,
     closures: BTreeMap<u64, Closure>,
     next_closure_id: u64,
 }
@@ -55,6 +60,8 @@ impl Vm {
         self.stack.clear();
         self.scopes.clear();
         self.scopes.push(BTreeMap::new());
+        self.bindings.clear();
+        self.next_binding_id = 0;
         self.closures.clear();
         self.next_closure_id = 0;
 
@@ -76,7 +83,11 @@ impl Vm {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::LoadIdentifier(name) => {
-                    let value = if let Some(binding) = self.resolve_binding(name) {
+                    let value = if let Some(binding_id) = self.resolve_binding_id(name) {
+                        let binding = self
+                            .bindings
+                            .get(&binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
                         binding.value.clone()
                     } else {
                         realm
@@ -87,17 +98,17 @@ impl Vm {
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    {
+                        let scope = self.current_scope_mut()?;
+                        if scope.contains_key(name) {
+                            return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        }
+                    }
+                    let binding_id = self.create_binding(value, *mutable);
                     let scope = self.current_scope_mut()?;
-                    if scope.contains_key(name) {
+                    if scope.insert(name.clone(), binding_id).is_some() {
                         return Err(VmError::VariableAlreadyDefined(name.clone()));
                     }
-                    scope.insert(
-                        name.clone(),
-                        Binding {
-                            value,
-                            mutable: *mutable,
-                        },
-                    );
                 }
                 Opcode::DefineFunction { name, function_id } => {
                     if *function_id >= functions.len() {
@@ -111,13 +122,12 @@ impl Vm {
                         if scope.contains_key(name) {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                        scope.insert(
-                            name.clone(),
-                            Binding {
-                                value: JsValue::Function(closure_id),
-                                mutable: false,
-                            },
-                        );
+                    }
+                    let function_binding =
+                        self.create_binding(JsValue::Function(closure_id), false);
+                    let scope = self.current_scope_mut()?;
+                    if scope.insert(name.clone(), function_binding).is_some() {
+                        return Err(VmError::VariableAlreadyDefined(name.clone()));
                     }
 
                     let captured_scopes = self.scopes.clone();
@@ -131,9 +141,13 @@ impl Vm {
                 }
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let binding = self
-                        .resolve_binding_mut(name)
+                    let binding_id = self
+                        .resolve_binding_id(name)
                         .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?;
+                    let binding = self
+                        .bindings
+                        .get_mut(&binding_id)
+                        .ok_or(VmError::ScopeUnderflow)?;
                     if !binding.mutable {
                         return Err(VmError::ImmutableBinding(name.clone()));
                     }
@@ -211,16 +225,11 @@ impl Vm {
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
 
-        let mut frame_scope = BTreeMap::new();
+        let mut frame_scope: Scope = BTreeMap::new();
         for (index, param_name) in function.params.iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(JsValue::Undefined);
-            frame_scope.insert(
-                param_name.clone(),
-                Binding {
-                    value,
-                    mutable: true,
-                },
-            );
+            let binding_id = self.create_binding(value, true);
+            frame_scope.insert(param_name.clone(), binding_id);
         }
 
         let saved_stack = std::mem::take(&mut self.stack);
@@ -246,19 +255,22 @@ impl Vm {
         Ok(value)
     }
 
-    fn current_scope_mut(&mut self) -> Result<&mut BTreeMap<String, Binding>, VmError> {
+    fn create_binding(&mut self, value: JsValue, mutable: bool) -> BindingId {
+        let id = self.next_binding_id;
+        self.next_binding_id += 1;
+        self.bindings.insert(id, Binding { value, mutable });
+        id
+    }
+
+    fn current_scope_mut(&mut self) -> Result<&mut Scope, VmError> {
         self.scopes.last_mut().ok_or(VmError::ScopeUnderflow)
     }
 
-    fn resolve_binding(&self, name: &str) -> Option<&Binding> {
-        self.scopes.iter().rev().find_map(|scope| scope.get(name))
-    }
-
-    fn resolve_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+    fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
         self.scopes
-            .iter_mut()
+            .iter()
             .rev()
-            .find_map(|scope| scope.get_mut(name))
+            .find_map(|scope| scope.get(name).copied())
     }
 
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
@@ -444,6 +456,44 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn function_call_observes_outer_assignment() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(10.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::DefineFunction {
+                    name: "add".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadNumber(20.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Pop,
+                Opcode::LoadIdentifier("add".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Call(1),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "add".to_string(),
+                params: vec!["v".to_string()],
+                code: vec![
+                    Opcode::LoadIdentifier("x".to_string()),
+                    Opcode::LoadIdentifier("v".to_string()),
+                    Opcode::Add,
+                    Opcode::Return,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(21.0)));
     }
 
     #[test]
