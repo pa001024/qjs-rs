@@ -3,6 +3,7 @@
 use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, NativeFunction, Realm};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -738,7 +739,7 @@ impl Vm {
                     pc = target;
                     continue;
                 }
-                Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm) {
+                Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm, strict) {
                     Ok(result) => self.stack.push(result),
                     Err(err) => {
                         let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -747,7 +748,7 @@ impl Vm {
                     }
                 },
                 Opcode::CallWithSpread(spread_flags) => {
-                    match self.execute_call_with_spread(spread_flags, realm) {
+                    match self.execute_call_with_spread(spread_flags, realm, strict) {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -756,16 +757,18 @@ impl Vm {
                         }
                     }
                 }
-                Opcode::Construct(arg_count) => match self.execute_construct(*arg_count, realm) {
-                    Ok(result) => self.stack.push(result),
-                    Err(err) => {
-                        let target = self.route_runtime_error_to_handler(err, code.len())?;
-                        pc = target;
-                        continue;
+                Opcode::Construct(arg_count) => {
+                    match self.execute_construct(*arg_count, realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
                     }
-                },
+                }
                 Opcode::ConstructWithSpread(spread_flags) => {
-                    match self.execute_construct_with_spread(spread_flags, realm) {
+                    match self.execute_construct_with_spread(spread_flags, realm, strict) {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -796,24 +799,35 @@ impl Vm {
         Ok(ExecutionSignal::Halt)
     }
 
-    fn execute_call(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
+    fn execute_call(
+        &mut self,
+        arg_count: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        self.execute_callable(callee, None, args, realm)
+        self.execute_callable(callee, None, args, realm, caller_strict)
     }
 
     fn execute_call_with_spread(
         &mut self,
         spread_flags: &[bool],
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        self.execute_callable(callee, None, args, realm)
+        self.execute_callable(callee, None, args, realm, caller_strict)
     }
 
-    fn execute_construct(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
+    fn execute_construct(
+        &mut self,
+        arg_count: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
 
@@ -843,12 +857,13 @@ impl Vm {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
-                self.execute_native_call(native, args, realm)
+                self.execute_native_call(native, args, realm, caller_strict)
             }
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
-                let result = self.execute_host_function_call(host_id, args, realm)?;
+                let result =
+                    self.execute_host_function_call(host_id, args, realm, caller_strict)?;
                 if matches!(result, JsValue::Object(_)) {
                     Ok(result)
                 } else {
@@ -863,6 +878,7 @@ impl Vm {
         &mut self,
         spread_flags: &[bool],
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
@@ -894,12 +910,13 @@ impl Vm {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
-                self.execute_native_call(native, args, realm)
+                self.execute_native_call(native, args, realm, caller_strict)
             }
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
-                let result = self.execute_host_function_call(host_id, args, realm)?;
+                let result =
+                    self.execute_host_function_call(host_id, args, realm, caller_strict)?;
                 if matches!(result, JsValue::Object(_)) {
                     Ok(result)
                 } else {
@@ -1035,10 +1052,15 @@ impl Vm {
         this_arg: Option<JsValue>,
         args: Vec<JsValue>,
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         match callee {
-            JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
-            JsValue::HostFunction(host_id) => self.execute_host_function_call(host_id, args, realm),
+            JsValue::NativeFunction(native) => {
+                self.execute_native_call(native, args, realm, caller_strict)
+            }
+            JsValue::HostFunction(host_id) => {
+                self.execute_host_function_call(host_id, args, realm, caller_strict)
+            }
             JsValue::Function(closure_id) => {
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
@@ -1180,6 +1202,7 @@ impl Vm {
         host_id: u64,
         args: Vec<JsValue>,
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let host = self
             .host_functions
@@ -1191,12 +1214,12 @@ impl Vm {
                 FunctionMethod::Call => {
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = args.get(1..).map_or_else(Vec::new, |slice| slice.to_vec());
-                    self.execute_callable(target, Some(this_arg), call_args, realm)
+                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Apply => {
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = self.collect_apply_arguments(args.get(1))?;
-                    self.execute_callable(target, Some(this_arg), call_args, realm)
+                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Bind => {
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
@@ -1214,7 +1237,7 @@ impl Vm {
                 mut bound_args,
             } => {
                 bound_args.extend(args);
-                self.execute_callable(target, Some(this_arg), bound_args, realm)
+                self.execute_callable(target, Some(this_arg), bound_args, realm, caller_strict)
             }
             HostFunction::StringReplace { receiver } => {
                 let search_value = args
@@ -1230,6 +1253,7 @@ impl Vm {
                             Some(JsValue::Undefined),
                             vec![JsValue::String(search_value.clone())],
                             realm,
+                            caller_strict,
                         )?;
                         self.coerce_to_string(&callback_result)
                     }
@@ -1298,7 +1322,13 @@ impl Vm {
             }
             HostFunction::AssertThrows => {
                 let callback = args.get(1).cloned().unwrap_or(JsValue::Undefined);
-                match self.execute_callable(callback, Some(JsValue::Undefined), Vec::new(), realm) {
+                match self.execute_callable(
+                    callback,
+                    Some(JsValue::Undefined),
+                    Vec::new(),
+                    realm,
+                    caller_strict,
+                ) {
                     Ok(_) => {
                         Err(self.assertion_failure("assert.throws expected callback to throw"))
                     }
@@ -1364,10 +1394,11 @@ impl Vm {
         native: NativeFunction,
         args: Vec<JsValue>,
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         match native {
             NativeFunction::Eval => match args.first() {
-                Some(JsValue::String(source)) => self.execute_eval(source, realm),
+                Some(JsValue::String(source)) => self.execute_eval(source, realm, caller_strict),
                 Some(value) => Ok(value.clone()),
                 None => Ok(JsValue::Undefined),
             },
@@ -1451,12 +1482,22 @@ impl Vm {
         }
     }
 
-    fn execute_eval(&mut self, source: &str, realm: &Realm) -> Result<JsValue, VmError> {
-        let script = parse_script(source).map_err(|err| {
+    fn execute_eval(
+        &mut self,
+        source: &str,
+        realm: &Realm,
+        force_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let parse_source: Cow<'_, str> = if force_strict {
+            Cow::Owned(format!("\"use strict\";\n{source}"))
+        } else {
+            Cow::Borrowed(source)
+        };
+        let script = parse_script(parse_source.as_ref()).map_err(|err| {
             VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
         })?;
         let chunk = compile_script(&script);
-        self.execute_inline_chunk(&chunk, realm)
+        self.execute_inline_chunk(&chunk, realm, force_strict)
     }
 
     fn execute_function_constructor(
@@ -1479,7 +1520,7 @@ impl Vm {
             VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
         })?;
         let chunk = compile_expression(&expr);
-        let value = self.execute_inline_chunk(&chunk, realm)?;
+        let value = self.execute_inline_chunk(&chunk, realm, false)?;
 
         if let JsValue::Function(closure_id) = value {
             if let Some(global_scope) = self.scopes.first().cloned() {
@@ -1876,9 +1917,14 @@ impl Vm {
         JsValue::Object(object_id)
     }
 
-    fn execute_inline_chunk(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
+    fn execute_inline_chunk(
+        &mut self,
+        chunk: &Chunk,
+        realm: &Realm,
+        force_strict: bool,
+    ) -> Result<JsValue, VmError> {
         let stack_depth = self.stack.len();
-        let strict = self.code_is_strict(&chunk.code);
+        let strict = force_strict || self.code_is_strict(&chunk.code);
         let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict) {
             Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
             Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
@@ -2060,13 +2106,7 @@ impl Vm {
     }
 
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
-        let mut cursor = 0usize;
-        while cursor < code.len() {
-            match &code[cursor] {
-                Opcode::DefineFunction { .. } => cursor += 1,
-                _ => break,
-            }
-        }
+        let mut cursor = Self::skip_prologue_prefix(code);
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {
@@ -2082,13 +2122,7 @@ impl Vm {
     }
 
     fn code_has_marker(&self, code: &[Opcode], marker: &str) -> bool {
-        let mut cursor = 0usize;
-        while cursor < code.len() {
-            match &code[cursor] {
-                Opcode::DefineFunction { .. } => cursor += 1,
-                _ => break,
-            }
-        }
+        let mut cursor = Self::skip_prologue_prefix(code);
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {
@@ -2101,6 +2135,23 @@ impl Vm {
             }
         }
         false
+    }
+
+    fn skip_prologue_prefix(code: &[Opcode]) -> usize {
+        let mut cursor = 0usize;
+        while cursor < code.len() {
+            match &code[cursor] {
+                Opcode::DefineFunction { .. } => cursor += 1,
+                _ => break,
+            }
+        }
+        while cursor + 1 < code.len() {
+            match (&code[cursor], &code[cursor + 1]) {
+                (Opcode::LoadUndefined, Opcode::DefineVariable { .. }) => cursor += 2,
+                _ => break,
+            }
+        }
+        cursor
     }
 
     fn create_host_function_value(&mut self, host: HostFunction) -> JsValue {
@@ -2134,6 +2185,7 @@ impl Vm {
                 Some(JsValue::Object(object_id)),
                 Vec::new(),
                 realm,
+                false,
             );
         }
         let mapped_binding = self
@@ -2183,6 +2235,7 @@ impl Vm {
                 Some(JsValue::Object(object_id)),
                 vec![value.clone()],
                 realm,
+                false,
             )?;
             return Ok(value);
         }

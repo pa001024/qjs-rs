@@ -148,6 +148,15 @@ mod tests {
     }
 
     #[test]
+    fn strict_mode_eval_inherits_caller_strictness() {
+        let result = run_script(
+            "var threw = false; function f() { 'use strict'; eval('var public = 1;'); } try { f(); } catch (e) { threw = true; } threw;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn catches_eval_reference_error_with_instanceof() {
         let result = run_script(
             "var ok = false; try { eval('missingName'); } catch (err) { ok = err instanceof ReferenceError; } ok;",
