@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3343, failed=1657
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3346, failed=1654
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -71,5 +71,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/ast/bytecode/vm 打通调用/构造参数 `...spread` 运行时展开（含 trailing comma 场景），修复 `arguments-object/*spread-operator*` 一批断言失败，`language` 基线提升至 `3275/1725`。
 - parser 为 class body 增加最小方法降级链路（实例方法下沉到 `prototype`、静态方法挂到构造对象，使用 IIFE 生成），显著降低 `arguments-object` 中 class trailing-comma 失败簇，`language` 基线提升至 `3307/1693`。
 - VM 对 `arguments` 对象新增形参与索引属性映射、基础属性特性（`writable/enumerable/configurable`）与 `Object.defineProperty`/`delete` 约束处理，同时新增 `delete identifier` 指令语义（已声明绑定删除返回 `false`）；`language` 基线提升至 `3343/1657`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3343/1657`（主要剩余在 `arguments-object` 非简单参数 unmapped 语义、块级作用域细节、computed-property/class 细分语义 与 strict 早期错误）。
+- parser/VM 新增“非简单形参列表”内部标记链路（默认值/rest/解构参数关闭 arguments 映射），修复 `arguments-object/unmapped/via-params-*` 失败簇，`language` 基线提升至 `3346/1654`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3346/1654`（主要剩余在 `arguments-object` 高阶 descriptor 边界、块级作用域细节、computed-property/class 细分语义 与 strict 早期错误）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
