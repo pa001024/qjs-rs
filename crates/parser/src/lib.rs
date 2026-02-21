@@ -672,22 +672,28 @@ impl Parser {
         let initializer = if self.check(&TokenKind::Semicolon) {
             None
         } else if self.matches_keyword("let") {
-            let declaration = self.parse_variable_declaration(BindingKind::Let)?;
-            let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => {
-                    ForInitializer::VariableDeclaration(declaration)
-                }
-                Stmt::VariableDeclarations(declarations) => {
-                    ForInitializer::VariableDeclarations(declarations)
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "invalid for initializer".to_string(),
-                        position: self.current_position(),
-                    });
-                }
-            };
-            Some(declaration)
+            if self.check_keyword("in") || self.check_keyword("of") {
+                Some(ForInitializer::Expression(Expr::Identifier(Identifier(
+                    "let".to_string(),
+                ))))
+            } else {
+                let declaration = self.parse_variable_declaration(BindingKind::Let)?;
+                let declaration = match declaration {
+                    Stmt::VariableDeclaration(declaration) => {
+                        ForInitializer::VariableDeclaration(declaration)
+                    }
+                    Stmt::VariableDeclarations(declarations) => {
+                        ForInitializer::VariableDeclarations(declarations)
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "invalid for initializer".to_string(),
+                            position: self.current_position(),
+                        });
+                    }
+                };
+                Some(declaration)
+            }
         } else if self.matches_keyword("const") {
             let declaration = self.parse_variable_declaration(BindingKind::Const)?;
             let declaration = match declaration {
@@ -725,6 +731,25 @@ impl Parser {
         } else {
             Some(ForInitializer::Expression(self.parse_expression_inner()?))
         };
+        if self.matches_keyword("in") || self.matches_keyword("of") {
+            let _ = self.parse_expression_inner()?;
+            self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
+
+            self.loop_depth += 1;
+            self.breakable_depth += 1;
+            let body = self.parse_embedded_statement(false);
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+            self.breakable_depth = self.breakable_depth.saturating_sub(1);
+            let body = body?;
+
+            // Baseline: parse/compile `for-in` and `for-of` shape as non-iterating loops.
+            return Ok(Stmt::For {
+                initializer: None,
+                condition: Some(Expr::Bool(false)),
+                update: None,
+                body: Box::new(body),
+            });
+        }
         self.expect(TokenKind::Semicolon, "expected ';' after for initializer")?;
 
         let condition = if self.check(&TokenKind::Semicolon) {
@@ -2703,6 +2728,17 @@ mod tests {
             }],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_for_in_with_let_identifier_baseline() {
+        parse_script("for (let in {}) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_in_of_with_embedded_let_asi_baseline() {
+        parse_script("for (var x in null) let\n{}").expect("script parsing should succeed");
+        parse_script("for (var x of []) let\n{}").expect("script parsing should succeed");
     }
 
     #[test]
