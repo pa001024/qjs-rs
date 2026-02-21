@@ -722,7 +722,12 @@ impl Parser {
             }
             TokenKind::Identifier(name) => {
                 self.advance();
-                Ok(Expr::Identifier(Identifier(name)))
+                match name.as_str() {
+                    "true" => Ok(Expr::Bool(true)),
+                    "false" => Ok(Expr::Bool(false)),
+                    "null" => Ok(Expr::Null),
+                    _ => Ok(Expr::Identifier(Identifier(name))),
+                }
             }
             TokenKind::LParen => {
                 self.advance();
@@ -1003,6 +1008,22 @@ mod tests {
             }),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_boolean_and_null_literals() {
+        assert_eq!(
+            parse_expression("true").expect("parser should succeed"),
+            Expr::Bool(true)
+        );
+        assert_eq!(
+            parse_expression("false").expect("parser should succeed"),
+            Expr::Bool(false)
+        );
+        assert_eq!(
+            parse_expression("null").expect("parser should succeed"),
+            Expr::Null
+        );
     }
 
     #[test]

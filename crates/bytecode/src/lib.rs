@@ -8,6 +8,8 @@ use ast::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
     LoadNumber(f64),
+    LoadBool(bool),
+    LoadNull,
     LoadUndefined,
     CreateObject,
     LoadIdentifier(String),
@@ -761,6 +763,8 @@ impl Compiler {
     fn compile_expr(&mut self, expr: &Expr, code: &mut Vec<Opcode>) {
         match expr {
             Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
+            Expr::Bool(value) => code.push(Opcode::LoadBool(*value)),
+            Expr::Null => code.push(Opcode::LoadNull),
             Expr::ObjectLiteral(properties) => {
                 code.push(Opcode::CreateObject);
                 for property in properties {
@@ -860,6 +864,27 @@ mod tests {
         };
 
         assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_boolean_and_null_literals() {
+        let bool_chunk = compile_expression(&Expr::Bool(true));
+        assert_eq!(
+            bool_chunk,
+            Chunk {
+                code: vec![Opcode::LoadBool(true), Opcode::Halt],
+                functions: vec![],
+            }
+        );
+
+        let null_chunk = compile_expression(&Expr::Null);
+        assert_eq!(
+            null_chunk,
+            Chunk {
+                code: vec![Opcode::LoadNull, Opcode::Halt],
+                functions: vec![],
+            }
+        );
     }
 
     #[test]

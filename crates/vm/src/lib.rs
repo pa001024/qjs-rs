@@ -112,6 +112,8 @@ impl Vm {
         while pc < code.len() {
             match &code[pc] {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
+                Opcode::LoadBool(value) => self.stack.push(JsValue::Bool(*value)),
+                Opcode::LoadNull => self.stack.push(JsValue::Null),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::CreateObject => {
                     let object_id = self.next_object_id;
@@ -527,6 +529,7 @@ impl Vm {
     fn is_truthy(&self, value: &JsValue) -> bool {
         match value {
             JsValue::Undefined => false,
+            JsValue::Null => false,
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
             JsValue::Function(_) => true,
@@ -872,8 +875,26 @@ mod tests {
     }
 
     #[test]
+    fn executes_boolean_and_null_literals() {
+        let bool_chunk = empty_chunk(vec![Opcode::LoadBool(true), Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&bool_chunk), Ok(JsValue::Bool(true)));
+
+        let null_chunk = empty_chunk(vec![Opcode::LoadNull, Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&null_chunk), Ok(JsValue::Null));
+    }
+
+    #[test]
     fn executes_logical_not_with_truthiness() {
         let chunk = empty_chunk(vec![Opcode::LoadNumber(0.0), Opcode::Not, Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn treats_null_as_falsy() {
+        let chunk = empty_chunk(vec![Opcode::LoadNull, Opcode::Not, Opcode::Halt]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }

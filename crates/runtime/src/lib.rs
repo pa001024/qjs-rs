@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub enum JsValue {
     Number(f64),
     Bool(bool),
+    Null,
     Function(u64),
     Object(u64),
     Undefined,

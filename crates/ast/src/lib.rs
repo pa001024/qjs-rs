@@ -27,6 +27,8 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(f64),
+    Bool(bool),
+    Null,
     Identifier(Identifier),
     ObjectLiteral(Vec<ObjectProperty>),
     Unary {

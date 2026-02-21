@@ -72,6 +72,14 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_boolean_and_null_literals() {
+        assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
+        assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));
+        assert_eq!(run_expression("null"), Ok(JsValue::Null));
+        assert_eq!(run_expression("!null"), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn evaluates_comparison_operators() {
         assert_eq!(run_expression("1 + 2 * 3 >= 7"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("3 == 4"), Ok(JsValue::Bool(false)));
