@@ -182,10 +182,21 @@ impl Vm {
                         realm
                             .resolve_identifier(name)
                             .unwrap_or_else(|| self.global_this_value())
+                    } else if let Some(value) = realm.resolve_identifier(name) {
+                        value
+                    } else if let Some(global_object_id) = self.global_object_id {
+                        let has_global_property =
+                            self.objects.get(&global_object_id).is_some_and(|object| {
+                                object.properties.contains_key(name)
+                                    || object.getters.contains_key(name)
+                            });
+                        if has_global_property {
+                            self.get_object_property(global_object_id, name, realm)?
+                        } else {
+                            return Err(VmError::UnknownIdentifier(name.clone()));
+                        }
                     } else {
-                        realm
-                            .resolve_identifier(name)
-                            .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?
+                        return Err(VmError::UnknownIdentifier(name.clone()));
                     };
                     self.stack.push(value);
                 }

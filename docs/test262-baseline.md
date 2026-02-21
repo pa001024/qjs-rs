@@ -11,13 +11,13 @@
 ```powershell
 cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test --max-cases 1000 --allow-failures --json target/test262-real-baseline-1000.json
 cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test --max-cases 5000 --allow-failures --json target/test262-real-baseline-5000.json
-cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\language --max-cases 5000 --allow-failures --show-failures 20 --json target/test262-language-baseline-5000.json
+cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\language --max-cases 5000 --allow-failures --show-failures 200 --json target/test262-language-baseline-5000.json
 ```
 
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1560, failed=25
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1583, failed=2
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -51,4 +51,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 补齐 `U+000B`（vertical tab）空白字符跳过，修复 `white-space/after-regular-expression-literal-vertical-tab.js`，`language` 基线进一步提升到 `1557/28`。
 - parser 补齐 postfix `++/--` 的行终止符约束，并支持括号内最小逗号表达式形状（`(0, eval)`），修复 `eval-code/indirect/parse-failure-2.js`，`language` 基线进一步提升到 `1558/27`。
 - parser 为函数参数列表增加 rest + 绑定模式语法吞吐基线（`...[]` / `...{}`），清理 `rest-parameters/(array|object)-pattern.js`，`language` 基线进一步提升到 `1560/25`。
+- parser 新增 `class` 声明/表达式语法吞吐基线、`async function` 与 `function*` 形状解析，以及转义关键字的“原始文本”判定（如 `l\u0065t` 不再被误判为关键字）；`language` 基线提升到 `1580/5`。
+- parser 补齐 `new Function(... )()` 这类 `new` 后续调用链形状解析；VM 增加“未解析标识符回退读取全局对象属性”路径（支持 `this.let = 0; let;` 场景）；`language` 基线提升到 `1581/4`。
+- bytecode 增加脚本顶层 `var` 预声明提升（最小 hoist），并对全局受限名（`undefined`/`NaN`/`Infinity`）的词法声明注入运行时异常路径（匹配 test262 `negative phase: runtime` 口径）；`language` 基线提升到 `1583/2`。
+- 当前 `language` 剩余失败仅 2 条：`punctuators/S7.7_A1.js`（`%` 与后续整组 punctuator 词法/语义未接入）与 `statements/function/S13.2.1_A1_T1.js`（深层 IIFE 在现有表达式深度保护下仍触发 `expression nesting too deep`）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

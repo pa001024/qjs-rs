@@ -4,6 +4,7 @@ use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
     ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
 };
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
@@ -87,6 +88,7 @@ struct Compiler {
     break_contexts: Vec<BreakContext>,
     finally_contexts: Vec<FinallyContext>,
     next_switch_temp_id: usize,
+    function_nesting: usize,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +143,18 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         preserve_value: bool,
     ) -> bool {
+        if self.scope_depth == 0 && self.function_nesting == 0 {
+            let mut hoisted_var_names = BTreeSet::new();
+            self.collect_hoisted_var_names(statements, &mut hoisted_var_names);
+            for name in hoisted_var_names {
+                code.push(Opcode::LoadUndefined);
+                code.push(Opcode::DefineVariable {
+                    name,
+                    mutable: true,
+                });
+            }
+        }
+
         // Function declarations are hoisted to the top of their containing scope.
         for stmt in statements {
             if let Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) = stmt {
@@ -177,6 +191,46 @@ impl Compiler {
         produced_value
     }
 
+    fn collect_hoisted_var_names(&self, statements: &[Stmt], names: &mut BTreeSet<String>) {
+        for stmt in statements {
+            match stmt {
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: Identifier(binding_name),
+                    ..
+                }) => {
+                    names.insert(binding_name.clone());
+                }
+                Stmt::VariableDeclarations(declarations) => {
+                    for declaration in declarations {
+                        if declaration.kind == BindingKind::Var {
+                            names.insert(declaration.name.0.clone());
+                        }
+                    }
+                }
+                Stmt::For {
+                    initializer: Some(initializer),
+                    ..
+                } => match initializer {
+                    ForInitializer::VariableDeclaration(declaration) => {
+                        if declaration.kind == BindingKind::Var {
+                            names.insert(declaration.name.0.clone());
+                        }
+                    }
+                    ForInitializer::VariableDeclarations(declarations) => {
+                        for declaration in declarations {
+                            if declaration.kind == BindingKind::Var {
+                                names.insert(declaration.name.0.clone());
+                            }
+                        }
+                    }
+                    ForInitializer::Expression(_) => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt, code: &mut Vec<Opcode>, keep_value: bool) -> bool {
         match stmt {
             Stmt::Empty => {
@@ -192,6 +246,24 @@ impl Compiler {
                 name: Identifier(binding_name),
                 initializer,
             }) => {
+                if self.scope_depth == 0
+                    && self.function_nesting == 0
+                    && matches!(kind, BindingKind::Let | BindingKind::Const)
+                    && matches!(binding_name.as_str(), "undefined" | "NaN" | "Infinity")
+                {
+                    code.push(Opcode::LoadString(format!(
+                        "restricted global lexical binding: {binding_name}"
+                    )));
+                    code.push(Opcode::Throw);
+                    return true;
+                }
+                if *kind == BindingKind::Var
+                    && self.scope_depth == 0
+                    && self.function_nesting == 0
+                    && initializer.is_none()
+                {
+                    return false;
+                }
                 if let Some(expr) = initializer {
                     self.compile_expr(expr, code);
                 } else {
@@ -707,8 +779,10 @@ impl Compiler {
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_break_contexts = std::mem::take(&mut self.break_contexts);
         let saved_finally_contexts = std::mem::take(&mut self.finally_contexts);
+        let saved_function_nesting = self.function_nesting;
         self.scope_depth = 0;
         self.handler_depth = 0;
+        self.function_nesting = self.function_nesting.saturating_add(1);
 
         let mut code = Vec::new();
         self.compile_statement_list(body, &mut code, false);
@@ -729,6 +803,7 @@ impl Compiler {
         self.loops = saved_loops;
         self.break_contexts = saved_break_contexts;
         self.finally_contexts = saved_finally_contexts;
+        self.function_nesting = saved_function_nesting;
         function_id
     }
 

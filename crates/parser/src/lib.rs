@@ -472,6 +472,7 @@ impl Parser {
                 continue;
             }
 
+            let starts_class_declaration = self.check_keyword("class");
             let statement = self.parse_statement()?;
             let needs_separator = !matches!(
                 statement,
@@ -485,7 +486,7 @@ impl Parser {
                     | Stmt::Switch { .. }
                     | Stmt::Labeled { .. }
                     | Stmt::Try { .. }
-            );
+            ) && !starts_class_declaration;
             statements.push(statement);
 
             if self.matches(&TokenKind::Semicolon) {
@@ -517,8 +518,19 @@ impl Parser {
         if self.check(&TokenKind::LBrace) {
             return self.parse_block_statement();
         }
+        if self.check_keyword("async")
+            && self.check_next_keyword("function")
+            && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+        {
+            self.advance();
+            self.advance();
+            return self.parse_function_declaration_statement();
+        }
         if self.matches_keyword("function") {
             return self.parse_function_declaration_statement();
+        }
+        if self.matches_keyword("class") {
+            return self.parse_class_declaration_statement();
         }
         if self.matches_keyword("if") {
             return self.parse_if_statement();
@@ -590,6 +602,7 @@ impl Parser {
     }
 
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
+        let _is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
@@ -607,6 +620,16 @@ impl Parser {
             name,
             params,
             body,
+        }))
+    }
+
+    fn parse_class_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
+        let name = Identifier(self.expect_binding_identifier("expected class name")?);
+        self.parse_class_tail()?;
+        Ok(Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name,
+            initializer: Some(Expr::ObjectLiteral(vec![])),
         }))
     }
 
@@ -856,6 +879,7 @@ impl Parser {
                 return Err(self.error_current("expected '}' after switch body"));
             }
 
+            let starts_class_declaration = self.check_keyword("class");
             let statement = self.parse_statement()?;
             let needs_separator = !matches!(
                 statement,
@@ -869,7 +893,7 @@ impl Parser {
                     | Stmt::Switch { .. }
                     | Stmt::Labeled { .. }
                     | Stmt::Try { .. }
-            );
+            ) && !starts_class_declaration;
             statements.push(statement);
 
             if self.matches(&TokenKind::Semicolon) {
@@ -985,6 +1009,9 @@ impl Parser {
         &mut self,
         allow_else_terminator: bool,
     ) -> Result<Stmt, ParseError> {
+        if self.check_keyword("class") {
+            return Err(self.error_current("class declaration not allowed in statement position"));
+        }
         let statement = if self.check_keyword("let") && !self.check_next(&TokenKind::Colon) {
             Stmt::Expression(self.parse_expression_inner()?)
         } else {
@@ -1446,10 +1473,40 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(Expr::New {
+        let mut expr = Expr::New {
             callee: Box::new(callee),
             arguments,
-        })
+        };
+        loop {
+            if self.matches(&TokenKind::LParen) {
+                let arguments = self.parse_argument_list()?;
+                self.expect(TokenKind::RParen, "expected ')' after arguments")?;
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    arguments,
+                };
+                continue;
+            }
+            if self.matches(&TokenKind::Dot) {
+                let property = self.expect_identifier_name("expected property name after '.'")?;
+                expr = Expr::Member {
+                    object: Box::new(expr),
+                    property,
+                };
+                continue;
+            }
+            if self.matches(&TokenKind::LBracket) {
+                let property = self.parse_expression_inner()?;
+                self.expect(TokenKind::RBracket, "expected ']' after computed property")?;
+                expr = Expr::MemberComputed {
+                    object: Box::new(expr),
+                    property: Box::new(property),
+                };
+                continue;
+            }
+            break;
+        }
+        Ok(expr)
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -1606,6 +1663,7 @@ impl Parser {
     }
 
     fn parse_function_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
+        let _is_generator = self.matches(&TokenKind::Star);
         let name = if self.check_identifier() {
             Some(Identifier(
                 self.expect_binding_identifier("expected function name")?,
@@ -1628,8 +1686,56 @@ impl Parser {
         Ok(Expr::Function { name, params, body })
     }
 
+    fn parse_class_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
+        if self.check_identifier() {
+            let _ = self.expect_binding_identifier("expected class name")?;
+        }
+        self.parse_class_tail()?;
+        Ok(Expr::ObjectLiteral(vec![]))
+    }
+
+    fn parse_class_tail(&mut self) -> Result<(), ParseError> {
+        if self.matches_keyword("extends") {
+            let _ = self.parse_expression_inner()?;
+        }
+        self.consume_balanced_brace_block(
+            "expected '{' before class body",
+            "expected '}' after class body",
+        )
+    }
+
+    fn consume_balanced_brace_block(
+        &mut self,
+        start_error: &str,
+        end_error: &str,
+    ) -> Result<(), ParseError> {
+        self.expect(TokenKind::LBrace, start_error)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            let token = self.current().ok_or(ParseError {
+                message: end_error.to_string(),
+                position: self.last_position(),
+            })?;
+            match token.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth = depth.saturating_sub(1);
+                }
+                TokenKind::Eof => {
+                    return Err(ParseError {
+                        message: end_error.to_string(),
+                        position: token.span.start,
+                    });
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+        Ok(())
+    }
+
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        let token = self.current().ok_or(ParseError {
+        let token = self.current().cloned().ok_or(ParseError {
             message: "unexpected end of input".to_string(),
             position: 0,
         })?;
@@ -1646,17 +1752,42 @@ impl Parser {
                 Ok(Expr::String(value))
             }
             TokenKind::Identifier(name) => {
+                if self.identifier_token_matches_keyword(&token, "async")
+                    && self.check_next_keyword("function")
+                    && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+                {
+                    self.advance();
+                    self.advance();
+                    return self.parse_function_expression_after_keyword();
+                }
                 self.advance();
                 match name.as_str() {
-                    "true" => Ok(Expr::Bool(true)),
-                    "false" => Ok(Expr::Bool(false)),
-                    "null" => Ok(Expr::Null),
-                    "this" => Ok(Expr::This),
-                    "function" => self.parse_function_expression_after_keyword(),
-                    _ if is_forbidden_identifier_reference(&name) => Err(ParseError {
-                        message: "reserved word cannot be identifier reference".to_string(),
-                        position,
-                    }),
+                    "true" if self.identifier_token_matches_keyword(&token, "true") => {
+                        Ok(Expr::Bool(true))
+                    }
+                    "false" if self.identifier_token_matches_keyword(&token, "false") => {
+                        Ok(Expr::Bool(false))
+                    }
+                    "null" if self.identifier_token_matches_keyword(&token, "null") => {
+                        Ok(Expr::Null)
+                    }
+                    "this" if self.identifier_token_matches_keyword(&token, "this") => {
+                        Ok(Expr::This)
+                    }
+                    "function" if self.identifier_token_matches_keyword(&token, "function") => {
+                        self.parse_function_expression_after_keyword()
+                    }
+                    "class" if self.identifier_token_matches_keyword(&token, "class") => {
+                        self.parse_class_expression_after_keyword()
+                    }
+                    _ if self.identifier_token_is_raw_name(&token, &name)
+                        && is_forbidden_identifier_reference(&name) =>
+                    {
+                        Err(ParseError {
+                            message: "reserved word cannot be identifier reference".to_string(),
+                            position,
+                        })
+                    }
                     _ => Ok(Expr::Identifier(Identifier(name))),
                 }
             }
@@ -2028,7 +2159,9 @@ impl Parser {
             position: self.last_position(),
         })?;
         if let TokenKind::Identifier(name) = &token.kind {
-            if is_forbidden_binding_identifier(name) {
+            if self.identifier_token_is_raw_name(token, name)
+                && is_forbidden_binding_identifier(name)
+            {
                 return Err(ParseError {
                     message: message.to_string(),
                     position: token.span.start,
@@ -2051,7 +2184,10 @@ impl Parser {
             position: self.last_position(),
         })?;
         if let TokenKind::Identifier(name) = &token.kind {
-            if is_forbidden_binding_identifier(name) && name != "let" {
+            if self.identifier_token_is_raw_name(token, name)
+                && is_forbidden_binding_identifier(name)
+                && name != "let"
+            {
                 return Err(ParseError {
                     message: message.to_string(),
                     position: token.span.start,
@@ -2070,22 +2206,18 @@ impl Parser {
 
     fn matches_keyword(&mut self, keyword: &str) -> bool {
         match self.current() {
-            Some(token) => match &token.kind {
-                TokenKind::Identifier(name) if name == keyword => {
-                    self.advance();
-                    true
-                }
-                _ => false,
-            },
+            Some(token) if self.identifier_token_matches_keyword(token, keyword) => {
+                self.advance();
+                true
+            }
             None => false,
+            _ => false,
         }
     }
 
     fn check_keyword(&self, keyword: &str) -> bool {
-        matches!(
-            self.current().map(|token| &token.kind),
-            Some(TokenKind::Identifier(name)) if name == keyword
-        )
+        self.current()
+            .is_some_and(|token| self.identifier_token_matches_keyword(token, keyword))
     }
 
     fn check_identifier(&self) -> bool {
@@ -2097,6 +2229,12 @@ impl Parser {
 
     fn check_next(&self, expected: &TokenKind) -> bool {
         matches!(self.tokens.get(self.pos + 1), Some(token) if &token.kind == expected)
+    }
+
+    fn check_next_keyword(&self, keyword: &str) -> bool {
+        self.tokens
+            .get(self.pos + 1)
+            .is_some_and(|token| self.identifier_token_matches_keyword(token, keyword))
     }
 
     fn check_nth(&self, offset: usize, expected: &TokenKind) -> bool {
@@ -2178,21 +2316,41 @@ impl Parser {
         if self.pos == 0 {
             return false;
         }
-        let previous_end = self
+        self.has_line_terminator_between_tokens(self.pos.saturating_sub(1), self.pos)
+    }
+
+    fn has_line_terminator_between_tokens(&self, left_index: usize, right_index: usize) -> bool {
+        let left_end = self
             .tokens
-            .get(self.pos.saturating_sub(1))
+            .get(left_index)
             .map(|token| token.span.end)
             .unwrap_or_default();
-        let current_start = self
-            .current()
+        let right_start = self
+            .tokens
+            .get(right_index)
             .map(|token| token.span.start)
             .unwrap_or_default();
-        if current_start <= previous_end || current_start > self.source.len() {
+        self.has_line_terminator_between_offsets(left_end, right_start)
+    }
+
+    fn has_line_terminator_between_offsets(&self, left_end: usize, right_start: usize) -> bool {
+        if right_start <= left_end || right_start > self.source.len() {
             return false;
         }
-        self.source[previous_end..current_start]
+        self.source[left_end..right_start]
             .chars()
             .any(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+    }
+
+    fn identifier_token_matches_keyword(&self, token: &Token, keyword: &str) -> bool {
+        matches!(&token.kind, TokenKind::Identifier(name) if name == keyword)
+            && self.identifier_token_is_raw_name(token, keyword)
+    }
+
+    fn identifier_token_is_raw_name(&self, token: &Token, name: &str) -> bool {
+        self.source
+            .get(token.span.start..token.span.end)
+            .is_some_and(|raw| raw == name)
     }
 
     fn current(&self) -> Option<&Token> {
@@ -2615,6 +2773,37 @@ mod tests {
             ],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_class_declaration_baseline() {
+        let parsed = parse_script("class C {} C;").expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("C".to_string()),
+                    initializer: Some(Expr::ObjectLiteral(vec![])),
+                }),
+                Stmt::Expression(Expr::Identifier(Identifier("C".to_string()))),
+            ],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_class_expression_baseline() {
+        let parsed = parse_expression("class await {}").expect("parser should succeed");
+        assert_eq!(parsed, Expr::ObjectLiteral(vec![]));
+    }
+
+    #[test]
+    fn parses_async_and_generator_function_forms_baseline() {
+        parse_script("async function f() {}").expect("script parsing should succeed");
+        parse_script("async function * g() {}").expect("script parsing should succeed");
+        parse_script("function * h() {}").expect("script parsing should succeed");
+        parse_expression("(async function foo() {}.prototype)")
+            .expect("expression parsing should succeed");
     }
 
     #[test]
@@ -3050,6 +3239,11 @@ mod tests {
             right: Box::new(Expr::Identifier(Identifier("static".to_string()))),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn treats_escaped_let_as_identifier_not_keyword() {
+        parse_script("l\\u0065t\na;\nvar a;").expect("script parsing should succeed");
     }
 
     #[test]
