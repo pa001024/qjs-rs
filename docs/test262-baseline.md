@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3620, failed=1380
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3624, failed=1376
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -84,5 +84,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - bytecode 为 `try`/`catch`/`finally` block 统一补齐词法作用域（`EnterScope/ExitScope`），并同步修正 finally unwind 路径，清理一批 `block-scope/leave|shadowing` 断言失败，`language` 基线提升至 `3486/1514`。
 - VM 将 `LoadIdentifier` 产生的 `UnknownIdentifier` 接入异常处理器路由（可被 `try/catch` 捕获），并为 inline chunk（`eval`/`Function` 路径）隔离异常处理栈，避免跨字节码段错误跳转（`InvalidJump`），大幅修复 `try/catch` 与 `eval-code` 失败簇，`language` 基线提升至 `3615/1385`。
 - VM/runtime 新增 `String.fromCharCode` baseline，并补齐 `ToNumber("0x...")` 的最小十六进制字符串转换分支，修复 comments 相关 `eval` 行注释 unicode 字符用例簇，`language` 基线提升至 `3620/1380`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3620/1380`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
+- lexer 补齐字符串行继续（`\\` + `LF/CRLF/U+2028/U+2029`）词法吞吐，并新增对应单测，修复 `directive-prologue/14.1-4-s.js` 等相关 parse 失败，`language` 基线提升至 `3624/1376`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3624/1376`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
