@@ -274,6 +274,33 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_try_catch_throw() {
+        let result = run_script("let x = 0; try { throw 42; } catch (e) { x = e; } x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn evaluates_try_catch_through_function_call() {
+        let result = run_script(
+            "let x = 0; function fail() { throw 7; } try { fail(); } catch (e) { x = e; } x;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn propagates_uncaught_throw_error() {
+        let err = run_script("throw 5;", &[]).expect_err("script should fail");
+        assert!(err.contains("UncaughtException"));
+    }
+
+    #[test]
+    fn evaluates_try_finally_side_effect() {
+        let result = run_script("let x = 0; try { x = 1; } finally { x = 2; } x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
     fn function_can_reference_itself() {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));

@@ -105,6 +105,13 @@ pub enum Stmt {
         discriminant: Expr,
         cases: Vec<SwitchCase>,
     },
+    Throw(Expr),
+    Try {
+        try_block: Vec<Stmt>,
+        catch_param: Option<Identifier>,
+        catch_block: Option<Vec<Stmt>>,
+        finally_block: Option<Vec<Stmt>>,
+    },
     Break,
     Continue,
 }

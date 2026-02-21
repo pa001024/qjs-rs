@@ -10,8 +10,14 @@ pub enum Opcode {
     LoadNumber(f64),
     LoadUndefined,
     LoadIdentifier(String),
-    DefineVariable { name: String, mutable: bool },
-    DefineFunction { name: String, function_id: usize },
+    DefineVariable {
+        name: String,
+        mutable: bool,
+    },
+    DefineFunction {
+        name: String,
+        function_id: usize,
+    },
     StoreVariable(String),
     EnterScope,
     ExitScope,
@@ -29,6 +35,14 @@ pub enum Opcode {
     Ge,
     JumpIfFalse(usize),
     Jump(usize),
+    PushExceptionHandler {
+        catch_target: Option<usize>,
+        finally_target: Option<usize>,
+    },
+    PopExceptionHandler,
+    LoadException,
+    RethrowIfException,
+    Throw,
     Call(usize),
     Return,
     Pop,
@@ -52,6 +66,7 @@ pub struct Chunk {
 struct Compiler {
     functions: Vec<CompiledFunction>,
     scope_depth: usize,
+    handler_depth: usize,
     loops: Vec<LoopContext>,
     break_contexts: Vec<BreakContext>,
     next_switch_temp_id: usize,
@@ -60,12 +75,14 @@ struct Compiler {
 #[derive(Debug, Default)]
 struct LoopContext {
     scope_depth: usize,
+    handler_depth: usize,
     continue_jumps: Vec<usize>,
 }
 
 #[derive(Debug, Default)]
 struct BreakContext {
     scope_depth: usize,
+    handler_depth: usize,
     break_jumps: Vec<usize>,
 }
 
@@ -231,10 +248,12 @@ impl Compiler {
                 code.push(Opcode::JumpIfFalse(usize::MAX));
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
                     break_jumps: Vec::new(),
                 });
                 self.loops.push(LoopContext {
                     scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
                     continue_jumps: Vec::new(),
                 });
 
@@ -296,10 +315,12 @@ impl Compiler {
 
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
                     break_jumps: Vec::new(),
                 });
                 self.loops.push(LoopContext {
                     scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
                     continue_jumps: Vec::new(),
                 });
 
@@ -374,6 +395,7 @@ impl Compiler {
 
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
                     break_jumps: Vec::new(),
                 });
                 for (index, SwitchCase { consequent, .. }) in cases.iter().enumerate() {
@@ -408,11 +430,30 @@ impl Compiler {
                     false
                 }
             }
+            Stmt::Throw(expr) => {
+                self.compile_expr(expr, code);
+                code.push(Opcode::Throw);
+                true
+            }
+            Stmt::Try {
+                try_block,
+                catch_param,
+                catch_block,
+                finally_block,
+            } => self.compile_try_statement(
+                try_block,
+                catch_param,
+                catch_block,
+                finally_block,
+                code,
+                keep_value,
+            ),
             Stmt::Break => {
                 let break_context = self
                     .break_contexts
                     .last_mut()
                     .expect("break outside breakable context");
+                Self::emit_handler_pops(self.handler_depth, break_context.handler_depth, code);
                 Self::emit_scope_exits(self.scope_depth, break_context.scope_depth, code);
                 let jump_pos = code.len();
                 code.push(Opcode::Jump(usize::MAX));
@@ -421,12 +462,140 @@ impl Compiler {
             }
             Stmt::Continue => {
                 let loop_context = self.loops.last_mut().expect("continue outside loop");
+                Self::emit_handler_pops(self.handler_depth, loop_context.handler_depth, code);
                 Self::emit_scope_exits(self.scope_depth, loop_context.scope_depth, code);
                 let jump_pos = code.len();
                 code.push(Opcode::Jump(usize::MAX));
                 loop_context.continue_jumps.push(jump_pos);
                 false
             }
+        }
+    }
+
+    fn compile_try_statement(
+        &mut self,
+        try_block: &[Stmt],
+        catch_param: &Option<Identifier>,
+        catch_block: &Option<Vec<Stmt>>,
+        finally_block: &Option<Vec<Stmt>>,
+        code: &mut Vec<Opcode>,
+        keep_value: bool,
+    ) -> bool {
+        match (catch_block, finally_block) {
+            (Some(catch_block), Some(finally_block)) => {
+                let nested_try = Stmt::Try {
+                    try_block: try_block.to_vec(),
+                    catch_param: catch_param.clone(),
+                    catch_block: Some(catch_block.clone()),
+                    finally_block: None,
+                };
+                self.compile_try_finally(&[nested_try], finally_block, code, keep_value)
+            }
+            (Some(catch_block), None) => {
+                self.compile_try_catch(try_block, catch_param, catch_block, code, keep_value)
+            }
+            (None, Some(finally_block)) => {
+                self.compile_try_finally(try_block, finally_block, code, keep_value)
+            }
+            (None, None) => {
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn compile_try_catch(
+        &mut self,
+        try_block: &[Stmt],
+        catch_param: &Option<Identifier>,
+        catch_block: &[Stmt],
+        code: &mut Vec<Opcode>,
+        keep_value: bool,
+    ) -> bool {
+        let handler_pos = code.len();
+        code.push(Opcode::PushExceptionHandler {
+            catch_target: None,
+            finally_target: None,
+        });
+        self.handler_depth += 1;
+
+        self.compile_statement_list(try_block, code, false);
+        code.push(Opcode::PopExceptionHandler);
+        self.handler_depth = self.handler_depth.saturating_sub(1);
+
+        let jump_after_catch_pos = code.len();
+        code.push(Opcode::Jump(usize::MAX));
+        let catch_start = code.len();
+        code[handler_pos] = Opcode::PushExceptionHandler {
+            catch_target: Some(catch_start),
+            finally_target: None,
+        };
+
+        match catch_param {
+            Some(Identifier(name)) => {
+                code.push(Opcode::LoadException);
+                code.push(Opcode::DefineVariable {
+                    name: name.clone(),
+                    mutable: true,
+                });
+            }
+            None => {
+                code.push(Opcode::LoadException);
+                code.push(Opcode::Pop);
+            }
+        }
+
+        self.compile_statement_list(catch_block, code, false);
+        let end = code.len();
+        code[jump_after_catch_pos] = Opcode::Jump(end);
+
+        if keep_value {
+            code.push(Opcode::LoadUndefined);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn compile_try_finally(
+        &mut self,
+        try_block: &[Stmt],
+        finally_block: &[Stmt],
+        code: &mut Vec<Opcode>,
+        keep_value: bool,
+    ) -> bool {
+        let handler_pos = code.len();
+        code.push(Opcode::PushExceptionHandler {
+            catch_target: None,
+            finally_target: None,
+        });
+        self.handler_depth += 1;
+
+        self.compile_statement_list(try_block, code, false);
+        code.push(Opcode::PopExceptionHandler);
+        self.handler_depth = self.handler_depth.saturating_sub(1);
+
+        let jump_to_finally_pos = code.len();
+        code.push(Opcode::Jump(usize::MAX));
+        let finally_start = code.len();
+        code[handler_pos] = Opcode::PushExceptionHandler {
+            catch_target: None,
+            finally_target: Some(finally_start),
+        };
+        code[jump_to_finally_pos] = Opcode::Jump(finally_start);
+
+        self.compile_statement_list(finally_block, code, false);
+        code.push(Opcode::RethrowIfException);
+
+        if keep_value {
+            code.push(Opcode::LoadUndefined);
+            true
+        } else {
+            false
         }
     }
 
@@ -437,9 +606,11 @@ impl Compiler {
         body: &[Stmt],
     ) -> usize {
         let saved_scope_depth = self.scope_depth;
+        let saved_handler_depth = self.handler_depth;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_break_contexts = std::mem::take(&mut self.break_contexts);
         self.scope_depth = 0;
+        self.handler_depth = 0;
 
         let mut code = Vec::new();
         self.compile_statement_list(body, &mut code, false);
@@ -454,6 +625,7 @@ impl Compiler {
         });
 
         self.scope_depth = saved_scope_depth;
+        self.handler_depth = saved_handler_depth;
         self.loops = saved_loops;
         self.break_contexts = saved_break_contexts;
         function_id
@@ -485,6 +657,13 @@ impl Compiler {
         let id = self.next_switch_temp_id;
         self.next_switch_temp_id += 1;
         format!("$__switch_tmp_{id}")
+    }
+
+    fn emit_handler_pops(current_depth: usize, target_depth: usize, code: &mut Vec<Opcode>) {
+        let pops = current_depth.saturating_sub(target_depth);
+        for _ in 0..pops {
+            code.push(Opcode::PopExceptionHandler);
+        }
     }
 
     fn emit_scope_exits(current_depth: usize, target_depth: usize, code: &mut Vec<Opcode>) {
@@ -1086,6 +1265,80 @@ mod tests {
                 Opcode::Jump(13),
                 Opcode::ExitScope,
                 Opcode::ExitScope,
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_try_catch_statement() {
+        let script = Script {
+            statements: vec![Stmt::Try {
+                try_block: vec![Stmt::Throw(Expr::Number(1.0))],
+                catch_param: Some(Identifier("e".to_string())),
+                catch_block: Some(vec![Stmt::Expression(Expr::Identifier(Identifier(
+                    "e".to_string(),
+                )))]),
+                finally_block: None,
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::PushExceptionHandler {
+                    catch_target: Some(5),
+                    finally_target: None,
+                },
+                Opcode::LoadNumber(1.0),
+                Opcode::Throw,
+                Opcode::PopExceptionHandler,
+                Opcode::Jump(9),
+                Opcode::LoadException,
+                Opcode::DefineVariable {
+                    name: "e".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("e".to_string()),
+                Opcode::Pop,
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_try_finally_statement() {
+        let script = Script {
+            statements: vec![Stmt::Try {
+                try_block: vec![Stmt::Expression(Expr::Number(1.0))],
+                catch_param: None,
+                catch_block: None,
+                finally_block: Some(vec![Stmt::Expression(Expr::Number(2.0))]),
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::PushExceptionHandler {
+                    catch_target: None,
+                    finally_target: Some(5),
+                },
+                Opcode::LoadNumber(1.0),
+                Opcode::Pop,
+                Opcode::PopExceptionHandler,
+                Opcode::Jump(5),
+                Opcode::LoadNumber(2.0),
+                Opcode::Pop,
+                Opcode::RethrowIfException,
                 Opcode::LoadUndefined,
                 Opcode::Halt,
             ],

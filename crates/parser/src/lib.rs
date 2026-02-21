@@ -79,6 +79,7 @@ impl Parser {
                     | Stmt::While { .. }
                     | Stmt::For { .. }
                     | Stmt::Switch { .. }
+                    | Stmt::Try { .. }
             );
             statements.push(statement);
 
@@ -120,6 +121,12 @@ impl Parser {
         if self.matches_keyword("switch") {
             return self.parse_switch_statement();
         }
+        if self.matches_keyword("try") {
+            return self.parse_try_statement();
+        }
+        if self.matches_keyword("throw") {
+            return self.parse_throw_statement();
+        }
         if self.matches_keyword("break") {
             return self.parse_break_statement();
         }
@@ -140,10 +147,20 @@ impl Parser {
     }
 
     fn parse_block_statement(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(TokenKind::LBrace, "expected '{' to start block")?;
-        let statements = self.parse_statement_list(Some(TokenKind::RBrace))?;
-        self.expect(TokenKind::RBrace, "expected '}' after block")?;
+        let statements =
+            self.parse_block_body("expected '{' to start block", "expected '}' after block")?;
         Ok(Stmt::Block(statements))
+    }
+
+    fn parse_block_body(
+        &mut self,
+        start_error: &str,
+        end_error: &str,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        self.expect(TokenKind::LBrace, start_error)?;
+        let statements = self.parse_statement_list(Some(TokenKind::RBrace))?;
+        self.expect(TokenKind::RBrace, end_error)?;
+        Ok(statements)
     }
 
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -152,12 +169,13 @@ impl Parser {
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        self.expect(TokenKind::LBrace, "expected '{' before function body")?;
         self.function_depth += 1;
-        let body = self.parse_statement_list(Some(TokenKind::RBrace));
+        let body = self.parse_block_body(
+            "expected '{' before function body",
+            "expected '}' after function body",
+        );
         self.function_depth = self.function_depth.saturating_sub(1);
         let body = body?;
-        self.expect(TokenKind::RBrace, "expected '}' after function body")?;
 
         Ok(Stmt::FunctionDeclaration(FunctionDeclaration {
             name,
@@ -341,6 +359,7 @@ impl Parser {
                     | Stmt::While { .. }
                     | Stmt::For { .. }
                     | Stmt::Switch { .. }
+                    | Stmt::Try { .. }
             );
             statements.push(statement);
 
@@ -358,6 +377,60 @@ impl Parser {
             }
         }
         Ok(statements)
+    }
+
+    fn parse_try_statement(&mut self) -> Result<Stmt, ParseError> {
+        let try_block =
+            self.parse_block_body("expected '{' after 'try'", "expected '}' after try block")?;
+
+        let mut catch_param = None;
+        let mut catch_block = None;
+        if self.matches_keyword("catch") {
+            self.expect(TokenKind::LParen, "expected '(' after 'catch'")?;
+            catch_param = Some(Identifier(
+                self.expect_identifier("expected catch binding identifier")?,
+            ));
+            self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
+            catch_block = Some(self.parse_block_body(
+                "expected '{' before catch block",
+                "expected '}' after catch block",
+            )?);
+        }
+
+        let finally_block = if self.matches_keyword("finally") {
+            Some(self.parse_block_body(
+                "expected '{' before finally block",
+                "expected '}' after finally block",
+            )?)
+        } else {
+            None
+        };
+
+        if catch_block.is_none() && finally_block.is_none() {
+            return Err(self.error_current("try requires catch or finally"));
+        }
+
+        Ok(Stmt::Try {
+            try_block,
+            catch_param,
+            catch_block,
+            finally_block,
+        })
+    }
+
+    fn parse_throw_statement(&mut self) -> Result<Stmt, ParseError> {
+        let has_expr = !matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) | None
+        );
+        if !has_expr {
+            return Err(ParseError {
+                message: "throw requires expression".to_string(),
+                position: self.previous_position(),
+            });
+        }
+        let expr = self.parse_expression_inner()?;
+        Ok(Stmt::Throw(expr))
     }
 
     fn parse_break_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -393,6 +466,7 @@ impl Parser {
                 | Stmt::While { .. }
                 | Stmt::For { .. }
                 | Stmt::Switch { .. }
+                | Stmt::Try { .. }
         );
         if self.matches(&TokenKind::Semicolon) {
             return Ok(statement);
@@ -1064,6 +1138,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_throw_statement() {
+        let parsed = parse_script("throw 42;").expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::Throw(Expr::Number(42.0))],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_try_catch_finally_statement() {
+        let parsed = parse_script("try { throw 1; } catch (e) { e; } finally { 0; }")
+            .expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::Try {
+                try_block: vec![Stmt::Throw(Expr::Number(1.0))],
+                catch_param: Some(Identifier("e".to_string())),
+                catch_block: Some(vec![Stmt::Expression(Expr::Identifier(Identifier(
+                    "e".to_string(),
+                )))]),
+                finally_block: Some(vec![Stmt::Expression(Expr::Number(0.0))]),
+            }],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
     fn rejects_return_outside_function() {
         let err = parse_script("return 1;").expect_err("parser should fail");
         assert_eq!(err.message, "return outside function");
@@ -1079,6 +1179,18 @@ mod tests {
     fn rejects_continue_outside_loop() {
         let err = parse_script("continue;").expect_err("parser should fail");
         assert_eq!(err.message, "continue outside loop");
+    }
+
+    #[test]
+    fn rejects_try_without_catch_or_finally() {
+        let err = parse_script("try { 1; }").expect_err("parser should fail");
+        assert_eq!(err.message, "try requires catch or finally");
+    }
+
+    #[test]
+    fn rejects_throw_without_expression() {
+        let err = parse_script("throw;").expect_err("parser should fail");
+        assert_eq!(err.message, "throw requires expression");
     }
 
     #[test]

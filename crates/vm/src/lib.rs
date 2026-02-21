@@ -22,7 +22,15 @@ struct Closure {
     captured_scopes: Vec<ScopeRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+struct ExceptionHandler {
+    catch_target: Option<usize>,
+    finally_target: Option<usize>,
+    scope_depth: usize,
+    stack_depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum VmError {
     EmptyStack,
     StackUnderflow,
@@ -35,6 +43,9 @@ pub enum VmError {
     NotCallable,
     TopLevelReturn,
     InvalidJump(usize),
+    HandlerUnderflow,
+    NoPendingException,
+    UncaughtException(JsValue),
     TypeError(&'static str),
 }
 
@@ -52,6 +63,8 @@ pub struct Vm {
     next_binding_id: BindingId,
     closures: BTreeMap<u64, Closure>,
     next_closure_id: u64,
+    exception_handlers: Vec<ExceptionHandler>,
+    pending_exception: Option<JsValue>,
 }
 
 impl Vm {
@@ -68,6 +81,8 @@ impl Vm {
         self.next_binding_id = 0;
         self.closures.clear();
         self.next_closure_id = 0;
+        self.exception_handlers.clear();
+        self.pending_exception = None;
 
         match self.execute_code(&chunk.code, &chunk.functions, realm, false)? {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
@@ -243,10 +258,51 @@ impl Vm {
                     pc = *target;
                     continue;
                 }
-                Opcode::Call(arg_count) => {
-                    let result = self.execute_call(*arg_count, functions, realm)?;
-                    self.stack.push(result);
+                Opcode::PushExceptionHandler {
+                    catch_target,
+                    finally_target,
+                } => {
+                    self.exception_handlers.push(ExceptionHandler {
+                        catch_target: *catch_target,
+                        finally_target: *finally_target,
+                        scope_depth: self.scopes.len(),
+                        stack_depth: self.stack.len(),
+                    });
                 }
+                Opcode::PopExceptionHandler => {
+                    self.exception_handlers
+                        .pop()
+                        .ok_or(VmError::HandlerUnderflow)?;
+                }
+                Opcode::LoadException => {
+                    let exception = self
+                        .pending_exception
+                        .take()
+                        .ok_or(VmError::NoPendingException)?;
+                    self.stack.push(exception);
+                }
+                Opcode::RethrowIfException => {
+                    if let Some(exception) = self.pending_exception.take() {
+                        let target = self.throw_to_handler(exception, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                }
+                Opcode::Throw => {
+                    let exception = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let target = self.throw_to_handler(exception, code.len())?;
+                    pc = target;
+                    continue;
+                }
+                Opcode::Call(arg_count) => match self.execute_call(*arg_count, functions, realm) {
+                    Ok(result) => self.stack.push(result),
+                    Err(VmError::UncaughtException(exception)) => {
+                        let target = self.throw_to_handler(exception, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                },
                 Opcode::Return => {
                     if !allow_return {
                         return Err(VmError::TopLevelReturn);
@@ -303,10 +359,14 @@ impl Vm {
 
         let saved_stack = std::mem::take(&mut self.stack);
         let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_handlers = std::mem::take(&mut self.exception_handlers);
+        let saved_pending_exception = self.pending_exception.take();
 
         self.scopes = closure.captured_scopes;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         self.stack = Vec::new();
+        self.exception_handlers = Vec::new();
+        self.pending_exception = None;
 
         let signal = self.execute_code(&function.code, functions, realm, true);
         let value = match signal {
@@ -315,13 +375,53 @@ impl Vm {
             Err(err) => {
                 self.stack = saved_stack;
                 self.scopes = saved_scopes;
+                self.exception_handlers = saved_handlers;
+                self.pending_exception = saved_pending_exception;
                 return Err(err);
             }
         };
 
         self.stack = saved_stack;
         self.scopes = saved_scopes;
+        self.exception_handlers = saved_handlers;
+        self.pending_exception = saved_pending_exception;
         Ok(value)
+    }
+
+    fn throw_to_handler(&mut self, exception: JsValue, code_len: usize) -> Result<usize, VmError> {
+        while let Some(handler) = self.exception_handlers.pop() {
+            self.unwind_to(handler.scope_depth, handler.stack_depth)?;
+
+            if let Some(catch_target) = handler.catch_target {
+                if catch_target >= code_len {
+                    return Err(VmError::InvalidJump(catch_target));
+                }
+                self.pending_exception = Some(exception);
+                return Ok(catch_target);
+            }
+            if let Some(finally_target) = handler.finally_target {
+                if finally_target >= code_len {
+                    return Err(VmError::InvalidJump(finally_target));
+                }
+                self.pending_exception = Some(exception);
+                return Ok(finally_target);
+            }
+        }
+        Err(VmError::UncaughtException(exception))
+    }
+
+    fn unwind_to(&mut self, scope_depth: usize, stack_depth: usize) -> Result<(), VmError> {
+        while self.scopes.len() > scope_depth {
+            self.scopes.pop();
+        }
+        if self.scopes.is_empty() {
+            return Err(VmError::ScopeUnderflow);
+        }
+        if self.stack.len() < stack_depth {
+            return Err(VmError::StackUnderflow);
+        }
+        self.stack.truncate(stack_depth);
+        Ok(())
     }
 
     fn create_binding(&mut self, value: JsValue, mutable: bool) -> BindingId {
@@ -560,6 +660,63 @@ mod tests {
         let chunk = empty_chunk(vec![Opcode::Jump(99), Opcode::Halt]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Err(VmError::InvalidJump(99)));
+    }
+
+    #[test]
+    fn throws_uncaught_exception_without_handler() {
+        let chunk = empty_chunk(vec![Opcode::LoadNumber(7.0), Opcode::Throw, Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::UncaughtException(JsValue::Number(7.0)))
+        );
+    }
+
+    #[test]
+    fn catches_thrown_exception() {
+        let chunk = empty_chunk(vec![
+            Opcode::PushExceptionHandler {
+                catch_target: Some(5),
+                finally_target: None,
+            },
+            Opcode::LoadNumber(1.0),
+            Opcode::Throw,
+            Opcode::PopExceptionHandler,
+            Opcode::Jump(8),
+            Opcode::LoadException,
+            Opcode::DefineVariable {
+                name: "e".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("e".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn runs_finally_block_on_exception() {
+        let chunk = empty_chunk(vec![
+            Opcode::PushExceptionHandler {
+                catch_target: None,
+                finally_target: Some(5),
+            },
+            Opcode::LoadNumber(1.0),
+            Opcode::Throw,
+            Opcode::PopExceptionHandler,
+            Opcode::Jump(5),
+            Opcode::LoadNumber(2.0),
+            Opcode::Pop,
+            Opcode::RethrowIfException,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::UncaughtException(JsValue::Number(1.0)))
+        );
     }
 
     #[test]
