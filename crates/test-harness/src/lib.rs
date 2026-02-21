@@ -262,6 +262,20 @@ mod tests {
             ),
             Ok(JsValue::Bool(true))
         );
+        assert_eq!(
+            run_script(
+                "function testcase() { return arguments.constructor.prototype === Object.prototype; } testcase();",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "function testcase() { return arguments.hasOwnProperty('callee'); } testcase();",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
     }
 
     #[test]

@@ -826,6 +826,10 @@ impl Vm {
             object
                 .properties
                 .insert("callee".to_string(), JsValue::Function(closure_id));
+            object.properties.insert(
+                "constructor".to_string(),
+                JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+            );
             for (index, arg) in args.iter().enumerate() {
                 object.properties.insert(index.to_string(), arg.clone());
             }
