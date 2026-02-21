@@ -352,6 +352,30 @@ impl Vm {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(JsValue::Bool(!self.is_truthy(&value)));
                 }
+                Opcode::Typeof => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.stack
+                        .push(JsValue::String(self.typeof_value(&value).to_string()));
+                }
+                Opcode::TypeofIdentifier(name) => {
+                    let value = if let Some(binding_id) = self.resolve_binding_id(name) {
+                        let binding = self
+                            .bindings
+                            .get(&binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
+                        binding.value.clone()
+                    } else if name == "undefined" {
+                        JsValue::Undefined
+                    } else if name == "NaN" {
+                        JsValue::Number(f64::NAN)
+                    } else if name == "Infinity" {
+                        JsValue::Number(f64::INFINITY)
+                    } else {
+                        realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
+                    };
+                    self.stack
+                        .push(JsValue::String(self.typeof_value(&value).to_string()));
+                }
                 Opcode::Eq => {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -656,6 +680,18 @@ impl Vm {
             JsValue::Function(_) => "[function]".to_string(),
             JsValue::Object(_) => "[object Object]".to_string(),
             JsValue::Undefined => "undefined".to_string(),
+        }
+    }
+
+    fn typeof_value(&self, value: &JsValue) -> &'static str {
+        match value {
+            JsValue::Undefined => "undefined",
+            JsValue::Null => "object",
+            JsValue::Bool(_) => "boolean",
+            JsValue::Number(_) => "number",
+            JsValue::String(_) => "string",
+            JsValue::Function(_) => "function",
+            JsValue::Object(_) => "object",
         }
     }
 
@@ -1264,6 +1300,22 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn executes_typeof_opcode_variants() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::Typeof,
+            Opcode::TypeofIdentifier("missing".to_string()),
+            Opcode::Pop,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Ok(JsValue::String("number".to_string()))
+        );
     }
 
     #[test]

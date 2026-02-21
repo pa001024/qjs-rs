@@ -37,6 +37,8 @@ pub enum Opcode {
     Div,
     Neg,
     Not,
+    Typeof,
+    TypeofIdentifier(String),
     Eq,
     Ne,
     Lt,
@@ -865,11 +867,37 @@ impl Compiler {
                 code.push(Opcode::DefineProperty("length".to_string()));
             }
             Expr::Unary { op, expr } => {
+                if *op == UnaryOp::Void {
+                    self.compile_expr(expr, code);
+                    code.push(Opcode::Pop);
+                    code.push(Opcode::LoadUndefined);
+                    return;
+                }
+                if *op == UnaryOp::Delete {
+                    if matches!(&**expr, Expr::Identifier(_)) {
+                        code.push(Opcode::LoadBool(true));
+                        return;
+                    }
+                    self.compile_expr(expr, code);
+                    code.push(Opcode::Pop);
+                    code.push(Opcode::LoadBool(true));
+                    return;
+                }
+                if *op == UnaryOp::Typeof {
+                    if let Expr::Identifier(Identifier(name)) = &**expr {
+                        code.push(Opcode::TypeofIdentifier(name.clone()));
+                    } else {
+                        self.compile_expr(expr, code);
+                        code.push(Opcode::Typeof);
+                    }
+                    return;
+                }
                 self.compile_expr(expr, code);
                 let opcode = match op {
                     UnaryOp::Plus => return,
                     UnaryOp::Minus => Opcode::Neg,
                     UnaryOp::Not => Opcode::Not,
+                    UnaryOp::Typeof | UnaryOp::Void | UnaryOp::Delete => unreachable!(),
                 };
                 code.push(opcode);
             }
@@ -1843,6 +1871,50 @@ mod tests {
             functions: vec![],
         };
         assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_typeof_void_and_delete_unary_ops() {
+        let typeof_ident = compile_expression(&Expr::Unary {
+            op: UnaryOp::Typeof,
+            expr: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+        });
+        assert_eq!(
+            typeof_ident,
+            Chunk {
+                code: vec![Opcode::TypeofIdentifier("x".to_string()), Opcode::Halt],
+                functions: vec![],
+            }
+        );
+
+        let void_expr = compile_expression(&Expr::Unary {
+            op: UnaryOp::Void,
+            expr: Box::new(Expr::Number(1.0)),
+        });
+        assert_eq!(
+            void_expr,
+            Chunk {
+                code: vec![
+                    Opcode::LoadNumber(1.0),
+                    Opcode::Pop,
+                    Opcode::LoadUndefined,
+                    Opcode::Halt
+                ],
+                functions: vec![],
+            }
+        );
+
+        let delete_expr = compile_expression(&Expr::Unary {
+            op: UnaryOp::Delete,
+            expr: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+        });
+        assert_eq!(
+            delete_expr,
+            Chunk {
+                code: vec![Opcode::LoadBool(true), Opcode::Halt],
+                functions: vec![],
+            }
+        );
     }
 
     #[test]

@@ -80,6 +80,12 @@ mod tests {
     fn evaluates_unary_operators() {
         assert_eq!(run_expression("-5 + +2"), Ok(JsValue::Number(-3.0)));
         assert_eq!(run_expression("!0"), Ok(JsValue::Bool(true)));
+        assert_eq!(
+            run_expression("typeof 1"),
+            Ok(JsValue::String("number".to_string()))
+        );
+        assert_eq!(run_expression("void 1"), Ok(JsValue::Undefined));
+        assert_eq!(run_expression("delete x"), Ok(JsValue::Bool(true)));
     }
 
     #[test]

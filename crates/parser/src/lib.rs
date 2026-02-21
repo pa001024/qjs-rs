@@ -1309,6 +1309,27 @@ impl Parser {
                 expr: Box::new(expr),
             });
         }
+        if self.matches_keyword("typeof") {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Typeof,
+                expr: Box::new(expr),
+            });
+        }
+        if self.matches_keyword("void") {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Void,
+                expr: Box::new(expr),
+            });
+        }
+        if self.matches_keyword("delete") {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Delete,
+                expr: Box::new(expr),
+            });
+        }
         self.parse_postfix()
     }
 
@@ -2076,6 +2097,22 @@ mod tests {
             expr: Box::new(Expr::Unary {
                 op: UnaryOp::Minus,
                 expr: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+            }),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_keyword_unary_expression() {
+        let parsed = parse_expression("typeof void delete x").expect("parser should succeed");
+        let expected = Expr::Unary {
+            op: UnaryOp::Typeof,
+            expr: Box::new(Expr::Unary {
+                op: UnaryOp::Void,
+                expr: Box::new(Expr::Unary {
+                    op: UnaryOp::Delete,
+                    expr: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                }),
             }),
         };
         assert_eq!(parsed, expected);
