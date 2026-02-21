@@ -127,6 +127,12 @@ impl Vm {
                             .get(&binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         binding.value.clone()
+                    } else if name == "undefined" {
+                        JsValue::Undefined
+                    } else if name == "NaN" {
+                        JsValue::Number(f64::NAN)
+                    } else if name == "Infinity" {
+                        JsValue::Number(f64::INFINITY)
                     } else if name == "this" {
                         realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
                     } else {
@@ -805,6 +811,20 @@ mod tests {
     fn unresolved_this_loads_as_undefined() {
         let chunk = empty_chunk(vec![
             Opcode::LoadIdentifier("this".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+    }
+
+    #[test]
+    fn loads_undefined_nan_and_infinity_builtins() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadIdentifier("undefined".to_string()),
+            Opcode::LoadIdentifier("NaN".to_string()),
+            Opcode::Pop,
+            Opcode::LoadIdentifier("Infinity".to_string()),
+            Opcode::Pop,
             Opcode::Halt,
         ]);
         let mut vm = Vm::default();
