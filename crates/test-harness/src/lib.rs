@@ -131,6 +131,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_postfix_update_expressions_in_non_strict_mode() {
+        let result = run_script("if (false) { arguments++; } eval--; 1;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

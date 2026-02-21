@@ -1409,6 +1409,12 @@ impl Parser {
             }
             break;
         }
+        if self.matches(&TokenKind::PlusPlus) {
+            return self.rewrite_update_target(expr, true);
+        }
+        if self.matches(&TokenKind::MinusMinus) {
+            return self.rewrite_update_target(expr, false);
+        }
         Ok(expr)
     }
 
@@ -2138,6 +2144,20 @@ mod tests {
     #[test]
     fn parses_prefix_increment_expression() {
         let parsed = parse_expression("++x").expect("parser should succeed");
+        let expected = Expr::Assign {
+            target: Identifier("x".to_string()),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_postfix_increment_expression() {
+        let parsed = parse_expression("x++").expect("parser should succeed");
         let expected = Expr::Assign {
             target: Identifier("x".to_string()),
             value: Box::new(Expr::Binary {
