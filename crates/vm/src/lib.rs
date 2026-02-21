@@ -438,6 +438,49 @@ impl Vm {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs / rhs)?;
                     self.stack.push(JsValue::Number(result));
                 }
+                Opcode::Mod => {
+                    let result = self.eval_numeric_binary(|lhs, rhs| lhs % rhs)?;
+                    self.stack.push(JsValue::Number(result));
+                }
+                Opcode::Shl => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let shift = self.to_uint32(&right) & 0x1F;
+                    let result = self.to_int32(&left) << shift;
+                    self.stack.push(JsValue::Number(result as f64));
+                }
+                Opcode::Shr => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let shift = self.to_uint32(&right) & 0x1F;
+                    let result = self.to_int32(&left) >> shift;
+                    self.stack.push(JsValue::Number(result as f64));
+                }
+                Opcode::UShr => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let shift = self.to_uint32(&right) & 0x1F;
+                    let result = self.to_uint32(&left) >> shift;
+                    self.stack.push(JsValue::Number(result as f64));
+                }
+                Opcode::BitAnd => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = self.to_int32(&left) & self.to_int32(&right);
+                    self.stack.push(JsValue::Number(result as f64));
+                }
+                Opcode::BitOr => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = self.to_int32(&left) | self.to_int32(&right);
+                    self.stack.push(JsValue::Number(result as f64));
+                }
+                Opcode::BitXor => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = self.to_int32(&left) ^ self.to_int32(&right);
+                    self.stack.push(JsValue::Number(result as f64));
+                }
                 Opcode::Neg => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(JsValue::Number(-self.to_number(&value)));
@@ -445,6 +488,11 @@ impl Vm {
                 Opcode::Not => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(JsValue::Bool(!self.is_truthy(&value)));
+                }
+                Opcode::BitNot => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.stack
+                        .push(JsValue::Number((!self.to_int32(&value)) as f64));
                 }
                 Opcode::Typeof => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -1411,6 +1459,28 @@ impl Vm {
             | JsValue::HostFunction(_)
             | JsValue::Object(_) => f64::NAN,
             JsValue::Undefined => f64::NAN,
+        }
+    }
+
+    fn to_uint32(&self, value: &JsValue) -> u32 {
+        let number = self.to_number(value);
+        if !number.is_finite() || number == 0.0 {
+            return 0;
+        }
+        let modulo = 4_294_967_296_f64;
+        let mut int = number.trunc() % modulo;
+        if int < 0.0 {
+            int += modulo;
+        }
+        int as u32
+    }
+
+    fn to_int32(&self, value: &JsValue) -> i32 {
+        let uint = self.to_uint32(value);
+        if uint >= 0x8000_0000 {
+            (uint as i64 - 0x1_0000_0000_i64) as i32
+        } else {
+            uint as i32
         }
     }
 

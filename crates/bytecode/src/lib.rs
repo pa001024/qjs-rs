@@ -38,8 +38,16 @@ pub enum Opcode {
     Sub,
     Mul,
     Div,
+    Mod,
+    Shl,
+    Shr,
+    UShr,
+    BitAnd,
+    BitOr,
+    BitXor,
     Neg,
     Not,
+    BitNot,
     Typeof,
     TypeofIdentifier(String),
     Eq,
@@ -990,9 +998,27 @@ impl Compiler {
                     UnaryOp::Plus => return,
                     UnaryOp::Minus => Opcode::Neg,
                     UnaryOp::Not => Opcode::Not,
+                    UnaryOp::BitNot => Opcode::BitNot,
                     UnaryOp::Typeof | UnaryOp::Void | UnaryOp::Delete => unreachable!(),
                 };
                 code.push(opcode);
+            }
+            Expr::Conditional {
+                condition,
+                consequent,
+                alternate,
+            } => {
+                self.compile_expr(condition, code);
+                let jump_to_alternate_pos = code.len();
+                code.push(Opcode::JumpIfFalse(usize::MAX));
+                self.compile_expr(consequent, code);
+                let jump_to_end_pos = code.len();
+                code.push(Opcode::Jump(usize::MAX));
+                let alternate_start = code.len();
+                self.compile_expr(alternate, code);
+                let end = code.len();
+                code[jump_to_alternate_pos] = Opcode::JumpIfFalse(alternate_start);
+                code[jump_to_end_pos] = Opcode::Jump(end);
             }
             Expr::Assign {
                 target: Identifier(name),
@@ -1078,6 +1104,13 @@ impl Compiler {
                     BinaryOp::Sub => Opcode::Sub,
                     BinaryOp::Mul => Opcode::Mul,
                     BinaryOp::Div => Opcode::Div,
+                    BinaryOp::Mod => Opcode::Mod,
+                    BinaryOp::ShiftLeft => Opcode::Shl,
+                    BinaryOp::ShiftRight => Opcode::Shr,
+                    BinaryOp::UnsignedShiftRight => Opcode::UShr,
+                    BinaryOp::BitAnd => Opcode::BitAnd,
+                    BinaryOp::BitOr => Opcode::BitOr,
+                    BinaryOp::BitXor => Opcode::BitXor,
                     BinaryOp::Equal => Opcode::Eq,
                     BinaryOp::NotEqual => Opcode::Ne,
                     BinaryOp::StrictEqual => Opcode::Eq,

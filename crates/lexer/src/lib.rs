@@ -12,11 +12,24 @@ pub enum TokenKind {
     String(String),
     Identifier(String),
     Plus,
+    PlusEqual,
     PlusPlus,
     Minus,
+    MinusEqual,
     MinusMinus,
     Star,
+    StarEqual,
     Slash,
+    SlashEqual,
+    Percent,
+    PercentEqual,
+    Amp,
+    AmpEqual,
+    Pipe,
+    PipeEqual,
+    Caret,
+    CaretEqual,
+    Tilde,
     Bang,
     Equal,
     EqualEqual,
@@ -24,8 +37,14 @@ pub enum TokenKind {
     BangEqual,
     BangEqualEqual,
     Less,
+    LessLess,
+    LessLessEqual,
     LessEqual,
     Greater,
+    GreaterGreater,
+    GreaterGreaterEqual,
+    GreaterGreaterGreater,
+    GreaterGreaterGreaterEqual,
     GreaterEqual,
     AndAnd,
     OrOr,
@@ -33,6 +52,7 @@ pub enum TokenKind {
     Dot,
     Comma,
     Colon,
+    Question,
     Semicolon,
     LParen,
     RParen,
@@ -160,6 +180,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 pos += 2;
                 continue;
             }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::PlusEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Plus,
                 span: Span {
@@ -183,6 +214,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 pos += 2;
                 continue;
             }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::MinusEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Minus,
                 span: Span {
@@ -195,6 +237,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'*' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::StarEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Star,
                 span: Span {
@@ -234,8 +287,42 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
                 continue;
             }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::SlashEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Slash,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'%' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::PercentEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            tokens.push(Token {
+                kind: TokenKind::Percent,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -310,36 +397,83 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'<' {
-            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
+            let is_shift = pos + 1 < bytes.len() && bytes[pos + 1] == b'<';
+            let is_shift_assign = is_shift && pos + 2 < bytes.len() && bytes[pos + 2] == b'=';
+            let is_double = !is_shift && pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
             tokens.push(Token {
-                kind: if is_double {
+                kind: if is_shift_assign {
+                    TokenKind::LessLessEqual
+                } else if is_shift {
+                    TokenKind::LessLess
+                } else if is_double {
                     TokenKind::LessEqual
                 } else {
                     TokenKind::Less
                 },
                 span: Span {
                     start: pos,
-                    end: if is_double { pos + 2 } else { pos + 1 },
+                    end: if is_shift_assign {
+                        pos + 3
+                    } else if is_shift || is_double {
+                        pos + 2
+                    } else {
+                        pos + 1
+                    },
                 },
             });
-            pos += if is_double { 2 } else { 1 };
+            pos += if is_shift_assign {
+                3
+            } else if is_shift || is_double {
+                2
+            } else {
+                1
+            };
             continue;
         }
 
         if byte == b'>' {
-            let is_double = pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
+            let is_shift = pos + 1 < bytes.len() && bytes[pos + 1] == b'>';
+            let is_shift2 = is_shift && pos + 2 < bytes.len() && bytes[pos + 2] == b'>';
+            let is_shift3_assign = is_shift2 && pos + 3 < bytes.len() && bytes[pos + 3] == b'=';
+            let is_shift_assign =
+                is_shift && !is_shift2 && pos + 2 < bytes.len() && bytes[pos + 2] == b'=';
+            let is_double = !is_shift && pos + 1 < bytes.len() && bytes[pos + 1] == b'=';
             tokens.push(Token {
-                kind: if is_double {
+                kind: if is_shift3_assign {
+                    TokenKind::GreaterGreaterGreaterEqual
+                } else if is_shift2 {
+                    TokenKind::GreaterGreaterGreater
+                } else if is_shift_assign {
+                    TokenKind::GreaterGreaterEqual
+                } else if is_shift {
+                    TokenKind::GreaterGreater
+                } else if is_double {
                     TokenKind::GreaterEqual
                 } else {
                     TokenKind::Greater
                 },
                 span: Span {
                     start: pos,
-                    end: if is_double { pos + 2 } else { pos + 1 },
+                    end: if is_shift3_assign {
+                        pos + 4
+                    } else if is_shift2 || is_shift_assign {
+                        pos + 3
+                    } else if is_shift || is_double {
+                        pos + 2
+                    } else {
+                        pos + 1
+                    },
                 },
             });
-            pos += if is_double { 2 } else { 1 };
+            pos += if is_shift3_assign {
+                4
+            } else if is_shift2 || is_shift_assign {
+                3
+            } else if is_shift || is_double {
+                2
+            } else {
+                1
+            };
             continue;
         }
 
@@ -355,10 +489,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 pos += 2;
                 continue;
             }
-            return Err(LexError {
-                message: "unexpected character '&'".to_string(),
-                position: pos,
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::AmpEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            tokens.push(Token {
+                kind: TokenKind::Amp,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
             });
+            pos += 1;
+            continue;
         }
 
         if byte == b'|' {
@@ -373,10 +523,61 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 pos += 2;
                 continue;
             }
-            return Err(LexError {
-                message: "unexpected character '|'".to_string(),
-                position: pos,
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::PipeEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            tokens.push(Token {
+                kind: TokenKind::Pipe,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
             });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'^' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::CaretEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            tokens.push(Token {
+                kind: TokenKind::Caret,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'~' {
+            tokens.push(Token {
+                kind: TokenKind::Tilde,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
         }
 
         if byte == b';' {
@@ -429,6 +630,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b':' {
             tokens.push(Token {
                 kind: TokenKind::Colon,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'?' {
+            tokens.push(Token {
+                kind: TokenKind::Question,
                 span: Span {
                     start: pos,
                     end: pos + 1,

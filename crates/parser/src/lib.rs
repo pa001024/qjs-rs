@@ -1122,7 +1122,7 @@ impl Parser {
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        const MAX_EXPRESSION_DEPTH: usize = 40;
+        const MAX_EXPRESSION_DEPTH: usize = 30;
         self.expression_depth += 1;
         if self.expression_depth > MAX_EXPRESSION_DEPTH {
             self.expression_depth = self.expression_depth.saturating_sub(1);
@@ -1142,32 +1142,103 @@ impl Parser {
             return Ok(arrow_function);
         }
 
-        let left = self.parse_logical_or()?;
-        if self.matches(&TokenKind::Equal) {
-            let assignment_position = self.previous_position();
-            let value = self.parse_assignment()?;
-            match left {
-                Expr::Identifier(target) => Ok(Expr::Assign {
+        let left = self.parse_conditional()?;
+        let (binary_op, assignment_position) = if self.matches(&TokenKind::Equal) {
+            (None, self.previous_position())
+        } else if self.matches(&TokenKind::PlusEqual) {
+            (Some(BinaryOp::Add), self.previous_position())
+        } else if self.matches(&TokenKind::MinusEqual) {
+            (Some(BinaryOp::Sub), self.previous_position())
+        } else if self.matches(&TokenKind::StarEqual) {
+            (Some(BinaryOp::Mul), self.previous_position())
+        } else if self.matches(&TokenKind::SlashEqual) {
+            (Some(BinaryOp::Div), self.previous_position())
+        } else if self.matches(&TokenKind::PercentEqual) {
+            (Some(BinaryOp::Mod), self.previous_position())
+        } else if self.matches(&TokenKind::LessLessEqual) {
+            (Some(BinaryOp::ShiftLeft), self.previous_position())
+        } else if self.matches(&TokenKind::GreaterGreaterEqual) {
+            (Some(BinaryOp::ShiftRight), self.previous_position())
+        } else if self.matches(&TokenKind::GreaterGreaterGreaterEqual) {
+            (Some(BinaryOp::UnsignedShiftRight), self.previous_position())
+        } else if self.matches(&TokenKind::AmpEqual) {
+            (Some(BinaryOp::BitAnd), self.previous_position())
+        } else if self.matches(&TokenKind::PipeEqual) {
+            (Some(BinaryOp::BitOr), self.previous_position())
+        } else if self.matches(&TokenKind::CaretEqual) {
+            (Some(BinaryOp::BitXor), self.previous_position())
+        } else {
+            return Ok(left);
+        };
+
+        let right = self.parse_assignment()?;
+        self.rewrite_assignment_target(left, right, binary_op, assignment_position)
+    }
+
+    fn rewrite_assignment_target(
+        &self,
+        left: Expr,
+        right: Expr,
+        binary_op: Option<BinaryOp>,
+        assignment_position: usize,
+    ) -> Result<Expr, ParseError> {
+        match left {
+            Expr::Identifier(target) => {
+                let value = self.wrap_compound_assignment_value(
+                    Expr::Identifier(target.clone()),
+                    right,
+                    binary_op,
+                );
+                Ok(Expr::Assign {
                     target,
                     value: Box::new(value),
-                }),
-                Expr::Member { object, property } => Ok(Expr::AssignMember {
+                })
+            }
+            Expr::Member { object, property } => {
+                let read = Expr::Member {
+                    object: object.clone(),
+                    property: property.clone(),
+                };
+                let value = self.wrap_compound_assignment_value(read, right, binary_op);
+                Ok(Expr::AssignMember {
                     object,
                     property,
                     value: Box::new(value),
-                }),
-                Expr::MemberComputed { object, property } => Ok(Expr::AssignMemberComputed {
+                })
+            }
+            Expr::MemberComputed { object, property } => {
+                let read = Expr::MemberComputed {
+                    object: object.clone(),
+                    property: property.clone(),
+                };
+                let value = self.wrap_compound_assignment_value(read, right, binary_op);
+                Ok(Expr::AssignMemberComputed {
                     object,
                     property,
                     value: Box::new(value),
-                }),
-                _ => Err(ParseError {
-                    message: "invalid assignment target".to_string(),
-                    position: assignment_position,
-                }),
+                })
+            }
+            _ => Err(ParseError {
+                message: "invalid assignment target".to_string(),
+                position: assignment_position,
+            }),
+        }
+    }
+
+    fn wrap_compound_assignment_value(
+        &self,
+        left: Expr,
+        right: Expr,
+        binary_op: Option<BinaryOp>,
+    ) -> Expr {
+        if let Some(binary_op) = binary_op {
+            Expr::Binary {
+                op: binary_op,
+                left: Box::new(left),
+                right: Box::new(right),
             }
         } else {
-            Ok(left)
+            right
         }
     }
 
@@ -1258,10 +1329,25 @@ impl Parser {
         Ok(expr)
     }
 
+    fn parse_conditional(&mut self) -> Result<Expr, ParseError> {
+        let condition = self.parse_logical_or()?;
+        if !self.matches(&TokenKind::Question) {
+            return Ok(condition);
+        }
+        let consequent = self.parse_assignment()?;
+        self.expect(TokenKind::Colon, "expected ':' in conditional expression")?;
+        let alternate = self.parse_assignment()?;
+        Ok(Expr::Conditional {
+            condition: Box::new(condition),
+            consequent: Box::new(consequent),
+            alternate: Box::new(alternate),
+        })
+    }
+
     fn parse_logical_and(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_comparison()?;
+        let mut expr = self.parse_bitwise_or()?;
         while self.matches(&TokenKind::AndAnd) {
-            let right = self.parse_comparison()?;
+            let right = self.parse_bitwise_or()?;
             expr = Expr::Binary {
                 op: BinaryOp::LogicalAnd,
                 left: Box::new(expr),
@@ -1271,8 +1357,47 @@ impl Parser {
         Ok(expr)
     }
 
+    fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bitwise_xor()?;
+        while self.matches(&TokenKind::Pipe) {
+            let right = self.parse_bitwise_xor()?;
+            expr = Expr::Binary {
+                op: BinaryOp::BitOr,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bitwise_and()?;
+        while self.matches(&TokenKind::Caret) {
+            let right = self.parse_bitwise_and()?;
+            expr = Expr::Binary {
+                op: BinaryOp::BitXor,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_comparison()?;
+        while self.matches(&TokenKind::Amp) {
+            let right = self.parse_comparison()?;
+            expr = Expr::Binary {
+                op: BinaryOp::BitAnd,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_additive()?;
+        let mut expr = self.parse_shift()?;
         loop {
             let op = if self.matches(&TokenKind::EqualEqualEqual) {
                 BinaryOp::StrictEqual
@@ -1290,6 +1415,28 @@ impl Parser {
                 BinaryOp::Greater
             } else if self.matches(&TokenKind::GreaterEqual) {
                 BinaryOp::GreaterEqual
+            } else {
+                break;
+            };
+            let right = self.parse_shift()?;
+            expr = Expr::Binary {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_additive()?;
+        loop {
+            let op = if self.matches(&TokenKind::LessLess) {
+                BinaryOp::ShiftLeft
+            } else if self.matches(&TokenKind::GreaterGreater) {
+                BinaryOp::ShiftRight
+            } else if self.matches(&TokenKind::GreaterGreaterGreater) {
+                BinaryOp::UnsignedShiftRight
             } else {
                 break;
             };
@@ -1330,6 +1477,8 @@ impl Parser {
                 BinaryOp::Mul
             } else if self.matches(&TokenKind::Slash) {
                 BinaryOp::Div
+            } else if self.matches(&TokenKind::Percent) {
+                BinaryOp::Mod
             } else {
                 break;
             };
@@ -1368,6 +1517,13 @@ impl Parser {
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary {
                 op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
+        }
+        if self.matches(&TokenKind::Tilde) {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::BitNot,
                 expr: Box::new(expr),
             });
         }
@@ -1804,26 +1960,46 @@ impl Parser {
             TokenKind::LBrace => self.parse_object_literal(),
             TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Plus
+            | TokenKind::PlusEqual
             | TokenKind::PlusPlus
             | TokenKind::Minus
+            | TokenKind::MinusEqual
             | TokenKind::MinusMinus
             | TokenKind::Star
+            | TokenKind::StarEqual
             | TokenKind::Bang
+            | TokenKind::Tilde
             | TokenKind::Equal
+            | TokenKind::SlashEqual
+            | TokenKind::Percent
+            | TokenKind::PercentEqual
+            | TokenKind::Amp
+            | TokenKind::AmpEqual
+            | TokenKind::Pipe
+            | TokenKind::PipeEqual
+            | TokenKind::Caret
+            | TokenKind::CaretEqual
             | TokenKind::EqualEqual
             | TokenKind::EqualEqualEqual
             | TokenKind::BangEqual
             | TokenKind::BangEqualEqual
             | TokenKind::Less
+            | TokenKind::LessLess
+            | TokenKind::LessLessEqual
             | TokenKind::LessEqual
             | TokenKind::Greater
+            | TokenKind::GreaterGreater
+            | TokenKind::GreaterGreaterEqual
+            | TokenKind::GreaterGreaterGreater
+            | TokenKind::GreaterGreaterGreaterEqual
             | TokenKind::GreaterEqual
             | TokenKind::AndAnd
             | TokenKind::OrOr
             | TokenKind::Ellipsis
             | TokenKind::Dot
             | TokenKind::Comma
-            | TokenKind::Colon => Err(ParseError {
+            | TokenKind::Colon
+            | TokenKind::Question => Err(ParseError {
                 message: "unexpected operator at expression start".to_string(),
                 position,
             }),

@@ -9,6 +9,13 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Mod,
+    ShiftLeft,
+    ShiftRight,
+    UnsignedShiftRight,
+    BitAnd,
+    BitOr,
+    BitXor,
     Equal,
     NotEqual,
     StrictEqual,
@@ -26,6 +33,7 @@ pub enum UnaryOp {
     Plus,
     Minus,
     Not,
+    BitNot,
     Typeof,
     Void,
     Delete,
@@ -53,6 +61,11 @@ pub enum Expr {
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
+    },
+    Conditional {
+        condition: Box<Expr>,
+        consequent: Box<Expr>,
+        alternate: Box<Expr>,
     },
     Member {
         object: Box<Expr>,

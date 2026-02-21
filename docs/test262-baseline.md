@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1583, failed=2
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1584, failed=1
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -54,5 +54,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 新增 `class` 声明/表达式语法吞吐基线、`async function` 与 `function*` 形状解析，以及转义关键字的“原始文本”判定（如 `l\u0065t` 不再被误判为关键字）；`language` 基线提升到 `1580/5`。
 - parser 补齐 `new Function(... )()` 这类 `new` 后续调用链形状解析；VM 增加“未解析标识符回退读取全局对象属性”路径（支持 `this.let = 0; let;` 场景）；`language` 基线提升到 `1581/4`。
 - bytecode 增加脚本顶层 `var` 预声明提升（最小 hoist），并对全局受限名（`undefined`/`NaN`/`Infinity`）的词法声明注入运行时异常路径（匹配 test262 `negative phase: runtime` 口径）；`language` 基线提升到 `1583/2`。
-- 当前 `language` 剩余失败仅 2 条：`punctuators/S7.7_A1.js`（`%` 与后续整组 punctuator 词法/语义未接入）与 `statements/function/S13.2.1_A1_T1.js`（深层 IIFE 在现有表达式深度保护下仍触发 `expression nesting too deep`）。
+- lexer/parser/ast/bytecode/vm 打通 `punctuators` 基线：新增 `%`、位运算（`&`/`|`/`^`/`~`）、移位（`<<`/`>>`/`>>>`）、条件运算符（`?:`）及对应复合赋值（`+=`/`-=`/`*=`/`/=`/`%=`/`<<=`/`>>=`/`>>>=`/`&=`/`|=`/`^=`）的最小可运行链路；`language` 基线提升到 `1584/1`。
+- 为避免新增运算符递归层级导致的 parser 进程栈溢出，表达式深度阈值调整为 `30`（当前仍会使深层 IIFE 用例 `statements/function/S13.2.1_A1_T1.js` 返回 `ParseFail(\"expression nesting too deep\")`）。
+- 当前 `language` 剩余失败仅 1 条：`statements/function/S13.2.1_A1_T1.js`（深层 IIFE 触发表达式深度保护）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
