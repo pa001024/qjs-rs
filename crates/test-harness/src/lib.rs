@@ -243,6 +243,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_object_accessor_syntax_in_sloppy_mode() {
+        let result = run_script("void { get foo() {}, set foo(v) {} };", &[]);
+        assert_eq!(result, Ok(JsValue::Undefined));
+    }
+
+    #[test]
     fn arguments_object_exposes_length() {
         let result = run_script(
             "function f(a, b, c) { return arguments.length; } f(1, 2, 3);",

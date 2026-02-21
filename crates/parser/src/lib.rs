@@ -1571,6 +1571,19 @@ impl Parser {
         }
         loop {
             let key = self.parse_object_property_key()?;
+            if let Some((accessor_key, accessor_value)) = self.try_parse_object_accessor(&key)? {
+                properties.push(ObjectProperty {
+                    key: accessor_key,
+                    value: accessor_value,
+                });
+                if self.matches(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
             let value = if self.matches(&TokenKind::Colon) {
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
@@ -1604,6 +1617,44 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
         Ok(Expr::ObjectLiteral(properties))
+    }
+
+    fn try_parse_object_accessor(
+        &mut self,
+        key: &ObjectPropertyKey,
+    ) -> Result<Option<(ObjectPropertyKey, Expr)>, ParseError> {
+        let is_accessor_prefix = matches!(
+            key,
+            ObjectPropertyKey::Static(name) if name == "get" || name == "set"
+        );
+        if !is_accessor_prefix {
+            return Ok(None);
+        }
+        if !self.check_identifier() || !self.check_next(&TokenKind::LParen) {
+            return Ok(None);
+        }
+        let accessor_name =
+            self.expect_identifier_name("expected property name in object literal")?;
+        self.expect(TokenKind::LParen, "expected '(' after accessor name")?;
+        let params = self.parse_parameter_list()?;
+        self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+
+        self.function_depth += 1;
+        let body = self.parse_block_body(
+            "expected '{' before function body",
+            "expected '}' after function body",
+        );
+        self.function_depth = self.function_depth.saturating_sub(1);
+        let body = body?;
+
+        Ok(Some((
+            ObjectPropertyKey::Static(accessor_name),
+            Expr::Function {
+                name: None,
+                params,
+                body,
+            },
+        )))
     }
 
     fn parse_object_property_key(&mut self) -> Result<ObjectPropertyKey, ParseError> {
@@ -1969,6 +2020,31 @@ mod tests {
                     name: None,
                     params: vec![],
                     body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                },
+            },
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_getter_and_setter_in_object_literal() {
+        let parsed =
+            parse_expression("({ get foo() {}, set foo(v) {} })").expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("foo".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![],
+                },
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("foo".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![Identifier("v".to_string())],
+                    body: vec![],
                 },
             },
         ]);

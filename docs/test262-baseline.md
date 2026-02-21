@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1351, failed=234
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1358, failed=227
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -34,4 +34,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 放宽非严格模式下 `let` 在标识符引用位置的限制，并允许 `var let = ...` 场景，补齐 `let` 相关历史语法兼容基线。
 - lexer/parser 新增 `...` 词法与调用实参 spread 形状解析支持（当前按 baseline 先走语法兼容），修复 `expressions/call/trailing-comma.js`。
 - parser/bytecode/vm 新增 `typeof` / `void` / `delete` 一元关键字运算符 baseline（含 `typeof 未声明标识符` 宽容行为），显著降低被误判为“reserved word identifier” 的失败簇。
+- parser 新增对象字面量访问器语法 baseline（`get foo(){}` / `set foo(v){}`），先按函数值属性降级处理以降低 parse-failure 噪声。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
