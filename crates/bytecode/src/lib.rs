@@ -74,12 +74,36 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         preserve_value: bool,
     ) -> bool {
-        let mut produced_value = false;
-        let len = statements.len();
+        // Function declarations are hoisted to the top of their containing scope.
+        for stmt in statements {
+            if let Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) = stmt {
+                let function_id = self.compile_function(name, params, body);
+                code.push(Opcode::DefineFunction {
+                    name: name.0.clone(),
+                    function_id,
+                });
+            }
+        }
 
+        let executable_indexes: Vec<usize> = statements
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, stmt)| {
+                if matches!(stmt, Stmt::FunctionDeclaration(_)) {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect();
+
+        let mut produced_value = false;
+        let last_executable = executable_indexes.last().copied();
         for (index, stmt) in statements.iter().enumerate() {
-            let is_last = index + 1 == len;
-            let keep_value = preserve_value && is_last;
+            if matches!(stmt, Stmt::FunctionDeclaration(_)) {
+                continue;
+            }
+            let keep_value = preserve_value && Some(index) == last_executable;
             produced_value = self.compile_stmt(stmt, code, keep_value);
         }
 
@@ -361,6 +385,51 @@ mod tests {
                     Opcode::LoadIdentifier("a".to_string()),
                     Opcode::LoadIdentifier("b".to_string()),
                     Opcode::Add,
+                    Opcode::Return,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn hoists_function_declaration_before_use() {
+        let script = Script {
+            statements: vec![
+                Stmt::Expression(Expr::Call {
+                    callee: Box::new(Expr::Identifier(Identifier("id".to_string()))),
+                    arguments: vec![Expr::Number(42.0)],
+                }),
+                Stmt::FunctionDeclaration(FunctionDeclaration {
+                    name: Identifier("id".to_string()),
+                    params: vec![Identifier("x".to_string())],
+                    body: vec![Stmt::Return(Some(Expr::Identifier(Identifier(
+                        "x".to_string(),
+                    ))))],
+                }),
+            ],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::DefineFunction {
+                    name: "id".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadIdentifier("id".to_string()),
+                Opcode::LoadNumber(42.0),
+                Opcode::Call(1),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "id".to_string(),
+                params: vec!["x".to_string()],
+                code: vec![
+                    Opcode::LoadIdentifier("x".to_string()),
                     Opcode::Return,
                     Opcode::LoadUndefined,
                     Opcode::Return,

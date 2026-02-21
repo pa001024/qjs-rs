@@ -139,4 +139,25 @@ mod tests {
         );
         assert_eq!(result, Ok(JsValue::Number(11.0)));
     }
+
+    #[test]
+    fn supports_function_hoisting_at_script_scope() {
+        let result = run_script("add(20, 22); function add(a, b) { return a + b; }", &[]);
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn supports_function_hoisting_inside_block() {
+        let result = run_script(
+            "let y = 0; { y = id(7); function id(v) { return v; } } y;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn function_can_reference_itself() {
+        let result = run_script("function f() { return f; } f();", &[]);
+        assert!(matches!(result, Ok(JsValue::Function(_))));
+    }
 }

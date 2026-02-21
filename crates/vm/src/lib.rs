@@ -2,10 +2,13 @@
 
 use bytecode::{Chunk, CompiledFunction, Opcode};
 use runtime::{JsValue, Realm};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 type BindingId = u64;
 type Scope = BTreeMap<String, BindingId>;
+type ScopeRef = Rc<RefCell<Scope>>;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Binding {
@@ -16,7 +19,7 @@ struct Binding {
 #[derive(Debug, Clone, PartialEq)]
 struct Closure {
     function_id: usize,
-    captured_scopes: Vec<Scope>,
+    captured_scopes: Vec<ScopeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +46,7 @@ enum ExecutionSignal {
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
-    scopes: Vec<Scope>,
+    scopes: Vec<ScopeRef>,
     bindings: BTreeMap<BindingId, Binding>,
     next_binding_id: BindingId,
     closures: BTreeMap<u64, Closure>,
@@ -59,7 +62,7 @@ impl Vm {
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
         self.scopes.clear();
-        self.scopes.push(BTreeMap::new());
+        self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
         self.bindings.clear();
         self.next_binding_id = 0;
         self.closures.clear();
@@ -99,14 +102,18 @@ impl Vm {
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     {
-                        let scope = self.current_scope_mut()?;
-                        if scope.contains_key(name) {
+                        let scope_ref = self.current_scope_ref()?;
+                        if scope_ref.borrow().contains_key(name) {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     }
                     let binding_id = self.create_binding(value, *mutable);
-                    let scope = self.current_scope_mut()?;
-                    if scope.insert(name.clone(), binding_id).is_some() {
+                    let scope_ref = self.current_scope_ref()?;
+                    if scope_ref
+                        .borrow_mut()
+                        .insert(name.clone(), binding_id)
+                        .is_some()
+                    {
                         return Err(VmError::VariableAlreadyDefined(name.clone()));
                     }
                 }
@@ -118,15 +125,19 @@ impl Vm {
                     self.next_closure_id += 1;
 
                     {
-                        let scope = self.current_scope_mut()?;
-                        if scope.contains_key(name) {
+                        let scope_ref = self.current_scope_ref()?;
+                        if scope_ref.borrow().contains_key(name) {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     }
                     let function_binding =
                         self.create_binding(JsValue::Function(closure_id), false);
-                    let scope = self.current_scope_mut()?;
-                    if scope.insert(name.clone(), function_binding).is_some() {
+                    let scope_ref = self.current_scope_ref()?;
+                    if scope_ref
+                        .borrow_mut()
+                        .insert(name.clone(), function_binding)
+                        .is_some()
+                    {
                         return Err(VmError::VariableAlreadyDefined(name.clone()));
                     }
 
@@ -154,7 +165,7 @@ impl Vm {
                     binding.value = value.clone();
                     self.stack.push(value);
                 }
-                Opcode::EnterScope => self.scopes.push(BTreeMap::new()),
+                Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
                 Opcode::ExitScope => {
                     if self.scopes.pop().is_none() || self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
@@ -236,7 +247,7 @@ impl Vm {
         let saved_scopes = std::mem::take(&mut self.scopes);
 
         self.scopes = closure.captured_scopes;
-        self.scopes.push(frame_scope);
+        self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         self.stack = Vec::new();
 
         let signal = self.execute_code(&function.code, functions, realm, true);
@@ -262,15 +273,17 @@ impl Vm {
         id
     }
 
-    fn current_scope_mut(&mut self) -> Result<&mut Scope, VmError> {
-        self.scopes.last_mut().ok_or(VmError::ScopeUnderflow)
+    fn current_scope_ref(&self) -> Result<ScopeRef, VmError> {
+        self.scopes.last().cloned().ok_or(VmError::ScopeUnderflow)
     }
 
     fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
+        for scope_ref in self.scopes.iter().rev() {
+            if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
+                return Some(binding_id);
+            }
+        }
+        None
     }
 
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
