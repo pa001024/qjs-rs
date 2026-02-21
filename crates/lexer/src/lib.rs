@@ -87,13 +87,37 @@ fn is_identifier_part(ch: char) -> bool {
 
 fn decode_unicode_escape(source: &str, pos: usize) -> Option<(char, usize)> {
     let bytes = source.as_bytes();
-    if pos + 6 > bytes.len() || bytes[pos] != b'\\' || bytes[pos + 1] != b'u' {
+    if pos + 2 > bytes.len() || bytes[pos] != b'\\' || bytes[pos + 1] != b'u' {
         return None;
     }
-    let hex = std::str::from_utf8(&bytes[pos + 2..pos + 6]).ok()?;
+    if pos + 6 <= bytes.len() {
+        let hex = std::str::from_utf8(&bytes[pos + 2..pos + 6]).ok()?;
+        if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            let code_point = u32::from_str_radix(hex, 16).ok()?;
+            let ch = char::from_u32(code_point)?;
+            return Some((ch, 6));
+        }
+    }
+    if pos + 3 > bytes.len() || bytes[pos + 2] != b'{' {
+        return None;
+    }
+    let mut end = pos + 3;
+    while end < bytes.len() && bytes[end] != b'}' {
+        end += 1;
+    }
+    if end >= bytes.len() || bytes[end] != b'}' {
+        return None;
+    }
+    let hex = std::str::from_utf8(&bytes[pos + 3..end]).ok()?;
+    if hex.is_empty() || hex.len() > 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
     let code_point = u32::from_str_radix(hex, 16).ok()?;
+    if code_point > 0x10FFFF {
+        return None;
+    }
     let ch = char::from_u32(code_point)?;
-    Some((ch, 6))
+    Some((ch, end + 1 - pos))
 }
 
 fn decode_char(source: &str, pos: usize) -> Option<(char, usize)> {
@@ -755,6 +779,17 @@ mod tests {
         let tokens = lex("var \\u0061 = 1;").expect("tokenization should succeed");
         assert_eq!(tokens[0].kind, TokenKind::Identifier("var".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Equal);
+        assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_unicode_codepoint_escape_in_identifier() {
+        let tokens = lex("var _\\u{1F600} = 1;").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("var".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("_😀".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::Equal);
         assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);

@@ -201,6 +201,12 @@ mod tests {
     }
 
     #[test]
+    fn supports_unicode_codepoint_identifier_escapes() {
+        let result = run_script("var _\\u{1F600} = 41; _😀 + 1;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
     fn supports_string_replace_callback_baseline() {
         let result = run_script(
             "var x = 1; var out = 'ab'.replace('b', function() { x = this; return 'a'; }); (out === 'aa') && (x === undefined);",
