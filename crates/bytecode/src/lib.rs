@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-    SwitchCase, UnaryOp, VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
+    ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,7 @@ pub enum Opcode {
     LoadUndefined,
     CreateObject,
     LoadIdentifier(String),
+    LoadFunction(usize),
     DefineVariable {
         name: String,
         mutable: bool,
@@ -138,7 +139,7 @@ impl Compiler {
         // Function declarations are hoisted to the top of their containing scope.
         for stmt in statements {
             if let Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) = stmt {
-                let function_id = self.compile_function(name, params, body);
+                let function_id = self.compile_function(Some(name), params, body);
                 code.push(Opcode::DefineFunction {
                     name: name.0.clone(),
                     function_id,
@@ -204,7 +205,7 @@ impl Compiler {
                 false
             }
             Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
-                let function_id = self.compile_function(name, params, body);
+                let function_id = self.compile_function(Some(name), params, body);
                 code.push(Opcode::DefineFunction {
                     name: name.0.clone(),
                     function_id,
@@ -692,7 +693,7 @@ impl Compiler {
 
     fn compile_function(
         &mut self,
-        name: &Identifier,
+        name: Option<&Identifier>,
         params: &[Identifier],
         body: &[Stmt],
     ) -> usize {
@@ -711,7 +712,9 @@ impl Compiler {
 
         let function_id = self.functions.len();
         self.functions.push(CompiledFunction {
-            name: name.0.clone(),
+            name: name
+                .map(|identifier| identifier.0.clone())
+                .unwrap_or_else(|| "<anonymous>".to_string()),
             params: params.iter().map(|param| param.0.clone()).collect(),
             code,
         });
@@ -830,11 +833,26 @@ impl Compiler {
             Expr::Null => code.push(Opcode::LoadNull),
             Expr::String(value) => code.push(Opcode::LoadString(value.clone())),
             Expr::This => code.push(Opcode::LoadIdentifier("this".to_string())),
+            Expr::Function { name, params, body } => {
+                let function_id = self.compile_function(name.as_ref(), params, body);
+                code.push(Opcode::LoadFunction(function_id));
+            }
             Expr::ObjectLiteral(properties) => {
                 code.push(Opcode::CreateObject);
                 for property in properties {
-                    self.compile_expr(&property.value, code);
-                    code.push(Opcode::DefineProperty(property.key.clone()));
+                    match &property.key {
+                        ObjectPropertyKey::Static(name) => {
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineProperty(name.clone()));
+                        }
+                        ObjectPropertyKey::Computed(key_expr) => {
+                            code.push(Opcode::Dup);
+                            self.compile_expr(key_expr, code);
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::SetPropertyByValue);
+                            code.push(Opcode::Pop);
+                        }
+                    }
                 }
             }
             Expr::ArrayLiteral(elements) => {
@@ -953,7 +971,7 @@ mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-        ObjectProperty, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+        ObjectProperty, ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -1018,11 +1036,11 @@ mod tests {
     fn compiles_object_literal_expression() {
         let expr = Expr::ObjectLiteral(vec![
             ObjectProperty {
-                key: "answer".to_string(),
+                key: ObjectPropertyKey::Static("answer".to_string()),
                 value: Expr::Number(42.0),
             },
             ObjectProperty {
-                key: "key".to_string(),
+                key: ObjectPropertyKey::Static("key".to_string()),
                 value: Expr::Identifier(Identifier("key".to_string())),
             },
         ]);
@@ -1038,6 +1056,57 @@ mod tests {
                 Opcode::Halt,
             ],
             functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_object_literal_with_computed_property() {
+        let expr = Expr::ObjectLiteral(vec![ObjectProperty {
+            key: ObjectPropertyKey::Computed(Box::new(Expr::Identifier(Identifier(
+                "k".to_string(),
+            )))),
+            value: Expr::Number(1.0),
+        }]);
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateObject,
+                Opcode::Dup,
+                Opcode::LoadIdentifier("k".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::SetPropertyByValue,
+                Opcode::Pop,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_function_expression() {
+        let expr = Expr::Function {
+            name: None,
+            params: vec![Identifier("x".to_string())],
+            body: vec![Stmt::Return(Some(Expr::Identifier(Identifier(
+                "x".to_string(),
+            ))))],
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![Opcode::LoadFunction(0), Opcode::Halt],
+            functions: vec![CompiledFunction {
+                name: "<anonymous>".to_string(),
+                params: vec!["x".to_string()],
+                code: vec![
+                    Opcode::LoadIdentifier("x".to_string()),
+                    Opcode::Return,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
         };
         assert_eq!(chunk, expected);
     }

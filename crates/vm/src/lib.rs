@@ -120,6 +120,10 @@ impl Vm {
                     let object = self.create_object_value();
                     self.stack.push(object);
                 }
+                Opcode::LoadFunction(function_id) => {
+                    let function = self.instantiate_function(*function_id, functions)?;
+                    self.stack.push(function);
+                }
                 Opcode::LoadIdentifier(name) => {
                     let value = if let Some(binding_id) = self.resolve_binding_id(name) {
                         let binding = self
@@ -173,13 +177,7 @@ impl Vm {
                     }
                 }
                 Opcode::DefineFunction { name, function_id } => {
-                    if *function_id >= functions.len() {
-                        return Err(VmError::UnknownFunction(*function_id));
-                    }
-                    let closure_id = self.next_closure_id;
-                    self.next_closure_id += 1;
-
-                    let function_value = JsValue::Function(closure_id);
+                    let function_value = self.instantiate_function(*function_id, functions)?;
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
@@ -204,15 +202,6 @@ impl Vm {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     }
-
-                    let captured_scopes = self.scopes.clone();
-                    self.closures.insert(
-                        closure_id,
-                        Closure {
-                            function_id: *function_id,
-                            captured_scopes,
-                        },
-                    );
                 }
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -612,6 +601,27 @@ impl Vm {
         JsValue::Object(id)
     }
 
+    fn instantiate_function(
+        &mut self,
+        function_id: usize,
+        functions: &[CompiledFunction],
+    ) -> Result<JsValue, VmError> {
+        if function_id >= functions.len() {
+            return Err(VmError::UnknownFunction(function_id));
+        }
+        let closure_id = self.next_closure_id;
+        self.next_closure_id += 1;
+        let captured_scopes = self.scopes.clone();
+        self.closures.insert(
+            closure_id,
+            Closure {
+                function_id,
+                captured_scopes,
+            },
+        );
+        Ok(JsValue::Function(closure_id))
+    }
+
     fn current_scope_ref(&self) -> Result<ScopeRef, VmError> {
         self.scopes.last().cloned().ok_or(VmError::ScopeUnderflow)
     }
@@ -924,6 +934,20 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Function(0)));
+    }
+
+    #[test]
+    fn loads_function_value_and_calls_it() {
+        let chunk = Chunk {
+            code: vec![Opcode::LoadFunction(0), Opcode::Call(0), Opcode::Halt],
+            functions: vec![CompiledFunction {
+                name: "<anonymous>".to_string(),
+                params: vec![],
+                code: vec![Opcode::LoadNumber(3.0), Opcode::Return],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
     }
 
     #[test]

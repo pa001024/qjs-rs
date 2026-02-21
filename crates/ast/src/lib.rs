@@ -36,6 +36,11 @@ pub enum Expr {
     String(String),
     This,
     Identifier(Identifier),
+    Function {
+        name: Option<Identifier>,
+        params: Vec<Identifier>,
+        body: Vec<Stmt>,
+    },
     ObjectLiteral(Vec<ObjectProperty>),
     ArrayLiteral(Vec<Expr>),
     Unary {
@@ -76,8 +81,14 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ObjectPropertyKey {
+    Static(String),
+    Computed(Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectProperty {
-    pub key: String,
+    pub key: ObjectPropertyKey,
     pub value: Expr,
 }
 

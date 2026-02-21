@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
-    Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+    ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -433,6 +433,7 @@ struct Parser {
     tokens: Vec<Token>,
     source: String,
     pos: usize,
+    expression_depth: usize,
     function_depth: usize,
     loop_depth: usize,
     breakable_depth: usize,
@@ -444,6 +445,7 @@ impl Parser {
             tokens,
             source: source.to_string(),
             pos: 0,
+            expression_depth: 0,
             function_depth: 0,
             loop_depth: 0,
             breakable_depth: 0,
@@ -1047,7 +1049,19 @@ impl Parser {
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        self.parse_assignment()
+        const MAX_EXPRESSION_DEPTH: usize = 32;
+        self.expression_depth += 1;
+        if self.expression_depth > MAX_EXPRESSION_DEPTH {
+            self.expression_depth = self.expression_depth.saturating_sub(1);
+            return Err(ParseError {
+                message: "expression nesting too deep".to_string(),
+                position: self.current_position(),
+            });
+        }
+
+        let result = self.parse_assignment();
+        self.expression_depth = self.expression_depth.saturating_sub(1);
+        result
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
@@ -1320,6 +1334,29 @@ impl Parser {
         Ok(params)
     }
 
+    fn parse_function_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
+        let name = if self.check_identifier() {
+            Some(Identifier(
+                self.expect_binding_identifier("expected function name")?,
+            ))
+        } else {
+            None
+        };
+        self.expect(TokenKind::LParen, "expected '(' after 'function'")?;
+        let params = self.parse_parameter_list()?;
+        self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+
+        self.function_depth += 1;
+        let body = self.parse_block_body(
+            "expected '{' before function body",
+            "expected '}' after function body",
+        );
+        self.function_depth = self.function_depth.saturating_sub(1);
+        let body = body?;
+
+        Ok(Expr::Function { name, params, body })
+    }
+
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let token = self.current().ok_or(ParseError {
             message: "unexpected end of input".to_string(),
@@ -1344,6 +1381,7 @@ impl Parser {
                     "false" => Ok(Expr::Bool(false)),
                     "null" => Ok(Expr::Null),
                     "this" => Ok(Expr::This),
+                    "function" => self.parse_function_expression_after_keyword(),
                     _ if is_forbidden_identifier_reference(&name) => Err(ParseError {
                         message: "reserved word cannot be identifier reference".to_string(),
                         position,
@@ -1413,17 +1451,28 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
-            let key = self.expect_identifier_name("expected property name in object literal")?;
+            let key = self.parse_object_property_key()?;
             let value = if self.matches(&TokenKind::Colon) {
                 self.parse_expression_inner()?
+            } else if self.check(&TokenKind::LParen) {
+                self.parse_object_method_value()?
             } else {
-                if is_forbidden_identifier_reference(&key) {
-                    return Err(ParseError {
-                        message: "reserved word cannot be identifier reference".to_string(),
-                        position: self.previous_position(),
-                    });
+                match &key {
+                    ObjectPropertyKey::Static(name) => {
+                        if is_forbidden_identifier_reference(name) {
+                            return Err(ParseError {
+                                message: "reserved word cannot be identifier reference".to_string(),
+                                position: self.previous_position(),
+                            });
+                        }
+                        Expr::Identifier(Identifier(name.clone()))
+                    }
+                    ObjectPropertyKey::Computed(_) => {
+                        return Err(self.error_current(
+                            "expected ':' after computed property name in object literal",
+                        ));
+                    }
                 }
-                Expr::Identifier(Identifier(key.clone()))
             };
             properties.push(ObjectProperty { key, value });
             if self.matches(&TokenKind::Comma) {
@@ -1436,6 +1485,65 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
         Ok(Expr::ObjectLiteral(properties))
+    }
+
+    fn parse_object_property_key(&mut self) -> Result<ObjectPropertyKey, ParseError> {
+        let token = self.current().ok_or(ParseError {
+            message: "expected property name in object literal".to_string(),
+            position: self.last_position(),
+        })?;
+        match token.kind.clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(ObjectPropertyKey::Static(name))
+            }
+            TokenKind::String(name) => {
+                self.advance();
+                Ok(ObjectPropertyKey::Static(name))
+            }
+            TokenKind::Number(number) => {
+                self.advance();
+                let key = if number.is_finite() && number.fract() == 0.0 {
+                    format!("{number:.0}")
+                } else {
+                    number.to_string()
+                };
+                Ok(ObjectPropertyKey::Static(key))
+            }
+            TokenKind::LBracket => {
+                self.advance();
+                let expr = self.parse_expression_inner()?;
+                self.expect(
+                    TokenKind::RBracket,
+                    "expected ']' after computed property name",
+                )?;
+                Ok(ObjectPropertyKey::Computed(Box::new(expr)))
+            }
+            _ => Err(ParseError {
+                message: "expected property name in object literal".to_string(),
+                position: token.span.start,
+            }),
+        }
+    }
+
+    fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after method name")?;
+        let params = self.parse_parameter_list()?;
+        self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+
+        self.function_depth += 1;
+        let body = self.parse_block_body(
+            "expected '{' before method body",
+            "expected '}' after method body",
+        );
+        self.function_depth = self.function_depth.saturating_sub(1);
+        let body = body?;
+
+        Ok(Expr::Function {
+            name: None,
+            params,
+            body,
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
@@ -1639,7 +1747,7 @@ mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-        ObjectProperty, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+        ObjectProperty, ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -1683,14 +1791,53 @@ mod tests {
             property: "value".to_string(),
             value: Box::new(Expr::ObjectLiteral(vec![
                 ObjectProperty {
-                    key: "answer".to_string(),
+                    key: ObjectPropertyKey::Static("answer".to_string()),
                     value: Expr::Number(42.0),
                 },
                 ObjectProperty {
-                    key: "key".to_string(),
+                    key: ObjectPropertyKey::Static("key".to_string()),
                     value: Expr::Identifier(Identifier("key".to_string())),
                 },
             ])),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_computed_property_and_method_in_object_literal() {
+        let parsed =
+            parse_expression("({ [v]: 1, f() { return 1; } })").expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Computed(Box::new(Expr::Identifier(Identifier(
+                    "v".to_string(),
+                )))),
+                value: Expr::Number(1.0),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("f".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                },
+            },
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_function_expression() {
+        let parsed = parse_expression("function add(a, b) { return a + b; }")
+            .expect("parser should succeed");
+        let expected = Expr::Function {
+            name: Some(Identifier("add".to_string())),
+            params: vec![Identifier("a".to_string()), Identifier("b".to_string())],
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+                right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+            }))],
         };
         assert_eq!(parsed, expected);
     }
@@ -2325,5 +2472,19 @@ mod tests {
     fn rejects_trailing_tokens() {
         let err = parse_expression("1 2").expect_err("parser should fail");
         assert_eq!(err.message, "unexpected trailing input");
+    }
+
+    #[test]
+    fn rejects_expression_nesting_too_deep() {
+        let mut source = String::new();
+        for _ in 0..40 {
+            source.push('(');
+        }
+        source.push('1');
+        for _ in 0..40 {
+            source.push(')');
+        }
+        let err = parse_expression(&source).expect_err("parser should fail");
+        assert_eq!(err.message, "expression nesting too deep");
     }
 }

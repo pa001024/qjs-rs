@@ -127,6 +127,18 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
         || source.contains("$262")
 }
 
+fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
+    if !source.contains("$DONOTEVALUATE") {
+        return false;
+    }
+    matches!(
+        outcome,
+        ExecutionOutcome::RuntimeFail(message)
+            if message.contains("UnknownIdentifier(\"$DONOTEVALUATE\")")
+                || message.contains("This statement should not be evaluated.")
+    )
+}
+
 fn is_fixture_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -134,12 +146,25 @@ fn is_fixture_file(path: &Path) -> bool {
 }
 
 pub fn execute_case(source: &str) -> ExecutionOutcome {
+    let trace_stages = std::env::var("QJS_TRACE_STAGES")
+        .ok()
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
+    if trace_stages {
+        println!("  stage: parse");
+    }
     let parsed = match parse_script(source) {
         Ok(script) => script,
         Err(err) => return ExecutionOutcome::ParseFail(err.message),
     };
 
+    if trace_stages {
+        println!("  stage: compile");
+    }
     let chunk = compile_script(&parsed);
+    if trace_stages {
+        println!("  stage: execute");
+    }
     let mut vm = Vm::default();
     let realm = Realm::default();
     match vm.execute_in_realm(&chunk, &realm) {
@@ -154,6 +179,10 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         discovered: files.len(),
         ..SuiteSummary::default()
     };
+    let trace_cases = std::env::var("QJS_TRACE_CASES")
+        .ok()
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
 
     for file in files {
         if let Some(max_cases) = options.max_cases {
@@ -178,6 +207,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             continue;
         }
 
+        if trace_cases {
+            println!(
+                "executing case #{}: {}",
+                summary.executed + 1,
+                file.display()
+            );
+        }
         summary.executed += 1;
         let actual = execute_case(case.body);
 
@@ -189,7 +225,8 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                     ExpectedOutcome::RuntimeFail,
                     ExecutionOutcome::RuntimeFail(_)
                 )
-        );
+        ) || (expected == ExpectedOutcome::ParseFail
+            && is_parse_tripwire_runtime_failure(case.body, &actual));
 
         if matched {
             summary.passed += 1;
@@ -450,6 +487,25 @@ import "x";
         ));
         assert!(!super::requires_unsupported_harness_globals(
             "let x = 1; x + 1;"
+        ));
+    }
+
+    #[test]
+    fn detects_parse_tripwire_runtime_failures() {
+        assert!(super::is_parse_tripwire_runtime_failure(
+            "$DONOTEVALUATE();",
+            &ExecutionOutcome::RuntimeFail("UnknownIdentifier(\"$DONOTEVALUATE\")".to_string())
+        ));
+        assert!(super::is_parse_tripwire_runtime_failure(
+            "$DONOTEVALUATE();",
+            &ExecutionOutcome::RuntimeFail(
+                "UncaughtException(String(\"Test262: This statement should not be evaluated.\"))"
+                    .to_string()
+            )
+        ));
+        assert!(!super::is_parse_tripwire_runtime_failure(
+            "1 + 1;",
+            &ExecutionOutcome::RuntimeFail("UnknownIdentifier(\"$DONOTEVALUATE\")".to_string())
         ));
     }
 
