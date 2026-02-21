@@ -201,26 +201,26 @@ impl Vm {
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
-                    let value = if let Some(binding_id) = self.resolve_binding_id(name) {
+                    let resolved = if let Some(binding_id) = self.resolve_binding_id(name) {
                         let binding = self
                             .bindings
                             .get(&binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
-                        binding.value.clone()
+                        Ok(binding.value.clone())
                     } else if name == "undefined" {
-                        JsValue::Undefined
+                        Ok(JsValue::Undefined)
                     } else if name == "NaN" {
-                        JsValue::Number(f64::NAN)
+                        Ok(JsValue::Number(f64::NAN))
                     } else if name == "Infinity" {
-                        JsValue::Number(f64::INFINITY)
+                        Ok(JsValue::Number(f64::INFINITY))
                     } else if name == "globalThis" {
-                        self.global_this_value()
+                        Ok(self.global_this_value())
                     } else if name == "this" {
-                        realm
+                        Ok(realm
                             .resolve_identifier(name)
-                            .unwrap_or_else(|| self.global_this_value())
+                            .unwrap_or_else(|| self.global_this_value()))
                     } else if let Some(value) = realm.resolve_identifier(name) {
-                        value
+                        Ok(value)
                     } else if let Some(global_object_id) = self.global_object_id {
                         let has_global_property =
                             self.objects.get(&global_object_id).is_some_and(|object| {
@@ -228,14 +228,21 @@ impl Vm {
                                     || object.getters.contains_key(name)
                             });
                         if has_global_property {
-                            self.get_object_property(global_object_id, name, realm)?
+                            self.get_object_property(global_object_id, name, realm)
                         } else {
-                            return Err(VmError::UnknownIdentifier(name.clone()));
+                            Err(VmError::UnknownIdentifier(name.clone()))
                         }
                     } else {
-                        return Err(VmError::UnknownIdentifier(name.clone()));
+                        Err(VmError::UnknownIdentifier(name.clone()))
                     };
-                    self.stack.push(value);
+                    match resolved {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -1924,12 +1931,18 @@ impl Vm {
         force_strict: bool,
     ) -> Result<JsValue, VmError> {
         let stack_depth = self.stack.len();
+        let saved_handlers = std::mem::take(&mut self.exception_handlers);
+        let saved_pending_exception = self.pending_exception.take();
+        self.exception_handlers = Vec::new();
+        self.pending_exception = None;
         let strict = force_strict || self.code_is_strict(&chunk.code);
         let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict) {
             Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
             Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
             Err(err) => Err(err),
         };
+        self.exception_handlers = saved_handlers;
+        self.pending_exception = saved_pending_exception;
         self.stack.truncate(stack_depth);
         result
     }

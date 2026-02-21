@@ -166,6 +166,15 @@ mod tests {
     }
 
     #[test]
+    fn catches_unknown_identifier_reference_error() {
+        let result = run_script(
+            "var ok = false; try { xx; } catch (err) { ok = err instanceof ReferenceError; } ok;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn catches_eval_syntax_error_with_instanceof() {
         let result = run_script(
             "var ok = false; try { eval('if ('); } catch (err) { ok = err instanceof SyntaxError; } ok;",
