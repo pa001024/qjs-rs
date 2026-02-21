@@ -90,8 +90,15 @@ pub fn expected_outcome(frontmatter: &Test262Frontmatter) -> ExpectedOutcome {
 }
 
 pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
-    // Current engine is script-only baseline.
-    if frontmatter.flags.iter().any(|flag| flag == "module") {
+    // Current engine is script-only, non-strict baseline without harness includes.
+    if frontmatter
+        .flags
+        .iter()
+        .any(|flag| matches!(flag.as_str(), "module" | "onlyStrict" | "async"))
+    {
+        return true;
+    }
+    if !frontmatter.includes.is_empty() {
         return true;
     }
     // Feature-gated tests are skipped until corresponding features land.
@@ -347,6 +354,29 @@ throw 1;
             ExpectedOutcome::ParseFail
         );
         assert!(!should_skip(&case.frontmatter));
+    }
+
+    #[test]
+    fn skips_flags_includes_and_features_not_supported_yet() {
+        let module_case = parse_test262_case("/*---\nflags: [module]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(should_skip(&module_case.frontmatter));
+
+        let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(should_skip(&strict_case.frontmatter));
+
+        let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(should_skip(&async_case.frontmatter));
+
+        let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(should_skip(&includes_case.frontmatter));
+
+        let feature_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(should_skip(&feature_case.frontmatter));
     }
 
     #[test]

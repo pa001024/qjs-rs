@@ -14,6 +14,15 @@
 执行方式：
 - `cargo test -p test-harness test262_lite`
 - `cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite`
+- `cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --allow-failures`
+- `cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --json target/test262-summary.json`
+
+CLI 参数：
+- `--root <path>`: test262 或 test262-lite 根目录（必填）
+- `--max-cases N`: 限制本次执行数量，便于快速迭代
+- `--fail-fast`: 首次不匹配时立即返回错误
+- `--allow-failures`: 即使存在失败也返回 0，适用于基线统计
+- `--json <path>`: 将统计结果写入 JSON 文件
 
 后续计划：
 - 接入真实 test262 仓库目录并解析更多 frontmatter 字段
