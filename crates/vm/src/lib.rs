@@ -727,6 +727,7 @@ impl Vm {
         match callee {
             JsValue::Function(closure_id) => {
                 let constructed = self.create_object_value();
+                self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
                 if matches!(result, JsValue::Object(_)) {
@@ -738,6 +739,7 @@ impl Vm {
             JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
+                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
                 let result = self.execute_host_function_call(host_id, args, realm)?;
                 if matches!(result, JsValue::Object(_)) {
                     Ok(result)
@@ -746,6 +748,17 @@ impl Vm {
                 }
             }
             _ => Err(VmError::NotCallable),
+        }
+    }
+
+    fn install_constructor_property(&mut self, target: &JsValue, constructor: JsValue) {
+        let JsValue::Object(object_id) = target else {
+            return;
+        };
+        if let Some(object) = self.objects.get_mut(object_id) {
+            object
+                .properties
+                .insert("constructor".to_string(), constructor);
         }
     }
 
@@ -1722,7 +1735,7 @@ impl Vm {
                 method: FunctionMethod::Bind,
             }),
             (_, "length") => JsValue::Number(1.0),
-            (_, "prototype") => self.object_prototype_value(),
+            (_, "prototype") => self.create_object_value(),
             _ => JsValue::Undefined,
         }
     }

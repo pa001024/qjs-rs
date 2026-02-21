@@ -349,6 +349,15 @@ mod tests {
     }
 
     #[test]
+    fn supports_constructor_property_on_constructed_object_baseline() {
+        let result = run_script(
+            "var ok = false; function C() { ok = this.constructor === C; } new C(); ok;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_regexp_constructor_baseline() {
         let result = run_script("var a = new RegExp('x', 'g'); a.source + a.flags;", &[]);
         assert_eq!(result, Ok(JsValue::String("xg".to_string())));
