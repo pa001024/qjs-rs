@@ -7,6 +7,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
+
 type BindingId = u64;
 type ObjectId = u64;
 type Scope = BTreeMap<String, BindingId>;
@@ -982,6 +984,8 @@ impl Vm {
             .get(closure.function_id)
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        let mapped_arguments_enabled =
+            !closure.strict && !self.function_has_non_simple_params(&function);
 
         let mut frame_scope: Scope = BTreeMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
@@ -1025,7 +1029,7 @@ impl Vm {
                     .property_attributes
                     .entry(key.clone())
                     .or_insert_with(PropertyAttributes::default);
-                if !closure.strict {
+                if mapped_arguments_enabled {
                     if let Some(binding_id) = param_binding_ids.get(index) {
                         object.argument_mappings.insert(key, *binding_id);
                     }
@@ -1888,6 +1892,10 @@ impl Vm {
         self.code_is_strict(&function.code)
     }
 
+    fn function_has_non_simple_params(&self, function: &CompiledFunction) -> bool {
+        self.code_has_non_simple_params_marker(&function.code)
+    }
+
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
         let mut cursor = 0usize;
         while cursor < code.len() {
@@ -1900,6 +1908,28 @@ impl Vm {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {
                     if value == "use strict" {
+                        return true;
+                    }
+                    cursor += 2;
+                }
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn code_has_non_simple_params_marker(&self, code: &[Opcode]) -> bool {
+        let mut cursor = 0usize;
+        while cursor < code.len() {
+            match &code[cursor] {
+                Opcode::DefineFunction { .. } => cursor += 1,
+                _ => break,
+            }
+        }
+        while cursor + 1 < code.len() {
+            match (&code[cursor], &code[cursor + 1]) {
+                (Opcode::LoadString(value), Opcode::Pop) => {
+                    if value == NON_SIMPLE_PARAMS_MARKER {
                         return true;
                     }
                     cursor += 2;

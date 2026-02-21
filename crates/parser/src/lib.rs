@@ -8,6 +8,8 @@ use ast::{
 };
 use lexer::{Token, TokenKind, lex};
 
+const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
@@ -768,17 +770,27 @@ impl Parser {
         body
     }
 
+    fn prepend_non_simple_params_marker(&self, body: &mut Vec<Stmt>) {
+        body.insert(
+            0,
+            Stmt::Expression(Expr::String(NON_SIMPLE_PARAMS_MARKER.to_string())),
+        );
+    }
+
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let _is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
-        let params = self.parse_parameter_list()?;
+        let (params, simple_parameters) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let body = self.parse_function_body(
+        let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        if !simple_parameters {
+            self.prepend_non_simple_params_marker(&mut body);
+        }
 
         Ok(Stmt::FunctionDeclaration(FunctionDeclaration {
             name,
@@ -1469,7 +1481,7 @@ impl Parser {
 
         let params = if self.matches(&TokenKind::LParen) {
             let params = match self.parse_parameter_list() {
-                Ok(params) => params,
+                Ok((params, _simple_parameters)) => params,
                 Err(_) => {
                     self.pos = saved_pos;
                     return Ok(None);
@@ -1941,23 +1953,29 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_parameter_list(&mut self) -> Result<Vec<Identifier>, ParseError> {
+    fn parse_parameter_list(&mut self) -> Result<(Vec<Identifier>, bool), ParseError> {
         let mut params = Vec::new();
         let mut synthetic_index = 0usize;
+        let mut simple_parameters = true;
         if self.check(&TokenKind::RParen) {
-            return Ok(params);
+            return Ok((params, simple_parameters));
         }
         loop {
             let is_rest = self.matches(&TokenKind::Ellipsis);
+            if is_rest {
+                simple_parameters = false;
+            }
             let name = if self.check_identifier() {
                 self.expect_binding_identifier("expected parameter name")?
             } else {
+                simple_parameters = false;
                 self.consume_parameter_pattern("expected parameter name")?;
                 let generated = format!("$param_{synthetic_index}");
                 synthetic_index += 1;
                 generated
             };
             if self.matches(&TokenKind::Equal) {
+                simple_parameters = false;
                 let _ = self.parse_expression_inner()?;
             }
             params.push(Identifier(name));
@@ -1972,7 +1990,7 @@ impl Parser {
             }
             break;
         }
-        Ok(params)
+        Ok((params, simple_parameters))
     }
 
     fn consume_parameter_pattern(&mut self, error_message: &str) -> Result<(), ParseError> {
@@ -2036,13 +2054,16 @@ impl Parser {
             None
         };
         self.expect(TokenKind::LParen, "expected '(' after 'function'")?;
-        let params = self.parse_parameter_list()?;
+        let (params, simple_parameters) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let body = self.parse_function_body(
+        let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        if !simple_parameters {
+            self.prepend_non_simple_params_marker(&mut body);
+        }
 
         Ok(Expr::Function { name, params, body })
     }
@@ -2099,12 +2120,15 @@ impl Parser {
 
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
-            let params = self.parse_parameter_list()?;
+            let (params, simple_parameters) = self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
-            let body = self.parse_function_body(
+            let mut body = self.parse_function_body(
                 "expected '{' before method body",
                 "expected '}' after method body",
             )?;
+            if !simple_parameters {
+                self.prepend_non_simple_params_marker(&mut body);
+            }
 
             parsed.methods.push(ClassMethodDefinition {
                 key,
@@ -2597,13 +2621,16 @@ impl Parser {
         };
 
         self.expect(TokenKind::LParen, "expected '(' after accessor name")?;
-        let params = self.parse_parameter_list()?;
+        let (params, simple_parameters) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let body = self.parse_function_body(
+        let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        if !simple_parameters {
+            self.prepend_non_simple_params_marker(&mut body);
+        }
 
         Ok(Some((
             accessor_key,
@@ -2656,13 +2683,16 @@ impl Parser {
 
     fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
-        let params = self.parse_parameter_list()?;
+        let (params, simple_parameters) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let body = self.parse_function_body(
+        let mut body = self.parse_function_body(
             "expected '{' before method body",
             "expected '}' after method body",
         )?;
+        if !simple_parameters {
+            self.prepend_non_simple_params_marker(&mut body);
+        }
 
         Ok(Expr::Function {
             name: None,
