@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/ast",
+    "crates/builtins",
+    "crates/bytecode",
+    "crates/lexer",
+    "crates/parser",
+    "crates/runtime",
+    "crates/test-harness",
+    "crates/vm",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+ast = { path = "crates/ast" }
+builtins = { path = "crates/builtins" }
+bytecode = { path = "crates/bytecode" }
+lexer = { path = "crates/lexer" }
+parser = { path = "crates/parser" }
+runtime = { path = "crates/runtime" }
+test-harness = { path = "crates/test-harness" }
+vm = { path = "crates/vm" }

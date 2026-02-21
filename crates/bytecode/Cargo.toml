@@ -1,0 +1,9 @@
+[package]
+name = "bytecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ast.workspace = true

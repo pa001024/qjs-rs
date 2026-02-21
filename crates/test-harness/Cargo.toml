@@ -1,0 +1,12 @@
+[package]
+name = "test-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytecode.workspace = true
+parser.workspace = true
+runtime.workspace = true
+vm.workspace = true

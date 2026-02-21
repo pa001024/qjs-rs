@@ -1,0 +1,170 @@
+#![forbid(unsafe_code)]
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenKind {
+    Number(f64),
+    Identifier(String),
+    Plus,
+    LParen,
+    RParen,
+    Eof,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexError {
+    pub message: String,
+    pub position: usize,
+}
+
+pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
+    let mut tokens = Vec::new();
+    let bytes = source.as_bytes();
+    let mut pos = 0usize;
+
+    while pos < bytes.len() {
+        let byte = bytes[pos];
+        if byte.is_ascii_whitespace() {
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'+' {
+            tokens.push(Token {
+                kind: TokenKind::Plus,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'(' {
+            tokens.push(Token {
+                kind: TokenKind::LParen,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b')' {
+            tokens.push(Token {
+                kind: TokenKind::RParen,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte.is_ascii_digit() {
+            let start = pos;
+            let mut has_dot = false;
+            while pos < bytes.len() {
+                let current = bytes[pos];
+                if current.is_ascii_digit() {
+                    pos += 1;
+                    continue;
+                }
+                if current == b'.' && !has_dot {
+                    has_dot = true;
+                    pos += 1;
+                    continue;
+                }
+                break;
+            }
+            let raw = &source[start..pos];
+            let value = raw.parse::<f64>().map_err(|_| LexError {
+                message: format!("invalid number literal '{raw}'"),
+                position: start,
+            })?;
+            tokens.push(Token {
+                kind: TokenKind::Number(value),
+                span: Span { start, end: pos },
+            });
+            continue;
+        }
+
+        if byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' {
+            let start = pos;
+            while pos < bytes.len() {
+                let current = bytes[pos];
+                if current.is_ascii_alphanumeric() || current == b'_' || current == b'$' {
+                    pos += 1;
+                    continue;
+                }
+                break;
+            }
+            let ident = source[start..pos].to_string();
+            tokens.push(Token {
+                kind: TokenKind::Identifier(ident),
+                span: Span { start, end: pos },
+            });
+            continue;
+        }
+
+        return Err(LexError {
+            message: format!("unexpected character '{}'", byte as char),
+            position: pos,
+        });
+    }
+
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        span: Span {
+            start: source.len(),
+            end: source.len(),
+        },
+    });
+    Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenKind, lex};
+
+    #[test]
+    fn lexes_add_expression() {
+        let tokens = lex("1 + 2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_parentheses() {
+        let tokens = lex("(a + 3)").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::LParen);
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Plus);
+        assert_eq!(tokens[3].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[4].kind, TokenKind::RParen);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn errors_on_invalid_character() {
+        let err = lex("1 @ 2").expect_err("tokenization should fail");
+        assert_eq!(err.position, 2);
+    }
+}

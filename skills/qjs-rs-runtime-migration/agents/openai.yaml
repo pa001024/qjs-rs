@@ -1,0 +1,4 @@
+interface:
+  display_name: "QJS Runtime Migration"
+  short_description: "Plan and execute pure Rust QuickJS migration"
+  default_prompt: "Use $qjs-rs-runtime-migration to map QuickJS semantics and implement the next Rust runtime milestone."
