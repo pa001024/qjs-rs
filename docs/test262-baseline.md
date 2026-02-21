@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1431, failed=154
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1452, failed=133
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -39,4 +39,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 新增 postfix `++/--` 的最小语法兼容（当前仍复用 update 重写策略），修复 `postfix-(in|de)crement/*-nostrict.js` 一批 parse 失败。
 - VM 新增 `HostFunction` 可调用桥，补齐 `Function.prototype.call/apply/bind` baseline 与 `Object.defineProperty` 的访问器触发路径，`function-code` 失败簇显著下降。
 - lexer 新增标识符 unicode 转义（`\\uXXXX`）与非 ASCII 标识符词法支持，显著降低 `unexpected character '\\'` 与乱码字符失败簇。
+- lexer 进一步放宽 Unicode 标识符判定并补齐非 ASCII 空白字符跳过，继续削减 `identifiers/*` 与 `white-space/*` 历史失败簇。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

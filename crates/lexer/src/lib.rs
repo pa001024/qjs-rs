@@ -78,7 +78,7 @@ fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
 }
 
 fn is_identifier_start(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_alphabetic()
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic() || (!ch.is_ascii() && !ch.is_whitespace())
 }
 
 fn is_identifier_part(ch: char) -> bool {
@@ -116,6 +116,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if let Some(length) = unicode_line_terminator_len(bytes, pos) {
             pos += length;
             continue;
+        }
+        if let Some((ch, len)) = decode_char(source, pos) {
+            if !ch.is_ascii() && ch.is_whitespace() {
+                pos += len;
+                continue;
+            }
         }
 
         if byte == b'+' {
