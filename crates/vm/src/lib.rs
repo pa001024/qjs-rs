@@ -1428,6 +1428,18 @@ impl Vm {
                     .map_or(String::new(), |value| self.coerce_to_string(value));
                 Ok(JsValue::String(value))
             }
+            NativeFunction::StringFromCharCode => {
+                let mut output = String::new();
+                for value in args {
+                    let code = (self.to_number(&value) as i64 as u32) & 0xFFFF;
+                    if let Some(ch) = char::from_u32(code) {
+                        output.push(ch);
+                    } else {
+                        output.push('\u{FFFD}');
+                    }
+                }
+                Ok(JsValue::String(output))
+            }
             NativeFunction::SymbolConstructor => {
                 let description = match args.first() {
                     None | Some(JsValue::Undefined) => String::new(),
@@ -2543,6 +2555,9 @@ impl Vm {
             (NativeFunction::Assert, "compareArray") => {
                 self.create_host_function_value(HostFunction::AssertCompareArray)
             }
+            (NativeFunction::StringConstructor, "fromCharCode") => {
+                JsValue::NativeFunction(NativeFunction::StringFromCharCode)
+            }
             (_, "call") => self.create_host_function_value(HostFunction::BoundMethod {
                 target: JsValue::NativeFunction(native),
                 method: FunctionMethod::Call,
@@ -2672,6 +2687,17 @@ impl Vm {
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
                     0.0
+                } else if let Some(hex) = trimmed
+                    .strip_prefix("0x")
+                    .or_else(|| trimmed.strip_prefix("0X"))
+                {
+                    if hex.is_empty() {
+                        f64::NAN
+                    } else {
+                        u64::from_str_radix(hex, 16)
+                            .map(|number| number as f64)
+                            .unwrap_or(f64::NAN)
+                    }
                 } else {
                     trimmed.parse::<f64>().unwrap_or(f64::NAN)
                 }

@@ -13,6 +13,7 @@ pub enum NativeFunction {
     NumberConstructor,
     RegExpConstructor,
     StringConstructor,
+    StringFromCharCode,
     SymbolConstructor,
     IsNaN,
     Assert,

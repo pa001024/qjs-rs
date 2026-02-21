@@ -211,6 +211,27 @@ mod tests {
     }
 
     #[test]
+    fn supports_string_from_char_code_baseline() {
+        let result = run_script("String.fromCharCode(65, 66, 67);", &[]);
+        assert_eq!(result, Ok(JsValue::String("ABC".to_string())));
+    }
+
+    #[test]
+    fn eval_line_comment_respects_unicode_line_terminators() {
+        let no_break = run_script(
+            "var yy = 0; eval('//x' + String.fromCharCode(0) + 'yy = -1'); yy;",
+            &[],
+        );
+        assert_eq!(no_break, Ok(JsValue::Number(0.0)));
+
+        let with_break = run_script(
+            "var yy = 0; eval('//x' + String.fromCharCode(8232) + 'yy = -1'); yy;",
+            &[],
+        );
+        assert_eq!(with_break, Ok(JsValue::Number(-1.0)));
+    }
+
+    #[test]
     fn supports_symbol_computed_property_baseline() {
         let result = run_script(
             "var obj = { [Symbol.iterator]: 7 }; obj[Symbol.iterator];",
