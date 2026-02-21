@@ -422,6 +422,13 @@ fn is_reserved_word(name: &str) -> bool {
 }
 
 fn is_forbidden_identifier_reference(name: &str) -> bool {
+    if matches!(name, "yield" | "await" | "let") {
+        return false;
+    }
+    is_reserved_word(name)
+}
+
+fn is_forbidden_binding_identifier(name: &str) -> bool {
     if matches!(name, "yield" | "await") {
         return false;
     }
@@ -1011,7 +1018,11 @@ impl Parser {
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
         let mut declarations = Vec::new();
         loop {
-            let name = self.expect_binding_identifier("expected binding name")?;
+            let name = if kind == BindingKind::Var {
+                self.expect_var_binding_identifier("expected binding name")?
+            } else {
+                self.expect_binding_identifier("expected binding name")?
+            };
             let initializer = if self.matches(&TokenKind::Equal) {
                 Some(self.parse_expression_inner()?)
             } else {
@@ -1673,7 +1684,30 @@ impl Parser {
             position: self.last_position(),
         })?;
         if let TokenKind::Identifier(name) = &token.kind {
-            if is_forbidden_identifier_reference(name) {
+            if is_forbidden_binding_identifier(name) {
+                return Err(ParseError {
+                    message: message.to_string(),
+                    position: token.span.start,
+                });
+            }
+            let cloned = name.clone();
+            self.advance();
+            Ok(cloned)
+        } else {
+            Err(ParseError {
+                message: message.to_string(),
+                position: token.span.start,
+            })
+        }
+    }
+
+    fn expect_var_binding_identifier(&mut self, message: &str) -> Result<String, ParseError> {
+        let token = self.current().ok_or(ParseError {
+            message: message.to_string(),
+            position: self.last_position(),
+        })?;
+        if let TokenKind::Identifier(name) = &token.kind {
+            if is_forbidden_binding_identifier(name) && name != "let" {
                 return Err(ParseError {
                     message: message.to_string(),
                     position: token.span.start,
@@ -2521,6 +2555,13 @@ mod tests {
     #[test]
     fn allows_var_redeclaration() {
         parse_script("var f; var f;").expect("parser should succeed");
+    }
+
+    #[test]
+    fn allows_let_identifier_in_non_strict_var_and_reference_positions() {
+        parse_script("var let = 1; var object = {let};").expect("parser should succeed");
+        let parsed = parse_expression("let").expect("parser should succeed");
+        assert_eq!(parsed, Expr::Identifier(Identifier("let".to_string())));
     }
 
     #[test]

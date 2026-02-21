@@ -156,6 +156,12 @@ mod tests {
     }
 
     #[test]
+    fn allows_let_identifier_in_non_strict_var_and_object_shorthand() {
+        let result = run_script("var let = 1; var object = {let}; object.let;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn short_circuit_skips_rhs_side_effects() {
         let result = run_script("let x = 0; 0 && (x = 1); 1 || (x = 2); x;", &[]);
         assert_eq!(result, Ok(JsValue::Number(0.0)));
