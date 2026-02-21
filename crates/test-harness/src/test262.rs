@@ -127,6 +127,12 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
         || source.contains("$262")
 }
 
+fn is_fixture_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("_FIXTURE.js"))
+}
+
 pub fn execute_case(source: &str) -> ExecutionOutcome {
     let parsed = match parse_script(source) {
         Ok(script) => script,
@@ -154,6 +160,11 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             if summary.executed >= max_cases {
                 break;
             }
+        }
+
+        if is_fixture_file(&file) {
+            summary.skipped += 1;
+            continue;
         }
 
         let source = fs::read_to_string(&file)
@@ -440,6 +451,16 @@ import "x";
         assert!(!super::requires_unsupported_harness_globals(
             "let x = 1; x + 1;"
         ));
+    }
+
+    #[test]
+    fn detects_fixture_file_names() {
+        assert!(super::is_fixture_file(&PathBuf::from(
+            "language/module-code/setup_FIXTURE.js"
+        )));
+        assert!(!super::is_fixture_file(&PathBuf::from(
+            "language/module-code/setup.js"
+        )));
     }
 
     #[test]

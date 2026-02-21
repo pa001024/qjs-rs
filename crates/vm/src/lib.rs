@@ -218,8 +218,11 @@ impl Vm {
                         }
                         binding.value = value.clone();
                     } else {
-                        let global_scope =
-                            self.scopes.first().cloned().ok_or(VmError::ScopeUnderflow)?;
+                        let global_scope = self
+                            .scopes
+                            .first()
+                            .cloned()
+                            .ok_or(VmError::ScopeUnderflow)?;
                         let binding_id = self.create_binding(value.clone(), true);
                         global_scope.borrow_mut().insert(name.clone(), binding_id);
                     }
