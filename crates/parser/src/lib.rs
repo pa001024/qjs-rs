@@ -1519,6 +1519,7 @@ impl Parser {
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
+            TokenKind::Slash => self.parse_regex_literal(),
             TokenKind::LBrace => self.parse_object_literal(),
             TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Plus
@@ -1526,7 +1527,6 @@ impl Parser {
             | TokenKind::Minus
             | TokenKind::MinusMinus
             | TokenKind::Star
-            | TokenKind::Slash
             | TokenKind::Bang
             | TokenKind::Equal
             | TokenKind::EqualEqual
@@ -1567,6 +1567,110 @@ impl Parser {
                 position,
             }),
         }
+    }
+
+    fn parse_regex_literal(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current().map_or(0usize, |token| token.span.start);
+        let bytes = self.source.as_bytes();
+        if start >= bytes.len() || bytes[start] != b'/' {
+            return Err(ParseError {
+                message: "expected regular expression literal".to_string(),
+                position: start,
+            });
+        }
+
+        let mut pos = start + 1;
+        let mut pattern = String::new();
+        let mut in_character_class = false;
+        let source_len = self.source.len();
+
+        while pos < source_len {
+            let tail = self.source.get(pos..).ok_or(ParseError {
+                message: "unterminated regular expression literal".to_string(),
+                position: start,
+            })?;
+            let ch = tail.chars().next().ok_or(ParseError {
+                message: "unterminated regular expression literal".to_string(),
+                position: start,
+            })?;
+
+            if matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                return Err(ParseError {
+                    message: "unterminated regular expression literal".to_string(),
+                    position: start,
+                });
+            }
+
+            if ch == '\\' {
+                pattern.push(ch);
+                pos += ch.len_utf8();
+                let escaped_tail = self.source.get(pos..).ok_or(ParseError {
+                    message: "unterminated regular expression literal".to_string(),
+                    position: start,
+                })?;
+                let escaped = escaped_tail.chars().next().ok_or(ParseError {
+                    message: "unterminated regular expression literal".to_string(),
+                    position: start,
+                })?;
+                pattern.push(escaped);
+                pos += escaped.len_utf8();
+                continue;
+            }
+
+            if ch == '[' {
+                in_character_class = true;
+                pattern.push(ch);
+                pos += ch.len_utf8();
+                continue;
+            }
+            if ch == ']' {
+                in_character_class = false;
+                pattern.push(ch);
+                pos += ch.len_utf8();
+                continue;
+            }
+            if ch == '/' && !in_character_class {
+                break;
+            }
+
+            pattern.push(ch);
+            pos += ch.len_utf8();
+        }
+
+        if pos >= source_len || self.source.as_bytes()[pos] != b'/' {
+            return Err(ParseError {
+                message: "unterminated regular expression literal".to_string(),
+                position: start,
+            });
+        }
+        pos += 1;
+
+        let mut flags = String::new();
+        while pos < source_len {
+            let tail = self.source.get(pos..).ok_or(ParseError {
+                message: "invalid regular expression flags".to_string(),
+                position: pos,
+            })?;
+            let ch = tail.chars().next().ok_or(ParseError {
+                message: "invalid regular expression flags".to_string(),
+                position: pos,
+            })?;
+            if !ch.is_ascii_alphabetic() {
+                break;
+            }
+            flags.push(ch);
+            pos += ch.len_utf8();
+        }
+
+        while let Some(token) = self.current() {
+            if token.span.start < pos {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        Ok(Expr::RegexLiteral { pattern, flags })
     }
 
     fn parse_object_literal(&mut self) -> Result<Expr, ParseError> {
@@ -2174,6 +2278,16 @@ mod tests {
                 left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
                 right: Box::new(Expr::Number(1.0)),
             }),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_regular_expression_literal() {
+        let parsed = parse_expression("/x/g").expect("parser should succeed");
+        let expected = Expr::RegexLiteral {
+            pattern: "x".to_string(),
+            flags: "g".to_string(),
         };
         assert_eq!(parsed, expected);
     }

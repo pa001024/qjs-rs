@@ -216,6 +216,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_regex_literal_expression_baseline() {
+        let result = run_script("typeof /x/g;", &[]);
+        assert_eq!(result, Ok(JsValue::String("object".to_string())));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1488, failed=97
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1520, failed=65
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -42,4 +42,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 新增标识符 unicode 转义（`\\uXXXX`）与非 ASCII 标识符词法支持，显著降低 `unexpected character '\\'` 与乱码字符失败簇。
 - lexer 进一步放宽 Unicode 标识符判定并补齐非 ASCII 空白字符跳过，继续削减 `identifiers/*` 与 `white-space/*` 历史失败簇。
 - lexer 追加 `\u{...}` 码点转义标识符支持（含 astral code point），进一步清理 `identifiers/*-escaped.js` 大簇失败。
+- parser/ast/bytecode 新增正则字面量 baseline 解析链路（`/.../flags`），按对象值降级编译，清理 `statementList/*regexp*` 与 `white-space/*after-regular-expression-literal*` 失败簇。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -37,6 +37,10 @@ pub enum Expr {
     Bool(bool),
     Null,
     String(String),
+    RegexLiteral {
+        pattern: String,
+        flags: String,
+    },
     This,
     Identifier(Identifier),
     Function {

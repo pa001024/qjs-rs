@@ -836,6 +836,13 @@ impl Compiler {
             Expr::Bool(value) => code.push(Opcode::LoadBool(*value)),
             Expr::Null => code.push(Opcode::LoadNull),
             Expr::String(value) => code.push(Opcode::LoadString(value.clone())),
+            Expr::RegexLiteral { pattern, flags } => {
+                code.push(Opcode::CreateObject);
+                code.push(Opcode::LoadString(pattern.clone()));
+                code.push(Opcode::DefineProperty("source".to_string()));
+                code.push(Opcode::LoadString(flags.clone()));
+                code.push(Opcode::DefineProperty("flags".to_string()));
+            }
             Expr::This => code.push(Opcode::LoadIdentifier("this".to_string())),
             Expr::Function { name, params, body } => {
                 let function_id = self.compile_function(name.as_ref(), params, body);
