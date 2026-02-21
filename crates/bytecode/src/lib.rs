@@ -34,6 +34,7 @@ pub enum Opcode {
     DefineSetterByValue,
     SetProperty(String),
     SetPropertyByValue,
+    DeleteIdentifier(String),
     DeleteProperty(String),
     DeletePropertyByValue,
     EnterScope,
@@ -1085,8 +1086,8 @@ impl Compiler {
                 }
                 if *op == UnaryOp::Delete {
                     match &**expr {
-                        Expr::Identifier(_) => {
-                            code.push(Opcode::LoadBool(true));
+                        Expr::Identifier(Identifier(name)) => {
+                            code.push(Opcode::DeleteIdentifier(name.clone()));
                         }
                         Expr::Member { object, property } => {
                             self.compile_expr(object, code);
@@ -2274,7 +2275,7 @@ mod tests {
         assert_eq!(
             delete_expr,
             Chunk {
-                code: vec![Opcode::LoadBool(true), Opcode::Halt],
+                code: vec![Opcode::DeleteIdentifier("x".to_string()), Opcode::Halt],
                 functions: vec![],
             }
         );

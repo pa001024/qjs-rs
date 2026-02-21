@@ -31,6 +31,25 @@ struct JsObject {
     properties: BTreeMap<String, JsValue>,
     getters: BTreeMap<String, JsValue>,
     setters: BTreeMap<String, JsValue>,
+    property_attributes: BTreeMap<String, PropertyAttributes>,
+    argument_mappings: BTreeMap<String, BindingId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PropertyAttributes {
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+}
+
+impl Default for PropertyAttributes {
+    fn default() -> Self {
+        Self {
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -347,6 +366,10 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.properties.insert(name.clone(), value);
+                    object
+                        .property_attributes
+                        .entry(name.clone())
+                        .or_insert_with(PropertyAttributes::default);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineGetter(name) => {
@@ -361,6 +384,14 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.getters.insert(name.clone(), getter);
+                    object.property_attributes.insert(
+                        name.clone(),
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineSetter(name) => {
@@ -375,6 +406,14 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.setters.insert(name.clone(), setter);
+                    object.property_attributes.insert(
+                        name.clone(),
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineGetterByValue => {
@@ -390,7 +429,15 @@ impl Vm {
                         .objects
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
-                    object.getters.insert(key, getter);
+                    object.getters.insert(key.clone(), getter);
+                    object.property_attributes.insert(
+                        key,
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineSetterByValue => {
@@ -406,7 +453,15 @@ impl Vm {
                         .objects
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
-                    object.setters.insert(key, setter);
+                    object.setters.insert(key.clone(), setter);
+                    object.property_attributes.insert(
+                        key,
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::SetProperty(name) => {
@@ -444,9 +499,16 @@ impl Vm {
                         _ => return Err(VmError::TypeError("property write expects object")),
                     }
                 }
+                Opcode::DeleteIdentifier(name) => {
+                    let deleted = self.resolve_binding_id(name).is_none();
+                    self.stack.push(JsValue::Bool(deleted));
+                }
                 Opcode::DeleteProperty(name) => {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let deleted = self.delete_property(receiver, name.clone())?;
+                    if strict && !deleted {
+                        return Err(VmError::TypeError("cannot delete property"));
+                    }
                     self.stack.push(JsValue::Bool(deleted));
                 }
                 Opcode::DeletePropertyByValue => {
@@ -454,6 +516,9 @@ impl Vm {
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let deleted = self.delete_property(receiver, key)?;
+                    if strict && !deleted {
+                        return Err(VmError::TypeError("cannot delete property"));
+                    }
                     self.stack.push(JsValue::Bool(deleted));
                 }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
@@ -919,10 +984,12 @@ impl Vm {
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
 
         let mut frame_scope: Scope = BTreeMap::new();
+        let mut param_binding_ids = Vec::with_capacity(function.params.len());
         for (index, param_name) in function.params.iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(JsValue::Undefined);
             let binding_id = self.create_binding(value, true);
             frame_scope.insert(param_name.clone(), binding_id);
+            param_binding_ids.push(binding_id);
         }
         let this_value = if closure.strict {
             this_arg.unwrap_or(JsValue::Undefined)
@@ -952,8 +1019,34 @@ impl Vm {
                 JsValue::NativeFunction(NativeFunction::ObjectConstructor),
             );
             for (index, arg) in args.iter().enumerate() {
-                object.properties.insert(index.to_string(), arg.clone());
+                let key = index.to_string();
+                object.properties.insert(key.clone(), arg.clone());
+                object
+                    .property_attributes
+                    .entry(key.clone())
+                    .or_insert_with(PropertyAttributes::default);
+                if !closure.strict {
+                    if let Some(binding_id) = param_binding_ids.get(index) {
+                        object.argument_mappings.insert(key, *binding_id);
+                    }
+                }
             }
+            object.property_attributes.insert(
+                "length".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            object.property_attributes.insert(
+                "callee".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
         }
         let arguments_binding_id = self.create_binding(arguments_value, true);
         frame_scope.insert("arguments".to_string(), arguments_binding_id);
@@ -1320,7 +1413,7 @@ impl Vm {
     fn execute_object_define_property(
         &mut self,
         args: &[JsValue],
-        realm: &Realm,
+        _realm: &Realm,
     ) -> Result<JsValue, VmError> {
         let target_id = match args.first() {
             Some(JsValue::Object(id)) => *id,
@@ -1346,38 +1439,233 @@ impl Vm {
                 .ok_or(VmError::UnknownObject(descriptor_id))?
                 .clone();
 
-            if let Some(value) = descriptor.properties.get("value").cloned() {
+            let has_value = descriptor.properties.contains_key("value");
+            let desc_value = descriptor
+                .properties
+                .get("value")
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            let has_get = descriptor.properties.contains_key("get");
+            let desc_get = descriptor
+                .properties
+                .get("get")
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            let has_set = descriptor.properties.contains_key("set");
+            let desc_set = descriptor
+                .properties
+                .get("set")
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            let desc_writable = descriptor
+                .properties
+                .get("writable")
+                .map(|value| self.is_truthy(value));
+            let desc_enumerable = descriptor
+                .properties
+                .get("enumerable")
+                .map(|value| self.is_truthy(value));
+            let desc_configurable = descriptor
+                .properties
+                .get("configurable")
+                .map(|value| self.is_truthy(value));
+
+            let (
+                current_data_value,
+                current_get,
+                current_set,
+                current_attributes,
+                mapped_binding_id,
+            ) = {
+                let object = self
+                    .objects
+                    .get(&target_id)
+                    .ok_or(VmError::UnknownObject(target_id))?;
+                (
+                    object.properties.get(&property).cloned(),
+                    object.getters.get(&property).cloned(),
+                    object.setters.get(&property).cloned(),
+                    object.property_attributes.get(&property).copied(),
+                    object.argument_mappings.get(&property).copied(),
+                )
+            };
+
+            let current_is_data = current_data_value.is_some();
+            let current_is_accessor = current_get.is_some() || current_set.is_some();
+            let current_attributes = current_attributes.unwrap_or(if current_is_accessor {
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: true,
+                    configurable: true,
+                }
+            } else {
+                PropertyAttributes::default()
+            });
+
+            if (current_is_data || current_is_accessor) && !current_attributes.configurable {
+                if desc_configurable == Some(true) {
+                    return Err(VmError::TypeError(
+                        "cannot redefine non-configurable property",
+                    ));
+                }
+                if let Some(enumerable) = desc_enumerable {
+                    if enumerable != current_attributes.enumerable {
+                        return Err(VmError::TypeError(
+                            "cannot redefine non-configurable property",
+                        ));
+                    }
+                }
+
+                if current_is_data {
+                    if has_get || has_set {
+                        return Err(VmError::TypeError(
+                            "cannot redefine non-configurable property",
+                        ));
+                    }
+                    if !current_attributes.writable {
+                        if desc_writable == Some(true) {
+                            return Err(VmError::TypeError(
+                                "cannot redefine non-configurable property",
+                            ));
+                        }
+                        if has_value {
+                            if let Some(current_value) = current_data_value.as_ref() {
+                                if !self.same_value(current_value, &desc_value) {
+                                    return Err(VmError::TypeError(
+                                        "cannot redefine non-configurable property",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if has_value || desc_writable.is_some() {
+                        return Err(VmError::TypeError(
+                            "cannot redefine non-configurable property",
+                        ));
+                    }
+                    if has_get {
+                        let current_get = current_get.unwrap_or(JsValue::Undefined);
+                        if !self.same_value(&current_get, &desc_get) {
+                            return Err(VmError::TypeError(
+                                "cannot redefine non-configurable property",
+                            ));
+                        }
+                    }
+                    if has_set {
+                        let current_set = current_set.unwrap_or(JsValue::Undefined);
+                        if !self.same_value(&current_set, &desc_set) {
+                            return Err(VmError::TypeError(
+                                "cannot redefine non-configurable property",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let mut remove_mapping = false;
+            if has_get || has_set {
                 let object = self
                     .objects
                     .get_mut(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
-                object.properties.insert(property.clone(), value);
-            }
+                object.properties.remove(&property);
+                if has_get {
+                    if matches!(desc_get, JsValue::Undefined) {
+                        object.getters.remove(&property);
+                    } else {
+                        object.getters.insert(property.clone(), desc_get);
+                    }
+                }
+                if has_set {
+                    if matches!(desc_set, JsValue::Undefined) {
+                        object.setters.remove(&property);
+                    } else {
+                        object.setters.insert(property.clone(), desc_set);
+                    }
+                }
+                let attributes = object
+                    .property_attributes
+                    .entry(property.clone())
+                    .or_insert(PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    });
+                attributes.writable = false;
+                if let Some(enumerable) = desc_enumerable {
+                    attributes.enumerable = enumerable;
+                } else if !current_is_data && !current_is_accessor {
+                    attributes.enumerable = false;
+                }
+                if let Some(configurable) = desc_configurable {
+                    attributes.configurable = configurable;
+                } else if !current_is_data && !current_is_accessor {
+                    attributes.configurable = false;
+                }
+                remove_mapping = true;
+            } else {
+                let object = self
+                    .objects
+                    .get_mut(&target_id)
+                    .ok_or(VmError::UnknownObject(target_id))?;
+                object.getters.remove(&property);
+                object.setters.remove(&property);
+                if has_value {
+                    object
+                        .properties
+                        .insert(property.clone(), desc_value.clone());
+                } else if !current_is_data && !current_is_accessor {
+                    object
+                        .properties
+                        .entry(property.clone())
+                        .or_insert(JsValue::Undefined);
+                }
 
-            if let Some(getter) = descriptor.properties.get("get").cloned() {
-                if !matches!(getter, JsValue::Undefined) {
-                    let object = self
-                        .objects
-                        .get_mut(&target_id)
-                        .ok_or(VmError::UnknownObject(target_id))?;
-                    object.getters.insert(property.clone(), getter);
+                let attributes = object
+                    .property_attributes
+                    .entry(property.clone())
+                    .or_insert(PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    });
+                if !current_is_data && !current_is_accessor {
+                    attributes.writable = desc_writable.unwrap_or(false);
+                    attributes.enumerable = desc_enumerable.unwrap_or(false);
+                    attributes.configurable = desc_configurable.unwrap_or(false);
+                } else {
+                    if let Some(writable) = desc_writable {
+                        attributes.writable = writable;
+                    }
+                    if let Some(enumerable) = desc_enumerable {
+                        attributes.enumerable = enumerable;
+                    }
+                    if let Some(configurable) = desc_configurable {
+                        attributes.configurable = configurable;
+                    }
+                }
+                if desc_writable == Some(false) {
+                    remove_mapping = true;
                 }
             }
 
-            if let Some(setter) = descriptor.properties.get("set").cloned() {
-                if !matches!(setter, JsValue::Undefined) {
-                    let object = self
-                        .objects
-                        .get_mut(&target_id)
-                        .ok_or(VmError::UnknownObject(target_id))?;
-                    object.setters.insert(property.clone(), setter);
+            if has_value {
+                if let Some(binding_id) = mapped_binding_id {
+                    if let Some(binding) = self.bindings.get_mut(&binding_id) {
+                        binding.value = desc_value;
+                    }
                 }
+            }
+            if remove_mapping {
+                let object = self
+                    .objects
+                    .get_mut(&target_id)
+                    .ok_or(VmError::UnknownObject(target_id))?;
+                object.argument_mappings.remove(&property);
             }
         }
 
-        // Baseline: trigger installed accessor once so existing tests observing side-effects pass.
-        let _ = self.get_object_property(target_id, &property, realm);
-        let _ = self.set_object_property(target_id, property, JsValue::Undefined, realm);
         Ok(JsValue::Object(target_id))
     }
 
@@ -1397,7 +1685,7 @@ impl Vm {
             .get(1)
             .map(|value| self.coerce_to_property_key(value))
             .unwrap_or_default();
-        let (data_value, getter_value, setter_value, is_arguments_like) = {
+        let (data_value, getter_value, setter_value, attributes, is_arguments_like) = {
             let object = self
                 .objects
                 .get(&target_id)
@@ -1406,27 +1694,37 @@ impl Vm {
                 object.properties.get(&property).cloned(),
                 object.getters.get(&property).cloned(),
                 object.setters.get(&property).cloned(),
+                object.property_attributes.get(&property).copied(),
                 object.properties.contains_key("callee")
                     && object.properties.contains_key("length"),
             )
         };
 
         if let Some(value) = data_value {
-            let enumerable =
-                !(is_arguments_like && matches!(property.as_str(), "length" | "callee"));
+            let attributes = attributes.unwrap_or(PropertyAttributes {
+                writable: true,
+                enumerable: !(is_arguments_like
+                    && matches!(property.as_str(), "length" | "callee")),
+                configurable: true,
+            });
             return Ok(self.create_descriptor_object(vec![
                 ("value", value),
-                ("writable", JsValue::Bool(true)),
-                ("enumerable", JsValue::Bool(enumerable)),
-                ("configurable", JsValue::Bool(true)),
+                ("writable", JsValue::Bool(attributes.writable)),
+                ("enumerable", JsValue::Bool(attributes.enumerable)),
+                ("configurable", JsValue::Bool(attributes.configurable)),
             ]));
         }
         if getter_value.is_some() || setter_value.is_some() {
+            let attributes = attributes.unwrap_or(PropertyAttributes {
+                writable: false,
+                enumerable: true,
+                configurable: true,
+            });
             return Ok(self.create_descriptor_object(vec![
                 ("get", getter_value.unwrap_or(JsValue::Undefined)),
                 ("set", setter_value.unwrap_or(JsValue::Undefined)),
-                ("enumerable", JsValue::Bool(true)),
-                ("configurable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(attributes.enumerable)),
+                ("configurable", JsValue::Bool(attributes.configurable)),
             ]));
         }
         Ok(JsValue::Undefined)
@@ -1645,6 +1943,15 @@ impl Vm {
                 realm,
             );
         }
+        let mapped_binding = self
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.argument_mappings.get(property).copied());
+        if let Some(binding_id) = mapped_binding {
+            if let Some(binding) = self.bindings.get(&binding_id) {
+                return Ok(binding.value.clone());
+            }
+        }
         let object = self
             .objects
             .get(&object_id)
@@ -1663,6 +1970,13 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        let mapped_binding_id = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?
+            .argument_mappings
+            .get(&property)
+            .copied();
         let setter = self
             .objects
             .get(&object_id)
@@ -1679,11 +1993,30 @@ impl Vm {
             )?;
             return Ok(value);
         }
+        if self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?
+            .property_attributes
+            .get(&property)
+            .is_some_and(|attributes| !attributes.writable)
+        {
+            return Ok(value);
+        }
+        if let Some(binding_id) = mapped_binding_id {
+            if let Some(binding) = self.bindings.get_mut(&binding_id) {
+                binding.value = value.clone();
+            }
+        }
         let object = self
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        object.properties.insert(property, value.clone());
+        object.properties.insert(property.clone(), value.clone());
+        object
+            .property_attributes
+            .entry(property)
+            .or_insert_with(PropertyAttributes::default);
         Ok(value)
     }
 
@@ -1729,6 +2062,17 @@ impl Vm {
         object_id: ObjectId,
         property: &str,
     ) -> Result<bool, VmError> {
+        let is_configurable = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?
+            .property_attributes
+            .get(property)
+            .map(|attributes| attributes.configurable)
+            .unwrap_or(true);
+        if !is_configurable {
+            return Ok(false);
+        }
         let object = self
             .objects
             .get_mut(&object_id)
@@ -1736,6 +2080,8 @@ impl Vm {
         object.properties.remove(property);
         object.getters.remove(property);
         object.setters.remove(property);
+        object.property_attributes.remove(property);
+        object.argument_mappings.remove(property);
         Ok(true)
     }
 
