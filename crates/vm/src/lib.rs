@@ -2,18 +2,28 @@
 
 use bytecode::{Chunk, Opcode};
 use runtime::{JsValue, Realm};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Binding {
+    value: JsValue,
+    mutable: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmError {
     EmptyStack,
     StackUnderflow,
     UnknownIdentifier(String),
+    ImmutableBinding(String),
+    VariableAlreadyDefined(String),
     TypeError(&'static str),
 }
 
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
+    bindings: BTreeMap<String, Binding>,
 }
 
 impl Vm {
@@ -24,13 +34,44 @@ impl Vm {
 
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
+        self.bindings.clear();
         for instruction in &chunk.code {
             match instruction {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
+                Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::LoadIdentifier(name) => {
-                    let value = realm
-                        .resolve_identifier(name)
+                    let value = if let Some(binding) = self.bindings.get(name) {
+                        binding.value.clone()
+                    } else {
+                        realm
+                            .resolve_identifier(name)
+                            .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?
+                    };
+                    self.stack.push(value);
+                }
+                Opcode::DefineVariable { name, mutable } => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    if self.bindings.contains_key(name) {
+                        return Err(VmError::VariableAlreadyDefined(name.clone()));
+                    }
+                    self.bindings.insert(
+                        name.clone(),
+                        Binding {
+                            value,
+                            mutable: *mutable,
+                        },
+                    );
+                }
+                Opcode::StoreVariable(name) => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let binding = self
+                        .bindings
+                        .get_mut(name)
                         .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?;
+                    if !binding.mutable {
+                        return Err(VmError::ImmutableBinding(name.clone()));
+                    }
+                    binding.value = value.clone();
                     self.stack.push(value);
                 }
                 Opcode::Add => {
@@ -48,6 +89,9 @@ impl Vm {
                 Opcode::Div => {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs / rhs)?;
                     self.stack.push(JsValue::Number(result));
+                }
+                Opcode::Pop => {
+                    self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 }
                 Opcode::Halt => break,
             }
@@ -128,6 +172,45 @@ mod tests {
         assert_eq!(
             vm.execute_in_realm(&chunk, &realm),
             Ok(JsValue::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn executes_let_declaration_and_assignment() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Halt,
+            ],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn errors_when_assigning_to_const() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: false,
+                },
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Halt,
+            ],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::ImmutableBinding("x".to_string()))
         );
     }
 }

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-use bytecode::compile_expression;
-use parser::parse_expression;
+use bytecode::{compile_expression, compile_script};
+use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};
 use vm::Vm;
 
@@ -15,18 +15,31 @@ pub fn run_expression_with_globals(
 ) -> Result<JsValue, String> {
     let expr = parse_expression(source).map_err(|err| err.message)?;
     let chunk = compile_expression(&expr);
+    execute_chunk_with_globals(&chunk, globals)
+}
+
+pub fn run_script(source: &str, globals: &[(&str, JsValue)]) -> Result<JsValue, String> {
+    let script = parse_script(source).map_err(|err| err.message)?;
+    let chunk = compile_script(&script);
+    execute_chunk_with_globals(&chunk, globals)
+}
+
+fn execute_chunk_with_globals(
+    chunk: &bytecode::Chunk,
+    globals: &[(&str, JsValue)],
+) -> Result<JsValue, String> {
     let mut realm = Realm::default();
     for (name, value) in globals {
         realm.define_global(name, value.clone());
     }
     let mut vm = Vm::default();
-    vm.execute_in_realm(&chunk, &realm)
+    vm.execute_in_realm(chunk, &realm)
         .map_err(|err| format!("{err:?}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{run_expression, run_expression_with_globals};
+    use super::{run_expression, run_expression_with_globals, run_script};
     use runtime::JsValue;
 
     #[test]
@@ -65,5 +78,17 @@ mod tests {
     fn resolves_identifiers_from_globals() {
         let result = run_expression_with_globals("foo * 2 + 1", &[("foo", JsValue::Number(20.0))]);
         assert_eq!(result, Ok(JsValue::Number(41.0)));
+    }
+
+    #[test]
+    fn evaluates_let_const_and_assignment_script() {
+        let result = run_script("let x = 1; const y = 2; x = x + y; x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn rejects_assignment_to_const_in_script() {
+        let err = run_script("const x = 1; x = 2; x;", &[]).expect_err("script should fail");
+        assert!(err.contains("ImmutableBinding"));
     }
 }
