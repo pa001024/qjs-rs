@@ -9,7 +9,7 @@
 
 ## Control Flow and Errors
 - [x] `if`, `while`, `for`.
-- [ ] `switch`.
+- [x] `switch`.
 - [ ] `try/catch/finally` propagation semantics.
 - [ ] `throw` behavior and stack/context handoff.
 - [x] `return`, `break`, `continue` jump semantics (baseline jump behavior landed).

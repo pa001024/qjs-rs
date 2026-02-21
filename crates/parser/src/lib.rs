@@ -2,7 +2,7 @@
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-    UnaryOp, VariableDeclaration,
+    SwitchCase, UnaryOp, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -40,6 +40,7 @@ struct Parser {
     pos: usize,
     function_depth: usize,
     loop_depth: usize,
+    breakable_depth: usize,
 }
 
 impl Parser {
@@ -49,6 +50,7 @@ impl Parser {
             pos: 0,
             function_depth: 0,
             loop_depth: 0,
+            breakable_depth: 0,
         }
     }
 
@@ -76,6 +78,7 @@ impl Parser {
                     | Stmt::If { .. }
                     | Stmt::While { .. }
                     | Stmt::For { .. }
+                    | Stmt::Switch { .. }
             );
             statements.push(statement);
 
@@ -113,6 +116,9 @@ impl Parser {
         }
         if self.matches_keyword("for") {
             return self.parse_for_statement();
+        }
+        if self.matches_keyword("switch") {
+            return self.parse_switch_statement();
         }
         if self.matches_keyword("break") {
             return self.parse_break_statement();
@@ -184,8 +190,10 @@ impl Parser {
         let condition = self.parse_expression_inner()?;
         self.expect(TokenKind::RParen, "expected ')' after while condition")?;
         self.loop_depth += 1;
+        self.breakable_depth += 1;
         let body = self.parse_embedded_statement(false);
         self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
         let body = body?;
         Ok(Stmt::While {
             condition,
@@ -242,8 +250,10 @@ impl Parser {
         self.expect(TokenKind::RParen, "expected ')' after for clauses")?;
 
         self.loop_depth += 1;
+        self.breakable_depth += 1;
         let body = self.parse_embedded_statement(false);
         self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
         let body = body?;
 
         Ok(Stmt::For {
@@ -254,10 +264,106 @@ impl Parser {
         })
     }
 
+    fn parse_switch_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after 'switch'")?;
+        let discriminant = self.parse_expression_inner()?;
+        self.expect(TokenKind::RParen, "expected ')' after switch discriminant")?;
+        self.expect(TokenKind::LBrace, "expected '{' before switch body")?;
+
+        self.breakable_depth += 1;
+        let cases = self.parse_switch_cases();
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
+        let cases = cases?;
+
+        self.expect(TokenKind::RBrace, "expected '}' after switch body")?;
+        Ok(Stmt::Switch {
+            discriminant,
+            cases,
+        })
+    }
+
+    fn parse_switch_cases(&mut self) -> Result<Vec<SwitchCase>, ParseError> {
+        let mut cases = Vec::new();
+        let mut has_default = false;
+        while !self.check(&TokenKind::RBrace) {
+            if self.matches_keyword("case") {
+                let test = self.parse_expression_inner()?;
+                self.expect(TokenKind::Colon, "expected ':' after case label")?;
+                let consequent = self.parse_switch_case_consequent()?;
+                cases.push(SwitchCase {
+                    test: Some(test),
+                    consequent,
+                });
+                continue;
+            }
+
+            if self.matches_keyword("default") {
+                if has_default {
+                    return Err(self.error_current("duplicate default in switch"));
+                }
+                has_default = true;
+                self.expect(TokenKind::Colon, "expected ':' after default label")?;
+                let consequent = self.parse_switch_case_consequent()?;
+                cases.push(SwitchCase {
+                    test: None,
+                    consequent,
+                });
+                continue;
+            }
+
+            if self.is_eof() {
+                break;
+            }
+            return Err(self.error_current("expected 'case' or 'default' in switch body"));
+        }
+        Ok(cases)
+    }
+
+    fn parse_switch_case_consequent(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut statements = Vec::new();
+        loop {
+            if self.check(&TokenKind::RBrace)
+                || self.check_keyword("case")
+                || self.check_keyword("default")
+            {
+                break;
+            }
+            if self.is_eof() {
+                return Err(self.error_current("expected '}' after switch body"));
+            }
+
+            let statement = self.parse_statement()?;
+            let needs_separator = !matches!(
+                statement,
+                Stmt::Block(_)
+                    | Stmt::FunctionDeclaration(_)
+                    | Stmt::If { .. }
+                    | Stmt::While { .. }
+                    | Stmt::For { .. }
+                    | Stmt::Switch { .. }
+            );
+            statements.push(statement);
+
+            if self.matches(&TokenKind::Semicolon) {
+                continue;
+            }
+            if self.check(&TokenKind::RBrace)
+                || self.check_keyword("case")
+                || self.check_keyword("default")
+            {
+                continue;
+            }
+            if needs_separator {
+                return Err(self.error_current("expected ';' between statements"));
+            }
+        }
+        Ok(statements)
+    }
+
     fn parse_break_statement(&mut self) -> Result<Stmt, ParseError> {
-        if self.loop_depth == 0 {
+        if self.breakable_depth == 0 {
             return Err(ParseError {
-                message: "break outside loop".to_string(),
+                message: "break outside loop or switch".to_string(),
                 position: self.previous_position(),
             });
         }
@@ -286,6 +392,7 @@ impl Parser {
                 | Stmt::If { .. }
                 | Stmt::While { .. }
                 | Stmt::For { .. }
+                | Stmt::Switch { .. }
         );
         if self.matches(&TokenKind::Semicolon) {
             return Ok(statement);
@@ -548,7 +655,8 @@ impl Parser {
             | TokenKind::LessEqual
             | TokenKind::Greater
             | TokenKind::GreaterEqual
-            | TokenKind::Comma => Err(ParseError {
+            | TokenKind::Comma
+            | TokenKind::Colon => Err(ParseError {
                 message: "unexpected operator at expression start".to_string(),
                 position,
             }),
@@ -697,7 +805,7 @@ mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-        UnaryOp, VariableDeclaration,
+        SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -918,6 +1026,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_switch_statement() {
+        let parsed = parse_script("switch (x) { case 1: y = 2; break; default: y = 3; }")
+            .expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::Switch {
+                discriminant: Expr::Identifier(Identifier("x".to_string())),
+                cases: vec![
+                    SwitchCase {
+                        test: Some(Expr::Number(1.0)),
+                        consequent: vec![
+                            Stmt::Expression(Expr::Assign {
+                                target: Identifier("y".to_string()),
+                                value: Box::new(Expr::Number(2.0)),
+                            }),
+                            Stmt::Break,
+                        ],
+                    },
+                    SwitchCase {
+                        test: None,
+                        consequent: vec![Stmt::Expression(Expr::Assign {
+                            target: Identifier("y".to_string()),
+                            value: Box::new(Expr::Number(3.0)),
+                        })],
+                    },
+                ],
+            }],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn allows_break_inside_switch() {
+        let parsed =
+            parse_script("switch (1) { case 1: break; }").expect("script parsing should succeed");
+        assert!(matches!(parsed.statements[0], Stmt::Switch { .. }));
+    }
+
+    #[test]
     fn rejects_return_outside_function() {
         let err = parse_script("return 1;").expect_err("parser should fail");
         assert_eq!(err.message, "return outside function");
@@ -926,13 +1072,20 @@ mod tests {
     #[test]
     fn rejects_break_outside_loop() {
         let err = parse_script("break;").expect_err("parser should fail");
-        assert_eq!(err.message, "break outside loop");
+        assert_eq!(err.message, "break outside loop or switch");
     }
 
     #[test]
     fn rejects_continue_outside_loop() {
         let err = parse_script("continue;").expect_err("parser should fail");
         assert_eq!(err.message, "continue outside loop");
+    }
+
+    #[test]
+    fn rejects_duplicate_default_in_switch() {
+        let err =
+            parse_script("switch (x) { default: 1; default: 2; }").expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate default in switch");
     }
 
     #[test]

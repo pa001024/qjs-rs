@@ -229,6 +229,51 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_switch_statement() {
+        let result = run_script(
+            "let y = 0; switch (2) { case 1: y = 1; break; case 2: y = 2; break; default: y = 3; } y;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn evaluates_switch_fallthrough() {
+        let result = run_script(
+            "let y = 0; switch (1) { case 1: y = y + 1; case 2: y = y + 2; break; default: y = y + 4; } y;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn evaluates_switch_default_branch() {
+        let result = run_script(
+            "let y = 0; switch (9) { case 1: y = 1; break; default: y = 5; } y;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(5.0)));
+    }
+
+    #[test]
+    fn break_in_switch_does_not_break_outer_loop() {
+        let result = run_script(
+            "let c = 0; for (let i = 0; i < 3; i = i + 1) { switch (i) { case 1: break; default: c = c + 1; } } c;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn continue_inside_switch_targets_outer_loop() {
+        let result = run_script(
+            "let sum = 0; for (let i = 0; i < 4; i = i + 1) { switch (i) { case 2: continue; default: sum = sum + i; } } sum;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(4.0)));
+    }
+
+    #[test]
     fn function_can_reference_itself() {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));

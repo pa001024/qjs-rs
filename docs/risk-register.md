@@ -10,3 +10,4 @@
 | R-006 | Function declaration hoisting in blocks currently uses simplified behavior vs full spec nuance. | Medium | Add strict-mode aware block-function tests and align runtime behavior incrementally. | Open |
 | R-007 | Jump-offset based bytecode can become fragile as control-flow features grow (`break/continue/try`). | Medium | Introduce label/block abstraction in compiler before adding exception and loop-control features. | Open |
 | R-008 | `for (let ...)` currently uses single loop-scope binding instead of spec-like per-iteration lexical environment. | Medium | Add per-iteration environment cloning when closure/object semantics are introduced. | Open |
+| R-009 | `switch` case matching currently reuses engine `Eq` semantics and may diverge from JavaScript strict case matching edge cases. | Medium | Add dedicated strict-equality opcode/semantics and conformance tests when equality semantics are expanded. | Open |

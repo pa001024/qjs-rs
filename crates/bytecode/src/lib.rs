@@ -2,7 +2,7 @@
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-    UnaryOp, VariableDeclaration,
+    SwitchCase, UnaryOp, VariableDeclaration,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,13 +53,20 @@ struct Compiler {
     functions: Vec<CompiledFunction>,
     scope_depth: usize,
     loops: Vec<LoopContext>,
+    break_contexts: Vec<BreakContext>,
+    next_switch_temp_id: usize,
 }
 
 #[derive(Debug, Default)]
 struct LoopContext {
     scope_depth: usize,
-    break_jumps: Vec<usize>,
     continue_jumps: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct BreakContext {
+    scope_depth: usize,
+    break_jumps: Vec<usize>,
 }
 
 pub fn compile_script(script: &Script) -> Chunk {
@@ -222,9 +229,12 @@ impl Compiler {
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
-                self.loops.push(LoopContext {
+                self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     break_jumps: Vec::new(),
+                });
+                self.loops.push(LoopContext {
+                    scope_depth: self.scope_depth,
                     continue_jumps: Vec::new(),
                 });
 
@@ -234,8 +244,13 @@ impl Compiler {
 
                 let loop_end = code.len();
                 code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+                let break_context = self
+                    .break_contexts
+                    .pop()
+                    .expect("loop break context should exist");
                 let loop_context = self.loops.pop().expect("loop context should exist");
-                self.patch_loop_exits(loop_context, continue_target, loop_end, code);
+                self.patch_loop_exits(loop_context, continue_target, code);
+                self.patch_break_exits(break_context, loop_end, code);
 
                 if keep_value {
                     code.push(Opcode::LoadUndefined);
@@ -279,9 +294,12 @@ impl Compiler {
                     None
                 };
 
-                self.loops.push(LoopContext {
+                self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     break_jumps: Vec::new(),
+                });
+                self.loops.push(LoopContext {
+                    scope_depth: self.scope_depth,
                     continue_jumps: Vec::new(),
                 });
 
@@ -297,8 +315,88 @@ impl Compiler {
                 if let Some(jump_to_end_pos) = jump_to_end_pos {
                     code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
                 }
+                let break_context = self
+                    .break_contexts
+                    .pop()
+                    .expect("loop break context should exist");
                 let loop_context = self.loops.pop().expect("loop context should exist");
-                self.patch_loop_exits(loop_context, continue_target, loop_end, code);
+                self.patch_loop_exits(loop_context, continue_target, code);
+                self.patch_break_exits(break_context, loop_end, code);
+
+                code.push(Opcode::ExitScope);
+                self.scope_depth = self.scope_depth.saturating_sub(1);
+
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
+            }
+            Stmt::Switch {
+                discriminant,
+                cases,
+            } => {
+                let temp_name = self.next_switch_temp_name();
+                code.push(Opcode::EnterScope);
+                self.scope_depth += 1;
+
+                self.compile_expr(discriminant, code);
+                code.push(Opcode::DefineVariable {
+                    name: temp_name.clone(),
+                    mutable: false,
+                });
+
+                let mut case_start_positions = vec![usize::MAX; cases.len()];
+                let mut case_dispatch_jumps = vec![usize::MAX; cases.len()];
+                let mut default_case_index = None;
+
+                for (index, case) in cases.iter().enumerate() {
+                    if let Some(test) = &case.test {
+                        self.compile_expr(&Expr::Identifier(Identifier(temp_name.clone())), code);
+                        self.compile_expr(test, code);
+                        code.push(Opcode::Eq);
+
+                        let jump_if_false_pos = code.len();
+                        code.push(Opcode::JumpIfFalse(usize::MAX));
+                        let jump_to_case_pos = code.len();
+                        code.push(Opcode::Jump(usize::MAX));
+                        let next_test_pos = code.len();
+                        code[jump_if_false_pos] = Opcode::JumpIfFalse(next_test_pos);
+                        case_dispatch_jumps[index] = jump_to_case_pos;
+                    } else {
+                        default_case_index = Some(index);
+                    }
+                }
+
+                let jump_no_match_pos = code.len();
+                code.push(Opcode::Jump(usize::MAX));
+
+                self.break_contexts.push(BreakContext {
+                    scope_depth: self.scope_depth,
+                    break_jumps: Vec::new(),
+                });
+                for (index, SwitchCase { consequent, .. }) in cases.iter().enumerate() {
+                    case_start_positions[index] = code.len();
+                    self.compile_statement_list(consequent, code, false);
+                }
+
+                let switch_end = code.len();
+                let break_context = self
+                    .break_contexts
+                    .pop()
+                    .expect("switch break context should exist");
+                self.patch_break_exits(break_context, switch_end, code);
+
+                for (index, jump_pos) in case_dispatch_jumps.into_iter().enumerate() {
+                    if jump_pos != usize::MAX {
+                        code[jump_pos] = Opcode::Jump(case_start_positions[index]);
+                    }
+                }
+                let no_match_target = default_case_index
+                    .map(|idx| case_start_positions[idx])
+                    .unwrap_or(switch_end);
+                code[jump_no_match_pos] = Opcode::Jump(no_match_target);
 
                 code.push(Opcode::ExitScope);
                 self.scope_depth = self.scope_depth.saturating_sub(1);
@@ -311,11 +409,14 @@ impl Compiler {
                 }
             }
             Stmt::Break => {
-                let loop_context = self.loops.last_mut().expect("break outside loop");
-                Self::emit_scope_exits(self.scope_depth, loop_context.scope_depth, code);
+                let break_context = self
+                    .break_contexts
+                    .last_mut()
+                    .expect("break outside breakable context");
+                Self::emit_scope_exits(self.scope_depth, break_context.scope_depth, code);
                 let jump_pos = code.len();
                 code.push(Opcode::Jump(usize::MAX));
-                loop_context.break_jumps.push(jump_pos);
+                break_context.break_jumps.push(jump_pos);
                 false
             }
             Stmt::Continue => {
@@ -337,6 +438,7 @@ impl Compiler {
     ) -> usize {
         let saved_scope_depth = self.scope_depth;
         let saved_loops = std::mem::take(&mut self.loops);
+        let saved_break_contexts = std::mem::take(&mut self.break_contexts);
         self.scope_depth = 0;
 
         let mut code = Vec::new();
@@ -353,6 +455,7 @@ impl Compiler {
 
         self.scope_depth = saved_scope_depth;
         self.loops = saved_loops;
+        self.break_contexts = saved_break_contexts;
         function_id
     }
 
@@ -360,15 +463,28 @@ impl Compiler {
         &self,
         loop_context: LoopContext,
         continue_target: usize,
-        break_target: usize,
         code: &mut [Opcode],
     ) {
-        for jump_pos in loop_context.break_jumps {
-            code[jump_pos] = Opcode::Jump(break_target);
-        }
         for jump_pos in loop_context.continue_jumps {
             code[jump_pos] = Opcode::Jump(continue_target);
         }
+    }
+
+    fn patch_break_exits(
+        &self,
+        break_context: BreakContext,
+        break_target: usize,
+        code: &mut [Opcode],
+    ) {
+        for jump_pos in break_context.break_jumps {
+            code[jump_pos] = Opcode::Jump(break_target);
+        }
+    }
+
+    fn next_switch_temp_name(&mut self) -> String {
+        let id = self.next_switch_temp_id;
+        self.next_switch_temp_id += 1;
+        format!("$__switch_tmp_{id}")
     }
 
     fn emit_scope_exits(current_depth: usize, target_depth: usize, code: &mut Vec<Opcode>) {
@@ -431,7 +547,7 @@ mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-        UnaryOp, VariableDeclaration,
+        SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -870,6 +986,106 @@ mod tests {
                 Opcode::Jump(12),
                 Opcode::ExitScope,
                 Opcode::Jump(0),
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_switch_statement() {
+        let script = Script {
+            statements: vec![Stmt::Switch {
+                discriminant: Expr::Identifier(Identifier("x".to_string())),
+                cases: vec![
+                    SwitchCase {
+                        test: Some(Expr::Number(1.0)),
+                        consequent: vec![
+                            Stmt::Expression(Expr::Assign {
+                                target: Identifier("y".to_string()),
+                                value: Box::new(Expr::Number(1.0)),
+                            }),
+                            Stmt::Break,
+                        ],
+                    },
+                    SwitchCase {
+                        test: None,
+                        consequent: vec![Stmt::Expression(Expr::Assign {
+                            target: Identifier("y".to_string()),
+                            value: Box::new(Expr::Number(2.0)),
+                        })],
+                    },
+                ],
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::EnterScope,
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::DefineVariable {
+                    name: "$__switch_tmp_0".to_string(),
+                    mutable: false,
+                },
+                Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Eq,
+                Opcode::JumpIfFalse(8),
+                Opcode::Jump(9),
+                Opcode::Jump(13),
+                Opcode::LoadNumber(1.0),
+                Opcode::StoreVariable("y".to_string()),
+                Opcode::Pop,
+                Opcode::Jump(16),
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreVariable("y".to_string()),
+                Opcode::Pop,
+                Opcode::ExitScope,
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_switch_break_with_scope_cleanup() {
+        let script = Script {
+            statements: vec![Stmt::Switch {
+                discriminant: Expr::Number(1.0),
+                cases: vec![SwitchCase {
+                    test: Some(Expr::Number(1.0)),
+                    consequent: vec![Stmt::Block(vec![Stmt::Break])],
+                }],
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::EnterScope,
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "$__switch_tmp_0".to_string(),
+                    mutable: false,
+                },
+                Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Eq,
+                Opcode::JumpIfFalse(8),
+                Opcode::Jump(9),
+                Opcode::Jump(13),
+                Opcode::EnterScope,
+                Opcode::ExitScope,
+                Opcode::Jump(13),
+                Opcode::ExitScope,
+                Opcode::ExitScope,
                 Opcode::LoadUndefined,
                 Opcode::Halt,
             ],

@@ -23,6 +23,7 @@ pub enum TokenKind {
     Greater,
     GreaterEqual,
     Comma,
+    Colon,
     Semicolon,
     LParen,
     RParen,
@@ -186,6 +187,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b',' {
             tokens.push(Token {
                 kind: TokenKind::Comma,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b':' {
+            tokens.push(Token {
+                kind: TokenKind::Colon,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -382,6 +395,24 @@ mod tests {
         assert_eq!(tokens[6].kind, TokenKind::RParen);
         assert_eq!(tokens[7].kind, TokenKind::LBrace);
         assert_eq!(tokens[8].kind, TokenKind::Identifier("return".to_string()));
+    }
+
+    #[test]
+    fn lexes_switch_syntax() {
+        let tokens = lex("switch (x) { case 1: break; default: continue; }")
+            .expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("switch".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::LParen);
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("x".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::RParen);
+        assert_eq!(tokens[4].kind, TokenKind::LBrace);
+        assert_eq!(tokens[5].kind, TokenKind::Identifier("case".to_string()));
+        assert_eq!(tokens[7].kind, TokenKind::Colon);
+        assert_eq!(
+            tokens[10].kind,
+            TokenKind::Identifier("default".to_string())
+        );
+        assert_eq!(tokens[11].kind, TokenKind::Colon);
     }
 
     #[test]

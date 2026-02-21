@@ -74,6 +74,12 @@ pub enum ForInitializer {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SwitchCase {
+    pub test: Option<Expr>,
+    pub consequent: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VariableDeclaration(VariableDeclaration),
     FunctionDeclaration(FunctionDeclaration),
@@ -94,6 +100,10 @@ pub enum Stmt {
         condition: Option<Expr>,
         update: Option<Expr>,
         body: Box<Stmt>,
+    },
+    Switch {
+        discriminant: Expr,
+        cases: Vec<SwitchCase>,
     },
     Break,
     Continue,
