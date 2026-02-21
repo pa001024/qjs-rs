@@ -1522,13 +1522,27 @@ impl Parser {
 
     fn parse_parameter_list(&mut self) -> Result<Vec<Identifier>, ParseError> {
         let mut params = Vec::new();
+        let mut synthetic_index = 0usize;
         if self.check(&TokenKind::RParen) {
             return Ok(params);
         }
         loop {
-            params.push(Identifier(
-                self.expect_binding_identifier("expected parameter name")?,
-            ));
+            let is_rest = self.matches(&TokenKind::Ellipsis);
+            let name = if self.check_identifier() {
+                self.expect_binding_identifier("expected parameter name")?
+            } else {
+                self.consume_parameter_pattern("expected parameter name")?;
+                let generated = format!("$param_{synthetic_index}");
+                synthetic_index += 1;
+                generated
+            };
+            if self.matches(&TokenKind::Equal) {
+                let _ = self.parse_expression_inner()?;
+            }
+            params.push(Identifier(name));
+            if is_rest {
+                break;
+            }
             if self.matches(&TokenKind::Comma) {
                 if self.check(&TokenKind::RParen) {
                     break;
@@ -1538,6 +1552,57 @@ impl Parser {
             break;
         }
         Ok(params)
+    }
+
+    fn consume_parameter_pattern(&mut self, error_message: &str) -> Result<(), ParseError> {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut consumed_any = false;
+
+        loop {
+            let Some(token) = self.current().cloned() else {
+                break;
+            };
+            match token.kind {
+                TokenKind::Eof => break,
+                TokenKind::Comma if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    break;
+                }
+                TokenKind::RParen if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    break;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => {
+                    if paren_depth == 0 {
+                        break;
+                    }
+                    paren_depth -= 1;
+                }
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => {
+                    if bracket_depth == 0 {
+                        break;
+                    }
+                    bracket_depth -= 1;
+                }
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => {
+                    if brace_depth == 0 {
+                        break;
+                    }
+                    brace_depth -= 1;
+                }
+                _ => {}
+            }
+            self.advance();
+            consumed_any = true;
+        }
+
+        if !consumed_any {
+            return Err(self.error_current(error_message));
+        }
+        Ok(())
     }
 
     fn parse_function_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
@@ -2550,6 +2615,12 @@ mod tests {
             ],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_rest_parameter_binding_pattern_baseline() {
+        parse_script("function f(...[]) {} function g(...{}) {}")
+            .expect("script parsing should succeed");
     }
 
     #[test]
