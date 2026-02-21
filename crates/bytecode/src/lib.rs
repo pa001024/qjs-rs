@@ -27,6 +27,8 @@ pub enum Opcode {
     Le,
     Gt,
     Ge,
+    JumpIfFalse(usize),
+    Jump(usize),
     Call(usize),
     Return,
     Pop,
@@ -171,6 +173,56 @@ impl Compiler {
                 }
                 code.push(Opcode::ExitScope);
                 keep_value
+            }
+            Stmt::If {
+                condition,
+                consequent,
+                alternate,
+            } => {
+                self.compile_expr(condition, code);
+                let jump_to_alternate_pos = code.len();
+                code.push(Opcode::JumpIfFalse(usize::MAX));
+
+                let consequent_value = self.compile_stmt(consequent, code, keep_value);
+                if keep_value && !consequent_value {
+                    code.push(Opcode::LoadUndefined);
+                }
+
+                let jump_to_end_pos = code.len();
+                code.push(Opcode::Jump(usize::MAX));
+
+                let alternate_start = code.len();
+                if let Some(alternate_stmt) = alternate {
+                    let alternate_value = self.compile_stmt(alternate_stmt, code, keep_value);
+                    if keep_value && !alternate_value {
+                        code.push(Opcode::LoadUndefined);
+                    }
+                } else if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                }
+
+                let end = code.len();
+                code[jump_to_alternate_pos] = Opcode::JumpIfFalse(alternate_start);
+                code[jump_to_end_pos] = Opcode::Jump(end);
+                keep_value
+            }
+            Stmt::While { condition, body } => {
+                let loop_start = code.len();
+                self.compile_expr(condition, code);
+                let jump_to_end_pos = code.len();
+                code.push(Opcode::JumpIfFalse(usize::MAX));
+                self.compile_stmt(body, code, false);
+                code.push(Opcode::Jump(loop_start));
+
+                let loop_end = code.len();
+                code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
             }
         }
     }
@@ -459,6 +511,143 @@ mod tests {
                     Opcode::Return,
                 ],
             }],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_if_else_statement() {
+        let script = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("x".to_string()),
+                    initializer: Some(Expr::Number(0.0)),
+                }),
+                Stmt::If {
+                    condition: Expr::Binary {
+                        op: BinaryOp::Less,
+                        left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                        right: Box::new(Expr::Number(1.0)),
+                    },
+                    consequent: Box::new(Stmt::Expression(Expr::Assign {
+                        target: Identifier("x".to_string()),
+                        value: Box::new(Expr::Number(1.0)),
+                    })),
+                    alternate: Some(Box::new(Stmt::Expression(Expr::Assign {
+                        target: Identifier("x".to_string()),
+                        value: Box::new(Expr::Number(2.0)),
+                    }))),
+                },
+                Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+            ],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(0.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Lt,
+                Opcode::JumpIfFalse(10),
+                Opcode::LoadNumber(1.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Pop,
+                Opcode::Jump(13),
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Pop,
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_while_statement() {
+        let script = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("x".to_string()),
+                    initializer: Some(Expr::Number(0.0)),
+                }),
+                Stmt::While {
+                    condition: Expr::Binary {
+                        op: BinaryOp::Less,
+                        left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                        right: Box::new(Expr::Number(3.0)),
+                    },
+                    body: Box::new(Stmt::Expression(Expr::Assign {
+                        target: Identifier("x".to_string()),
+                        value: Box::new(Expr::Binary {
+                            op: BinaryOp::Add,
+                            left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                            right: Box::new(Expr::Number(1.0)),
+                        }),
+                    })),
+                },
+                Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+            ],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(0.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::LoadNumber(3.0),
+                Opcode::Lt,
+                Opcode::JumpIfFalse(12),
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Add,
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Pop,
+                Opcode::Jump(2),
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn keeps_statement_value_for_terminal_if_without_else() {
+        let script = Script {
+            statements: vec![Stmt::If {
+                condition: Expr::Number(0.0),
+                consequent: Box::new(Stmt::Expression(Expr::Number(1.0))),
+                alternate: None,
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(0.0),
+                Opcode::JumpIfFalse(4),
+                Opcode::LoadNumber(1.0),
+                Opcode::Jump(5),
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
         };
 
         assert_eq!(chunk, expected);

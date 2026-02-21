@@ -67,8 +67,13 @@ impl Parser {
             }
 
             let statement = self.parse_statement()?;
-            let needs_separator =
-                !matches!(statement, Stmt::Block(_) | Stmt::FunctionDeclaration(_));
+            let needs_separator = !matches!(
+                statement,
+                Stmt::Block(_)
+                    | Stmt::FunctionDeclaration(_)
+                    | Stmt::If { .. }
+                    | Stmt::While { .. }
+            );
             statements.push(statement);
 
             if self.matches(&TokenKind::Semicolon) {
@@ -96,6 +101,12 @@ impl Parser {
         }
         if self.matches_keyword("function") {
             return self.parse_function_declaration_statement();
+        }
+        if self.matches_keyword("if") {
+            return self.parse_if_statement();
+        }
+        if self.matches_keyword("while") {
+            return self.parse_while_statement();
         }
         if self.matches_keyword("return") {
             return self.parse_return_statement();
@@ -135,6 +146,63 @@ impl Parser {
             params,
             body,
         }))
+    }
+
+    fn parse_if_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after 'if'")?;
+        let condition = self.parse_expression_inner()?;
+        self.expect(TokenKind::RParen, "expected ')' after if condition")?;
+
+        let consequent = self.parse_embedded_statement(true)?;
+        let alternate = if self.matches_keyword("else") {
+            Some(Box::new(self.parse_embedded_statement(false)?))
+        } else {
+            None
+        };
+
+        Ok(Stmt::If {
+            condition,
+            consequent: Box::new(consequent),
+            alternate,
+        })
+    }
+
+    fn parse_while_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after 'while'")?;
+        let condition = self.parse_expression_inner()?;
+        self.expect(TokenKind::RParen, "expected ')' after while condition")?;
+        let body = self.parse_embedded_statement(false)?;
+        Ok(Stmt::While {
+            condition,
+            body: Box::new(body),
+        })
+    }
+
+    fn parse_embedded_statement(
+        &mut self,
+        allow_else_terminator: bool,
+    ) -> Result<Stmt, ParseError> {
+        let statement = self.parse_statement()?;
+        let needs_separator = !matches!(
+            statement,
+            Stmt::Block(_) | Stmt::FunctionDeclaration(_) | Stmt::If { .. } | Stmt::While { .. }
+        );
+        if self.matches(&TokenKind::Semicolon) {
+            return Ok(statement);
+        }
+
+        let can_end_without_separator = self.is_eof()
+            || self.check(&TokenKind::RBrace)
+            || (allow_else_terminator && self.check_keyword("else"));
+        if can_end_without_separator {
+            return Ok(statement);
+        }
+
+        if needs_separator {
+            return Err(self.error_current("expected ';' between statements"));
+        }
+
+        Ok(statement)
     }
 
     fn parse_return_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -433,6 +501,13 @@ impl Parser {
         }
     }
 
+    fn check_keyword(&self, keyword: &str) -> bool {
+        matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Identifier(name)) if name == keyword
+        )
+    }
+
     fn check(&self, expected: &TokenKind) -> bool {
         matches!(self.current(), Some(token) if &token.kind == expected)
     }
@@ -663,6 +738,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_if_else_statement() {
+        let parsed =
+            parse_script("if (1 < 2) x = 1; else x = 2;").expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::If {
+                condition: Expr::Binary {
+                    op: BinaryOp::Less,
+                    left: Box::new(Expr::Number(1.0)),
+                    right: Box::new(Expr::Number(2.0)),
+                },
+                consequent: Box::new(Stmt::Expression(Expr::Assign {
+                    target: Identifier("x".to_string()),
+                    value: Box::new(Expr::Number(1.0)),
+                })),
+                alternate: Some(Box::new(Stmt::Expression(Expr::Assign {
+                    target: Identifier("x".to_string()),
+                    value: Box::new(Expr::Number(2.0)),
+                }))),
+            }],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_while_statement() {
+        let parsed = parse_script("let x = 0; while (x < 3) x = x + 1; x;")
+            .expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 3);
+        assert!(matches!(parsed.statements[1], Stmt::While { .. }));
+    }
+
+    #[test]
     fn rejects_return_outside_function() {
         let err = parse_script("return 1;").expect_err("parser should fail");
         assert_eq!(err.message, "return outside function");
@@ -678,6 +785,12 @@ mod tests {
     fn rejects_invalid_assignment_target() {
         let err = parse_expression("(x + 1) = 2").expect_err("parser should fail");
         assert_eq!(err.message, "invalid assignment target");
+    }
+
+    #[test]
+    fn rejects_missing_separator_in_if_consequent() {
+        let err = parse_script("if (1) x = 1 y = 2;").expect_err("parser should fail");
+        assert_eq!(err.message, "expected ';' between statements");
     }
 
     #[test]

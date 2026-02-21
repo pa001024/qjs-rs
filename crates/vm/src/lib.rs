@@ -34,6 +34,7 @@ pub enum VmError {
     UnknownFunction(usize),
     NotCallable,
     TopLevelReturn,
+    InvalidJump(usize),
     TypeError(&'static str),
 }
 
@@ -81,8 +82,9 @@ impl Vm {
         realm: &Realm,
         allow_return: bool,
     ) -> Result<ExecutionSignal, VmError> {
-        for instruction in code {
-            match instruction {
+        let mut pc = 0usize;
+        while pc < code.len() {
+            match &code[pc] {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::LoadIdentifier(name) => {
@@ -224,6 +226,23 @@ impl Vm {
                     let result = self.eval_numeric_compare(|lhs, rhs| lhs >= rhs)?;
                     self.stack.push(JsValue::Bool(result));
                 }
+                Opcode::JumpIfFalse(target) => {
+                    let condition = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    if !self.is_truthy(&condition) {
+                        if *target >= code.len() {
+                            return Err(VmError::InvalidJump(*target));
+                        }
+                        pc = *target;
+                        continue;
+                    }
+                }
+                Opcode::Jump(target) => {
+                    if *target >= code.len() {
+                        return Err(VmError::InvalidJump(*target));
+                    }
+                    pc = *target;
+                    continue;
+                }
                 Opcode::Call(arg_count) => {
                     let result = self.execute_call(*arg_count, functions, realm)?;
                     self.stack.push(result);
@@ -239,6 +258,8 @@ impl Vm {
                 }
                 Opcode::Halt => return Ok(ExecutionSignal::Halt),
             }
+
+            pc += 1;
         }
 
         Ok(ExecutionSignal::Halt)
@@ -493,6 +514,52 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn executes_conditional_jumps() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(0.0),
+            Opcode::JumpIfFalse(4),
+            Opcode::LoadNumber(1.0),
+            Opcode::Jump(5),
+            Opcode::LoadNumber(2.0),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn executes_loop_with_jumps() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(0.0),
+            Opcode::DefineVariable {
+                name: "x".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::LoadNumber(3.0),
+            Opcode::Lt,
+            Opcode::JumpIfFalse(12),
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::LoadNumber(1.0),
+            Opcode::Add,
+            Opcode::StoreVariable("x".to_string()),
+            Opcode::Pop,
+            Opcode::Jump(2),
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn errors_on_invalid_jump_target() {
+        let chunk = empty_chunk(vec![Opcode::Jump(99), Opcode::Halt]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Err(VmError::InvalidJump(99)));
     }
 
     #[test]

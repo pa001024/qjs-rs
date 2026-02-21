@@ -169,6 +169,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_if_else_statement() {
+        let result = run_script("let x = 0; if (x < 1) x = 2; else x = 3; x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn evaluates_terminal_if_without_else_as_undefined_when_false() {
+        let result = run_script("if (0) 1;", &[]);
+        assert_eq!(result, Ok(JsValue::Undefined));
+    }
+
+    #[test]
+    fn evaluates_while_statement() {
+        let result = run_script("let x = 0; while (x < 3) x = x + 1; x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn evaluates_terminal_while_as_undefined() {
+        let result = run_script("while (0) { }", &[]);
+        assert_eq!(result, Ok(JsValue::Undefined));
+    }
+
+    #[test]
     fn function_can_reference_itself() {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));

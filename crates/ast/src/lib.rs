@@ -74,6 +74,15 @@ pub enum Stmt {
     Return(Option<Expr>),
     Expression(Expr),
     Block(Vec<Stmt>),
+    If {
+        condition: Expr,
+        consequent: Box<Stmt>,
+        alternate: Option<Box<Stmt>>,
+    },
+    While {
+        condition: Expr,
+        body: Box<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

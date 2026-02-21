@@ -8,3 +8,4 @@
 | R-004 | Compatibility gaps become hard to trace late in project. | Medium | Maintain mapping/checklist docs and run frequent regression tests. | Open |
 | R-005 | Function closure capture may diverge from JS lexical reference semantics in edge cases. | Medium | Continue hardening around hoisting/recursion edge cases after switching to reference-based lexical environments. | In Progress |
 | R-006 | Function declaration hoisting in blocks currently uses simplified behavior vs full spec nuance. | Medium | Add strict-mode aware block-function tests and align runtime behavior incrementally. | Open |
+| R-007 | Jump-offset based bytecode can become fragile as control-flow features grow (`break/continue/try`). | Medium | Introduce label/block abstraction in compiler before adding exception and loop-control features. | Open |
