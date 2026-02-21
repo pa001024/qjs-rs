@@ -77,6 +77,31 @@ fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
     unicode_line_terminator_len(bytes, pos)
 }
 
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_alphabetic()
+}
+
+fn is_identifier_part(ch: char) -> bool {
+    is_identifier_start(ch) || ch.is_ascii_digit()
+}
+
+fn decode_unicode_escape(source: &str, pos: usize) -> Option<(char, usize)> {
+    let bytes = source.as_bytes();
+    if pos + 6 > bytes.len() || bytes[pos] != b'\\' || bytes[pos + 1] != b'u' {
+        return None;
+    }
+    let hex = std::str::from_utf8(&bytes[pos + 2..pos + 6]).ok()?;
+    let code_point = u32::from_str_radix(hex, 16).ok()?;
+    let ch = char::from_u32(code_point)?;
+    Some((ch, 6))
+}
+
+fn decode_char(source: &str, pos: usize) -> Option<(char, usize)> {
+    let tail = source.get(pos..)?;
+    let ch = tail.chars().next()?;
+    Some((ch, ch.len_utf8()))
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
@@ -591,17 +616,48 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        if byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' {
+        let starts_identifier = if let Some((escaped, _)) = decode_unicode_escape(source, pos) {
+            is_identifier_start(escaped)
+        } else if let Some((ch, _)) = decode_char(source, pos) {
+            is_identifier_start(ch)
+        } else {
+            false
+        };
+        if starts_identifier {
             let start = pos;
+            let mut ident = String::new();
+
+            if let Some((escaped, len)) = decode_unicode_escape(source, pos) {
+                ident.push(escaped);
+                pos += len;
+            } else if let Some((ch, len)) = decode_char(source, pos) {
+                ident.push(ch);
+                pos += len;
+            }
+
             while pos < bytes.len() {
-                let current = bytes[pos];
-                if current.is_ascii_alphanumeric() || current == b'_' || current == b'$' {
-                    pos += 1;
+                if let Some((escaped, len)) = decode_unicode_escape(source, pos) {
+                    if !is_identifier_part(escaped) {
+                        return Err(LexError {
+                            message: "invalid identifier escape".to_string(),
+                            position: pos,
+                        });
+                    }
+                    ident.push(escaped);
+                    pos += len;
                     continue;
                 }
-                break;
+
+                let Some((ch, len)) = decode_char(source, pos) else {
+                    break;
+                };
+                if !is_identifier_part(ch) {
+                    break;
+                }
+                ident.push(ch);
+                pos += len;
             }
-            let ident = source[start..pos].to_string();
+
             tokens.push(Token {
                 kind: TokenKind::Identifier(ident),
                 span: Span { start, end: pos },
@@ -686,6 +742,28 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::String("a".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_unicode_escape_in_identifier() {
+        let tokens = lex("var \\u0061 = 1;").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("var".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Equal);
+        assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_non_ascii_identifier() {
+        let tokens = lex("var π = 3;").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("var".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("π".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Equal);
+        assert_eq!(tokens[3].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
 
     #[test]

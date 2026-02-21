@@ -180,6 +180,12 @@ mod tests {
     }
 
     #[test]
+    fn supports_unicode_identifier_escapes() {
+        let result = run_script("var \\u0061 = 41; a + 1;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));
