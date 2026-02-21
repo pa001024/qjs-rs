@@ -201,6 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn supports_string_replace_callback_baseline() {
+        let result = run_script(
+            "var x = 1; var out = 'ab'.replace('b', function() { x = this; return 'a'; }); (out === 'aa') && (x === undefined);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

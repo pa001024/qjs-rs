@@ -58,6 +58,9 @@ enum HostFunction {
         this_arg: JsValue,
         bound_args: Vec<JsValue>,
     },
+    StringReplace {
+        receiver: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -269,6 +272,7 @@ impl Vm {
                         JsValue::HostFunction(host_id) => {
                             self.get_host_function_property(host_id, name)?
                         }
+                        JsValue::String(receiver) => self.get_string_property(&receiver, name),
                         _ => return Err(VmError::TypeError("property access expects object")),
                     };
                     self.stack.push(value);
@@ -290,6 +294,7 @@ impl Vm {
                         JsValue::HostFunction(host_id) => {
                             self.get_host_function_property(host_id, &key)?
                         }
+                        JsValue::String(receiver) => self.get_string_property(&receiver, &key),
                         _ => return Err(VmError::TypeError("property access expects object")),
                     };
                     self.stack.push(value);
@@ -704,6 +709,36 @@ impl Vm {
                 bound_args.extend(args);
                 self.execute_callable(target, Some(this_arg), bound_args, realm)
             }
+            HostFunction::StringReplace { receiver } => {
+                let search_value = args
+                    .first()
+                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                let replacement = match args.get(1) {
+                    Some(JsValue::Function(_))
+                    | Some(JsValue::NativeFunction(_))
+                    | Some(JsValue::HostFunction(_)) => {
+                        let callback = args[1].clone();
+                        let callback_result = self.execute_callable(
+                            callback,
+                            Some(JsValue::Undefined),
+                            vec![JsValue::String(search_value.clone())],
+                            realm,
+                        )?;
+                        self.coerce_to_string(&callback_result)
+                    }
+                    Some(value) => self.coerce_to_string(value),
+                    None => "undefined".to_string(),
+                };
+                if let Some(index) = receiver.find(&search_value) {
+                    let mut output = String::new();
+                    output.push_str(&receiver[..index]);
+                    output.push_str(&replacement);
+                    output.push_str(&receiver[index + search_value.len()..]);
+                    Ok(JsValue::String(output))
+                } else {
+                    Ok(JsValue::String(receiver))
+                }
+            }
         }
     }
 
@@ -1079,6 +1114,23 @@ impl Vm {
             })),
             "length" => Ok(JsValue::Number(0.0)),
             _ => Ok(JsValue::Undefined),
+        }
+    }
+
+    fn get_string_property(&mut self, receiver: &str, property: &str) -> JsValue {
+        match property {
+            "length" => JsValue::Number(receiver.chars().count() as f64),
+            "replace" => self.create_host_function_value(HostFunction::StringReplace {
+                receiver: receiver.to_string(),
+            }),
+            _ => match property.parse::<usize>() {
+                Ok(index) => receiver
+                    .chars()
+                    .nth(index)
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .unwrap_or(JsValue::Undefined),
+                Err(_) => JsValue::Undefined,
+            },
         }
     }
 
