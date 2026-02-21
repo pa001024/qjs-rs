@@ -137,6 +137,49 @@ mod tests {
     }
 
     #[test]
+    fn supports_function_call_apply_bind_baseline() {
+        assert_eq!(
+            run_script(
+                "function id() { return this; } var o = {}; id.call(o) === o;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "function add(a, b) { return a + b; } add.apply(null, [20, 22]);",
+                &[],
+            ),
+            Ok(JsValue::Number(42.0))
+        );
+        assert_eq!(
+            run_script(
+                "function add(a, b) { return a + b; } var add20 = add.bind(null, 20); add20(22);",
+                &[],
+            ),
+            Ok(JsValue::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn supports_object_define_property_accessor_baseline() {
+        assert_eq!(
+            run_script(
+                "var o = {}; Object.defineProperty(o, 'foo', { get: function() { return this; } }); o.foo === o;",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var x = null; var o = {}; Object.defineProperty(o, 'foo', { set: function(v) { x = this; } }); o.foo = 1; x === o;",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

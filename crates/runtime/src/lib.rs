@@ -7,6 +7,7 @@ pub enum NativeFunction {
     Eval,
     FunctionConstructor,
     ObjectConstructor,
+    ObjectDefineProperty,
     NumberConstructor,
 }
 
@@ -18,6 +19,7 @@ pub enum JsValue {
     String(String),
     Function(u64),
     NativeFunction(NativeFunction),
+    HostFunction(u64),
     Object(u64),
     Undefined,
 }
