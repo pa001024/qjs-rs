@@ -678,6 +678,12 @@ impl Vm {
                     let result = self.evaluate_in_operator(key, right)?;
                     self.stack.push(JsValue::Bool(result));
                 }
+                Opcode::InstanceOf => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = self.evaluate_instanceof_operator(left, right, realm)?;
+                    self.stack.push(JsValue::Bool(result));
+                }
                 Opcode::JumpIfFalse(target) => {
                     let condition = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     if !self.is_truthy(&condition) {
@@ -2117,6 +2123,46 @@ impl Vm {
         }
     }
 
+    fn evaluate_instanceof_operator(
+        &mut self,
+        left: JsValue,
+        right: JsValue,
+        realm: &Realm,
+    ) -> Result<bool, VmError> {
+        if !Self::is_callable_value(&right) {
+            return Err(VmError::TypeError(
+                "right-hand side of 'instanceof' is not callable",
+            ));
+        }
+
+        match left {
+            JsValue::Object(object_id) => {
+                let constructor = self.get_object_property(object_id, "constructor", realm)?;
+                if constructor == right {
+                    return Ok(true);
+                }
+                Ok(matches!(
+                    right,
+                    JsValue::NativeFunction(NativeFunction::ObjectConstructor)
+                ))
+            }
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok(matches!(
+                    right,
+                    JsValue::NativeFunction(NativeFunction::FunctionConstructor)
+                ))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn is_callable_value(value: &JsValue) -> bool {
+        matches!(
+            value,
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_)
+        )
+    }
+
     fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
         match receiver {
             JsValue::Object(object_id) => self.delete_object_property(object_id, &property),
@@ -2528,7 +2574,7 @@ impl Vm {
 mod tests {
     use super::{Vm, VmError};
     use bytecode::{Chunk, CompiledFunction, Opcode};
-    use runtime::{JsValue, Realm};
+    use runtime::{JsValue, NativeFunction, Realm};
 
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
         Chunk {
@@ -3286,6 +3332,49 @@ mod tests {
         assert_eq!(
             vm.execute(&chunk),
             Err(VmError::TypeError("right-hand side of 'in' expects object"))
+        );
+    }
+
+    #[test]
+    fn executes_instanceof_for_matching_constructor() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::DefineVariable {
+                name: "obj".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::LoadIdentifier("Ctor".to_string()),
+            Opcode::DefineProperty("constructor".to_string()),
+            Opcode::Pop,
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::LoadIdentifier("Ctor".to_string()),
+            Opcode::InstanceOf,
+            Opcode::Halt,
+        ]);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Ctor",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn instanceof_throws_for_non_callable_rhs() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::LoadNumber(2.0),
+            Opcode::InstanceOf,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::TypeError(
+                "right-hand side of 'instanceof' is not callable"
+            ))
         );
     }
 

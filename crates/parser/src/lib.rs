@@ -1641,6 +1641,8 @@ impl Parser {
                 BinaryOp::GreaterEqual
             } else if self.allow_in && self.matches_keyword("in") {
                 BinaryOp::In
+            } else if self.matches_keyword("instanceof") {
+                BinaryOp::InstanceOf
             } else {
                 break;
             };
@@ -3376,6 +3378,17 @@ mod tests {
             op: BinaryOp::In,
             left: Box::new(Expr::String("arguments".to_string())),
             right: Box::new(Expr::This),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_instanceof_expression() {
+        let parsed = parse_expression("value instanceof Foo").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::InstanceOf,
+            left: Box::new(Expr::Identifier(Identifier("value".to_string()))),
+            right: Box::new(Expr::Identifier(Identifier("Foo".to_string()))),
         };
         assert_eq!(parsed, expected);
     }

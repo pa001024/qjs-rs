@@ -25,6 +25,7 @@ pub enum BinaryOp {
     Greater,
     GreaterEqual,
     In,
+    InstanceOf,
     LogicalAnd,
     LogicalOr,
 }
