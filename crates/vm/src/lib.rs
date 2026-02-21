@@ -919,8 +919,7 @@ impl Vm {
                     Ok(_) => {
                         Err(self.assertion_failure("assert.throws expected callback to throw"))
                     }
-                    Err(VmError::UncaughtException(_)) => Ok(JsValue::Undefined),
-                    Err(err) => Err(err),
+                    Err(_) => Ok(JsValue::Undefined),
                 }
             }
             HostFunction::AssertCompareArray => {

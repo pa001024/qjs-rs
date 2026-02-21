@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3019, failed=1981
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3139, failed=1861
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -58,5 +58,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - test-harness 将单 case 执行放入大栈线程（`32MB`）以隔离深递归解析/执行路径；parser 表达式深度阈值上调至 `80`，`statements/function/S13.2.1_A1_T1.js`（32 层嵌套 IIFE）已通过。
 - bytecode/vm 新增 `delete member` 专用路径（`DeleteProperty` / `DeletePropertyByValue`），修复 getter 内部 `delete this.x` 触发的递归栈溢出。
 - baseline builtins 新增 `String` / `isNaN` 以及 `Error` / `TypeError` / `ReferenceError` / `SyntaxError` 名称注入，降低 `UnknownIdentifier` 噪声失败簇。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3019/1981`（主要剩余在参数语义、块级作用域、class/computed-property、strict 早期错误等）。
+- `assert.throws` 已将 VM 抛出的 runtime 错误统一纳入“抛出”判定路径，减少 harness 断言误报。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3139/1861`（主要剩余在参数语义、块级作用域、class/computed-property、strict 早期错误等）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

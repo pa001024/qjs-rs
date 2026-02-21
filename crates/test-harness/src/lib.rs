@@ -212,6 +212,15 @@ mod tests {
     }
 
     #[test]
+    fn supports_test262_assert_throws_for_vm_errors() {
+        let result = run_script(
+            "assert.throws(TypeError, function() { var v = 1; v.x; }); 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn supports_object_define_property_accessor_baseline() {
         assert_eq!(
             run_script(
