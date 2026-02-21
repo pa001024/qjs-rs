@@ -493,25 +493,74 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         });
                     }
                     let escaped = bytes[pos];
-                    let ch = match escaped {
-                        b'\'' => '\'',
-                        b'"' => '"',
-                        b'\\' => '\\',
-                        b'n' => '\n',
-                        b'r' => '\r',
-                        b't' => '\t',
-                        _ => {
-                            return Err(LexError {
-                                message: format!(
-                                    "unsupported escape sequence '\\{}'",
-                                    escaped as char
-                                ),
-                                position: pos.saturating_sub(1),
-                            });
-                        }
-                    };
+                    let (ch, advance) =
+                        match escaped {
+                            b'\'' => ('\'', 1usize),
+                            b'"' => ('"', 1usize),
+                            b'\\' => ('\\', 1usize),
+                            b'n' => ('\n', 1usize),
+                            b'r' => ('\r', 1usize),
+                            b't' => ('\t', 1usize),
+                            b'u' => {
+                                if pos + 4 >= bytes.len() {
+                                    return Err(LexError {
+                                        message: "unterminated unicode escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    });
+                                }
+                                let hex = std::str::from_utf8(&bytes[pos + 1..pos + 5]).map_err(
+                                    |_| LexError {
+                                        message: "invalid unicode escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    },
+                                )?;
+                                let code_point =
+                                    u32::from_str_radix(hex, 16).map_err(|_| LexError {
+                                        message: "invalid unicode escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    })?;
+                                let ch = char::from_u32(code_point).ok_or(LexError {
+                                    message: "invalid unicode escape".to_string(),
+                                    position: pos.saturating_sub(1),
+                                })?;
+                                (ch, 5usize)
+                            }
+                            b'x' => {
+                                if pos + 2 >= bytes.len() {
+                                    return Err(LexError {
+                                        message: "unterminated hex escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    });
+                                }
+                                let hex = std::str::from_utf8(&bytes[pos + 1..pos + 3]).map_err(
+                                    |_| LexError {
+                                        message: "invalid hex escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    },
+                                )?;
+                                let code_point =
+                                    u32::from_str_radix(hex, 16).map_err(|_| LexError {
+                                        message: "invalid hex escape".to_string(),
+                                        position: pos.saturating_sub(1),
+                                    })?;
+                                let ch = char::from_u32(code_point).ok_or(LexError {
+                                    message: "invalid hex escape".to_string(),
+                                    position: pos.saturating_sub(1),
+                                })?;
+                                (ch, 3usize)
+                            }
+                            _ => {
+                                return Err(LexError {
+                                    message: format!(
+                                        "unsupported escape sequence '\\{}'",
+                                        escaped as char
+                                    ),
+                                    position: pos.saturating_sub(1),
+                                });
+                            }
+                        };
                     value.push(ch);
-                    pos += 1;
+                    pos += advance;
                     continue;
                 }
                 value.push(current as char);
@@ -615,6 +664,14 @@ mod tests {
     fn lexes_string_literals() {
         let tokens = lex("'a\\n' \"b\"").expect("tokenization should succeed");
         assert_eq!(tokens[0].kind, TokenKind::String("a\n".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_hex_and_unicode_string_escapes() {
+        let tokens = lex("'\\x61' \"\\u0062\"").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::String("a".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::Eof);
     }
