@@ -410,13 +410,6 @@ fn is_reserved_word(name: &str) -> bool {
             | "void"
             | "while"
             | "with"
-            | "implements"
-            | "interface"
-            | "package"
-            | "private"
-            | "protected"
-            | "public"
-            | "static"
             | "let"
     )
 }
@@ -2880,6 +2873,21 @@ mod tests {
         parse_script("var let = 1; var object = {let};").expect("parser should succeed");
         let parsed = parse_expression("let").expect("parser should succeed");
         assert_eq!(parsed, Expr::Identifier(Identifier("let".to_string())));
+    }
+
+    #[test]
+    fn allows_future_reserved_words_as_identifiers_in_non_strict_mode() {
+        parse_script(
+            "var implements = 1; var interface = 2; var package = 3; var private = 4; var protected = 5; var public = 6; var static = 7;",
+        )
+        .expect("parser should succeed");
+        let parsed = parse_expression("implements + static").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Identifier(Identifier("implements".to_string()))),
+            right: Box::new(Expr::Identifier(Identifier("static".to_string()))),
+        };
+        assert_eq!(parsed, expected);
     }
 
     #[test]

@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1535, failed=50
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1543, failed=42
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -45,4 +45,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/ast/bytecode 新增正则字面量 baseline 解析链路（`/.../flags`），按对象值降级编译，清理 `statementList/*regexp*` 与 `white-space/*after-regular-expression-literal*` 失败簇。
 - parser/bytecode/vm 新增 `new` 表达式 baseline（`Construct` 指令）并补齐 `RegExp` 原生构造器最小语义，继续压降 `function-code` 与 `delete` 历史失败。
 - VM 调整 `this` 绑定基线：补齐脚本顶层全局 `this` 回退、函数调用 strict/sloppy `this` 分流，以及 strict 代码中嵌套函数的 `this` 继承路径；`language` 基线由 `1528/57` 进一步提升至 `1535/50`。
+- parser 放宽非严格模式 future-reserved words（`implements/interface/package/private/protected/public/static`）作为标识符/绑定标识符，`future-reserved-words/*` 失败簇清空，`language` 基线进一步提升到 `1543/42`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
