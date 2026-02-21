@@ -1662,6 +1662,19 @@ impl Vm {
                 }
             }
             if remove_mapping {
+                if !has_get && !has_set && !has_value {
+                    if let Some(binding_id) = mapped_binding_id {
+                        if let Some(binding) = self.bindings.get(&binding_id) {
+                            let object = self
+                                .objects
+                                .get_mut(&target_id)
+                                .ok_or(VmError::UnknownObject(target_id))?;
+                            object
+                                .properties
+                                .insert(property.clone(), binding.value.clone());
+                        }
+                    }
+                }
                 let object = self
                     .objects
                     .get_mut(&target_id)
