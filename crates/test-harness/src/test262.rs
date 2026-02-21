@@ -149,6 +149,20 @@ fn is_fixture_file(path: &Path) -> bool {
 }
 
 pub fn execute_case(source: &str) -> ExecutionOutcome {
+    let source_owned = source.to_string();
+    let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
+    match builder.spawn(move || execute_case_inner(&source_owned)) {
+        Ok(handle) => match handle.join() {
+            Ok(outcome) => outcome,
+            Err(_) => ExecutionOutcome::RuntimeFail("case execution panicked".to_string()),
+        },
+        Err(err) => {
+            ExecutionOutcome::RuntimeFail(format!("failed to spawn case execution thread: {err}"))
+        }
+    }
+}
+
+fn execute_case_inner(source: &str) -> ExecutionOutcome {
     let trace_stages = std::env::var("QJS_TRACE_STAGES")
         .ok()
         .map(|value| !value.is_empty() && value != "0")

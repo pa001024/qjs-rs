@@ -1122,7 +1122,7 @@ impl Parser {
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        const MAX_EXPRESSION_DEPTH: usize = 30;
+        const MAX_EXPRESSION_DEPTH: usize = 80;
         self.expression_depth += 1;
         if self.expression_depth > MAX_EXPRESSION_DEPTH {
             self.expression_depth = self.expression_depth.saturating_sub(1);
