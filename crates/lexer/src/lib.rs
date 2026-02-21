@@ -91,7 +91,13 @@ fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
     if pos >= bytes.len() {
         return None;
     }
-    if matches!(bytes[pos], b'\n' | b'\r') {
+    if bytes[pos] == b'\n' {
+        return Some(1);
+    }
+    if bytes[pos] == b'\r' {
+        if pos + 1 < bytes.len() && bytes[pos + 1] == b'\n' {
+            return Some(2);
+        }
         return Some(1);
     }
     unicode_line_terminator_len(bytes, pos)
@@ -790,6 +796,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             position: start,
                         });
                     }
+                    if let Some(line_terminator_len) = line_terminator_len_at(bytes, pos) {
+                        pos += line_terminator_len;
+                        continue;
+                    }
                     let escaped = bytes[pos];
                     let (ch, advance) =
                         match escaped {
@@ -1010,6 +1020,17 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::String("a\n".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_string_line_continuations() {
+        let lf_tokens = lex("'a\\\nb'").expect("tokenization should succeed");
+        assert_eq!(lf_tokens[0].kind, TokenKind::String("ab".to_string()));
+        assert_eq!(lf_tokens[1].kind, TokenKind::Eof);
+
+        let crlf_tokens = lex("'a\\\r\nb'").expect("tokenization should succeed");
+        assert_eq!(crlf_tokens[0].kind, TokenKind::String("ab".to_string()));
+        assert_eq!(crlf_tokens[1].kind, TokenKind::Eof);
     }
 
     #[test]
