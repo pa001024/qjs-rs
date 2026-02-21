@@ -1065,6 +1065,10 @@ impl Parser {
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
+        if let Some(arrow_function) = self.try_parse_arrow_function()? {
+            return Ok(arrow_function);
+        }
+
         let left = self.parse_logical_or()?;
         if self.matches(&TokenKind::Equal) {
             let assignment_position = self.previous_position();
@@ -1092,6 +1096,80 @@ impl Parser {
         } else {
             Ok(left)
         }
+    }
+
+    fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
+        let saved_pos = self.pos;
+
+        let params = if self.matches(&TokenKind::LParen) {
+            let mut params = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    let Some(Token {
+                        kind: TokenKind::Identifier(name),
+                        ..
+                    }) = self.current()
+                    else {
+                        self.pos = saved_pos;
+                        return Ok(None);
+                    };
+                    params.push(Identifier(name.clone()));
+                    self.advance();
+
+                    if self.matches(&TokenKind::Comma) {
+                        if self.check(&TokenKind::RParen) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            if !self.matches(&TokenKind::RParen) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            params
+        } else if self.check_identifier()
+            && self.check_next(&TokenKind::Equal)
+            && self.check_nth(2, &TokenKind::Greater)
+        {
+            vec![Identifier(
+                self.expect_binding_identifier("expected parameter name")?,
+            )]
+        } else {
+            return Ok(None);
+        };
+
+        if !self.matches(&TokenKind::Equal) || !self.matches(&TokenKind::Greater) {
+            self.pos = saved_pos;
+            return Ok(None);
+        }
+
+        for Identifier(name) in &params {
+            if is_forbidden_identifier_reference(name) {
+                return Err(self.error_current("expected parameter name"));
+            }
+        }
+
+        let body = if self.check(&TokenKind::LBrace) {
+            self.function_depth += 1;
+            let statements = self.parse_block_body(
+                "expected '{' before function body",
+                "expected '}' after function body",
+            );
+            self.function_depth = self.function_depth.saturating_sub(1);
+            statements?
+        } else {
+            vec![Stmt::Return(Some(self.parse_assignment()?))]
+        };
+
+        Ok(Some(Expr::Function {
+            name: None,
+            params,
+            body,
+        }))
     }
 
     fn parse_logical_or(&mut self) -> Result<Expr, ParseError> {
@@ -1310,6 +1388,9 @@ impl Parser {
         loop {
             args.push(self.parse_expression_inner()?);
             if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RParen) {
+                    break;
+                }
                 continue;
             }
             break;
@@ -1327,6 +1408,9 @@ impl Parser {
                 self.expect_binding_identifier("expected parameter name")?,
             ));
             if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RParen) {
+                    break;
+                }
                 continue;
             }
             break;
@@ -1637,6 +1721,13 @@ impl Parser {
         matches!(self.tokens.get(self.pos + 1), Some(token) if &token.kind == expected)
     }
 
+    fn check_nth(&self, offset: usize, expected: &TokenKind) -> bool {
+        matches!(
+            self.tokens.get(self.pos + offset),
+            Some(token) if &token.kind == expected
+        )
+    }
+
     fn check(&self, expected: &TokenKind) -> bool {
         matches!(self.current(), Some(token) if &token.kind == expected)
     }
@@ -1838,6 +1929,42 @@ mod tests {
                 left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
                 right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
             }))],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_arrow_function_with_empty_parameters() {
+        let parsed = parse_expression("() => 1").expect("parser should succeed");
+        let expected = Expr::Function {
+            name: None,
+            params: vec![],
+            body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_arrow_function_with_single_parameter() {
+        let parsed = parse_expression("x => x + 1").expect("parser should succeed");
+        let expected = Expr::Function {
+            name: None,
+            params: vec![Identifier("x".to_string())],
+            body: vec![Stmt::Return(Some(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                right: Box::new(Expr::Number(1.0)),
+            }))],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_call_with_trailing_comma() {
+        let parsed = parse_expression("f(1,)").expect("parser should succeed");
+        let expected = Expr::Call {
+            callee: Box::new(Expr::Identifier(Identifier("f".to_string()))),
+            arguments: vec![Expr::Number(1.0)],
         };
         assert_eq!(parsed, expected);
     }

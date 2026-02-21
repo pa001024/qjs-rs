@@ -216,6 +216,15 @@ mod tests {
     }
 
     #[test]
+    fn arrow_function_can_return_object_for_computed_member_assignment() {
+        let result = run_script(
+            "let v = 'v'; let o = { [v]: 1, f() {} }; let f = () => o; f()[v] = 2; o[v];",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
     fn arguments_object_exposes_length() {
         let result = run_script(
             "function f(a, b, c) { return arguments.length; } f(1, 2, 3);",
