@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3373, failed=1627
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3422, failed=1578
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -75,5 +75,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 在 arguments 映射断开（`writable: false`）路径补齐“先快照后解绑”语义，修复 `mapped-arguments-nonconfigurable-nonwritable-3.js`，`language` 基线提升至 `3347/1653`。
 - parser/VM 为箭头函数增加内部 marker，并在调用/构造路径实现词法 `this`/`arguments`（不创建箭头函数自有绑定，且 `new` 调用箭头函数报 `NotCallable`），`language` 基线提升至 `3354/1646`。
 - parser/ast/bytecode/vm 新增 `instanceof` 运算符基线（关系运算符解析、指令生成与最小运行时判定），清理一批 `expected ')' after arguments` 误解析并改善 `catch` 场景断言链路，`language` 基线提升至 `3373/1627`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3373/1627`（主要剩余在块级作用域细节、computed-property/class 细分语义、strict/directive-prologue 早期错误与部分内建缺失）。
+- VM 新增调用/构造路径错误路由：在存在异常处理器时，将 `UnknownIdentifier`/`TypeError`/`NotCallable` 等运行时错误转为可捕获异常值并进入 `catch`，同时为 `eval`/`Function` 解析错误统一加 `SyntaxError:` 前缀，显著降低 `try/catch` 与 directive-prologue 相关误差，`language` 基线提升至 `3422/1578`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3422/1578`（主要剩余在块级作用域细节、computed-property/class 细分语义、strict/directive-prologue 早期错误与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
