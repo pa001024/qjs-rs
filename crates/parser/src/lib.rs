@@ -17,7 +17,7 @@ pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
         message: err.message,
         position: err.position,
     })?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, source);
     let expr = parser.parse_expression_inner()?;
     parser.expect_eof()?;
     Ok(expr)
@@ -28,7 +28,7 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
         message: err.message,
         position: err.position,
     })?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, source);
     let statements = parser.parse_statement_list(None)?;
     parser.expect_eof()?;
     Ok(Script { statements })
@@ -37,6 +37,7 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
+    source: String,
     pos: usize,
     function_depth: usize,
     loop_depth: usize,
@@ -44,9 +45,10 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    fn new(tokens: Vec<Token>, source: &str) -> Self {
         Self {
             tokens,
+            source: source.to_string(),
             pos: 0,
             function_depth: 0,
             loop_depth: 0,
@@ -69,16 +71,23 @@ impl Parser {
             if self.is_eof() {
                 break;
             }
+            if self.matches(&TokenKind::Semicolon) {
+                statements.push(Stmt::Empty);
+                continue;
+            }
 
             let statement = self.parse_statement()?;
             let needs_separator = !matches!(
                 statement,
                 Stmt::Block(_)
+                    | Stmt::Empty
                     | Stmt::FunctionDeclaration(_)
                     | Stmt::If { .. }
                     | Stmt::While { .. }
+                    | Stmt::DoWhile { .. }
                     | Stmt::For { .. }
                     | Stmt::Switch { .. }
+                    | Stmt::Labeled { .. }
                     | Stmt::Try { .. }
             );
             statements.push(statement);
@@ -94,6 +103,9 @@ impl Parser {
             if self.is_eof() {
                 break;
             }
+            if self.has_line_terminator_between_prev_and_current() {
+                continue;
+            }
             if needs_separator {
                 return Err(self.error_current("expected ';' between statements"));
             }
@@ -103,6 +115,9 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.matches(&TokenKind::Semicolon) {
+            return Ok(Stmt::Empty);
+        }
         if self.check(&TokenKind::LBrace) {
             return self.parse_block_statement();
         }
@@ -114,6 +129,9 @@ impl Parser {
         }
         if self.matches_keyword("while") {
             return self.parse_while_statement();
+        }
+        if self.matches_keyword("do") {
+            return self.parse_do_while_statement();
         }
         if self.matches_keyword("for") {
             return self.parse_for_statement();
@@ -144,6 +162,9 @@ impl Parser {
         }
         if self.matches_keyword("var") {
             return self.parse_variable_declaration(BindingKind::Var);
+        }
+        if self.check_identifier() && self.check_next(&TokenKind::Colon) {
+            return self.parse_labeled_statement();
         }
         let expr = self.parse_expression_inner()?;
         Ok(Stmt::Expression(expr))
@@ -222,6 +243,27 @@ impl Parser {
         })
     }
 
+    fn parse_do_while_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.loop_depth += 1;
+        self.breakable_depth += 1;
+        let body = self.parse_embedded_statement(false);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
+        let body = body?;
+
+        if !self.matches_keyword("while") {
+            return Err(self.error_current("expected 'while' after do-while body"));
+        }
+        self.expect(TokenKind::LParen, "expected '(' after 'while'")?;
+        let condition = self.parse_expression_inner()?;
+        self.expect(TokenKind::RParen, "expected ')' after do-while condition")?;
+        let _ = self.matches(&TokenKind::Semicolon);
+        Ok(Stmt::DoWhile {
+            body: Box::new(body),
+            condition,
+        })
+    }
+
     fn parse_for_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'for'")?;
 
@@ -230,7 +272,12 @@ impl Parser {
         } else if self.matches_keyword("let") {
             let declaration = self.parse_variable_declaration(BindingKind::Let)?;
             let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => declaration,
+                Stmt::VariableDeclaration(declaration) => {
+                    ForInitializer::VariableDeclaration(declaration)
+                }
+                Stmt::VariableDeclarations(declarations) => {
+                    ForInitializer::VariableDeclarations(declarations)
+                }
                 _ => {
                     return Err(ParseError {
                         message: "invalid for initializer".to_string(),
@@ -238,11 +285,16 @@ impl Parser {
                     });
                 }
             };
-            Some(ForInitializer::VariableDeclaration(declaration))
+            Some(declaration)
         } else if self.matches_keyword("const") {
             let declaration = self.parse_variable_declaration(BindingKind::Const)?;
             let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => declaration,
+                Stmt::VariableDeclaration(declaration) => {
+                    ForInitializer::VariableDeclaration(declaration)
+                }
+                Stmt::VariableDeclarations(declarations) => {
+                    ForInitializer::VariableDeclarations(declarations)
+                }
                 _ => {
                     return Err(ParseError {
                         message: "invalid for initializer".to_string(),
@@ -250,11 +302,16 @@ impl Parser {
                     });
                 }
             };
-            Some(ForInitializer::VariableDeclaration(declaration))
+            Some(declaration)
         } else if self.matches_keyword("var") {
             let declaration = self.parse_variable_declaration(BindingKind::Var)?;
             let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => declaration,
+                Stmt::VariableDeclaration(declaration) => {
+                    ForInitializer::VariableDeclaration(declaration)
+                }
+                Stmt::VariableDeclarations(declarations) => {
+                    ForInitializer::VariableDeclarations(declarations)
+                }
                 _ => {
                     return Err(ParseError {
                         message: "invalid for initializer".to_string(),
@@ -262,7 +319,7 @@ impl Parser {
                     });
                 }
             };
-            Some(ForInitializer::VariableDeclaration(declaration))
+            Some(declaration)
         } else {
             Some(ForInitializer::Expression(self.parse_expression_inner()?))
         };
@@ -369,11 +426,14 @@ impl Parser {
             let needs_separator = !matches!(
                 statement,
                 Stmt::Block(_)
+                    | Stmt::Empty
                     | Stmt::FunctionDeclaration(_)
                     | Stmt::If { .. }
                     | Stmt::While { .. }
+                    | Stmt::DoWhile { .. }
                     | Stmt::For { .. }
                     | Stmt::Switch { .. }
+                    | Stmt::Labeled { .. }
                     | Stmt::Try { .. }
             );
             statements.push(statement);
@@ -385,6 +445,9 @@ impl Parser {
                 || self.check_keyword("case")
                 || self.check_keyword("default")
             {
+                continue;
+            }
+            if self.has_line_terminator_between_prev_and_current() {
                 continue;
             }
             if needs_separator {
@@ -434,6 +497,12 @@ impl Parser {
     }
 
     fn parse_throw_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.has_line_terminator_between_prev_and_current() {
+            return Err(ParseError {
+                message: "throw requires expression".to_string(),
+                position: self.previous_position(),
+            });
+        }
         let has_expr = !matches!(
             self.current().map(|token| &token.kind),
             Some(TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) | None
@@ -446,6 +515,16 @@ impl Parser {
         }
         let expr = self.parse_expression_inner()?;
         Ok(Stmt::Throw(expr))
+    }
+
+    fn parse_labeled_statement(&mut self) -> Result<Stmt, ParseError> {
+        let label = Identifier(self.expect_identifier("expected label identifier")?);
+        self.expect(TokenKind::Colon, "expected ':' after label")?;
+        let body = self.parse_embedded_statement(false)?;
+        Ok(Stmt::Labeled {
+            label,
+            body: Box::new(body),
+        })
     }
 
     fn parse_break_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -476,11 +555,14 @@ impl Parser {
         let needs_separator = !matches!(
             statement,
             Stmt::Block(_)
+                | Stmt::Empty
                 | Stmt::FunctionDeclaration(_)
                 | Stmt::If { .. }
                 | Stmt::While { .. }
+                | Stmt::DoWhile { .. }
                 | Stmt::For { .. }
                 | Stmt::Switch { .. }
+                | Stmt::Labeled { .. }
                 | Stmt::Try { .. }
         );
         if self.matches(&TokenKind::Semicolon) {
@@ -489,7 +571,8 @@ impl Parser {
 
         let can_end_without_separator = self.is_eof()
             || self.check(&TokenKind::RBrace)
-            || (allow_else_terminator && self.check_keyword("else"));
+            || (allow_else_terminator && self.check_keyword("else") && !needs_separator)
+            || self.has_line_terminator_between_prev_and_current();
         if can_end_without_separator {
             return Ok(statement);
         }
@@ -509,6 +592,9 @@ impl Parser {
             });
         }
 
+        if self.has_line_terminator_between_prev_and_current() {
+            return Ok(Stmt::Return(None));
+        }
         let has_expr = !matches!(
             self.current().map(|token| &token.kind),
             Some(TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) | None
@@ -522,25 +608,43 @@ impl Parser {
     }
 
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
-        let name = self.expect_identifier("expected binding name")?;
-        let initializer = if self.matches(&TokenKind::Equal) {
-            Some(self.parse_expression_inner()?)
-        } else {
-            None
-        };
+        let mut declarations = Vec::new();
+        loop {
+            let name = self.expect_identifier("expected binding name")?;
+            let initializer = if self.matches(&TokenKind::Equal) {
+                Some(self.parse_expression_inner()?)
+            } else {
+                None
+            };
 
-        if kind == BindingKind::Const && initializer.is_none() {
-            return Err(ParseError {
-                message: "const declaration requires an initializer".to_string(),
-                position: self.current_position(),
+            if kind == BindingKind::Const && initializer.is_none() {
+                return Err(ParseError {
+                    message: "const declaration requires an initializer".to_string(),
+                    position: self.current_position(),
+                });
+            }
+
+            declarations.push(VariableDeclaration {
+                kind,
+                name: Identifier(name),
+                initializer,
             });
+
+            if !self.matches(&TokenKind::Comma) {
+                break;
+            }
         }
 
-        Ok(Stmt::VariableDeclaration(VariableDeclaration {
-            kind,
-            name: Identifier(name),
-            initializer,
-        }))
+        if declarations.len() == 1 {
+            Ok(Stmt::VariableDeclaration(
+                declarations
+                    .into_iter()
+                    .next()
+                    .expect("declaration should exist"),
+            ))
+        } else {
+            Ok(Stmt::VariableDeclarations(declarations))
+        }
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
@@ -928,6 +1032,17 @@ impl Parser {
         )
     }
 
+    fn check_identifier(&self) -> bool {
+        matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Identifier(_))
+        )
+    }
+
+    fn check_next(&self, expected: &TokenKind) -> bool {
+        matches!(self.tokens.get(self.pos + 1), Some(token) if &token.kind == expected)
+    }
+
     fn check(&self, expected: &TokenKind) -> bool {
         matches!(self.current(), Some(token) if &token.kind == expected)
     }
@@ -994,6 +1109,27 @@ impl Parser {
             .get(self.pos.saturating_sub(1))
             .map(|token| token.span.start)
             .unwrap_or_default()
+    }
+
+    fn has_line_terminator_between_prev_and_current(&self) -> bool {
+        if self.pos == 0 {
+            return false;
+        }
+        let previous_end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|token| token.span.end)
+            .unwrap_or_default();
+        let current_start = self
+            .current()
+            .map(|token| token.span.start)
+            .unwrap_or_default();
+        if current_start <= previous_end || current_start > self.source.len() {
+            return false;
+        }
+        self.source.as_bytes()[previous_end..current_start]
+            .iter()
+            .any(|byte| matches!(byte, b'\n' | b'\r'))
     }
 
     fn current(&self) -> Option<&Token> {
@@ -1265,6 +1401,51 @@ mod tests {
             ],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_var_declaration_list() {
+        let parsed = parse_script("var x, y = 1;").expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::VariableDeclarations(vec![
+                VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: Identifier("x".to_string()),
+                    initializer: None,
+                },
+                VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: Identifier("y".to_string()),
+                    initializer: Some(Expr::Number(1.0)),
+                },
+            ])],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn allows_line_terminator_as_statement_separator() {
+        let parsed =
+            parse_script("var x = 1\nx = x + 1\nx").expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 3);
+    }
+
+    #[test]
+    fn parses_empty_statement() {
+        let parsed = parse_script("let x = 1;;x;").expect("script parsing should succeed");
+        assert!(matches!(parsed.statements[1], Stmt::Empty));
+    }
+
+    #[test]
+    fn parses_do_while_statement() {
+        let parsed = parse_script("do ; while (false);").expect("script parsing should succeed");
+        assert!(matches!(parsed.statements[0], Stmt::DoWhile { .. }));
+    }
+
+    #[test]
+    fn parses_labeled_statement() {
+        let parsed = parse_script("a: 1;").expect("script parsing should succeed");
+        assert!(matches!(parsed.statements[0], Stmt::Labeled { .. }));
     }
 
     #[test]

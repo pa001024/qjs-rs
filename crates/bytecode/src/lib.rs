@@ -173,6 +173,14 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt, code: &mut Vec<Opcode>, keep_value: bool) -> bool {
         match stmt {
+            Stmt::Empty => {
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
+            }
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind,
                 name: Identifier(binding_name),
@@ -187,6 +195,12 @@ impl Compiler {
                     name: binding_name.clone(),
                     mutable: matches!(kind, BindingKind::Let | BindingKind::Var),
                 });
+                false
+            }
+            Stmt::VariableDeclarations(declarations) => {
+                for declaration in declarations {
+                    self.compile_stmt(&Stmt::VariableDeclaration(declaration.clone()), code, false);
+                }
                 false
             }
             Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
@@ -295,6 +309,43 @@ impl Compiler {
                     false
                 }
             }
+            Stmt::DoWhile { body, condition } => {
+                let loop_start = code.len();
+                self.break_contexts.push(BreakContext {
+                    scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
+                    break_jumps: Vec::new(),
+                });
+                self.loops.push(LoopContext {
+                    scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
+                    continue_jumps: Vec::new(),
+                });
+
+                self.compile_stmt(body, code, false);
+                let continue_target = code.len();
+                self.compile_expr(condition, code);
+                let jump_to_end_pos = code.len();
+                code.push(Opcode::JumpIfFalse(usize::MAX));
+                code.push(Opcode::Jump(loop_start));
+
+                let loop_end = code.len();
+                code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+                let break_context = self
+                    .break_contexts
+                    .pop()
+                    .expect("loop break context should exist");
+                let loop_context = self.loops.pop().expect("loop context should exist");
+                self.patch_loop_exits(loop_context, continue_target, code);
+                self.patch_break_exits(break_context, loop_end, code);
+
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
+            }
             Stmt::For {
                 initializer,
                 condition,
@@ -309,6 +360,13 @@ impl Compiler {
                         ForInitializer::VariableDeclaration(declaration) => {
                             self.compile_stmt(
                                 &Stmt::VariableDeclaration(declaration.clone()),
+                                code,
+                                false,
+                            );
+                        }
+                        ForInitializer::VariableDeclarations(declarations) => {
+                            self.compile_stmt(
+                                &Stmt::VariableDeclarations(declarations.clone()),
                                 code,
                                 false,
                             );
@@ -465,6 +523,7 @@ impl Compiler {
                 code,
                 keep_value,
             ),
+            Stmt::Labeled { body, .. } => self.compile_stmt(body, code, keep_value),
             Stmt::Break => {
                 let (target_handler_depth, target_scope_depth) = {
                     let break_context = self
@@ -1366,6 +1425,30 @@ mod tests {
             functions: vec![],
         };
 
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_do_while_statement() {
+        let script = Script {
+            statements: vec![Stmt::DoWhile {
+                body: Box::new(Stmt::Expression(Expr::Number(1.0))),
+                condition: Expr::Number(0.0),
+            }],
+        };
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::Pop,
+                Opcode::LoadNumber(0.0),
+                Opcode::JumpIfFalse(5),
+                Opcode::Jump(0),
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
         assert_eq!(chunk, expected);
     }
 

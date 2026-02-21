@@ -150,6 +150,12 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_var_declaration_list_script() {
+        let result = run_script("var x, y = 2; x = 1; x + y;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
     fn short_circuit_skips_rhs_side_effects() {
         let result = run_script("let x = 0; 0 && (x = 1); 1 || (x = 2); x;", &[]);
         assert_eq!(result, Ok(JsValue::Number(0.0)));
@@ -258,6 +264,12 @@ mod tests {
     fn evaluates_while_statement() {
         let result = run_script("let x = 0; while (x < 3) x = x + 1; x;", &[]);
         assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn evaluates_do_while_statement() {
+        let result = run_script("let x = 0; do { x = x + 1; } while (0); x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
     }
 
     #[test]
@@ -459,5 +471,11 @@ mod tests {
             &[],
         );
         assert_eq!(result, Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn evaluates_labeled_statement() {
+        let result = run_script("label: 1; 2;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
     }
 }

@@ -104,6 +104,7 @@ pub struct FunctionDeclaration {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForInitializer {
     VariableDeclaration(VariableDeclaration),
+    VariableDeclarations(Vec<VariableDeclaration>),
     Expression(Expr),
 }
 
@@ -115,7 +116,9 @@ pub struct SwitchCase {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    Empty,
     VariableDeclaration(VariableDeclaration),
+    VariableDeclarations(Vec<VariableDeclaration>),
     FunctionDeclaration(FunctionDeclaration),
     Return(Option<Expr>),
     Expression(Expr),
@@ -128,6 +131,10 @@ pub enum Stmt {
     While {
         condition: Expr,
         body: Box<Stmt>,
+    },
+    DoWhile {
+        body: Box<Stmt>,
+        condition: Expr,
     },
     For {
         initializer: Option<ForInitializer>,
@@ -145,6 +152,10 @@ pub enum Stmt {
         catch_param: Option<Identifier>,
         catch_block: Option<Vec<Stmt>>,
         finally_block: Option<Vec<Stmt>>,
+    },
+    Labeled {
+        label: Identifier,
+        body: Box<Stmt>,
     },
     Break,
     Continue,
