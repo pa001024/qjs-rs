@@ -9,6 +9,7 @@ use ast::{
 use lexer::{Token, TokenKind, lex};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
+const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -770,11 +771,16 @@ impl Parser {
         body
     }
 
+    fn prepend_marker(&self, body: &mut Vec<Stmt>, marker: &str) {
+        body.insert(0, Stmt::Expression(Expr::String(marker.to_string())));
+    }
+
     fn prepend_non_simple_params_marker(&self, body: &mut Vec<Stmt>) {
-        body.insert(
-            0,
-            Stmt::Expression(Expr::String(NON_SIMPLE_PARAMS_MARKER.to_string())),
-        );
+        self.prepend_marker(body, NON_SIMPLE_PARAMS_MARKER);
+    }
+
+    fn prepend_arrow_function_marker(&self, body: &mut Vec<Stmt>) {
+        self.prepend_marker(body, ARROW_FUNCTION_MARKER);
     }
 
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -1479,9 +1485,9 @@ impl Parser {
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
         let saved_pos = self.pos;
 
-        let params = if self.matches(&TokenKind::LParen) {
+        let (params, _simple_parameters) = if self.matches(&TokenKind::LParen) {
             let params = match self.parse_parameter_list() {
-                Ok((params, _simple_parameters)) => params,
+                Ok(parsed) => parsed,
                 Err(_) => {
                     self.pos = saved_pos;
                     return Ok(None);
@@ -1496,9 +1502,12 @@ impl Parser {
             && self.check_next(&TokenKind::Equal)
             && self.check_nth(2, &TokenKind::Greater)
         {
-            vec![Identifier(
-                self.expect_binding_identifier("expected parameter name")?,
-            )]
+            (
+                vec![Identifier(
+                    self.expect_binding_identifier("expected parameter name")?,
+                )],
+                true,
+            )
         } else {
             return Ok(None);
         };
@@ -1514,7 +1523,7 @@ impl Parser {
             }
         }
 
-        let body = if self.check(&TokenKind::LBrace) {
+        let mut body = if self.check(&TokenKind::LBrace) {
             self.parse_function_body(
                 "expected '{' before function body",
                 "expected '}' after function body",
@@ -1522,6 +1531,7 @@ impl Parser {
         } else {
             vec![Stmt::Return(Some(self.parse_assignment()?))]
         };
+        self.prepend_arrow_function_marker(&mut body);
 
         Ok(Some(Expr::Function {
             name: None,
@@ -3120,7 +3130,10 @@ mod tests {
         let expected = Expr::Function {
             name: None,
             params: vec![],
-            body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+            body: vec![
+                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Return(Some(Expr::Number(1.0))),
+            ],
         };
         assert_eq!(parsed, expected);
     }
@@ -3131,11 +3144,14 @@ mod tests {
         let expected = Expr::Function {
             name: None,
             params: vec![Identifier("x".to_string())],
-            body: vec![Stmt::Return(Some(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
-                right: Box::new(Expr::Number(1.0)),
-            }))],
+            body: vec![
+                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Return(Some(Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                    right: Box::new(Expr::Number(1.0)),
+                })),
+            ],
         };
         assert_eq!(parsed, expected);
     }
@@ -3150,9 +3166,10 @@ mod tests {
                 Identifier("p".to_string()),
                 Identifier("arguments".to_string()),
             ],
-            body: vec![Stmt::Return(Some(Expr::Identifier(Identifier(
-                "arguments".to_string(),
-            ))))],
+            body: vec![
+                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Return(Some(Expr::Identifier(Identifier("arguments".to_string())))),
+            ],
         };
         assert_eq!(parsed, expected);
     }

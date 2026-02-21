@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
+const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -815,6 +816,9 @@ impl Vm {
 
         match callee {
             JsValue::Function(closure_id) => {
+                if self.closure_is_arrow(closure_id)? {
+                    return Err(VmError::NotCallable);
+                }
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
@@ -851,6 +855,9 @@ impl Vm {
 
         match callee {
             JsValue::Function(closure_id) => {
+                if self.closure_is_arrow(closure_id)? {
+                    return Err(VmError::NotCallable);
+                }
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
@@ -984,8 +991,10 @@ impl Vm {
             .get(closure.function_id)
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
-        let mapped_arguments_enabled =
-            !closure.strict && !self.function_has_non_simple_params(&function);
+        let is_arrow_function = self.function_is_arrow(&function);
+        let mapped_arguments_enabled = !closure.strict
+            && !is_arrow_function
+            && !self.function_has_non_simple_params(&function);
 
         let mut frame_scope: Scope = BTreeMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
@@ -995,65 +1004,67 @@ impl Vm {
             frame_scope.insert(param_name.clone(), binding_id);
             param_binding_ids.push(binding_id);
         }
-        let this_value = if closure.strict {
-            this_arg.unwrap_or(JsValue::Undefined)
-        } else {
-            self.coerce_this_for_sloppy(this_arg)
-        };
-        let this_binding_id = self.create_binding(this_value, true);
-        frame_scope.insert("this".to_string(), this_binding_id);
-        let arguments_value = self.create_object_value();
-        let arguments_id = match arguments_value {
-            JsValue::Object(id) => id,
-            _ => unreachable!(),
-        };
-        {
-            let object = self
-                .objects
-                .get_mut(&arguments_id)
-                .ok_or(VmError::UnknownObject(arguments_id))?;
-            object
-                .properties
-                .insert("length".to_string(), JsValue::Number(args.len() as f64));
-            object
-                .properties
-                .insert("callee".to_string(), JsValue::Function(closure_id));
-            object.properties.insert(
-                "constructor".to_string(),
-                JsValue::NativeFunction(NativeFunction::ObjectConstructor),
-            );
-            for (index, arg) in args.iter().enumerate() {
-                let key = index.to_string();
-                object.properties.insert(key.clone(), arg.clone());
+        if !is_arrow_function {
+            let this_value = if closure.strict {
+                this_arg.unwrap_or(JsValue::Undefined)
+            } else {
+                self.coerce_this_for_sloppy(this_arg)
+            };
+            let this_binding_id = self.create_binding(this_value, true);
+            frame_scope.insert("this".to_string(), this_binding_id);
+            let arguments_value = self.create_object_value();
+            let arguments_id = match arguments_value {
+                JsValue::Object(id) => id,
+                _ => unreachable!(),
+            };
+            {
+                let object = self
+                    .objects
+                    .get_mut(&arguments_id)
+                    .ok_or(VmError::UnknownObject(arguments_id))?;
                 object
-                    .property_attributes
-                    .entry(key.clone())
-                    .or_insert_with(PropertyAttributes::default);
-                if mapped_arguments_enabled {
-                    if let Some(binding_id) = param_binding_ids.get(index) {
-                        object.argument_mappings.insert(key, *binding_id);
+                    .properties
+                    .insert("length".to_string(), JsValue::Number(args.len() as f64));
+                object
+                    .properties
+                    .insert("callee".to_string(), JsValue::Function(closure_id));
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+                );
+                for (index, arg) in args.iter().enumerate() {
+                    let key = index.to_string();
+                    object.properties.insert(key.clone(), arg.clone());
+                    object
+                        .property_attributes
+                        .entry(key.clone())
+                        .or_insert_with(PropertyAttributes::default);
+                    if mapped_arguments_enabled {
+                        if let Some(binding_id) = param_binding_ids.get(index) {
+                            object.argument_mappings.insert(key, *binding_id);
+                        }
                     }
                 }
+                object.property_attributes.insert(
+                    "length".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.property_attributes.insert(
+                    "callee".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
             }
-            object.property_attributes.insert(
-                "length".to_string(),
-                PropertyAttributes {
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
-            object.property_attributes.insert(
-                "callee".to_string(),
-                PropertyAttributes {
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
+            let arguments_binding_id = self.create_binding(arguments_value, true);
+            frame_scope.insert("arguments".to_string(), arguments_binding_id);
         }
-        let arguments_binding_id = self.create_binding(arguments_value, true);
-        frame_scope.insert("arguments".to_string(), arguments_binding_id);
 
         let saved_stack = std::mem::take(&mut self.stack);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -1905,8 +1916,24 @@ impl Vm {
         self.code_is_strict(&function.code)
     }
 
+    fn function_is_arrow(&self, function: &CompiledFunction) -> bool {
+        self.code_has_marker(&function.code, ARROW_FUNCTION_MARKER)
+    }
+
     fn function_has_non_simple_params(&self, function: &CompiledFunction) -> bool {
-        self.code_has_non_simple_params_marker(&function.code)
+        self.code_has_marker(&function.code, NON_SIMPLE_PARAMS_MARKER)
+    }
+
+    fn closure_is_arrow(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_is_arrow(function))
     }
 
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
@@ -1931,7 +1958,7 @@ impl Vm {
         false
     }
 
-    fn code_has_non_simple_params_marker(&self, code: &[Opcode]) -> bool {
+    fn code_has_marker(&self, code: &[Opcode], marker: &str) -> bool {
         let mut cursor = 0usize;
         while cursor < code.len() {
             match &code[cursor] {
@@ -1942,7 +1969,7 @@ impl Vm {
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {
-                    if value == NON_SIMPLE_PARAMS_MARKER {
+                    if value == marker {
                         return true;
                     }
                     cursor += 2;
