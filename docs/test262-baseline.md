@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3259, failed=1741
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3260, failed=1740
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -67,5 +67,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/ast/bytecode 新增带标签 `continue`（`continue label;`）链路，并按函数边界隔离 label-set + 增加“continue 目标必须为迭代语句”早期错误校验，修复 `asi/S7.9_A1` 与 `block-scope/leave` 的一批标签控制流失败。
 - lexer 新增科学计数法数字字面量（`1e55`/`2E-2`）词法支持；VM 的 number→string 调整为更贴近 JS 规范（`-0 -> "0"`、`Infinity`、指数统一 `e+N`），清理 `computed-property-names/object/property/number-duplicates.js` 及一批数字字符串化相关断言失败。
 - VM 补齐 `Object.getOwnPropertyDescriptor` / `Object.getPrototypeOf` 最小执行路径，并新增对象 `hasOwnProperty` 基线，显著减少 `arguments-object/*` 中的 `NotCallable` 失败。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3259/1741`（主要剩余在 `arguments-object` 映射语义、块级作用域细节、class/computed-property 与 strict 早期错误）。
+- VM 在函数调用创建的 `arguments` 对象上补齐 `constructor === Object` 基线（含测试覆盖 `arguments.constructor.prototype` 与 `arguments.hasOwnProperty('callee')`），`language` 基线提升至 `3260/1740`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3260/1740`（主要剩余在 `arguments-object` 映射语义、块级作用域细节、class/computed-property 与 strict 早期错误）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
