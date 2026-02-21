@@ -23,6 +23,7 @@ struct Closure {
     function_id: usize,
     functions: Rc<Vec<CompiledFunction>>,
     captured_scopes: Vec<ScopeRef>,
+    strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -102,6 +103,7 @@ pub struct Vm {
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     next_host_function_id: u64,
+    global_object_id: Option<ObjectId>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
 }
@@ -124,10 +126,16 @@ impl Vm {
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.next_host_function_id = 0;
+        self.global_object_id = None;
         self.exception_handlers.clear();
         self.pending_exception = None;
+        let global_object = self.create_object_value();
+        if let JsValue::Object(id) = global_object {
+            self.global_object_id = Some(id);
+        }
 
-        match self.execute_code(&chunk.code, &chunk.functions, realm, false)? {
+        let strict = self.code_is_strict(&chunk.code);
+        match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict)? {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
@@ -139,6 +147,7 @@ impl Vm {
         functions: &[CompiledFunction],
         realm: &Realm,
         allow_return: bool,
+        strict: bool,
     ) -> Result<ExecutionSignal, VmError> {
         let mut pc = 0usize;
         while pc < code.len() {
@@ -153,7 +162,7 @@ impl Vm {
                     self.stack.push(object);
                 }
                 Opcode::LoadFunction(function_id) => {
-                    let function = self.instantiate_function(*function_id, functions)?;
+                    let function = self.instantiate_function(*function_id, functions, strict)?;
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
@@ -170,7 +179,9 @@ impl Vm {
                     } else if name == "Infinity" {
                         JsValue::Number(f64::INFINITY)
                     } else if name == "this" {
-                        realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
+                        realm
+                            .resolve_identifier(name)
+                            .unwrap_or_else(|| self.global_this_value())
                     } else {
                         realm
                             .resolve_identifier(name)
@@ -209,7 +220,8 @@ impl Vm {
                     }
                 }
                 Opcode::DefineFunction { name, function_id } => {
-                    let function_value = self.instantiate_function(*function_id, functions)?;
+                    let function_value =
+                        self.instantiate_function(*function_id, functions, strict)?;
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
@@ -653,10 +665,13 @@ impl Vm {
             let binding_id = self.create_binding(value, true);
             frame_scope.insert(param_name.clone(), binding_id);
         }
-        if let Some(this_value) = this_arg {
-            let this_binding_id = self.create_binding(this_value, true);
-            frame_scope.insert("this".to_string(), this_binding_id);
-        }
+        let this_value = if closure.strict {
+            this_arg.unwrap_or(JsValue::Undefined)
+        } else {
+            self.coerce_this_for_sloppy(this_arg)
+        };
+        let this_binding_id = self.create_binding(this_value, true);
+        frame_scope.insert("this".to_string(), this_binding_id);
         let arguments_value = self.create_object_value();
         let arguments_id = match arguments_value {
             JsValue::Object(id) => id,
@@ -691,7 +706,13 @@ impl Vm {
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
 
-        let signal = self.execute_code(&function.code, closure.functions.as_ref(), realm, true);
+        let signal = self.execute_code(
+            &function.code,
+            closure.functions.as_ref(),
+            realm,
+            true,
+            closure.strict,
+        );
         let value = match signal {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
@@ -994,7 +1015,8 @@ impl Vm {
 
     fn execute_inline_chunk(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         let stack_depth = self.stack.len();
-        let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false) {
+        let strict = self.code_is_strict(&chunk.code);
+        let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict) {
             Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
             Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
             Err(err) => Err(err),
@@ -1057,10 +1079,15 @@ impl Vm {
         &mut self,
         function_id: usize,
         functions: &[CompiledFunction],
+        enclosing_strict: bool,
     ) -> Result<JsValue, VmError> {
         if function_id >= functions.len() {
             return Err(VmError::UnknownFunction(function_id));
         }
+        let strict = functions
+            .get(function_id)
+            .map(|function| enclosing_strict || self.function_is_strict(function))
+            .unwrap_or(enclosing_strict);
         let closure_id = self.next_closure_id;
         self.next_closure_id += 1;
         let captured_scopes = self.scopes.clone();
@@ -1070,6 +1097,7 @@ impl Vm {
                 function_id,
                 functions: Rc::new(functions.to_vec()),
                 captured_scopes,
+                strict,
             },
         );
         Ok(JsValue::Function(closure_id))
@@ -1086,6 +1114,45 @@ impl Vm {
             }
         }
         None
+    }
+
+    fn global_this_value(&self) -> JsValue {
+        self.global_object_id
+            .map(JsValue::Object)
+            .unwrap_or(JsValue::Undefined)
+    }
+
+    fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {
+        match this_arg {
+            None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.global_this_value(),
+            Some(value) => value,
+        }
+    }
+
+    fn function_is_strict(&self, function: &CompiledFunction) -> bool {
+        self.code_is_strict(&function.code)
+    }
+
+    fn code_is_strict(&self, code: &[Opcode]) -> bool {
+        let mut cursor = 0usize;
+        while cursor < code.len() {
+            match &code[cursor] {
+                Opcode::DefineFunction { .. } => cursor += 1,
+                _ => break,
+            }
+        }
+        while cursor + 1 < code.len() {
+            match (&code[cursor], &code[cursor + 1]) {
+                (Opcode::LoadString(value), Opcode::Pop) => {
+                    if value == "use strict" {
+                        return true;
+                    }
+                    cursor += 2;
+                }
+                _ => break,
+            }
+        }
+        false
     }
 
     fn create_host_function_value(&mut self, host: HostFunction) -> JsValue {
@@ -1467,13 +1534,14 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_this_loads_as_undefined() {
+    fn unresolved_this_loads_as_global_object() {
         let chunk = empty_chunk(vec![
             Opcode::LoadIdentifier("this".to_string()),
             Opcode::Halt,
         ]);
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+        let value = vm.execute(&chunk).expect("execution should succeed");
+        assert!(matches!(value, JsValue::Object(_)));
     }
 
     #[test]

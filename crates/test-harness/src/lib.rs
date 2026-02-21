@@ -209,7 +209,16 @@ mod tests {
     #[test]
     fn supports_string_replace_callback_baseline() {
         let result = run_script(
-            "var x = 1; var out = 'ab'.replace('b', function() { x = this; return 'a'; }); (out === 'aa') && (x === undefined);",
+            "var x = 1; var out = 'ab'.replace('b', function() { x = this; return 'a'; }); (out === 'aa') && (typeof x === 'object') && (x !== null);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_string_replace_callback_strict_this() {
+        let result = run_script(
+            "var x = 1; var out = 'ab'.replace('b', function() { 'use strict'; x = this; return 'a'; }); (out === 'aa') && (x === undefined);",
             &[],
         );
         assert_eq!(result, Ok(JsValue::Bool(true)));
