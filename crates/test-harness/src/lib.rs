@@ -113,6 +113,10 @@ mod tests {
             Ok(JsValue::String("function".to_string()))
         );
         assert_eq!(
+            run_expression("typeof Symbol"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
             run_expression("typeof isNaN"),
             Ok(JsValue::String("function".to_string()))
         );
@@ -186,6 +190,15 @@ mod tests {
             run_script("isNaN(Number.NaN);", &[]),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn supports_symbol_computed_property_baseline() {
+        let result = run_script(
+            "var obj = { [Symbol.iterator]: 7 }; obj[Symbol.iterator];",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(7.0)));
     }
 
     #[test]

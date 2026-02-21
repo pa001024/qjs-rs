@@ -26,6 +26,10 @@ pub fn install_baseline(realm: &mut Realm) {
         "RegExp",
         JsValue::NativeFunction(NativeFunction::RegExpConstructor),
     );
+    realm.define_global(
+        "Symbol",
+        JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+    );
     realm.define_global("isNaN", JsValue::NativeFunction(NativeFunction::IsNaN));
     realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
     realm.define_global(

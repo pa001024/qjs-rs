@@ -831,7 +831,12 @@ impl Vm {
                     Ok(constructed)
                 }
             }
-            JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
+            JsValue::NativeFunction(native) => {
+                if matches!(native, NativeFunction::SymbolConstructor) {
+                    return Err(VmError::NotCallable);
+                }
+                self.execute_native_call(native, args, realm)
+            }
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
@@ -870,7 +875,12 @@ impl Vm {
                     Ok(constructed)
                 }
             }
-            JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
+            JsValue::NativeFunction(native) => {
+                if matches!(native, NativeFunction::SymbolConstructor) {
+                    return Err(VmError::NotCallable);
+                }
+                self.execute_native_call(native, args, realm)
+            }
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
@@ -1318,6 +1328,18 @@ impl Vm {
                 let value = args
                     .first()
                     .map_or(String::new(), |value| self.coerce_to_string(value));
+                Ok(JsValue::String(value))
+            }
+            NativeFunction::SymbolConstructor => {
+                let description = match args.first() {
+                    None | Some(JsValue::Undefined) => String::new(),
+                    Some(value) => self.coerce_to_string(value),
+                };
+                let value = if description.is_empty() {
+                    "Symbol()".to_string()
+                } else {
+                    format!("Symbol({description})")
+                };
                 Ok(JsValue::String(value))
             }
             NativeFunction::IsNaN => {
@@ -2344,6 +2366,45 @@ impl Vm {
                 JsValue::NativeFunction(NativeFunction::ObjectGetPrototypeOf)
             }
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
+            (NativeFunction::SymbolConstructor, "iterator") => {
+                JsValue::String("Symbol.iterator".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "asyncIterator") => {
+                JsValue::String("Symbol.asyncIterator".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "hasInstance") => {
+                JsValue::String("Symbol.hasInstance".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "isConcatSpreadable") => {
+                JsValue::String("Symbol.isConcatSpreadable".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "match") => {
+                JsValue::String("Symbol.match".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "matchAll") => {
+                JsValue::String("Symbol.matchAll".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "replace") => {
+                JsValue::String("Symbol.replace".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "search") => {
+                JsValue::String("Symbol.search".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "species") => {
+                JsValue::String("Symbol.species".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "split") => {
+                JsValue::String("Symbol.split".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "toPrimitive") => {
+                JsValue::String("Symbol.toPrimitive".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "toStringTag") => {
+                JsValue::String("Symbol.toStringTag".to_string())
+            }
+            (NativeFunction::SymbolConstructor, "unscopables") => {
+                JsValue::String("Symbol.unscopables".to_string())
+            }
             (NativeFunction::Assert, "sameValue") => {
                 self.create_host_function_value(HostFunction::AssertSameValue)
             }
