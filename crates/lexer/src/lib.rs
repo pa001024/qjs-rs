@@ -133,7 +133,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
     while pos < bytes.len() {
         let byte = bytes[pos];
-        if byte.is_ascii_whitespace() {
+        if byte.is_ascii_whitespace() || byte == 0x0B {
             pos += 1;
             continue;
         }
@@ -874,6 +874,15 @@ mod tests {
     #[test]
     fn treats_unicode_line_separators_as_whitespace() {
         let tokens = lex("1\u{2028}+\u{2029}2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn treats_vertical_tab_as_whitespace() {
+        let tokens = lex("1\u{000B}+2").expect("tokenization should succeed");
         assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
         assert_eq!(tokens[1].kind, TokenKind::Plus);
         assert_eq!(tokens[2].kind, TokenKind::Number(2.0));

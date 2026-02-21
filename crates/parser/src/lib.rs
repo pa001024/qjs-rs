@@ -1095,7 +1095,7 @@ impl Parser {
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        const MAX_EXPRESSION_DEPTH: usize = 32;
+        const MAX_EXPRESSION_DEPTH: usize = 40;
         self.expression_depth += 1;
         if self.expression_depth > MAX_EXPRESSION_DEPTH {
             self.expression_depth = self.expression_depth.saturating_sub(1);
@@ -3039,11 +3039,11 @@ mod tests {
     #[test]
     fn rejects_expression_nesting_too_deep() {
         let mut source = String::new();
-        for _ in 0..40 {
+        for _ in 0..200 {
             source.push('(');
         }
         source.push('1');
-        for _ in 0..40 {
+        for _ in 0..200 {
             source.push(')');
         }
         let err = parse_expression(&source).expect_err("parser should fail");
