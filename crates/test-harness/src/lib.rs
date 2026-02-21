@@ -231,6 +231,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_executes_call_with_spread_and_trailing_comma_shape() {
+        let result = run_script("function foo() {} foo(...[],);", &[]);
+        assert_eq!(result, Ok(JsValue::Undefined));
+    }
+
+    #[test]
     fn arguments_object_exposes_length() {
         let result = run_script(
             "function f(a, b, c) { return arguments.length; } f(1, 2, 3);",

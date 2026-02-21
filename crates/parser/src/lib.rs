@@ -1397,6 +1397,8 @@ impl Parser {
             return Ok(args);
         }
         loop {
+            let _is_spread = self.matches(&TokenKind::Ellipsis);
+            // Baseline parser accepts spread syntax shape first; runtime treats as plain arg.
             args.push(self.parse_expression_inner()?);
             if self.matches(&TokenKind::Comma) {
                 if self.check(&TokenKind::RParen) {
@@ -1510,6 +1512,7 @@ impl Parser {
             | TokenKind::GreaterEqual
             | TokenKind::AndAnd
             | TokenKind::OrOr
+            | TokenKind::Ellipsis
             | TokenKind::Dot
             | TokenKind::Comma
             | TokenKind::Colon => Err(ParseError {
@@ -1999,6 +2002,16 @@ mod tests {
         let expected = Expr::Call {
             callee: Box::new(Expr::Identifier(Identifier("f".to_string()))),
             arguments: vec![Expr::Number(1.0)],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_call_with_spread_and_trailing_comma() {
+        let parsed = parse_expression("foo(...[],)").expect("parser should succeed");
+        let expected = Expr::Call {
+            callee: Box::new(Expr::Identifier(Identifier("foo".to_string()))),
+            arguments: vec![Expr::ArrayLiteral(vec![])],
         };
         assert_eq!(parsed, expected);
     }

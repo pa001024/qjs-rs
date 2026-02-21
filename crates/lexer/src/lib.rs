@@ -29,6 +29,7 @@ pub enum TokenKind {
     GreaterEqual,
     AndAnd,
     OrOr,
+    Ellipsis,
     Dot,
     Comma,
     Colon,
@@ -336,6 +337,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'.' {
+            if pos + 2 < bytes.len() && bytes[pos + 1] == b'.' && bytes[pos + 2] == b'.' {
+                tokens.push(Token {
+                    kind: TokenKind::Ellipsis,
+                    span: Span {
+                        start: pos,
+                        end: pos + 3,
+                    },
+                });
+                pos += 3;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Dot,
                 span: Span {
@@ -810,6 +822,14 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Dot);
         assert_eq!(tokens[2].kind, TokenKind::Identifier("value".to_string()));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_ellipsis_token() {
+        let tokens = lex("...x").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Ellipsis);
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("x".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
     }
 
     #[test]
