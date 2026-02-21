@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3455, failed=1545
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3464, failed=1536
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -79,5 +79,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - baseline globals 新增最小 `Symbol` 支持（含 `Symbol.iterator` 等常见 well-known keys 以及 computed key 测试链路），继续清理 `computed-property-names/object/*` 的 `UnknownIdentifier("Symbol")` 失败，`language` 基线提升至 `3425/1575`。
 - bytecode 编译器补齐函数级 `var` 提升语义（顶层函数体预声明 + 嵌套 block/if/for/switch/try 收集 + 块内 `var` 初始化走 `StoreVariable` 绑定已提升变量），显著削减 `block-scope/shadowing` 中的 `UnknownIdentifier` 与值覆盖异常，`language` 基线提升至 `3454/1546`。
 - parser 新增 strict-mode 后置校验链路（directive-prologue 识别 + script/function/body 递归检查），在严格模式下禁止 `implements/interface/package/private/protected/public/static` 作为绑定名或标识符引用，进一步降低 `directive-prologue` 误通过，`language` 基线提升至 `3455/1545`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3455/1545`（主要剩余在块级作用域细节、computed-property/class 细分语义、strict/directive-prologue 早期错误与部分内建缺失）。
+- parser/VM 打通 class computed accessor 与受限构造路径：class body 支持 `get/set` 计算属性名解析并经 `Object.defineProperty` 降级定义；VM 仅对带内部 marker 的“类构造对象”开放 `new` 构造，避免把普通对象误判为可构造，`language` 基线提升至 `3464/1536`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3464/1536`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
