@@ -25,12 +25,16 @@ pub enum TokenKind {
     LessEqual,
     Greater,
     GreaterEqual,
+    AndAnd,
+    OrOr,
     Dot,
     Comma,
     Colon,
     Semicolon,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     LBrace,
     RBrace,
     Eof,
@@ -97,6 +101,33 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'/' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'/' {
+                pos += 2;
+                while pos < bytes.len() && bytes[pos] != b'\n' {
+                    pos += 1;
+                }
+                continue;
+            }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'*' {
+                let start = pos;
+                pos += 2;
+                let mut terminated = false;
+                while pos + 1 < bytes.len() {
+                    if bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
+                        pos += 2;
+                        terminated = true;
+                        break;
+                    }
+                    pos += 1;
+                }
+                if !terminated {
+                    return Err(LexError {
+                        message: "unterminated block comment".to_string(),
+                        position: start,
+                    });
+                }
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Slash,
                 span: Span {
@@ -206,6 +237,42 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
+        if byte == b'&' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'&' {
+                tokens.push(Token {
+                    kind: TokenKind::AndAnd,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            return Err(LexError {
+                message: "unexpected character '&'".to_string(),
+                position: pos,
+            });
+        }
+
+        if byte == b'|' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'|' {
+                tokens.push(Token {
+                    kind: TokenKind::OrOr,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
+            return Err(LexError {
+                message: "unexpected character '|'".to_string(),
+                position: pos,
+            });
+        }
+
         if byte == b';' {
             tokens.push(Token {
                 kind: TokenKind::Semicolon,
@@ -269,6 +336,30 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b')' {
             tokens.push(Token {
                 kind: TokenKind::RParen,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'[' {
+            tokens.push(Token {
+                kind: TokenKind::LBracket,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b']' {
+            tokens.push(Token {
+                kind: TokenKind::RBracket,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -493,6 +584,16 @@ mod tests {
     }
 
     #[test]
+    fn lexes_brackets() {
+        let tokens = lex("arr[0]").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("arr".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::LBracket);
+        assert_eq!(tokens[2].kind, TokenKind::Number(0.0));
+        assert_eq!(tokens[3].kind, TokenKind::RBracket);
+        assert_eq!(tokens[4].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn lexes_function_syntax() {
         let tokens =
             lex("function add(a, b) { return a + b; }").expect("tokenization should succeed");
@@ -508,6 +609,18 @@ mod tests {
         assert_eq!(tokens[6].kind, TokenKind::RParen);
         assert_eq!(tokens[7].kind, TokenKind::LBrace);
         assert_eq!(tokens[8].kind, TokenKind::Identifier("return".to_string()));
+    }
+
+    #[test]
+    fn skips_line_and_block_comments() {
+        let tokens =
+            lex("1 + 2 // comment #1\n/* block #2 */ + 3").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
 
     #[test]
@@ -542,6 +655,17 @@ mod tests {
         assert_eq!(tokens[12].kind, TokenKind::LessEqual);
         assert_eq!(tokens[14].kind, TokenKind::Greater);
         assert_eq!(tokens[16].kind, TokenKind::GreaterEqual);
+    }
+
+    #[test]
+    fn lexes_logical_operators() {
+        let tokens = lex("a && b || c").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::AndAnd);
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("b".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::OrOr);
+        assert_eq!(tokens[4].kind, TokenKind::Identifier("c".to_string()));
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
 
     #[test]

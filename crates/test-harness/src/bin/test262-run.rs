@@ -10,6 +10,7 @@ fn main() {
     let mut fail_fast = false;
     let mut allow_failures = false;
     let mut json: Option<PathBuf> = None;
+    let mut show_failures = 0usize;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -45,6 +46,15 @@ fn main() {
                 });
                 json = Some(PathBuf::from(value));
             }
+            "--show-failures" => {
+                i += 1;
+                let value = args.get(i).unwrap_or_else(|| {
+                    panic!("--show-failures requires an integer argument");
+                });
+                show_failures = value
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| panic!("invalid --show-failures value: {value}"));
+            }
             "--help" | "-h" => {
                 print_help();
                 return;
@@ -63,6 +73,7 @@ fn main() {
     let options = SuiteOptions {
         max_cases,
         fail_fast,
+        failure_details_limit: show_failures,
     };
 
     let summary = run_suite(&root, options).unwrap_or_else(|err| {
@@ -77,6 +88,15 @@ fn main() {
         });
     }
 
+    if !summary.failures.is_empty() {
+        println!("sample failures:");
+        for detail in &summary.failures {
+            println!("  - {}", detail.path);
+            println!("    expected: {:?}", detail.expected);
+            println!("    actual:   {:?}", detail.actual);
+        }
+    }
+
     if summary.failed > 0 && !allow_failures {
         std::process::exit(1);
     }
@@ -84,7 +104,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>]"
+        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>] [--show-failures N]"
     );
 }
 

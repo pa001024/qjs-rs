@@ -117,10 +117,8 @@ impl Vm {
                 Opcode::LoadString(value) => self.stack.push(JsValue::String(value.clone())),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::CreateObject => {
-                    let object_id = self.next_object_id;
-                    self.next_object_id += 1;
-                    self.objects.insert(object_id, JsObject::default());
-                    self.stack.push(JsValue::Object(object_id));
+                    let object = self.create_object_value();
+                    self.stack.push(object);
                 }
                 Opcode::LoadIdentifier(name) => {
                     let value = if let Some(binding_id) = self.resolve_binding_id(name) {
@@ -219,6 +217,25 @@ impl Vm {
                         .unwrap_or(JsValue::Undefined);
                     self.stack.push(value);
                 }
+                Opcode::GetPropertyByValue => {
+                    let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let key = self.coerce_to_property_key(&key);
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property access expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    let value = object
+                        .properties
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined);
+                    self.stack.push(value);
+                }
                 Opcode::DefineProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -247,6 +264,22 @@ impl Vm {
                     object.properties.insert(name.clone(), value.clone());
                     self.stack.push(value);
                 }
+                Opcode::SetPropertyByValue => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let key = self.coerce_to_property_key(&key);
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.properties.insert(key, value.clone());
+                    self.stack.push(value);
+                }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
                 Opcode::ExitScope => {
                     if self.scopes.pop().is_none() || self.scopes.is_empty() {
@@ -268,7 +301,10 @@ impl Vm {
                             let lhs = self.coerce_to_string(&lhs);
                             self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
                         }
-                        _ => return Err(VmError::TypeError("arithmetic expects numeric operands")),
+                        (lhs, rhs) => {
+                            self.stack
+                                .push(JsValue::Number(self.to_number(&lhs) + self.to_number(&rhs)));
+                        }
                     }
                 }
                 Opcode::Sub => {
@@ -285,10 +321,7 @@ impl Vm {
                 }
                 Opcode::Neg => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match value {
-                        JsValue::Number(number) => self.stack.push(JsValue::Number(-number)),
-                        _ => return Err(VmError::TypeError("unary '-' expects numeric operand")),
-                    }
+                    self.stack.push(JsValue::Number(-self.to_number(&value)));
                 }
                 Opcode::Not => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -388,6 +421,10 @@ impl Vm {
                     }
                     return Ok(ExecutionSignal::Return);
                 }
+                Opcode::Dup => {
+                    let value = self.stack.last().cloned().ok_or(VmError::StackUnderflow)?;
+                    self.stack.push(value);
+                }
                 Opcode::Pop => {
                     self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 }
@@ -435,6 +472,28 @@ impl Vm {
             let binding_id = self.create_binding(value, true);
             frame_scope.insert(param_name.clone(), binding_id);
         }
+        let arguments_value = self.create_object_value();
+        let arguments_id = match arguments_value {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        {
+            let object = self
+                .objects
+                .get_mut(&arguments_id)
+                .ok_or(VmError::UnknownObject(arguments_id))?;
+            object
+                .properties
+                .insert("length".to_string(), JsValue::Number(args.len() as f64));
+            object
+                .properties
+                .insert("callee".to_string(), JsValue::Function(closure_id));
+            for (index, arg) in args.iter().enumerate() {
+                object.properties.insert(index.to_string(), arg.clone());
+            }
+        }
+        let arguments_binding_id = self.create_binding(arguments_value, true);
+        frame_scope.insert("arguments".to_string(), arguments_binding_id);
 
         let saved_stack = std::mem::take(&mut self.stack);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -510,6 +569,13 @@ impl Vm {
         id
     }
 
+    fn create_object_value(&mut self) -> JsValue {
+        let id = self.next_object_id;
+        self.next_object_id += 1;
+        self.objects.insert(id, JsObject::default());
+        JsValue::Object(id)
+    }
+
     fn current_scope_ref(&self) -> Result<ScopeRef, VmError> {
         self.scopes.last().cloned().ok_or(VmError::ScopeUnderflow)
     }
@@ -526,19 +592,13 @@ impl Vm {
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        match (left, right) {
-            (JsValue::Number(lhs), JsValue::Number(rhs)) => Ok(op(lhs, rhs)),
-            _ => Err(VmError::TypeError("arithmetic expects numeric operands")),
-        }
+        Ok(op(self.to_number(&left), self.to_number(&right)))
     }
 
     fn eval_numeric_compare(&mut self, op: impl FnOnce(f64, f64) -> bool) -> Result<bool, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        match (left, right) {
-            (JsValue::Number(lhs), JsValue::Number(rhs)) => Ok(op(lhs, rhs)),
-            _ => Err(VmError::TypeError("comparison expects numeric operands")),
-        }
+        Ok(op(self.to_number(&left), self.to_number(&right)))
     }
 
     fn coerce_to_string(&self, value: &JsValue) -> String {
@@ -550,6 +610,34 @@ impl Vm {
             JsValue::Function(_) => "[function]".to_string(),
             JsValue::Object(_) => "[object Object]".to_string(),
             JsValue::Undefined => "undefined".to_string(),
+        }
+    }
+
+    fn coerce_to_property_key(&self, value: &JsValue) -> String {
+        self.coerce_to_string(value)
+    }
+
+    fn to_number(&self, value: &JsValue) -> f64 {
+        match value {
+            JsValue::Number(number) => *number,
+            JsValue::Bool(boolean) => {
+                if *boolean {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            JsValue::Null => 0.0,
+            JsValue::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    0.0
+                } else {
+                    trimmed.parse::<f64>().unwrap_or(f64::NAN)
+                }
+            }
+            JsValue::Function(_) | JsValue::Object(_) => f64::NAN,
+            JsValue::Undefined => f64::NAN,
         }
     }
 
@@ -592,6 +680,18 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_top_stack_value() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::Dup,
+            Opcode::Add,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
     fn concatenates_when_string_is_present_in_addition() {
         let chunk = empty_chunk(vec![
             Opcode::LoadString("qjs".to_string()),
@@ -617,6 +717,34 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(5.0)));
+    }
+
+    #[test]
+    fn arithmetic_applies_basic_numeric_coercion() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::LoadBool(true),
+            Opcode::Add,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn multiplying_object_yields_nan_instead_of_type_error() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::CreateObject,
+            Opcode::Mul,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        let value = vm.execute(&chunk).expect("execution should succeed");
+        match value {
+            JsValue::Number(number) => assert!(number.is_nan()),
+            other => panic!("expected numeric result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -857,6 +985,41 @@ mod tests {
     }
 
     #[test]
+    fn function_call_exposes_arguments_object() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::DefineFunction {
+                    name: "sum".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadIdentifier("sum".to_string()),
+                Opcode::LoadNumber(20.0),
+                Opcode::LoadNumber(22.0),
+                Opcode::Call(2),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "sum".to_string(),
+                params: vec!["a".to_string(), "b".to_string()],
+                code: vec![
+                    Opcode::LoadIdentifier("arguments".to_string()),
+                    Opcode::LoadNumber(0.0),
+                    Opcode::GetPropertyByValue,
+                    Opcode::LoadIdentifier("arguments".to_string()),
+                    Opcode::LoadNumber(1.0),
+                    Opcode::GetPropertyByValue,
+                    Opcode::Add,
+                    Opcode::Return,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
     fn function_call_observes_outer_assignment() {
         let chunk = Chunk {
             code: vec![
@@ -1000,6 +1163,28 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn supports_computed_property_access_and_assignment() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::DefineVariable {
+                name: "obj".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::LoadNumber(3.0),
+            Opcode::LoadNumber(9.0),
+            Opcode::SetPropertyByValue,
+            Opcode::Pop,
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::LoadNumber(3.0),
+            Opcode::GetPropertyByValue,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(9.0)));
     }
 
     #[test]

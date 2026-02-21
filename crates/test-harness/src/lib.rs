@@ -66,6 +66,17 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_basic_numeric_coercion() {
+        assert_eq!(run_expression("'2' * 3"), Ok(JsValue::Number(6.0)));
+
+        let value = run_expression("1 * {}").expect("expression should execute");
+        match value {
+            JsValue::Number(number) => assert!(number.is_nan()),
+            other => panic!("expected Number(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn evaluates_unary_operators() {
         assert_eq!(run_expression("-5 + +2"), Ok(JsValue::Number(-3.0)));
         assert_eq!(run_expression("!0"), Ok(JsValue::Bool(true)));
@@ -102,6 +113,14 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_logical_operators_with_short_circuit() {
+        assert_eq!(run_expression("0 && 1"), Ok(JsValue::Number(0.0)));
+        assert_eq!(run_expression("1 && 2"), Ok(JsValue::Number(2.0)));
+        assert_eq!(run_expression("0 || 2"), Ok(JsValue::Number(2.0)));
+        assert_eq!(run_expression("1 || 2"), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn surfaces_unknown_identifier_error() {
         let result = run_expression("foo + 1");
         assert!(result.is_err());
@@ -122,6 +141,18 @@ mod tests {
     fn evaluates_let_const_and_assignment_script() {
         let result = run_script("let x = 1; const y = 2; x = x + y; x;", &[]);
         assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn evaluates_var_declaration_script() {
+        let result = run_script("var x = 1; x = x + 2; x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn short_circuit_skips_rhs_side_effects() {
+        let result = run_script("let x = 0; 0 && (x = 1); 1 || (x = 2); x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(0.0)));
     }
 
     #[test]
@@ -167,6 +198,24 @@ mod tests {
             &[],
         );
         assert_eq!(result, Ok(JsValue::Number(21.0)));
+    }
+
+    #[test]
+    fn function_has_arguments_object() {
+        let result = run_script(
+            "function f(a, b) { return arguments[0] + arguments[1]; } f(20, 22);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn arguments_object_exposes_length() {
+        let result = run_script(
+            "function f(a, b, c) { return arguments.length; } f(1, 2, 3);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
     }
 
     #[test]
@@ -388,6 +437,15 @@ mod tests {
     #[test]
     fn evaluates_member_assignment_expression() {
         let result = run_script("let obj = {}; obj.value = 7; obj.value;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn evaluates_computed_member_assignment_expression() {
+        let result = run_script(
+            "let obj = {}; let key = 'value'; obj[key] = 7; obj[key];",
+            &[],
+        );
         assert_eq!(result, Ok(JsValue::Number(7.0)));
     }
 }

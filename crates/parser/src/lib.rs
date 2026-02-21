@@ -142,6 +142,9 @@ impl Parser {
         if self.matches_keyword("const") {
             return self.parse_variable_declaration(BindingKind::Const);
         }
+        if self.matches_keyword("var") {
+            return self.parse_variable_declaration(BindingKind::Var);
+        }
         let expr = self.parse_expression_inner()?;
         Ok(Stmt::Expression(expr))
     }
@@ -238,6 +241,18 @@ impl Parser {
             Some(ForInitializer::VariableDeclaration(declaration))
         } else if self.matches_keyword("const") {
             let declaration = self.parse_variable_declaration(BindingKind::Const)?;
+            let declaration = match declaration {
+                Stmt::VariableDeclaration(declaration) => declaration,
+                _ => {
+                    return Err(ParseError {
+                        message: "invalid for initializer".to_string(),
+                        position: self.current_position(),
+                    });
+                }
+            };
+            Some(ForInitializer::VariableDeclaration(declaration))
+        } else if self.matches_keyword("var") {
+            let declaration = self.parse_variable_declaration(BindingKind::Var)?;
             let declaration = match declaration {
                 Stmt::VariableDeclaration(declaration) => declaration,
                 _ => {
@@ -533,7 +548,7 @@ impl Parser {
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_comparison()?;
+        let left = self.parse_logical_or()?;
         if self.matches(&TokenKind::Equal) {
             let assignment_position = self.previous_position();
             let value = self.parse_assignment()?;
@@ -547,6 +562,11 @@ impl Parser {
                     property,
                     value: Box::new(value),
                 }),
+                Expr::MemberComputed { object, property } => Ok(Expr::AssignMemberComputed {
+                    object,
+                    property,
+                    value: Box::new(value),
+                }),
                 _ => Err(ParseError {
                     message: "invalid assignment target".to_string(),
                     position: assignment_position,
@@ -555,6 +575,32 @@ impl Parser {
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_logical_or(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_logical_and()?;
+        while self.matches(&TokenKind::OrOr) {
+            let right = self.parse_logical_and()?;
+            expr = Expr::Binary {
+                op: BinaryOp::LogicalOr,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_comparison()?;
+        while self.matches(&TokenKind::AndAnd) {
+            let right = self.parse_comparison()?;
+            expr = Expr::Binary {
+                op: BinaryOp::LogicalAnd,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
@@ -674,6 +720,15 @@ impl Parser {
                 };
                 continue;
             }
+            if self.matches(&TokenKind::LBracket) {
+                let property = self.parse_expression_inner()?;
+                self.expect(TokenKind::RBracket, "expected ']' after computed property")?;
+                expr = Expr::MemberComputed {
+                    object: Box::new(expr),
+                    property: Box::new(property),
+                };
+                continue;
+            }
             break;
         }
         Ok(expr)
@@ -744,6 +799,10 @@ impl Parser {
                 Ok(expr)
             }
             TokenKind::LBrace => self.parse_object_literal(),
+            TokenKind::LBracket => Err(ParseError {
+                message: "unexpected '[' in expression".to_string(),
+                position,
+            }),
             TokenKind::Plus
             | TokenKind::Minus
             | TokenKind::Star
@@ -758,6 +817,8 @@ impl Parser {
             | TokenKind::LessEqual
             | TokenKind::Greater
             | TokenKind::GreaterEqual
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
             | TokenKind::Dot
             | TokenKind::Comma
             | TokenKind::Colon => Err(ParseError {
@@ -774,6 +835,10 @@ impl Parser {
             }),
             TokenKind::RBrace => Err(ParseError {
                 message: "unexpected '}'".to_string(),
+                position,
+            }),
+            TokenKind::RBracket => Err(ParseError {
+                message: "unexpected ']'".to_string(),
                 position,
             }),
             TokenKind::Eof => Err(ParseError {
@@ -992,6 +1057,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_computed_member_assignment() {
+        let parsed = parse_expression("obj[key] = 1").expect("parser should succeed");
+        let expected = Expr::AssignMemberComputed {
+            object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+            property: Box::new(Expr::Identifier(Identifier("key".to_string()))),
+            value: Box::new(Expr::Number(1.0)),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
     fn parses_member_chain_with_call() {
         let parsed = parse_expression("obj.fn(1).value").expect("parser should succeed");
         let expected = Expr::Member {
@@ -1075,6 +1151,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_logical_expression_with_precedence() {
+        let parsed = parse_expression("a && b || c").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::LogicalOr,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::LogicalAnd,
+                left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+                right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+            }),
+            right: Box::new(Expr::Identifier(Identifier("c".to_string()))),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
     fn parses_function_declaration_and_return() {
         let parsed = parse_script("function add(a, b) { return a + b; } add(1, 2);")
             .expect("script parsing should succeed");
@@ -1125,6 +1216,22 @@ mod tests {
                         left: Box::new(Expr::Identifier(Identifier("y".to_string()))),
                         right: Box::new(Expr::Number(3.0)),
                     }),
+                }),
+                Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+            ],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_var_declaration() {
+        let parsed = parse_script("var x = 1; x;").expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: Identifier("x".to_string()),
+                    initializer: Some(Expr::Number(1.0)),
                 }),
                 Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
             ],

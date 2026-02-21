@@ -48,6 +48,14 @@ pub enum ExecutionOutcome {
 pub struct SuiteOptions {
     pub max_cases: Option<usize>,
     pub fail_fast: bool,
+    pub failure_details_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureDetail {
+    pub path: String,
+    pub expected: ExpectedOutcome,
+    pub actual: ExecutionOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -57,6 +65,7 @@ pub struct SuiteSummary {
     pub skipped: usize,
     pub passed: usize,
     pub failed: usize,
+    pub failures: Vec<FailureDetail>,
 }
 
 pub fn parse_test262_case(source: &str) -> Result<Test262Case<'_>, String> {
@@ -111,6 +120,13 @@ pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
     !frontmatter.features.is_empty()
 }
 
+fn requires_unsupported_harness_globals(source: &str) -> bool {
+    source.contains("assert(")
+        || source.contains("assert.")
+        || source.contains("Test262Error")
+        || source.contains("$262")
+}
+
 pub fn execute_case(source: &str) -> ExecutionOutcome {
     let parsed = match parse_script(source) {
         Ok(script) => script,
@@ -145,7 +161,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         let case = parse_test262_case(&source)
             .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
 
-        if should_skip(&case.frontmatter) {
+        if should_skip(&case.frontmatter) || requires_unsupported_harness_globals(case.body) {
             summary.skipped += 1;
             continue;
         }
@@ -170,6 +186,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         }
 
         summary.failed += 1;
+        if summary.failures.len() < options.failure_details_limit {
+            summary.failures.push(FailureDetail {
+                path: file.display().to_string(),
+                expected: expected.clone(),
+                actual: actual.clone(),
+            });
+        }
         if options.fail_fast {
             return Err(format!(
                 "test262 mismatch at {}: expected {:?}, got {:?}",
@@ -400,6 +423,23 @@ import "x";
         let feature_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert!(should_skip(&feature_case.frontmatter));
+    }
+
+    #[test]
+    fn detects_unsupported_harness_globals_in_body() {
+        assert!(super::requires_unsupported_harness_globals("assert(true);"));
+        assert!(super::requires_unsupported_harness_globals(
+            "assert.sameValue(x, y);"
+        ));
+        assert!(super::requires_unsupported_harness_globals(
+            "throw new Test262Error();"
+        ));
+        assert!(super::requires_unsupported_harness_globals(
+            "$262.detachArrayBuffer(ab);"
+        ));
+        assert!(!super::requires_unsupported_harness_globals(
+            "let x = 1; x + 1;"
+        ));
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub enum BinaryOp {
     LessEqual,
     Greater,
     GreaterEqual,
+    LogicalAnd,
+    LogicalOr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,10 @@ pub enum Expr {
         object: Box<Expr>,
         property: String,
     },
+    MemberComputed {
+        object: Box<Expr>,
+        property: Box<Expr>,
+    },
     Call {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
@@ -60,6 +66,11 @@ pub enum Expr {
         property: String,
         value: Box<Expr>,
     },
+    AssignMemberComputed {
+        object: Box<Expr>,
+        property: Box<Expr>,
+        value: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +83,7 @@ pub struct ObjectProperty {
 pub enum BindingKind {
     Let,
     Const,
+    Var,
 }
 
 #[derive(Debug, Clone, PartialEq)]

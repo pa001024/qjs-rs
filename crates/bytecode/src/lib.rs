@@ -24,8 +24,10 @@ pub enum Opcode {
     },
     StoreVariable(String),
     GetProperty(String),
+    GetPropertyByValue,
     DefineProperty(String),
     SetProperty(String),
+    SetPropertyByValue,
     EnterScope,
     ExitScope,
     Add,
@@ -52,6 +54,7 @@ pub enum Opcode {
     Throw,
     Call(usize),
     Return,
+    Dup,
     Pop,
     Halt,
 }
@@ -182,7 +185,7 @@ impl Compiler {
                 }
                 code.push(Opcode::DefineVariable {
                     name: binding_name.clone(),
-                    mutable: matches!(kind, BindingKind::Let),
+                    mutable: matches!(kind, BindingKind::Let | BindingKind::Var),
                 });
                 false
             }
@@ -799,10 +802,25 @@ impl Compiler {
                 self.compile_expr(value, code);
                 code.push(Opcode::SetProperty(property.clone()));
             }
+            Expr::AssignMemberComputed {
+                object,
+                property,
+                value,
+            } => {
+                self.compile_expr(object, code);
+                self.compile_expr(property, code);
+                self.compile_expr(value, code);
+                code.push(Opcode::SetPropertyByValue);
+            }
             Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
             Expr::Member { object, property } => {
                 self.compile_expr(object, code);
                 code.push(Opcode::GetProperty(property.clone()));
+            }
+            Expr::MemberComputed { object, property } => {
+                self.compile_expr(object, code);
+                self.compile_expr(property, code);
+                code.push(Opcode::GetPropertyByValue);
             }
             Expr::Call { callee, arguments } => {
                 self.compile_expr(callee, code);
@@ -812,6 +830,32 @@ impl Compiler {
                 code.push(Opcode::Call(arguments.len()));
             }
             Expr::Binary { op, left, right } => {
+                if *op == BinaryOp::LogicalAnd {
+                    self.compile_expr(left, code);
+                    code.push(Opcode::Dup);
+                    let jump_false_pos = code.len();
+                    code.push(Opcode::JumpIfFalse(usize::MAX));
+                    code.push(Opcode::Pop);
+                    self.compile_expr(right, code);
+                    let end = code.len();
+                    code[jump_false_pos] = Opcode::JumpIfFalse(end);
+                    return;
+                }
+                if *op == BinaryOp::LogicalOr {
+                    self.compile_expr(left, code);
+                    code.push(Opcode::Dup);
+                    let jump_false_pos = code.len();
+                    code.push(Opcode::JumpIfFalse(usize::MAX));
+                    let jump_end_pos = code.len();
+                    code.push(Opcode::Jump(usize::MAX));
+                    let rhs_start = code.len();
+                    code.push(Opcode::Pop);
+                    self.compile_expr(right, code);
+                    let end = code.len();
+                    code[jump_false_pos] = Opcode::JumpIfFalse(rhs_start);
+                    code[jump_end_pos] = Opcode::Jump(end);
+                    return;
+                }
                 self.compile_expr(left, code);
                 self.compile_expr(right, code);
                 let opcode = match op {
@@ -827,6 +871,7 @@ impl Compiler {
                     BinaryOp::LessEqual => Opcode::Le,
                     BinaryOp::Greater => Opcode::Gt,
                     BinaryOp::GreaterEqual => Opcode::Ge,
+                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
                 };
                 code.push(opcode);
             }
@@ -950,6 +995,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_computed_member_assignment_expression() {
+        let expr = Expr::AssignMemberComputed {
+            object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+            property: Box::new(Expr::Identifier(Identifier("key".to_string()))),
+            value: Box::new(Expr::Number(1.0)),
+        };
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("obj".to_string()),
+                Opcode::LoadIdentifier("key".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::SetPropertyByValue,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
     fn compiles_script_with_bindings() {
         let script = Script {
             statements: vec![
@@ -989,6 +1056,34 @@ mod tests {
             functions: vec![],
         };
 
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_var_declaration_as_mutable_binding() {
+        let script = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: Identifier("x".to_string()),
+                    initializer: None,
+                }),
+                Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+            ],
+        };
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
         assert_eq!(chunk, expected);
     }
 
@@ -1587,6 +1682,51 @@ mod tests {
                 Opcode::Eq,
                 Opcode::LoadNumber(0.0),
                 Opcode::Ne,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_logical_and_with_short_circuit() {
+        let expr = Expr::Binary {
+            op: BinaryOp::LogicalAnd,
+            left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+            right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("a".to_string()),
+                Opcode::Dup,
+                Opcode::JumpIfFalse(5),
+                Opcode::Pop,
+                Opcode::LoadIdentifier("b".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_logical_or_with_short_circuit() {
+        let expr = Expr::Binary {
+            op: BinaryOp::LogicalOr,
+            left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+            right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("a".to_string()),
+                Opcode::Dup,
+                Opcode::JumpIfFalse(4),
+                Opcode::Jump(6),
+                Opcode::Pop,
+                Opcode::LoadIdentifier("b".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],
