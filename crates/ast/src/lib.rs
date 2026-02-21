@@ -15,6 +15,10 @@ pub enum BinaryOp {
 pub enum Expr {
     Number(f64),
     Identifier(Identifier),
+    Call {
+        callee: Box<Expr>,
+        arguments: Vec<Expr>,
+    },
     Binary {
         op: BinaryOp,
         left: Box<Expr>,
@@ -40,8 +44,17 @@ pub struct VariableDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FunctionDeclaration {
+    pub name: Identifier,
+    pub params: Vec<Identifier>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VariableDeclaration(VariableDeclaration),
+    FunctionDeclaration(FunctionDeclaration),
+    Return(Option<Expr>),
     Expression(Expr),
     Block(Vec<Stmt>),
 }

@@ -109,4 +109,16 @@ mod tests {
         let result = run_script("let x = 1;", &[]);
         assert_eq!(result, Ok(JsValue::Undefined));
     }
+
+    #[test]
+    fn executes_function_declaration_and_call() {
+        let result = run_script("function add(a, b) { return a + b; } add(20, 22);", &[]);
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn function_call_can_observe_outer_binding() {
+        let result = run_script("let x = 10; function add(v) { return x + v; } add(1);", &[]);
+        assert_eq!(result, Ok(JsValue::Number(11.0)));
+    }
 }

@@ -15,6 +15,7 @@ pub enum TokenKind {
     Star,
     Slash,
     Equal,
+    Comma,
     Semicolon,
     LParen,
     RParen,
@@ -110,6 +111,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b';' {
             tokens.push(Token {
                 kind: TokenKind::Semicolon,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b',' {
+            tokens.push(Token {
+                kind: TokenKind::Comma,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -288,6 +301,24 @@ mod tests {
         assert_eq!(tokens[5].kind, TokenKind::Semicolon);
         assert_eq!(tokens[6].kind, TokenKind::RBrace);
         assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_function_syntax() {
+        let tokens =
+            lex("function add(a, b) { return a + b; }").expect("tokenization should succeed");
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::Identifier("function".to_string())
+        );
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("add".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::LParen);
+        assert_eq!(tokens[3].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[4].kind, TokenKind::Comma);
+        assert_eq!(tokens[5].kind, TokenKind::Identifier("b".to_string()));
+        assert_eq!(tokens[6].kind, TokenKind::RParen);
+        assert_eq!(tokens[7].kind, TokenKind::LBrace);
+        assert_eq!(tokens[8].kind, TokenKind::Identifier("return".to_string()));
     }
 
     #[test]

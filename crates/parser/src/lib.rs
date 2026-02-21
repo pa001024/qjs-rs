@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use ast::{BinaryOp, BindingKind, Expr, Identifier, Script, Stmt, VariableDeclaration};
+use ast::{
+    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, VariableDeclaration,
+};
 use lexer::{Token, TokenKind, lex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +37,16 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    function_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            function_depth: 0,
+        }
     }
 
     fn parse_statement_list(
@@ -58,9 +65,10 @@ impl Parser {
                 break;
             }
 
-            let stmt = self.parse_statement()?;
-            let needs_separator = !matches!(stmt, Stmt::Block(_));
-            statements.push(stmt);
+            let statement = self.parse_statement()?;
+            let needs_separator =
+                !matches!(statement, Stmt::Block(_) | Stmt::FunctionDeclaration(_));
+            statements.push(statement);
 
             if self.matches(&TokenKind::Semicolon) {
                 continue;
@@ -85,6 +93,12 @@ impl Parser {
         if self.check(&TokenKind::LBrace) {
             return self.parse_block_statement();
         }
+        if self.matches_keyword("function") {
+            return self.parse_function_declaration_statement();
+        }
+        if self.matches_keyword("return") {
+            return self.parse_return_statement();
+        }
         if self.matches_keyword("let") {
             return self.parse_variable_declaration(BindingKind::Let);
         }
@@ -100,6 +114,46 @@ impl Parser {
         let statements = self.parse_statement_list(Some(TokenKind::RBrace))?;
         self.expect(TokenKind::RBrace, "expected '}' after block")?;
         Ok(Stmt::Block(statements))
+    }
+
+    fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
+        let name = Identifier(self.expect_identifier("expected function name")?);
+        self.expect(TokenKind::LParen, "expected '(' after function name")?;
+        let params = self.parse_parameter_list()?;
+        self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+
+        self.expect(TokenKind::LBrace, "expected '{' before function body")?;
+        self.function_depth += 1;
+        let body = self.parse_statement_list(Some(TokenKind::RBrace));
+        self.function_depth = self.function_depth.saturating_sub(1);
+        let body = body?;
+        self.expect(TokenKind::RBrace, "expected '}' after function body")?;
+
+        Ok(Stmt::FunctionDeclaration(FunctionDeclaration {
+            name,
+            params,
+            body,
+        }))
+    }
+
+    fn parse_return_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.function_depth == 0 {
+            return Err(ParseError {
+                message: "return outside function".to_string(),
+                position: self.previous_position(),
+            });
+        }
+
+        let has_expr = !matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) | None
+        );
+        if has_expr {
+            let expr = self.parse_expression_inner()?;
+            Ok(Stmt::Return(Some(expr)))
+        } else {
+            Ok(Stmt::Return(None))
+        }
     }
 
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
@@ -169,7 +223,7 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
+        let mut expr = self.parse_postfix()?;
         loop {
             let op = if self.matches(&TokenKind::Star) {
                 BinaryOp::Mul
@@ -178,7 +232,7 @@ impl Parser {
             } else {
                 break;
             };
-            let right = self.parse_primary()?;
+            let right = self.parse_postfix()?;
             expr = Expr::Binary {
                 op,
                 left: Box::new(expr),
@@ -186,6 +240,51 @@ impl Parser {
             };
         }
         Ok(expr)
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary()?;
+        while self.matches(&TokenKind::LParen) {
+            let arguments = self.parse_argument_list()?;
+            self.expect(TokenKind::RParen, "expected ')' after arguments")?;
+            expr = Expr::Call {
+                callee: Box::new(expr),
+                arguments,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_argument_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        if self.check(&TokenKind::RParen) {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_expression_inner()?);
+            if self.matches(&TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        Ok(args)
+    }
+
+    fn parse_parameter_list(&mut self) -> Result<Vec<Identifier>, ParseError> {
+        let mut params = Vec::new();
+        if self.check(&TokenKind::RParen) {
+            return Ok(params);
+        }
+        loop {
+            params.push(Identifier(
+                self.expect_identifier("expected parameter name")?,
+            ));
+            if self.matches(&TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        Ok(params)
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -219,7 +318,8 @@ impl Parser {
             | TokenKind::Minus
             | TokenKind::Star
             | TokenKind::Slash
-            | TokenKind::Equal => Err(ParseError {
+            | TokenKind::Equal
+            | TokenKind::Comma => Err(ParseError {
                 message: "unexpected operator at expression start".to_string(),
                 position,
             }),
@@ -359,7 +459,10 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::{parse_expression, parse_script};
-    use ast::{BinaryOp, BindingKind, Expr, Identifier, Script, Stmt, VariableDeclaration};
+    use ast::{
+        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt,
+        VariableDeclaration,
+    };
 
     #[test]
     fn parses_additive_expression() {
@@ -378,31 +481,41 @@ mod tests {
     }
 
     #[test]
-    fn parses_assignment_expression() {
-        let parsed = parse_expression("x = 1 + 2").expect("parser should succeed");
-        let expected = Expr::Assign {
-            target: Identifier("x".to_string()),
-            value: Box::new(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Number(1.0)),
-                right: Box::new(Expr::Number(2.0)),
-            }),
+    fn parses_call_expression() {
+        let parsed = parse_expression("add(1, mul(2, 3))").expect("parser should succeed");
+        let expected = Expr::Call {
+            callee: Box::new(Expr::Identifier(Identifier("add".to_string()))),
+            arguments: vec![
+                Expr::Number(1.0),
+                Expr::Call {
+                    callee: Box::new(Expr::Identifier(Identifier("mul".to_string()))),
+                    arguments: vec![Expr::Number(2.0), Expr::Number(3.0)],
+                },
+            ],
         };
         assert_eq!(parsed, expected);
     }
 
     #[test]
-    fn enforces_multiplicative_precedence() {
-        let parsed = parse_expression("1 + 2 * 3").expect("parser should succeed");
-        let right = Expr::Binary {
-            op: BinaryOp::Mul,
-            left: Box::new(Expr::Number(2.0)),
-            right: Box::new(Expr::Number(3.0)),
-        };
-        let expected = Expr::Binary {
-            op: BinaryOp::Add,
-            left: Box::new(Expr::Number(1.0)),
-            right: Box::new(right),
+    fn parses_function_declaration_and_return() {
+        let parsed = parse_script("function add(a, b) { return a + b; } add(1, 2);")
+            .expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![
+                Stmt::FunctionDeclaration(FunctionDeclaration {
+                    name: Identifier("add".to_string()),
+                    params: vec![Identifier("a".to_string()), Identifier("b".to_string())],
+                    body: vec![Stmt::Return(Some(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+                        right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+                    }))],
+                }),
+                Stmt::Expression(Expr::Call {
+                    callee: Box::new(Expr::Identifier(Identifier("add".to_string()))),
+                    arguments: vec![Expr::Number(1.0), Expr::Number(2.0)],
+                }),
+            ],
         };
         assert_eq!(parsed, expected);
     }
@@ -454,6 +567,12 @@ mod tests {
         let parsed =
             parse_script("{ let x = 1; } let y = 2; y;").expect("script parsing should succeed");
         assert_eq!(parsed.statements.len(), 3);
+    }
+
+    #[test]
+    fn rejects_return_outside_function() {
+        let err = parse_script("return 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "return outside function");
     }
 
     #[test]

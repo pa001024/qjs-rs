@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use ast::{BinaryOp, BindingKind, Expr, Identifier, Script, Stmt, VariableDeclaration};
+use ast::{
+    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, VariableDeclaration,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
@@ -8,6 +10,7 @@ pub enum Opcode {
     LoadUndefined,
     LoadIdentifier(String),
     DefineVariable { name: String, mutable: bool },
+    DefineFunction { name: String, function_id: usize },
     StoreVariable(String),
     EnterScope,
     ExitScope,
@@ -15,117 +18,190 @@ pub enum Opcode {
     Sub,
     Mul,
     Div,
+    Call(usize),
+    Return,
     Pop,
     Halt,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Chunk {
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CompiledFunction {
+    pub name: String,
+    pub params: Vec<String>,
     pub code: Vec<Opcode>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Chunk {
+    pub code: Vec<Opcode>,
+    pub functions: Vec<CompiledFunction>,
+}
+
+#[derive(Debug, Default)]
+struct Compiler {
+    functions: Vec<CompiledFunction>,
+}
+
 pub fn compile_script(script: &Script) -> Chunk {
+    let mut compiler = Compiler::default();
     let mut code = Vec::new();
-    let produced_value = compile_statement_list(&script.statements, &mut code, true);
+    let produced_value = compiler.compile_statement_list(&script.statements, &mut code, true);
     if !produced_value {
         code.push(Opcode::LoadUndefined);
     }
     code.push(Opcode::Halt);
-    Chunk { code }
+    Chunk {
+        code,
+        functions: compiler.functions,
+    }
 }
 
 pub fn compile_expression(expr: &Expr) -> Chunk {
+    let mut compiler = Compiler::default();
     let mut code = Vec::new();
-    compile_expr(expr, &mut code);
+    compiler.compile_expr(expr, &mut code);
     code.push(Opcode::Halt);
-    Chunk { code }
+    Chunk {
+        code,
+        functions: compiler.functions,
+    }
 }
 
-fn compile_statement_list(
-    statements: &[Stmt],
-    code: &mut Vec<Opcode>,
-    preserve_value: bool,
-) -> bool {
-    let mut produced_value = false;
-    let len = statements.len();
+impl Compiler {
+    fn compile_statement_list(
+        &mut self,
+        statements: &[Stmt],
+        code: &mut Vec<Opcode>,
+        preserve_value: bool,
+    ) -> bool {
+        let mut produced_value = false;
+        let len = statements.len();
 
-    for (index, stmt) in statements.iter().enumerate() {
-        let is_last = index + 1 == len;
-        let keep_value = preserve_value && is_last;
-        produced_value = compile_stmt(stmt, code, keep_value);
+        for (index, stmt) in statements.iter().enumerate() {
+            let is_last = index + 1 == len;
+            let keep_value = preserve_value && is_last;
+            produced_value = self.compile_stmt(stmt, code, keep_value);
+        }
+
+        produced_value
     }
 
-    produced_value
-}
-
-fn compile_stmt(stmt: &Stmt, code: &mut Vec<Opcode>, keep_value: bool) -> bool {
-    match stmt {
-        Stmt::VariableDeclaration(VariableDeclaration {
-            kind,
-            name: Identifier(binding_name),
-            initializer,
-        }) => {
-            if let Some(expr) = initializer {
-                compile_expr(expr, code);
-            } else {
-                code.push(Opcode::LoadUndefined);
-            }
-            code.push(Opcode::DefineVariable {
-                name: binding_name.clone(),
-                mutable: matches!(kind, BindingKind::Let),
-            });
-            false
-        }
-        Stmt::Expression(expr) => {
-            compile_expr(expr, code);
-            if !keep_value {
-                code.push(Opcode::Pop);
+    fn compile_stmt(&mut self, stmt: &Stmt, code: &mut Vec<Opcode>, keep_value: bool) -> bool {
+        match stmt {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind,
+                name: Identifier(binding_name),
+                initializer,
+            }) => {
+                if let Some(expr) = initializer {
+                    self.compile_expr(expr, code);
+                } else {
+                    code.push(Opcode::LoadUndefined);
+                }
+                code.push(Opcode::DefineVariable {
+                    name: binding_name.clone(),
+                    mutable: matches!(kind, BindingKind::Let),
+                });
                 false
-            } else {
+            }
+            Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
+                let function_id = self.compile_function(name, params, body);
+                code.push(Opcode::DefineFunction {
+                    name: name.0.clone(),
+                    function_id,
+                });
+                false
+            }
+            Stmt::Return(value) => {
+                if let Some(expr) = value {
+                    self.compile_expr(expr, code);
+                } else {
+                    code.push(Opcode::LoadUndefined);
+                }
+                code.push(Opcode::Return);
                 true
             }
-        }
-        Stmt::Block(statements) => {
-            code.push(Opcode::EnterScope);
-            let block_value = compile_statement_list(statements, code, keep_value);
-            if keep_value && !block_value {
-                code.push(Opcode::LoadUndefined);
+            Stmt::Expression(expr) => {
+                self.compile_expr(expr, code);
+                if !keep_value {
+                    code.push(Opcode::Pop);
+                    false
+                } else {
+                    true
+                }
             }
-            code.push(Opcode::ExitScope);
-            keep_value
+            Stmt::Block(statements) => {
+                code.push(Opcode::EnterScope);
+                let block_value = self.compile_statement_list(statements, code, keep_value);
+                if keep_value && !block_value {
+                    code.push(Opcode::LoadUndefined);
+                }
+                code.push(Opcode::ExitScope);
+                keep_value
+            }
         }
     }
-}
 
-fn compile_expr(expr: &Expr, code: &mut Vec<Opcode>) {
-    match expr {
-        Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
-        Expr::Assign {
-            target: Identifier(name),
-            value,
-        } => {
-            compile_expr(value, code);
-            code.push(Opcode::StoreVariable(name.clone()));
-        }
-        Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
-        Expr::Binary { op, left, right } => {
-            compile_expr(left, code);
-            compile_expr(right, code);
-            let opcode = match op {
-                BinaryOp::Add => Opcode::Add,
-                BinaryOp::Sub => Opcode::Sub,
-                BinaryOp::Mul => Opcode::Mul,
-                BinaryOp::Div => Opcode::Div,
-            };
-            code.push(opcode);
+    fn compile_function(
+        &mut self,
+        name: &Identifier,
+        params: &[Identifier],
+        body: &[Stmt],
+    ) -> usize {
+        let mut code = Vec::new();
+        self.compile_statement_list(body, &mut code, false);
+        code.push(Opcode::LoadUndefined);
+        code.push(Opcode::Return);
+
+        let function_id = self.functions.len();
+        self.functions.push(CompiledFunction {
+            name: name.0.clone(),
+            params: params.iter().map(|param| param.0.clone()).collect(),
+            code,
+        });
+        function_id
+    }
+
+    fn compile_expr(&mut self, expr: &Expr, code: &mut Vec<Opcode>) {
+        match expr {
+            Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
+            Expr::Assign {
+                target: Identifier(name),
+                value,
+            } => {
+                self.compile_expr(value, code);
+                code.push(Opcode::StoreVariable(name.clone()));
+            }
+            Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
+            Expr::Call { callee, arguments } => {
+                self.compile_expr(callee, code);
+                for argument in arguments {
+                    self.compile_expr(argument, code);
+                }
+                code.push(Opcode::Call(arguments.len()));
+            }
+            Expr::Binary { op, left, right } => {
+                self.compile_expr(left, code);
+                self.compile_expr(right, code);
+                let opcode = match op {
+                    BinaryOp::Add => Opcode::Add,
+                    BinaryOp::Sub => Opcode::Sub,
+                    BinaryOp::Mul => Opcode::Mul,
+                    BinaryOp::Div => Opcode::Div,
+                };
+                code.push(opcode);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Chunk, Opcode, compile_expression, compile_script};
-    use ast::{BinaryOp, BindingKind, Expr, Identifier, Script, Stmt, VariableDeclaration};
+    use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+    use ast::{
+        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt,
+        VariableDeclaration,
+    };
 
     #[test]
     fn compiles_binary_with_precedence() {
@@ -149,6 +225,7 @@ mod tests {
                 Opcode::Add,
                 Opcode::Halt,
             ],
+            functions: vec![],
         };
 
         assert_eq!(chunk, expected);
@@ -191,6 +268,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
+            functions: vec![],
         };
 
         assert_eq!(chunk, expected);
@@ -237,6 +315,57 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_function_declaration_and_call() {
+        let script = Script {
+            statements: vec![
+                Stmt::FunctionDeclaration(FunctionDeclaration {
+                    name: Identifier("add".to_string()),
+                    params: vec![Identifier("a".to_string()), Identifier("b".to_string())],
+                    body: vec![Stmt::Return(Some(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+                        right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+                    }))],
+                }),
+                Stmt::Expression(Expr::Call {
+                    callee: Box::new(Expr::Identifier(Identifier("add".to_string()))),
+                    arguments: vec![Expr::Number(1.0), Expr::Number(2.0)],
+                }),
+            ],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::DefineFunction {
+                    name: "add".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadIdentifier("add".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::LoadNumber(2.0),
+                Opcode::Call(2),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "add".to_string(),
+                params: vec!["a".to_string(), "b".to_string()],
+                code: vec![
+                    Opcode::LoadIdentifier("a".to_string()),
+                    Opcode::LoadIdentifier("b".to_string()),
+                    Opcode::Add,
+                    Opcode::Return,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
         };
 
         assert_eq!(chunk, expected);

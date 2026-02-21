@@ -6,3 +6,4 @@
 | R-002 | GC strategy blocks feature velocity if chosen too early. | High | Ship simple mark-sweep first, optimize after parity milestones. | Open |
 | R-003 | Parser/VM scope creep delays runnable baseline. | Medium | Enforce feature-slice milestones and acceptance checks per phase. | Open |
 | R-004 | Compatibility gaps become hard to trace late in project. | Medium | Maintain mapping/checklist docs and run frequent regression tests. | Open |
+| R-005 | Current function closure capture model may diverge from JS lexical reference semantics. | Medium | Replace scope snapshot with reference-based lexical environments before compatibility hardening. | Open |
