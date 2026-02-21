@@ -168,7 +168,7 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         preserve_value: bool,
     ) -> bool {
-        if self.scope_depth == 0 && self.function_nesting == 0 {
+        if self.scope_depth == 0 {
             let mut hoisted_var_names = BTreeSet::new();
             self.collect_hoisted_var_names(statements, &mut hoisted_var_names);
             for name in hoisted_var_names {
@@ -218,41 +218,83 @@ impl Compiler {
 
     fn collect_hoisted_var_names(&self, statements: &[Stmt], names: &mut BTreeSet<String>) {
         for stmt in statements {
-            match stmt {
-                Stmt::VariableDeclaration(VariableDeclaration {
-                    kind: BindingKind::Var,
-                    name: Identifier(binding_name),
-                    ..
-                }) => {
-                    names.insert(binding_name.clone());
-                }
-                Stmt::VariableDeclarations(declarations) => {
-                    for declaration in declarations {
-                        if declaration.kind == BindingKind::Var {
-                            names.insert(declaration.name.0.clone());
-                        }
+            self.collect_hoisted_var_names_from_stmt(stmt, names);
+        }
+    }
+
+    fn collect_hoisted_var_names_from_stmt(&self, stmt: &Stmt, names: &mut BTreeSet<String>) {
+        match stmt {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Var,
+                name: Identifier(binding_name),
+                ..
+            }) => {
+                names.insert(binding_name.clone());
+            }
+            Stmt::VariableDeclarations(declarations) => {
+                for declaration in declarations {
+                    if declaration.kind == BindingKind::Var {
+                        names.insert(declaration.name.0.clone());
                     }
                 }
-                Stmt::For {
-                    initializer: Some(initializer),
-                    ..
-                } => match initializer {
-                    ForInitializer::VariableDeclaration(declaration) => {
-                        if declaration.kind == BindingKind::Var {
-                            names.insert(declaration.name.0.clone());
-                        }
-                    }
-                    ForInitializer::VariableDeclarations(declarations) => {
-                        for declaration in declarations {
+            }
+            Stmt::FunctionDeclaration(_) => {}
+            Stmt::Block(statements) => self.collect_hoisted_var_names(statements, names),
+            Stmt::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                self.collect_hoisted_var_names_from_stmt(consequent, names);
+                if let Some(alternate) = alternate {
+                    self.collect_hoisted_var_names_from_stmt(alternate, names);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+                self.collect_hoisted_var_names_from_stmt(body, names);
+            }
+            Stmt::For {
+                initializer, body, ..
+            } => {
+                if let Some(initializer) = initializer {
+                    match initializer {
+                        ForInitializer::VariableDeclaration(declaration) => {
                             if declaration.kind == BindingKind::Var {
                                 names.insert(declaration.name.0.clone());
                             }
                         }
+                        ForInitializer::VariableDeclarations(declarations) => {
+                            for declaration in declarations {
+                                if declaration.kind == BindingKind::Var {
+                                    names.insert(declaration.name.0.clone());
+                                }
+                            }
+                        }
+                        ForInitializer::Expression(_) => {}
                     }
-                    ForInitializer::Expression(_) => {}
-                },
-                _ => {}
+                }
+                self.collect_hoisted_var_names_from_stmt(body, names);
             }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    self.collect_hoisted_var_names(&case.consequent, names);
+                }
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                self.collect_hoisted_var_names(try_block, names);
+                if let Some(catch_block) = catch_block {
+                    self.collect_hoisted_var_names(catch_block, names);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.collect_hoisted_var_names(finally_block, names);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -282,11 +324,14 @@ impl Compiler {
                     code.push(Opcode::Throw);
                     return true;
                 }
-                if *kind == BindingKind::Var
-                    && self.scope_depth == 0
-                    && self.function_nesting == 0
-                    && initializer.is_none()
-                {
+                if *kind == BindingKind::Var && self.scope_depth == 0 && initializer.is_none() {
+                    return false;
+                }
+                if *kind == BindingKind::Var && self.scope_depth > 0 {
+                    if let Some(expr) = initializer {
+                        self.compile_expr(expr, code);
+                        code.push(Opcode::StoreVariable(binding_name.clone()));
+                    }
                     return false;
                 }
                 if let Some(expr) = initializer {

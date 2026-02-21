@@ -534,6 +534,24 @@ mod tests {
     }
 
     #[test]
+    fn hoists_var_from_nested_block_inside_function() {
+        let result = run_script(
+            "function f() { if (true) { var x = 1; } return x; } f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn hoists_uninitialized_var_from_nested_block_inside_function() {
+        let result = run_script(
+            "function f() { if (false) { var x = 1; } return x === undefined; } f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn returns_undefined_when_script_has_no_result_expression() {
         let result = run_script("let x = 1;", &[]);
         assert_eq!(result, Ok(JsValue::Undefined));
