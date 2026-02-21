@@ -11,6 +11,9 @@ pub enum TokenKind {
     Number(f64),
     Identifier(String),
     Plus,
+    Minus,
+    Star,
+    Slash,
     LParen,
     RParen,
     Eof,
@@ -43,6 +46,42 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b'+' {
             tokens.push(Token {
                 kind: TokenKind::Plus,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'-' {
+            tokens.push(Token {
+                kind: TokenKind::Minus,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'*' {
+            tokens.push(Token {
+                kind: TokenKind::Star,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'/' {
+            tokens.push(Token {
+                kind: TokenKind::Slash,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -149,6 +188,19 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Plus);
         assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_all_arithmetic_operators() {
+        let tokens = lex("8 - 2 * 3 / 4").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(8.0));
+        assert_eq!(tokens[1].kind, TokenKind::Minus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Star);
+        assert_eq!(tokens[4].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[5].kind, TokenKind::Slash);
+        assert_eq!(tokens[6].kind, TokenKind::Number(4.0));
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
     }
 
     #[test]

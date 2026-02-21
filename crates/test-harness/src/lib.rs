@@ -28,6 +28,17 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_operator_precedence() {
+        assert_eq!(run_expression("1 + 2 * 3"), Ok(JsValue::Number(7.0)));
+        assert_eq!(run_expression("(1 + 2) * 3"), Ok(JsValue::Number(9.0)));
+    }
+
+    #[test]
+    fn evaluates_sub_and_div() {
+        assert_eq!(run_expression("10 - 4 / 2"), Ok(JsValue::Number(8.0)));
+    }
+
+    #[test]
     fn surfaces_unknown_identifier_error() {
         let result = run_expression("foo + 1");
         assert!(result.is_err());

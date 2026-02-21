@@ -26,19 +26,34 @@ impl Vm {
                     return Err(VmError::UnknownIdentifier(name.clone()));
                 }
                 Opcode::Add => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match (left, right) {
-                        (JsValue::Number(lhs), JsValue::Number(rhs)) => {
-                            self.stack.push(JsValue::Number(lhs + rhs));
-                        }
-                        _ => return Err(VmError::TypeError("addition expects numeric operands")),
-                    }
+                    let result = self.eval_numeric_binary(|lhs, rhs| lhs + rhs)?;
+                    self.stack.push(JsValue::Number(result));
+                }
+                Opcode::Sub => {
+                    let result = self.eval_numeric_binary(|lhs, rhs| lhs - rhs)?;
+                    self.stack.push(JsValue::Number(result));
+                }
+                Opcode::Mul => {
+                    let result = self.eval_numeric_binary(|lhs, rhs| lhs * rhs)?;
+                    self.stack.push(JsValue::Number(result));
+                }
+                Opcode::Div => {
+                    let result = self.eval_numeric_binary(|lhs, rhs| lhs / rhs)?;
+                    self.stack.push(JsValue::Number(result));
                 }
                 Opcode::Halt => break,
             }
         }
         self.stack.pop().ok_or(VmError::EmptyStack)
+    }
+
+    fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
+        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        match (left, right) {
+            (JsValue::Number(lhs), JsValue::Number(rhs)) => Ok(op(lhs, rhs)),
+            _ => Err(VmError::TypeError("arithmetic expects numeric operands")),
+        }
     }
 }
 
@@ -63,9 +78,27 @@ mod tests {
     }
 
     #[test]
+    fn executes_mixed_arithmetic() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(20.0),
+                Opcode::LoadNumber(5.0),
+                Opcode::Div,
+                Opcode::LoadNumber(2.0),
+                Opcode::Mul,
+                Opcode::LoadNumber(3.0),
+                Opcode::Sub,
+                Opcode::Halt,
+            ],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(5.0)));
+    }
+
+    #[test]
     fn errors_on_stack_underflow() {
         let chunk = Chunk {
-            code: vec![Opcode::Add, Opcode::Halt],
+            code: vec![Opcode::Mul, Opcode::Halt],
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Err(VmError::StackUnderflow));
