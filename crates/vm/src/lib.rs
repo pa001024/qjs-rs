@@ -208,17 +208,21 @@ impl Vm {
                 }
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let binding_id = self
-                        .resolve_binding_id(name)
-                        .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?;
-                    let binding = self
-                        .bindings
-                        .get_mut(&binding_id)
-                        .ok_or(VmError::ScopeUnderflow)?;
-                    if !binding.mutable {
-                        return Err(VmError::ImmutableBinding(name.clone()));
+                    if let Some(binding_id) = self.resolve_binding_id(name) {
+                        let binding = self
+                            .bindings
+                            .get_mut(&binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
+                        if !binding.mutable {
+                            return Err(VmError::ImmutableBinding(name.clone()));
+                        }
+                        binding.value = value.clone();
+                    } else {
+                        let global_scope =
+                            self.scopes.first().cloned().ok_or(VmError::ScopeUnderflow)?;
+                        let binding_id = self.create_binding(value.clone(), true);
+                        global_scope.borrow_mut().insert(name.clone(), binding_id);
                     }
-                    binding.value = value.clone();
                     self.stack.push(value);
                 }
                 Opcode::GetProperty(name) => {
@@ -806,6 +810,19 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn assignment_to_undeclared_name_creates_global_binding() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::StoreVariable("x".to_string()),
+            Opcode::Pop,
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
     }
 
     #[test]

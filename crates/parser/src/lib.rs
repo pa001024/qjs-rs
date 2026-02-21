@@ -371,6 +371,63 @@ fn add_var_name_if_needed(
     }
 }
 
+fn is_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "implements"
+            | "interface"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+            | "let"
+    )
+}
+
+fn is_forbidden_identifier_reference(name: &str) -> bool {
+    if matches!(name, "yield" | "await") {
+        return false;
+    }
+    is_reserved_word(name)
+}
+
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
@@ -525,7 +582,7 @@ impl Parser {
     }
 
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
-        let name = Identifier(self.expect_identifier("expected function name")?);
+        let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
@@ -803,7 +860,7 @@ impl Parser {
         if self.matches_keyword("catch") {
             self.expect(TokenKind::LParen, "expected '(' after 'catch'")?;
             catch_param = Some(Identifier(
-                self.expect_identifier("expected catch binding identifier")?,
+                self.expect_binding_identifier("expected catch binding identifier")?,
             ));
             self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
             catch_block = Some(self.parse_block_body(
@@ -855,7 +912,7 @@ impl Parser {
     }
 
     fn parse_labeled_statement(&mut self) -> Result<Stmt, ParseError> {
-        let label = Identifier(self.expect_identifier("expected label identifier")?);
+        let label = Identifier(self.expect_binding_identifier("expected label identifier")?);
         self.expect(TokenKind::Colon, "expected ':' after label")?;
         let body = self.parse_embedded_statement(false)?;
         Ok(Stmt::Labeled {
@@ -952,7 +1009,7 @@ impl Parser {
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
         let mut declarations = Vec::new();
         loop {
-            let name = self.expect_identifier("expected binding name")?;
+            let name = self.expect_binding_identifier("expected binding name")?;
             let initializer = if self.matches(&TokenKind::Equal) {
                 Some(self.parse_expression_inner()?)
             } else {
@@ -1159,7 +1216,7 @@ impl Parser {
                 continue;
             }
             if self.matches(&TokenKind::Dot) {
-                let property = self.expect_identifier("expected property name after '.'")?;
+                let property = self.expect_identifier_name("expected property name after '.'")?;
                 expr = Expr::Member {
                     object: Box::new(expr),
                     property,
@@ -1202,7 +1259,7 @@ impl Parser {
         }
         loop {
             params.push(Identifier(
-                self.expect_identifier("expected parameter name")?,
+                self.expect_binding_identifier("expected parameter name")?,
             ));
             if self.matches(&TokenKind::Comma) {
                 continue;
@@ -1235,6 +1292,10 @@ impl Parser {
                     "true" => Ok(Expr::Bool(true)),
                     "false" => Ok(Expr::Bool(false)),
                     "null" => Ok(Expr::Null),
+                    _ if is_forbidden_identifier_reference(&name) => Err(ParseError {
+                        message: "reserved word cannot be identifier reference".to_string(),
+                        position,
+                    }),
                     _ => Ok(Expr::Identifier(Identifier(name))),
                 }
             }
@@ -1298,10 +1359,16 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
-            let key = self.expect_identifier("expected property name in object literal")?;
+            let key = self.expect_identifier_name("expected property name in object literal")?;
             let value = if self.matches(&TokenKind::Colon) {
                 self.parse_expression_inner()?
             } else {
+                if is_forbidden_identifier_reference(&key) {
+                    return Err(ParseError {
+                        message: "reserved word cannot be identifier reference".to_string(),
+                        position: self.previous_position(),
+                    });
+                }
                 Expr::Identifier(Identifier(key.clone()))
             };
             properties.push(ObjectProperty { key, value });
@@ -1337,12 +1404,35 @@ impl Parser {
         Ok(Expr::ArrayLiteral(elements))
     }
 
-    fn expect_identifier(&mut self, message: &str) -> Result<String, ParseError> {
+    fn expect_identifier_name(&mut self, message: &str) -> Result<String, ParseError> {
         let token = self.current().ok_or(ParseError {
             message: message.to_string(),
             position: self.last_position(),
         })?;
         if let TokenKind::Identifier(name) = &token.kind {
+            let cloned = name.clone();
+            self.advance();
+            Ok(cloned)
+        } else {
+            Err(ParseError {
+                message: message.to_string(),
+                position: token.span.start,
+            })
+        }
+    }
+
+    fn expect_binding_identifier(&mut self, message: &str) -> Result<String, ParseError> {
+        let token = self.current().ok_or(ParseError {
+            message: message.to_string(),
+            position: self.last_position(),
+        })?;
+        if let TokenKind::Identifier(name) = &token.kind {
+            if is_forbidden_identifier_reference(name) {
+                return Err(ParseError {
+                    message: message.to_string(),
+                    position: token.span.start,
+                });
+            }
             let cloned = name.clone();
             self.advance();
             Ok(cloned)
@@ -1549,6 +1639,17 @@ mod tests {
             ])),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn allows_reserved_word_as_property_name() {
+        let parsed = parse_expression("obj.default").expect("parser should succeed");
+        let expected = Expr::Member {
+            object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+            property: "default".to_string(),
+        };
+        assert_eq!(parsed, expected);
+        parse_expression("({ default: 1 })").expect("parser should succeed");
     }
 
     #[test]
@@ -2110,6 +2211,24 @@ mod tests {
     fn rejects_invalid_assignment_target() {
         let err = parse_expression("(x + 1) = 2").expect_err("parser should fail");
         assert_eq!(err.message, "invalid assignment target");
+    }
+
+    #[test]
+    fn rejects_reserved_word_identifier_reference() {
+        let err = parse_script("case = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "reserved word cannot be identifier reference");
+    }
+
+    #[test]
+    fn rejects_reserved_word_binding_identifier() {
+        let err = parse_script("var break = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "expected binding name");
+    }
+
+    #[test]
+    fn rejects_reserved_word_shorthand_property() {
+        let err = parse_script("({ false });").expect_err("parser should fail");
+        assert_eq!(err.message, "reserved word cannot be identifier reference");
     }
 
     #[test]
