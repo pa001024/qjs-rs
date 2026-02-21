@@ -99,6 +99,7 @@ struct Compiler {
     handler_depth: usize,
     loops: Vec<LoopContext>,
     break_contexts: Vec<BreakContext>,
+    label_contexts: Vec<LabelContext>,
     finally_contexts: Vec<FinallyContext>,
     next_switch_temp_id: usize,
     function_nesting: usize,
@@ -116,6 +117,12 @@ struct BreakContext {
     scope_depth: usize,
     handler_depth: usize,
     break_jumps: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabelContext {
+    name: String,
+    break_context_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -614,7 +621,28 @@ impl Compiler {
                 code,
                 keep_value,
             ),
-            Stmt::Labeled { body, .. } => self.compile_stmt(body, code, keep_value),
+            Stmt::Labeled { label, body } => {
+                let break_context_index = self.break_contexts.len();
+                self.break_contexts.push(BreakContext {
+                    scope_depth: self.scope_depth,
+                    handler_depth: self.handler_depth,
+                    break_jumps: Vec::new(),
+                });
+                self.label_contexts.push(LabelContext {
+                    name: label.0.clone(),
+                    break_context_index,
+                });
+
+                let body_value = self.compile_stmt(body, code, keep_value);
+                let label_end = code.len();
+                self.label_contexts.pop();
+                let break_context = self
+                    .break_contexts
+                    .pop()
+                    .expect("label break context should exist");
+                self.patch_break_exits(break_context, label_end, code);
+                body_value
+            }
             Stmt::Break => {
                 let (target_handler_depth, target_scope_depth) = {
                     let break_context = self
@@ -628,6 +656,28 @@ impl Compiler {
                 self.break_contexts
                     .last_mut()
                     .expect("break outside breakable context")
+                    .break_jumps
+                    .push(jump_pos);
+                false
+            }
+            Stmt::BreakLabel(label) => {
+                let break_context_index = self
+                    .label_contexts
+                    .iter()
+                    .rev()
+                    .find(|context| context.name == label.0)
+                    .map(|context| context.break_context_index)
+                    .expect("break label should be resolved by parser");
+                let (target_handler_depth, target_scope_depth) = {
+                    let break_context = self
+                        .break_contexts
+                        .get(break_context_index)
+                        .expect("break context for label should exist");
+                    (break_context.handler_depth, break_context.scope_depth)
+                };
+                let jump_pos =
+                    self.emit_jump_with_finally(code, target_handler_depth, target_scope_depth);
+                self.break_contexts[break_context_index]
                     .break_jumps
                     .push(jump_pos);
                 false
@@ -791,6 +841,7 @@ impl Compiler {
         let saved_handler_depth = self.handler_depth;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_break_contexts = std::mem::take(&mut self.break_contexts);
+        let saved_label_contexts = std::mem::take(&mut self.label_contexts);
         let saved_finally_contexts = std::mem::take(&mut self.finally_contexts);
         let saved_function_nesting = self.function_nesting;
         self.scope_depth = 0;
@@ -815,6 +866,7 @@ impl Compiler {
         self.handler_depth = saved_handler_depth;
         self.loops = saved_loops;
         self.break_contexts = saved_break_contexts;
+        self.label_contexts = saved_label_contexts;
         self.finally_contexts = saved_finally_contexts;
         self.function_nesting = saved_function_nesting;
         function_id

@@ -199,6 +199,7 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
     Break,
+    BreakLabel(Identifier),
     Continue,
 }
 

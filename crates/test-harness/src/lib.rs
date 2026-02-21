@@ -763,4 +763,19 @@ mod tests {
         let result = run_script("label: 1; 2;", &[]);
         assert_eq!(result, Ok(JsValue::Number(2.0)));
     }
+
+    #[test]
+    fn supports_break_to_label_baseline() {
+        assert_eq!(
+            run_script("let x = 0; outer: { x = 1; break outer; x = 2; } x;", &[]),
+            Ok(JsValue::Number(1.0))
+        );
+        assert_eq!(
+            run_script(
+                "let x = 0; outer: while (1) { while (1) { x = 1; break outer; } x = 2; } x;",
+                &[]
+            ),
+            Ok(JsValue::Number(1.0))
+        );
+    }
 }

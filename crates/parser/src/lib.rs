@@ -125,6 +125,7 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
         | Stmt::Expression(_)
         | Stmt::Throw(_)
         | Stmt::Break
+        | Stmt::BreakLabel(_)
         | Stmt::Continue => Ok(()),
     }
 }
@@ -341,6 +342,7 @@ fn collect_var_declared_names(
         | Stmt::Expression(_)
         | Stmt::Throw(_)
         | Stmt::Break
+        | Stmt::BreakLabel(_)
         | Stmt::Continue => {}
     }
 }
@@ -438,6 +440,7 @@ struct Parser {
     function_depth: usize,
     loop_depth: usize,
     breakable_depth: usize,
+    label_stack: Vec<String>,
 }
 
 impl Parser {
@@ -451,6 +454,7 @@ impl Parser {
             function_depth: 0,
             loop_depth: 0,
             breakable_depth: 0,
+            label_stack: Vec::new(),
         }
     }
 
@@ -603,6 +607,19 @@ impl Parser {
         Ok(statements)
     }
 
+    fn parse_function_body(
+        &mut self,
+        start_error: &str,
+        end_error: &str,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        self.function_depth += 1;
+        let saved_label_stack = std::mem::take(&mut self.label_stack);
+        let body = self.parse_block_body(start_error, end_error);
+        self.label_stack = saved_label_stack;
+        self.function_depth = self.function_depth.saturating_sub(1);
+        body
+    }
+
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let _is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
@@ -610,13 +627,10 @@ impl Parser {
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        self.function_depth += 1;
-        let body = self.parse_block_body(
+        let body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
-        );
-        self.function_depth = self.function_depth.saturating_sub(1);
-        let body = body?;
+        )?;
 
         Ok(Stmt::FunctionDeclaration(FunctionDeclaration {
             name,
@@ -979,8 +993,21 @@ impl Parser {
 
     fn parse_labeled_statement(&mut self) -> Result<Stmt, ParseError> {
         let label = Identifier(self.expect_binding_identifier("expected label identifier")?);
+        if self
+            .label_stack
+            .iter()
+            .any(|candidate| candidate == &label.0)
+        {
+            return Err(ParseError {
+                message: format!("duplicate label: {}", label.0),
+                position: self.previous_position(),
+            });
+        }
         self.expect(TokenKind::Colon, "expected ':' after label")?;
-        let body = self.parse_embedded_statement(false)?;
+        self.label_stack.push(label.0.clone());
+        let body = self.parse_embedded_statement(false);
+        self.label_stack.pop();
+        let body = body?;
         Ok(Stmt::Labeled {
             label,
             body: Box::new(body),
@@ -988,6 +1015,22 @@ impl Parser {
     }
 
     fn parse_break_statement(&mut self) -> Result<Stmt, ParseError> {
+        if !self.has_line_terminator_between_prev_and_current() && self.check_identifier() {
+            let label = Identifier(
+                self.expect_binding_identifier("expected label identifier after 'break'")?,
+            );
+            if !self
+                .label_stack
+                .iter()
+                .any(|candidate| candidate == &label.0)
+            {
+                return Err(ParseError {
+                    message: format!("undefined label: {}", label.0),
+                    position: self.previous_position(),
+                });
+            }
+            return Ok(Stmt::BreakLabel(label));
+        }
         if self.breakable_depth == 0 {
             return Err(ParseError {
                 message: "break outside loop or switch".to_string(),
@@ -1291,13 +1334,10 @@ impl Parser {
         }
 
         let body = if self.check(&TokenKind::LBrace) {
-            self.function_depth += 1;
-            let statements = self.parse_block_body(
+            self.parse_function_body(
                 "expected '{' before function body",
                 "expected '}' after function body",
-            );
-            self.function_depth = self.function_depth.saturating_sub(1);
-            statements?
+            )?
         } else {
             vec![Stmt::Return(Some(self.parse_assignment()?))]
         };
@@ -1826,13 +1866,10 @@ impl Parser {
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        self.function_depth += 1;
-        let body = self.parse_block_body(
+        let body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
-        );
-        self.function_depth = self.function_depth.saturating_sub(1);
-        let body = body?;
+        )?;
 
         Ok(Expr::Function { name, params, body })
     }
@@ -2228,13 +2265,10 @@ impl Parser {
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        self.function_depth += 1;
-        let body = self.parse_block_body(
+        let body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
-        );
-        self.function_depth = self.function_depth.saturating_sub(1);
-        let body = body?;
+        )?;
 
         Ok(Some((
             accessor_key,
@@ -2290,13 +2324,10 @@ impl Parser {
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        self.function_depth += 1;
-        let body = self.parse_block_body(
+        let body = self.parse_function_body(
             "expected '{' before method body",
             "expected '}' after method body",
-        );
-        self.function_depth = self.function_depth.saturating_sub(1);
-        let body = body?;
+        )?;
 
         Ok(Expr::Function {
             name: None,
@@ -3166,6 +3197,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_labeled_break_statement() {
+        let parsed =
+            parse_script("outer: { break outer; }").expect("script parsing should succeed");
+        let body = match &parsed.statements[0] {
+            Stmt::Labeled { body, .. } => body,
+            _ => panic!("expected labeled statement"),
+        };
+        let statements = match body.as_ref() {
+            Stmt::Block(statements) => statements,
+            _ => panic!("expected block body"),
+        };
+        assert!(matches!(
+            statements[0],
+            Stmt::BreakLabel(Identifier(ref name)) if name == "outer"
+        ));
+    }
+
+    #[test]
     fn parses_block_statement_and_shadowing_syntax() {
         let parsed = parse_script("let x = 1; { let x = 2; x = x + 1; }; x;")
             .expect("script parsing should succeed");
@@ -3365,6 +3414,25 @@ mod tests {
     fn rejects_break_outside_loop() {
         let err = parse_script("break;").expect_err("parser should fail");
         assert_eq!(err.message, "break outside loop or switch");
+    }
+
+    #[test]
+    fn rejects_break_with_undefined_label() {
+        let err = parse_script("break outer;").expect_err("parser should fail");
+        assert_eq!(err.message, "undefined label: outer");
+    }
+
+    #[test]
+    fn rejects_break_to_outer_label_inside_function() {
+        let err = parse_script("outer: { function f() { break outer; } }")
+            .expect_err("parser should fail");
+        assert_eq!(err.message, "undefined label: outer");
+    }
+
+    #[test]
+    fn rejects_duplicate_label() {
+        let err = parse_script("outer: { outer: 1; }").expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate label: outer");
     }
 
     #[test]

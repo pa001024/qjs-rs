@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3149, failed=1851
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3175, failed=1825
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -62,5 +62,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/ast/bytecode/vm 新增 `in` 运算符最小可运行链路，并在 `for` 头部引入 `no-in` 解析上下文，修复一批调用实参里的 `"... in this"` 解析失败。
 - parser 的箭头函数分支改为复用参数列表解析，补齐带默认值/复杂形参的吞吐基线。
 - VM 标识符解析新增 `globalThis` 回退到全局对象，清理一批 `eval-code` 里的 `UnknownIdentifier("globalThis")`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3149/1851`（主要剩余在参数语义、块级作用域、class/computed-property、strict 早期错误等）。
+- parser/ast/bytecode/vm 打通对象字面量 computed accessor（`get [k](){}` / `set [k](v){}`）最小执行链路，修复 `computed-property-names/object/accessor/*` 一批基线失败。
+- parser/ast/bytecode 新增带标签 `break`（`break label;`）链路，并修复函数体标签上下文隔离，清理 `block-scope/leave/*break*` 相关 parse 失败并消除编译期 panic。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3175/1825`（主要剩余在 `arguments-object` 语义、块级作用域细节、class/computed-property 与 strict 早期错误）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
