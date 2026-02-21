@@ -308,6 +308,34 @@ impl Vm {
                     object.properties.insert(name.clone(), value);
                     self.stack.push(JsValue::Object(object_id));
                 }
+                Opcode::DefineGetter(name) => {
+                    let getter = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.getters.insert(name.clone(), getter);
+                    self.stack.push(JsValue::Object(object_id));
+                }
+                Opcode::DefineSetter(name) => {
+                    let setter = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.setters.insert(name.clone(), setter);
+                    self.stack.push(JsValue::Object(object_id));
+                }
                 Opcode::SetProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;

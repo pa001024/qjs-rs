@@ -27,6 +27,8 @@ pub enum Opcode {
     GetProperty(String),
     GetPropertyByValue,
     DefineProperty(String),
+    DefineGetter(String),
+    DefineSetter(String),
     SetProperty(String),
     SetPropertyByValue,
     EnterScope,
@@ -846,6 +848,14 @@ impl Compiler {
                         ObjectPropertyKey::Static(name) => {
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::DefineProperty(name.clone()));
+                        }
+                        ObjectPropertyKey::AccessorGet(name) => {
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineGetter(name.clone()));
+                        }
+                        ObjectPropertyKey::AccessorSet(name) => {
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineSetter(name.clone()));
                         }
                         ObjectPropertyKey::Computed(key_expr) => {
                             code.push(Opcode::Dup);

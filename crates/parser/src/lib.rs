@@ -1610,6 +1610,9 @@ impl Parser {
                             "expected ':' after computed property name in object literal",
                         ));
                     }
+                    ObjectPropertyKey::AccessorGet(_) | ObjectPropertyKey::AccessorSet(_) => {
+                        return Err(self.error_current("unexpected accessor in object literal"));
+                    }
                 }
             };
             properties.push(ObjectProperty { key, value });
@@ -1629,13 +1632,14 @@ impl Parser {
         &mut self,
         key: &ObjectPropertyKey,
     ) -> Result<Option<(ObjectPropertyKey, Expr)>, ParseError> {
-        let is_accessor_prefix = matches!(
-            key,
-            ObjectPropertyKey::Static(name) if name == "get" || name == "set"
-        );
-        if !is_accessor_prefix {
+        let accessor_kind = match key {
+            ObjectPropertyKey::Static(name) if name == "get" => Some("get"),
+            ObjectPropertyKey::Static(name) if name == "set" => Some("set"),
+            _ => None,
+        };
+        let Some(accessor_kind) = accessor_kind else {
             return Ok(None);
-        }
+        };
         if !self.check_identifier() || !self.check_next(&TokenKind::LParen) {
             return Ok(None);
         }
@@ -1653,8 +1657,13 @@ impl Parser {
         self.function_depth = self.function_depth.saturating_sub(1);
         let body = body?;
 
+        let accessor_key = if accessor_kind == "get" {
+            ObjectPropertyKey::AccessorGet(accessor_name)
+        } else {
+            ObjectPropertyKey::AccessorSet(accessor_name)
+        };
         Ok(Some((
-            ObjectPropertyKey::Static(accessor_name),
+            accessor_key,
             Expr::Function {
                 name: None,
                 params,
@@ -2038,7 +2047,7 @@ mod tests {
             parse_expression("({ get foo() {}, set foo(v) {} })").expect("parser should succeed");
         let expected = Expr::ObjectLiteral(vec![
             ObjectProperty {
-                key: ObjectPropertyKey::Static("foo".to_string()),
+                key: ObjectPropertyKey::AccessorGet("foo".to_string()),
                 value: Expr::Function {
                     name: None,
                     params: vec![],
@@ -2046,7 +2055,7 @@ mod tests {
                 },
             },
             ObjectProperty {
-                key: ObjectPropertyKey::Static("foo".to_string()),
+                key: ObjectPropertyKey::AccessorSet("foo".to_string()),
                 value: Expr::Function {
                     name: None,
                     params: vec![Identifier("v".to_string())],

@@ -180,6 +180,21 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_literal_accessor_this_binding() {
+        assert_eq!(
+            run_script("var o = { get foo() { return this; } }; o.foo === o;", &[]),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var x = null; var o = { set foo(v) { x = this; } }; o.foo = 1; x === o;",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn supports_unicode_identifier_escapes() {
         let result = run_script("var \\u0061 = 41; a + 1;", &[]);
         assert_eq!(result, Ok(JsValue::Number(42.0)));

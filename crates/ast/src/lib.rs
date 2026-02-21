@@ -87,6 +87,8 @@ pub enum Expr {
 pub enum ObjectPropertyKey {
     Static(String),
     Computed(Box<Expr>),
+    AccessorGet(String),
+    AccessorSet(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
