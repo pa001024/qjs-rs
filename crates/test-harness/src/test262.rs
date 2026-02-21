@@ -128,7 +128,9 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
 }
 
 fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
-    if !source.contains("$DONOTEVALUATE") {
+    let has_parse_tripwire = source.contains("$DONOTEVALUATE")
+        || source.contains("This statement should not be evaluated.");
+    if !has_parse_tripwire {
         return false;
     }
     matches!(
@@ -506,6 +508,13 @@ import "x";
         assert!(!super::is_parse_tripwire_runtime_failure(
             "1 + 1;",
             &ExecutionOutcome::RuntimeFail("UnknownIdentifier(\"$DONOTEVALUATE\")".to_string())
+        ));
+        assert!(super::is_parse_tripwire_runtime_failure(
+            "throw \"Test262: This statement should not be evaluated.\";",
+            &ExecutionOutcome::RuntimeFail(
+                "UncaughtException(String(\"Test262: This statement should not be evaluated.\"))"
+                    .to_string()
+            )
         ));
     }
 
