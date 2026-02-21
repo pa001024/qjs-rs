@@ -827,7 +827,7 @@ impl Compiler {
         });
         self.handler_depth += 1;
 
-        self.compile_statement_list(try_block, code, false);
+        self.compile_scoped_statement_list(try_block, code);
         code.push(Opcode::PopExceptionHandler);
         self.handler_depth = self.handler_depth.saturating_sub(1);
 
@@ -839,6 +839,8 @@ impl Compiler {
             finally_target: None,
         };
 
+        code.push(Opcode::EnterScope);
+        self.scope_depth += 1;
         match catch_param {
             Some(Identifier(name)) => {
                 code.push(Opcode::LoadException);
@@ -854,6 +856,8 @@ impl Compiler {
         }
 
         self.compile_statement_list(catch_block, code, false);
+        code.push(Opcode::ExitScope);
+        self.scope_depth = self.scope_depth.saturating_sub(1);
         let end = code.len();
         code[jump_after_catch_pos] = Opcode::Jump(end);
 
@@ -883,7 +887,7 @@ impl Compiler {
             finally_block: finally_block.to_vec(),
         });
 
-        self.compile_statement_list(try_block, code, false);
+        self.compile_scoped_statement_list(try_block, code);
         self.finally_contexts.pop();
         code.push(Opcode::PopExceptionHandler);
         self.handler_depth = self.handler_depth.saturating_sub(1);
@@ -897,7 +901,7 @@ impl Compiler {
         };
         code[jump_to_finally_pos] = Opcode::Jump(finally_start);
 
-        self.compile_statement_list(finally_block, code, false);
+        self.compile_scoped_statement_list(finally_block, code);
         code.push(Opcode::RethrowIfException);
 
         if keep_value {
@@ -1032,8 +1036,16 @@ impl Compiler {
         for context in contexts_to_run.iter().rev() {
             code.push(Opcode::PopExceptionHandler);
             self.handler_depth = self.handler_depth.saturating_sub(1);
-            self.compile_statement_list(&context.finally_block, code, false);
+            self.compile_scoped_statement_list(&context.finally_block, code);
         }
+    }
+
+    fn compile_scoped_statement_list(&mut self, statements: &[Stmt], code: &mut Vec<Opcode>) {
+        code.push(Opcode::EnterScope);
+        self.scope_depth += 1;
+        self.compile_statement_list(statements, code, false);
+        code.push(Opcode::ExitScope);
+        self.scope_depth = self.scope_depth.saturating_sub(1);
     }
 
     fn next_switch_temp_name(&mut self) -> String {
@@ -2179,13 +2191,16 @@ mod tests {
         let expected = Chunk {
             code: vec![
                 Opcode::PushExceptionHandler {
-                    catch_target: Some(5),
+                    catch_target: Some(7),
                     finally_target: None,
                 },
+                Opcode::EnterScope,
                 Opcode::LoadNumber(1.0),
                 Opcode::Throw,
+                Opcode::ExitScope,
                 Opcode::PopExceptionHandler,
-                Opcode::Jump(9),
+                Opcode::Jump(13),
+                Opcode::EnterScope,
                 Opcode::LoadException,
                 Opcode::DefineVariable {
                     name: "e".to_string(),
@@ -2193,6 +2208,7 @@ mod tests {
                 },
                 Opcode::LoadIdentifier("e".to_string()),
                 Opcode::Pop,
+                Opcode::ExitScope,
                 Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
@@ -2218,14 +2234,18 @@ mod tests {
             code: vec![
                 Opcode::PushExceptionHandler {
                     catch_target: None,
-                    finally_target: Some(5),
+                    finally_target: Some(7),
                 },
+                Opcode::EnterScope,
                 Opcode::LoadNumber(1.0),
                 Opcode::Pop,
+                Opcode::ExitScope,
                 Opcode::PopExceptionHandler,
-                Opcode::Jump(5),
+                Opcode::Jump(7),
+                Opcode::EnterScope,
                 Opcode::LoadNumber(2.0),
                 Opcode::Pop,
+                Opcode::ExitScope,
                 Opcode::RethrowIfException,
                 Opcode::LoadUndefined,
                 Opcode::Halt,
