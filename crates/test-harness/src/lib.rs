@@ -262,6 +262,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_literal_computed_accessor_baseline() {
+        assert_eq!(
+            run_script(
+                "var k = 'foo'; var o = { get [k]() { return this; } }; o.foo === o;",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var k = 'foo'; var x = null; var o = { set [k](v) { x = this; } }; o.foo = 1; x === o;",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn delete_member_in_getter_does_not_recurse() {
         let result = run_script(
             "var o = { get x() { delete this.x; return 1; } }; var a = o.x; var b = o.x; (a === 1) && (b === undefined);",

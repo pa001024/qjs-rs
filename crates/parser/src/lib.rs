@@ -2166,7 +2166,10 @@ impl Parser {
                             "expected ':' after computed property name in object literal",
                         ));
                     }
-                    ObjectPropertyKey::AccessorGet(_) | ObjectPropertyKey::AccessorSet(_) => {
+                    ObjectPropertyKey::AccessorGet(_)
+                    | ObjectPropertyKey::AccessorSet(_)
+                    | ObjectPropertyKey::AccessorGetComputed(_)
+                    | ObjectPropertyKey::AccessorSetComputed(_) => {
                         return Err(self.error_current("unexpected accessor in object literal"));
                     }
                 }
@@ -2196,11 +2199,31 @@ impl Parser {
         let Some(accessor_kind) = accessor_kind else {
             return Ok(None);
         };
-        if !self.check_identifier() || !self.check_next(&TokenKind::LParen) {
-            return Ok(None);
-        }
-        let accessor_name =
-            self.expect_identifier_name("expected property name in object literal")?;
+
+        let accessor_key = if self.matches(&TokenKind::LBracket) {
+            let key_expr = self.parse_expression_inner()?;
+            self.expect(
+                TokenKind::RBracket,
+                "expected ']' after computed property name",
+            )?;
+            if accessor_kind == "get" {
+                ObjectPropertyKey::AccessorGetComputed(Box::new(key_expr))
+            } else {
+                ObjectPropertyKey::AccessorSetComputed(Box::new(key_expr))
+            }
+        } else {
+            if !self.check_identifier() || !self.check_next(&TokenKind::LParen) {
+                return Ok(None);
+            }
+            let accessor_name =
+                self.expect_identifier_name("expected property name in object literal")?;
+            if accessor_kind == "get" {
+                ObjectPropertyKey::AccessorGet(accessor_name)
+            } else {
+                ObjectPropertyKey::AccessorSet(accessor_name)
+            }
+        };
+
         self.expect(TokenKind::LParen, "expected '(' after accessor name")?;
         let params = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
@@ -2213,11 +2236,6 @@ impl Parser {
         self.function_depth = self.function_depth.saturating_sub(1);
         let body = body?;
 
-        let accessor_key = if accessor_kind == "get" {
-            ObjectPropertyKey::AccessorGet(accessor_name)
-        } else {
-            ObjectPropertyKey::AccessorSet(accessor_name)
-        };
         Ok(Some((
             accessor_key,
             Expr::Function {
@@ -2645,6 +2663,35 @@ mod tests {
             },
             ObjectProperty {
                 key: ObjectPropertyKey::AccessorSet("foo".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![Identifier("v".to_string())],
+                    body: vec![],
+                },
+            },
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_computed_getter_and_setter_in_object_literal() {
+        let parsed = parse_expression("({ get [foo]() {}, set [bar](v) {} })")
+            .expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorGetComputed(Box::new(Expr::Identifier(
+                    Identifier("foo".to_string()),
+                ))),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![],
+                },
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorSetComputed(Box::new(Expr::Identifier(
+                    Identifier("bar".to_string()),
+                ))),
                 value: Expr::Function {
                     name: None,
                     params: vec![Identifier("v".to_string())],

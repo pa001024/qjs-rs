@@ -111,6 +111,8 @@ pub enum ObjectPropertyKey {
     Computed(Box<Expr>),
     AccessorGet(String),
     AccessorSet(String),
+    AccessorGetComputed(Box<Expr>),
+    AccessorSetComputed(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

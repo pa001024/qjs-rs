@@ -30,6 +30,8 @@ pub enum Opcode {
     DefineProperty(String),
     DefineGetter(String),
     DefineSetter(String),
+    DefineGetterByValue,
+    DefineSetterByValue,
     SetProperty(String),
     SetPropertyByValue,
     DeleteProperty(String),
@@ -958,6 +960,20 @@ impl Compiler {
                             code.push(Opcode::SetPropertyByValue);
                             code.push(Opcode::Pop);
                         }
+                        ObjectPropertyKey::AccessorGetComputed(key_expr) => {
+                            code.push(Opcode::Dup);
+                            self.compile_expr(key_expr, code);
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineGetterByValue);
+                            code.push(Opcode::Pop);
+                        }
+                        ObjectPropertyKey::AccessorSetComputed(key_expr) => {
+                            code.push(Opcode::Dup);
+                            self.compile_expr(key_expr, code);
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineSetterByValue);
+                            code.push(Opcode::Pop);
+                        }
                     }
                 }
             }
@@ -1258,6 +1274,68 @@ mod tests {
                 Opcode::Halt,
             ],
             functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_object_literal_with_computed_accessors() {
+        let expr = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorGetComputed(Box::new(Expr::Identifier(
+                    Identifier("k".to_string()),
+                ))),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                },
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorSetComputed(Box::new(Expr::Identifier(
+                    Identifier("k".to_string()),
+                ))),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![Identifier("v".to_string())],
+                    body: vec![],
+                },
+            },
+        ]);
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateObject,
+                Opcode::Dup,
+                Opcode::LoadIdentifier("k".to_string()),
+                Opcode::LoadFunction(0),
+                Opcode::DefineGetterByValue,
+                Opcode::Pop,
+                Opcode::Dup,
+                Opcode::LoadIdentifier("k".to_string()),
+                Opcode::LoadFunction(1),
+                Opcode::DefineSetterByValue,
+                Opcode::Pop,
+                Opcode::Halt,
+            ],
+            functions: vec![
+                CompiledFunction {
+                    name: "<anonymous>".to_string(),
+                    params: vec![],
+                    code: vec![
+                        Opcode::LoadNumber(1.0),
+                        Opcode::Return,
+                        Opcode::LoadUndefined,
+                        Opcode::Return,
+                    ],
+                },
+                CompiledFunction {
+                    name: "<anonymous>".to_string(),
+                    params: vec!["v".to_string()],
+                    code: vec![Opcode::LoadUndefined, Opcode::Return],
+                },
+            ],
         };
         assert_eq!(chunk, expected);
     }
