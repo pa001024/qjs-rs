@@ -161,13 +161,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         let case = parse_test262_case(&source)
             .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
 
+        let expected = expected_outcome(&case.frontmatter);
         if should_skip(&case.frontmatter) || requires_unsupported_harness_globals(case.body) {
             summary.skipped += 1;
             continue;
         }
 
         summary.executed += 1;
-        let expected = expected_outcome(&case.frontmatter);
         let actual = execute_case(case.body);
 
         let matched = matches!(

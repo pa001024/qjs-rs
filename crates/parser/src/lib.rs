@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
     Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
@@ -30,8 +32,283 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
     })?;
     let mut parser = Parser::new(tokens, source);
     let statements = parser.parse_statement_list(None)?;
+    validate_early_errors(&statements)?;
     parser.expect_eof()?;
     Ok(Script { statements })
+}
+
+fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
+    validate_statement_list_early_errors(statements)
+}
+
+fn validate_statement_list_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
+    let mut lexical_names = BTreeSet::new();
+    for statement in statements {
+        collect_direct_lexical_names(statement, &mut lexical_names)?;
+    }
+
+    let mut var_declared_names = BTreeSet::new();
+    for statement in statements {
+        collect_var_declared_names(statement, &mut var_declared_names);
+    }
+
+    if let Some(name) = lexical_names
+        .iter()
+        .find(|candidate| var_declared_names.contains(*candidate))
+    {
+        return Err(ParseError {
+            message: format!("lexical declaration conflicts with var/function declaration: {name}"),
+            position: 0,
+        });
+    }
+
+    for statement in statements {
+        validate_nested_statement_early_errors(statement)?;
+    }
+
+    Ok(())
+}
+
+fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseError> {
+    match statement {
+        Stmt::Block(statements) => validate_statement_list_early_errors(statements),
+        Stmt::FunctionDeclaration(declaration) => {
+            validate_statement_list_early_errors(&declaration.body)
+        }
+        Stmt::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            validate_nested_statement_early_errors(consequent)?;
+            if let Some(alternate) = alternate {
+                validate_nested_statement_early_errors(alternate)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::Labeled { body, .. } => validate_nested_statement_early_errors(body),
+        Stmt::Switch { cases, .. } => validate_switch_case_early_errors(cases),
+        Stmt::Try {
+            try_block,
+            catch_param,
+            catch_block,
+            finally_block,
+        } => {
+            validate_statement_list_early_errors(try_block)?;
+            if let Some(catch_block) = catch_block {
+                validate_catch_block_early_errors(catch_param.as_ref(), catch_block)?;
+            }
+            if let Some(finally_block) = finally_block {
+                validate_statement_list_early_errors(finally_block)?;
+            }
+            Ok(())
+        }
+        Stmt::Empty
+        | Stmt::VariableDeclaration(_)
+        | Stmt::VariableDeclarations(_)
+        | Stmt::Return(_)
+        | Stmt::Expression(_)
+        | Stmt::Throw(_)
+        | Stmt::Break
+        | Stmt::Continue => Ok(()),
+    }
+}
+
+fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseError> {
+    let mut lexical_names = BTreeSet::new();
+    for case in cases {
+        for statement in &case.consequent {
+            collect_direct_lexical_names(statement, &mut lexical_names)?;
+        }
+    }
+
+    let mut var_declared_names = BTreeSet::new();
+    for case in cases {
+        for statement in &case.consequent {
+            collect_var_declared_names(statement, &mut var_declared_names);
+        }
+    }
+
+    if let Some(name) = lexical_names
+        .iter()
+        .find(|candidate| var_declared_names.contains(*candidate))
+    {
+        return Err(ParseError {
+            message: format!("lexical declaration conflicts with var/function declaration: {name}"),
+            position: 0,
+        });
+    }
+
+    for case in cases {
+        for statement in &case.consequent {
+            validate_nested_statement_early_errors(statement)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_catch_block_early_errors(
+    catch_param: Option<&Identifier>,
+    catch_block: &[Stmt],
+) -> Result<(), ParseError> {
+    validate_statement_list_early_errors(catch_block)?;
+
+    if let Some(catch_param) = catch_param {
+        let mut lexical_names = BTreeSet::new();
+        for statement in catch_block {
+            collect_direct_lexical_names(statement, &mut lexical_names)?;
+        }
+        if lexical_names.contains(&catch_param.0) {
+            return Err(ParseError {
+                message: format!(
+                    "catch parameter conflicts with lexical declaration: {}",
+                    catch_param.0
+                ),
+                position: 0,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_direct_lexical_names(
+    statement: &Stmt,
+    lexical_names: &mut BTreeSet<String>,
+) -> Result<(), ParseError> {
+    match statement {
+        Stmt::VariableDeclaration(declaration) => {
+            add_lexical_name_if_needed(lexical_names, declaration)?;
+        }
+        Stmt::VariableDeclarations(declarations) => {
+            for declaration in declarations {
+                add_lexical_name_if_needed(lexical_names, declaration)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn add_lexical_name_if_needed(
+    lexical_names: &mut BTreeSet<String>,
+    declaration: &VariableDeclaration,
+) -> Result<(), ParseError> {
+    if !matches!(declaration.kind, BindingKind::Let | BindingKind::Const) {
+        return Ok(());
+    }
+    if !lexical_names.insert(declaration.name.0.clone()) {
+        return Err(ParseError {
+            message: format!("duplicate lexical declaration: {}", declaration.name.0),
+            position: 0,
+        });
+    }
+    Ok(())
+}
+
+fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSet<String>) {
+    match statement {
+        Stmt::VariableDeclaration(declaration) => {
+            add_var_name_if_needed(var_declared_names, declaration);
+        }
+        Stmt::VariableDeclarations(declarations) => {
+            for declaration in declarations {
+                add_var_name_if_needed(var_declared_names, declaration);
+            }
+        }
+        Stmt::FunctionDeclaration(declaration) => {
+            var_declared_names.insert(declaration.name.0.clone());
+        }
+        Stmt::Block(statements) => {
+            for statement in statements {
+                collect_var_declared_names(statement, var_declared_names);
+            }
+        }
+        Stmt::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            collect_var_declared_names(consequent, var_declared_names);
+            if let Some(alternate) = alternate {
+                collect_var_declared_names(alternate, var_declared_names);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+            collect_var_declared_names(body, var_declared_names);
+        }
+        Stmt::For {
+            initializer, body, ..
+        } => {
+            if let Some(initializer) = initializer {
+                collect_var_declared_names_from_for_initializer(initializer, var_declared_names);
+            }
+            collect_var_declared_names(body, var_declared_names);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for statement in &case.consequent {
+                    collect_var_declared_names(statement, var_declared_names);
+                }
+            }
+        }
+        Stmt::Try {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            for statement in try_block {
+                collect_var_declared_names(statement, var_declared_names);
+            }
+            if let Some(catch_block) = catch_block {
+                for statement in catch_block {
+                    collect_var_declared_names(statement, var_declared_names);
+                }
+            }
+            if let Some(finally_block) = finally_block {
+                for statement in finally_block {
+                    collect_var_declared_names(statement, var_declared_names);
+                }
+            }
+        }
+        Stmt::Empty
+        | Stmt::Return(_)
+        | Stmt::Expression(_)
+        | Stmt::Throw(_)
+        | Stmt::Break
+        | Stmt::Continue => {}
+    }
+}
+
+fn collect_var_declared_names_from_for_initializer(
+    initializer: &ForInitializer,
+    var_declared_names: &mut BTreeSet<String>,
+) {
+    match initializer {
+        ForInitializer::VariableDeclaration(declaration) => {
+            add_var_name_if_needed(var_declared_names, declaration);
+        }
+        ForInitializer::VariableDeclarations(declarations) => {
+            for declaration in declarations {
+                add_var_name_if_needed(var_declared_names, declaration);
+            }
+        }
+        ForInitializer::Expression(_) => {}
+    }
+}
+
+fn add_var_name_if_needed(
+    var_declared_names: &mut BTreeSet<String>,
+    declaration: &VariableDeclaration,
+) {
+    if declaration.kind == BindingKind::Var {
+        var_declared_names.insert(declaration.name.0.clone());
+    }
 }
 
 #[derive(Debug)]
@@ -552,6 +829,11 @@ impl Parser {
         allow_else_terminator: bool,
     ) -> Result<Stmt, ParseError> {
         let statement = self.parse_statement()?;
+        if matches!(statement, Stmt::FunctionDeclaration(_)) {
+            return Err(
+                self.error_current("function declaration not allowed in statement position")
+            );
+        }
         let needs_separator = !matches!(
             statement,
             Stmt::Block(_)
@@ -1638,6 +1920,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_function_declaration_in_embedded_statement() {
+        let err = parse_script("while (1) function f() {}").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "function declaration not allowed in statement position"
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_default_in_switch() {
         let err =
             parse_script("switch (x) { default: 1; default: 2; }").expect_err("parser should fail");
@@ -1648,6 +1939,60 @@ mod tests {
     fn rejects_const_without_initializer() {
         let err = parse_script("const x;").expect_err("parser should fail");
         assert_eq!(err.message, "const declaration requires an initializer");
+    }
+
+    #[test]
+    fn rejects_duplicate_lexical_declaration() {
+        let err = parse_script("{ let x = 1; const x = 2; }").expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate lexical declaration: x");
+    }
+
+    #[test]
+    fn rejects_lexical_var_redeclaration_in_block() {
+        let err = parse_script("{ const f = 0; var f; }").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "lexical declaration conflicts with var/function declaration: f"
+        );
+    }
+
+    #[test]
+    fn rejects_lexical_function_redeclaration_in_block() {
+        let err = parse_script("{ let f; function f() {} }").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "lexical declaration conflicts with var/function declaration: f"
+        );
+    }
+
+    #[test]
+    fn allows_var_redeclaration() {
+        parse_script("var f; var f;").expect("parser should succeed");
+    }
+
+    #[test]
+    fn allows_function_var_redeclaration() {
+        parse_script("function f() {} var f;").expect("parser should succeed");
+    }
+
+    #[test]
+    fn rejects_switch_case_lexical_var_conflict() {
+        let err = parse_script("switch (0) { case 0: let x = 1; case 1: var x; }")
+            .expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "lexical declaration conflicts with var/function declaration: x"
+        );
+    }
+
+    #[test]
+    fn rejects_catch_parameter_lexical_conflict() {
+        let err =
+            parse_script("try { 1; } catch (e) { let e = 1; }").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "catch parameter conflicts with lexical declaration: e"
+        );
     }
 
     #[test]
