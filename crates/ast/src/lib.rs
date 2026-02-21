@@ -34,6 +34,7 @@ pub enum Expr {
     Bool(bool),
     Null,
     String(String),
+    This,
     Identifier(Identifier),
     ObjectLiteral(Vec<ObjectProperty>),
     ArrayLiteral(Vec<Expr>),

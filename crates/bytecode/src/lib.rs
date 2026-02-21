@@ -829,6 +829,7 @@ impl Compiler {
             Expr::Bool(value) => code.push(Opcode::LoadBool(*value)),
             Expr::Null => code.push(Opcode::LoadNull),
             Expr::String(value) => code.push(Opcode::LoadString(value.clone())),
+            Expr::This => code.push(Opcode::LoadIdentifier("this".to_string())),
             Expr::ObjectLiteral(properties) => {
                 code.push(Opcode::CreateObject);
                 for property in properties {

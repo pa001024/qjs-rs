@@ -12,7 +12,9 @@ pub enum TokenKind {
     String(String),
     Identifier(String),
     Plus,
+    PlusPlus,
     Minus,
+    MinusMinus,
     Star,
     Slash,
     Bang,
@@ -91,6 +93,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'+' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'+' {
+                tokens.push(Token {
+                    kind: TokenKind::PlusPlus,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Plus,
                 span: Span {
@@ -103,6 +116,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'-' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'-' {
+                tokens.push(Token {
+                    kind: TokenKind::MinusMinus,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Minus,
                 span: Span {
@@ -564,6 +588,16 @@ mod tests {
         assert_eq!(tokens[5].kind, TokenKind::Slash);
         assert_eq!(tokens[6].kind, TokenKind::Number(4.0));
         assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_increment_and_decrement_tokens() {
+        let tokens = lex("x++ --y").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("x".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::PlusPlus);
+        assert_eq!(tokens[2].kind, TokenKind::MinusMinus);
+        assert_eq!(tokens[3].kind, TokenKind::Identifier("y".to_string()));
+        assert_eq!(tokens[4].kind, TokenKind::Eof);
     }
 
     #[test]

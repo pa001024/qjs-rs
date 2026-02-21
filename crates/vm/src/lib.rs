@@ -127,6 +127,8 @@ impl Vm {
                             .get(&binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         binding.value.clone()
+                    } else if name == "this" {
+                        realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
                     } else {
                         realm
                             .resolve_identifier(name)
@@ -797,6 +799,16 @@ mod tests {
             vm.execute_in_realm(&chunk, &realm),
             Ok(JsValue::Number(42.0))
         );
+    }
+
+    #[test]
+    fn unresolved_this_loads_as_undefined() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadIdentifier("this".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
     }
 
     #[test]

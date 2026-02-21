@@ -1179,6 +1179,12 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        if self.matches(&TokenKind::PlusPlus) {
+            return self.parse_prefix_update_expression(true);
+        }
+        if self.matches(&TokenKind::MinusMinus) {
+            return self.parse_prefix_update_expression(false);
+        }
         if self.matches(&TokenKind::Plus) {
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary {
@@ -1201,6 +1207,51 @@ impl Parser {
             });
         }
         self.parse_postfix()
+    }
+
+    fn parse_prefix_update_expression(&mut self, increment: bool) -> Result<Expr, ParseError> {
+        let target = self.parse_unary()?;
+        self.rewrite_update_target(target, increment)
+    }
+
+    fn rewrite_update_target(&self, target: Expr, increment: bool) -> Result<Expr, ParseError> {
+        let op = if increment {
+            BinaryOp::Add
+        } else {
+            BinaryOp::Sub
+        };
+        match target {
+            Expr::Identifier(identifier) => Ok(Expr::Assign {
+                target: identifier.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Identifier(identifier)),
+                    right: Box::new(Expr::Number(1.0)),
+                }),
+            }),
+            Expr::Member { object, property } => Ok(Expr::AssignMember {
+                object: object.clone(),
+                property: property.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Member { object, property }),
+                    right: Box::new(Expr::Number(1.0)),
+                }),
+            }),
+            Expr::MemberComputed { object, property } => Ok(Expr::AssignMemberComputed {
+                object: object.clone(),
+                property: property.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::MemberComputed { object, property }),
+                    right: Box::new(Expr::Number(1.0)),
+                }),
+            }),
+            _ => Err(ParseError {
+                message: "invalid update target".to_string(),
+                position: self.current_position(),
+            }),
+        }
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -1292,6 +1343,7 @@ impl Parser {
                     "true" => Ok(Expr::Bool(true)),
                     "false" => Ok(Expr::Bool(false)),
                     "null" => Ok(Expr::Null),
+                    "this" => Ok(Expr::This),
                     _ if is_forbidden_identifier_reference(&name) => Err(ParseError {
                         message: "reserved word cannot be identifier reference".to_string(),
                         position,
@@ -1308,7 +1360,9 @@ impl Parser {
             TokenKind::LBrace => self.parse_object_literal(),
             TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Plus
+            | TokenKind::PlusPlus
             | TokenKind::Minus
+            | TokenKind::MinusMinus
             | TokenKind::Star
             | TokenKind::Slash
             | TokenKind::Bang
@@ -1664,6 +1718,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_prefix_increment_expression() {
+        let parsed = parse_expression("++x").expect("parser should succeed");
+        let expected = Expr::Assign {
+            target: Identifier("x".to_string()),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
     fn parses_member_chain_with_call() {
         let parsed = parse_expression("obj.fn(1).value").expect("parser should succeed");
         let expected = Expr::Member {
@@ -1709,6 +1777,10 @@ mod tests {
         assert_eq!(
             parse_expression("'ok'").expect("parser should succeed"),
             Expr::String("ok".to_string())
+        );
+        assert_eq!(
+            parse_expression("this").expect("parser should succeed"),
+            Expr::This
         );
     }
 
@@ -2217,6 +2289,18 @@ mod tests {
     fn rejects_reserved_word_identifier_reference() {
         let err = parse_script("case = 1;").expect_err("parser should fail");
         assert_eq!(err.message, "reserved word cannot be identifier reference");
+    }
+
+    #[test]
+    fn rejects_assignment_to_this_expression() {
+        let err = parse_script("this = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid assignment target");
+    }
+
+    #[test]
+    fn rejects_increment_operator_without_support() {
+        let err = parse_script("++this;").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid update target");
     }
 
     #[test]
