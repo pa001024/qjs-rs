@@ -9,6 +9,8 @@ pub enum Opcode {
     LoadIdentifier(String),
     DefineVariable { name: String, mutable: bool },
     StoreVariable(String),
+    EnterScope,
+    ExitScope,
     Add,
     Sub,
     Mul,
@@ -24,10 +26,9 @@ pub struct Chunk {
 
 pub fn compile_script(script: &Script) -> Chunk {
     let mut code = Vec::new();
-    let len = script.statements.len();
-    for (index, statement) in script.statements.iter().enumerate() {
-        let is_last = index + 1 == len;
-        compile_stmt(statement, &mut code, is_last);
+    let produced_value = compile_statement_list(&script.statements, &mut code, true);
+    if !produced_value {
+        code.push(Opcode::LoadUndefined);
     }
     code.push(Opcode::Halt);
     Chunk { code }
@@ -40,7 +41,24 @@ pub fn compile_expression(expr: &Expr) -> Chunk {
     Chunk { code }
 }
 
-fn compile_stmt(stmt: &Stmt, code: &mut Vec<Opcode>, is_last: bool) {
+fn compile_statement_list(
+    statements: &[Stmt],
+    code: &mut Vec<Opcode>,
+    preserve_value: bool,
+) -> bool {
+    let mut produced_value = false;
+    let len = statements.len();
+
+    for (index, stmt) in statements.iter().enumerate() {
+        let is_last = index + 1 == len;
+        let keep_value = preserve_value && is_last;
+        produced_value = compile_stmt(stmt, code, keep_value);
+    }
+
+    produced_value
+}
+
+fn compile_stmt(stmt: &Stmt, code: &mut Vec<Opcode>, keep_value: bool) -> bool {
     match stmt {
         Stmt::VariableDeclaration(VariableDeclaration {
             kind,
@@ -56,12 +74,25 @@ fn compile_stmt(stmt: &Stmt, code: &mut Vec<Opcode>, is_last: bool) {
                 name: binding_name.clone(),
                 mutable: matches!(kind, BindingKind::Let),
             });
+            false
         }
         Stmt::Expression(expr) => {
             compile_expr(expr, code);
-            if !is_last {
+            if !keep_value {
                 code.push(Opcode::Pop);
+                false
+            } else {
+                true
             }
+        }
+        Stmt::Block(statements) => {
+            code.push(Opcode::EnterScope);
+            let block_value = compile_statement_list(statements, code, keep_value);
+            if keep_value && !block_value {
+                code.push(Opcode::LoadUndefined);
+            }
+            code.push(Opcode::ExitScope);
+            keep_value
         }
     }
 }
@@ -157,6 +188,52 @@ mod tests {
                 Opcode::Add,
                 Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_block_scope_with_shadowing() {
+        let script = Script {
+            statements: vec![
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("x".to_string()),
+                    initializer: Some(Expr::Number(1.0)),
+                }),
+                Stmt::Block(vec![
+                    Stmt::VariableDeclaration(VariableDeclaration {
+                        kind: BindingKind::Let,
+                        name: Identifier("x".to_string()),
+                        initializer: Some(Expr::Number(2.0)),
+                    }),
+                    Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+                ]),
+                Stmt::Expression(Expr::Identifier(Identifier("x".to_string()))),
+            ],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::EnterScope,
+                Opcode::LoadNumber(2.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Pop,
+                Opcode::ExitScope,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],

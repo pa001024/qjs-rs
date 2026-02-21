@@ -18,6 +18,8 @@ pub enum TokenKind {
     Semicolon,
     LParen,
     RParen,
+    LBrace,
+    RBrace,
     Eof,
 }
 
@@ -141,6 +143,30 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
+        if byte == b'{' {
+            tokens.push(Token {
+                kind: TokenKind::LBrace,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'}' {
+            tokens.push(Token {
+                kind: TokenKind::RBrace,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
         if byte.is_ascii_digit() {
             let start = pos;
             let mut has_dot = false;
@@ -249,6 +275,19 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_braces() {
+        let tokens = lex("{ let x = 1; }").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::LBrace);
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("let".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("x".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::Equal);
+        assert_eq!(tokens[4].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[5].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[6].kind, TokenKind::RBrace);
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
     }
 
     #[test]

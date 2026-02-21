@@ -14,6 +14,7 @@ struct Binding {
 pub enum VmError {
     EmptyStack,
     StackUnderflow,
+    ScopeUnderflow,
     UnknownIdentifier(String),
     ImmutableBinding(String),
     VariableAlreadyDefined(String),
@@ -23,7 +24,7 @@ pub enum VmError {
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
-    bindings: BTreeMap<String, Binding>,
+    scopes: Vec<BTreeMap<String, Binding>>,
 }
 
 impl Vm {
@@ -34,13 +35,14 @@ impl Vm {
 
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
-        self.bindings.clear();
+        self.scopes.clear();
+        self.scopes.push(BTreeMap::new());
         for instruction in &chunk.code {
             match instruction {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
                 Opcode::LoadIdentifier(name) => {
-                    let value = if let Some(binding) = self.bindings.get(name) {
+                    let value = if let Some(binding) = self.resolve_binding(name) {
                         binding.value.clone()
                     } else {
                         realm
@@ -51,10 +53,11 @@ impl Vm {
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    if self.bindings.contains_key(name) {
+                    let scope = self.current_scope_mut()?;
+                    if scope.contains_key(name) {
                         return Err(VmError::VariableAlreadyDefined(name.clone()));
                     }
-                    self.bindings.insert(
+                    scope.insert(
                         name.clone(),
                         Binding {
                             value,
@@ -65,14 +68,19 @@ impl Vm {
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let binding = self
-                        .bindings
-                        .get_mut(name)
+                        .resolve_binding_mut(name)
                         .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?;
                     if !binding.mutable {
                         return Err(VmError::ImmutableBinding(name.clone()));
                     }
                     binding.value = value.clone();
                     self.stack.push(value);
+                }
+                Opcode::EnterScope => self.scopes.push(BTreeMap::new()),
+                Opcode::ExitScope => {
+                    if self.scopes.pop().is_none() || self.scopes.is_empty() {
+                        return Err(VmError::ScopeUnderflow);
+                    }
                 }
                 Opcode::Add => {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs + rhs)?;
@@ -97,6 +105,21 @@ impl Vm {
             }
         }
         self.stack.pop().ok_or(VmError::EmptyStack)
+    }
+
+    fn current_scope_mut(&mut self) -> Result<&mut BTreeMap<String, Binding>, VmError> {
+        self.scopes.last_mut().ok_or(VmError::ScopeUnderflow)
+    }
+
+    fn resolve_binding(&self, name: &str) -> Option<&Binding> {
+        self.scopes.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    fn resolve_binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
     }
 
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
@@ -212,5 +235,53 @@ mod tests {
             vm.execute(&chunk),
             Err(VmError::ImmutableBinding("x".to_string()))
         );
+    }
+
+    #[test]
+    fn supports_scope_shadowing() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::EnterScope,
+                Opcode::LoadNumber(2.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Pop,
+                Opcode::ExitScope,
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn assignment_updates_nearest_scope_binding() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
+                Opcode::EnterScope,
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Pop,
+                Opcode::ExitScope,
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::Halt,
+            ],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
     }
 }

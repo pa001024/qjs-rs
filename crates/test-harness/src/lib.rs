@@ -91,4 +91,22 @@ mod tests {
         let err = run_script("const x = 1; x = 2; x;", &[]).expect_err("script should fail");
         assert!(err.contains("ImmutableBinding"));
     }
+
+    #[test]
+    fn supports_block_shadowing() {
+        let result = run_script("let x = 1; { let x = 2; x = x + 1; }; x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_outer_assignment_inside_block() {
+        let result = run_script("let x = 1; { x = x + 2; } x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn returns_undefined_when_script_has_no_result_expression() {
+        let result = run_script("let x = 1;", &[]);
+        assert_eq!(result, Ok(JsValue::Undefined));
+    }
 }

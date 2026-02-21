@@ -43,6 +43,7 @@ pub struct VariableDeclaration {
 pub enum Stmt {
     VariableDeclaration(VariableDeclaration),
     Expression(Expr),
+    Block(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -26,21 +26,7 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
         position: err.position,
     })?;
     let mut parser = Parser::new(tokens);
-    let mut statements = Vec::new();
-
-    while !parser.is_eof() {
-        let statement = parser.parse_statement()?;
-        statements.push(statement);
-
-        if parser.matches(&TokenKind::Semicolon) {
-            continue;
-        }
-        if parser.is_eof() {
-            break;
-        }
-        return Err(parser.error_current("expected ';' between statements"));
-    }
-
+    let statements = parser.parse_statement_list(None)?;
     parser.expect_eof()?;
     Ok(Script { statements })
 }
@@ -56,7 +42,49 @@ impl Parser {
         Self { tokens, pos: 0 }
     }
 
+    fn parse_statement_list(
+        &mut self,
+        terminator: Option<TokenKind>,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        let mut statements = Vec::new();
+
+        loop {
+            if let Some(term) = &terminator {
+                if self.check(term) {
+                    break;
+                }
+            }
+            if self.is_eof() {
+                break;
+            }
+
+            let stmt = self.parse_statement()?;
+            let needs_separator = !matches!(stmt, Stmt::Block(_));
+            statements.push(stmt);
+
+            if self.matches(&TokenKind::Semicolon) {
+                continue;
+            }
+            if let Some(term) = &terminator {
+                if self.check(term) {
+                    continue;
+                }
+            }
+            if self.is_eof() {
+                break;
+            }
+            if needs_separator {
+                return Err(self.error_current("expected ';' between statements"));
+            }
+        }
+
+        Ok(statements)
+    }
+
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.check(&TokenKind::LBrace) {
+            return self.parse_block_statement();
+        }
         if self.matches_keyword("let") {
             return self.parse_variable_declaration(BindingKind::Let);
         }
@@ -65,6 +93,13 @@ impl Parser {
         }
         let expr = self.parse_expression_inner()?;
         Ok(Stmt::Expression(expr))
+    }
+
+    fn parse_block_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LBrace, "expected '{' to start block")?;
+        let statements = self.parse_statement_list(Some(TokenKind::RBrace))?;
+        self.expect(TokenKind::RBrace, "expected '}' after block")?;
+        Ok(Stmt::Block(statements))
     }
 
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
@@ -176,6 +211,10 @@ impl Parser {
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
+            TokenKind::LBrace => Err(ParseError {
+                message: "unexpected '{' in expression".to_string(),
+                position,
+            }),
             TokenKind::Plus
             | TokenKind::Minus
             | TokenKind::Star
@@ -190,6 +229,10 @@ impl Parser {
             }),
             TokenKind::RParen => Err(ParseError {
                 message: "unexpected ')'".to_string(),
+                position,
+            }),
+            TokenKind::RBrace => Err(ParseError {
+                message: "unexpected '}'".to_string(),
                 position,
             }),
             TokenKind::Eof => Err(ParseError {
@@ -229,13 +272,16 @@ impl Parser {
         }
     }
 
+    fn check(&self, expected: &TokenKind) -> bool {
+        matches!(self.current(), Some(token) if &token.kind == expected)
+    }
+
     fn matches(&mut self, expected: &TokenKind) -> bool {
-        match self.current() {
-            Some(token) if &token.kind == expected => {
-                self.advance();
-                true
-            }
-            _ => false,
+        if self.check(expected) {
+            self.advance();
+            true
+        } else {
+            false
         }
     }
 
@@ -271,13 +317,7 @@ impl Parser {
     }
 
     fn is_eof(&self) -> bool {
-        matches!(
-            self.current(),
-            Some(Token {
-                kind: TokenKind::Eof,
-                ..
-            })
-        )
+        self.check(&TokenKind::Eof)
     }
 
     fn error_current(&self, message: &str) -> ParseError {
@@ -402,9 +442,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_block_statement_and_shadowing_syntax() {
+        let parsed = parse_script("let x = 1; { let x = 2; x = x + 1; }; x;")
+            .expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 3);
+        assert!(matches!(parsed.statements[1], Stmt::Block(_)));
+    }
+
+    #[test]
+    fn allows_statement_after_block_without_semicolon() {
+        let parsed =
+            parse_script("{ let x = 1; } let y = 2; y;").expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 3);
+    }
+
+    #[test]
     fn rejects_const_without_initializer() {
         let err = parse_script("const x;").expect_err("parser should fail");
         assert_eq!(err.message, "const declaration requires an initializer");
+    }
+
+    #[test]
+    fn rejects_invalid_assignment_target() {
+        let err = parse_expression("(x + 1) = 2").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid assignment target");
     }
 
     #[test]
