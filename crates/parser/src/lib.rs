@@ -173,6 +173,24 @@ enum StatementListKind {
     BlockLike,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum ClassMethodKey {
+    Static(String),
+    Computed(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClassMethodDefinition {
+    key: ClassMethodKey,
+    value: Expr,
+    is_static: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ParsedClassTail {
+    methods: Vec<ClassMethodDefinition>,
+}
+
 fn validate_statement_list_early_errors(
     statements: &[Stmt],
     kind: StatementListKind,
@@ -569,6 +587,7 @@ struct Parser {
     loop_depth: usize,
     breakable_depth: usize,
     label_stack: Vec<String>,
+    class_temp_index: usize,
 }
 
 impl Parser {
@@ -583,6 +602,7 @@ impl Parser {
             loop_depth: 0,
             breakable_depth: 0,
             label_stack: Vec::new(),
+            class_temp_index: 0,
         }
     }
 
@@ -769,11 +789,16 @@ impl Parser {
 
     fn parse_class_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let name = Identifier(self.expect_binding_identifier("expected class name")?);
-        self.parse_class_tail()?;
+        let class_tail = self.parse_class_tail()?;
+        let initializer = if class_tail.methods.is_empty() {
+            Expr::ObjectLiteral(vec![])
+        } else {
+            self.lower_class_tail(class_tail)
+        };
         Ok(Stmt::VariableDeclaration(VariableDeclaration {
             kind: BindingKind::Let,
             name,
-            initializer: Some(Expr::ObjectLiteral(vec![])),
+            initializer: Some(initializer),
         }))
     }
 
@@ -2026,18 +2051,180 @@ impl Parser {
         if self.check_identifier() {
             let _ = self.expect_binding_identifier("expected class name")?;
         }
-        self.parse_class_tail()?;
-        Ok(Expr::ObjectLiteral(vec![]))
+        let class_tail = self.parse_class_tail()?;
+        if class_tail.methods.is_empty() {
+            Ok(Expr::ObjectLiteral(vec![]))
+        } else {
+            Ok(self.lower_class_tail(class_tail))
+        }
     }
 
-    fn parse_class_tail(&mut self) -> Result<(), ParseError> {
+    fn parse_class_tail(&mut self) -> Result<ParsedClassTail, ParseError> {
+        let checkpoint = self.pos;
+        match self.parse_class_tail_detailed() {
+            Ok(parsed) => Ok(parsed),
+            Err(_) => {
+                self.pos = checkpoint;
+                if self.matches_keyword("extends") {
+                    let _ = self.parse_expression_inner()?;
+                }
+                self.consume_balanced_brace_block(
+                    "expected '{' before class body",
+                    "expected '}' after class body",
+                )?;
+                Ok(ParsedClassTail::default())
+            }
+        }
+    }
+
+    fn parse_class_tail_detailed(&mut self) -> Result<ParsedClassTail, ParseError> {
         if self.matches_keyword("extends") {
             let _ = self.parse_expression_inner()?;
         }
-        self.consume_balanced_brace_block(
-            "expected '{' before class body",
-            "expected '}' after class body",
-        )
+        self.expect(TokenKind::LBrace, "expected '{' before class body")?;
+
+        let mut parsed = ParsedClassTail::default();
+        while !self.check(&TokenKind::RBrace) {
+            if self.is_eof() {
+                return Err(self.error_current("expected '}' after class body"));
+            }
+            if self.matches(&TokenKind::Semicolon) {
+                continue;
+            }
+
+            let is_static = self.check_keyword("static") && !self.check_next(&TokenKind::LParen);
+            if is_static {
+                self.advance();
+            }
+
+            let key = self.parse_class_method_name()?;
+            self.expect(TokenKind::LParen, "expected '(' after method name")?;
+            let params = self.parse_parameter_list()?;
+            self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+            let body = self.parse_function_body(
+                "expected '{' before method body",
+                "expected '}' after method body",
+            )?;
+
+            parsed.methods.push(ClassMethodDefinition {
+                key,
+                value: Expr::Function {
+                    name: None,
+                    params,
+                    body,
+                },
+                is_static,
+            });
+        }
+
+        self.expect(TokenKind::RBrace, "expected '}' after class body")?;
+        Ok(parsed)
+    }
+
+    fn parse_class_method_name(&mut self) -> Result<ClassMethodKey, ParseError> {
+        let token = self.current().cloned().ok_or(ParseError {
+            message: "expected method name in class body".to_string(),
+            position: self.last_position(),
+        })?;
+        match token.kind {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(ClassMethodKey::Static(name))
+            }
+            TokenKind::String(name) => {
+                self.advance();
+                Ok(ClassMethodKey::Static(name))
+            }
+            TokenKind::Number(number) => {
+                self.advance();
+                let key = if number.is_finite() && number.fract() == 0.0 {
+                    format!("{number:.0}")
+                } else {
+                    number.to_string()
+                };
+                Ok(ClassMethodKey::Static(key))
+            }
+            TokenKind::LBracket => {
+                self.advance();
+                let key = self.parse_expression_inner()?;
+                self.expect(
+                    TokenKind::RBracket,
+                    "expected ']' after computed method name",
+                )?;
+                Ok(ClassMethodKey::Computed(key))
+            }
+            _ => Err(ParseError {
+                message: "expected method name in class body".to_string(),
+                position: token.span.start,
+            }),
+        }
+    }
+
+    fn lower_class_tail(&mut self, class_tail: ParsedClassTail) -> Expr {
+        let class_temp = self.next_class_temp_name();
+        let class_ident = Identifier(class_temp.clone());
+
+        let mut body = vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: class_ident.clone(),
+                initializer: Some(Expr::ObjectLiteral(vec![])),
+            }),
+            Stmt::Expression(Expr::AssignMember {
+                object: Box::new(Expr::Identifier(class_ident.clone())),
+                property: "prototype".to_string(),
+                value: Box::new(Expr::ObjectLiteral(vec![])),
+            }),
+            Stmt::Expression(Expr::AssignMember {
+                object: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(class_ident.clone())),
+                    property: "prototype".to_string(),
+                }),
+                property: "constructor".to_string(),
+                value: Box::new(Expr::Identifier(class_ident.clone())),
+            }),
+        ];
+
+        for method in class_tail.methods {
+            let target = if method.is_static {
+                Expr::Identifier(class_ident.clone())
+            } else {
+                Expr::Member {
+                    object: Box::new(Expr::Identifier(class_ident.clone())),
+                    property: "prototype".to_string(),
+                }
+            };
+            let assignment = match method.key {
+                ClassMethodKey::Static(name) => Expr::AssignMember {
+                    object: Box::new(target),
+                    property: name,
+                    value: Box::new(method.value),
+                },
+                ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
+                    object: Box::new(target),
+                    property: Box::new(key),
+                    value: Box::new(method.value),
+                },
+            };
+            body.push(Stmt::Expression(assignment));
+        }
+
+        body.push(Stmt::Return(Some(Expr::Identifier(class_ident))));
+
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![],
+                body,
+            }),
+            arguments: vec![],
+        }
+    }
+
+    fn next_class_temp_name(&mut self) -> String {
+        let name = format!("$__class_ctor_{}", self.class_temp_index);
+        self.class_temp_index += 1;
+        name
     }
 
     fn consume_balanced_brace_block(

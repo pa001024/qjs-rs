@@ -363,6 +363,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_class_prototype_method_baseline() {
+        let result = run_script(
+            "class C { method() { return arguments.length; } } C.prototype.method(42,);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_class_static_method_baseline() {
+        let result = run_script(
+            "class C { static method() { return arguments.length; } } C.method(42, null);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
     fn supports_constructor_property_on_constructed_object_baseline() {
         let result = run_script(
             "var ok = false; function C() { ok = this.constructor === C; } new C(); ok;",
