@@ -2,6 +2,14 @@
 
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFunction {
+    Eval,
+    FunctionConstructor,
+    ObjectConstructor,
+    NumberConstructor,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsValue {
     Number(f64),
@@ -9,6 +17,7 @@ pub enum JsValue {
     Null,
     String(String),
     Function(u64),
+    NativeFunction(NativeFunction),
     Object(u64),
     Undefined,
 }

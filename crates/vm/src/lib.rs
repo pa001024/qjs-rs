@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
-use bytecode::{Chunk, CompiledFunction, Opcode};
-use runtime::{JsValue, Realm};
+use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+use parser::{parse_expression, parse_script};
+use runtime::{JsValue, NativeFunction, Realm};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -20,6 +21,7 @@ struct Binding {
 #[derive(Debug, Clone, PartialEq)]
 struct Closure {
     function_id: usize,
+    functions: Rc<Vec<CompiledFunction>>,
     captured_scopes: Vec<ScopeRef>,
 }
 
@@ -227,38 +229,52 @@ impl Vm {
                 }
                 Opcode::GetProperty(name) => {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let object_id = match receiver {
-                        JsValue::Object(id) => id,
+                    let value = match receiver {
+                        JsValue::Object(object_id) => {
+                            let object = self
+                                .objects
+                                .get(&object_id)
+                                .ok_or(VmError::UnknownObject(object_id))?;
+                            object
+                                .properties
+                                .get(name)
+                                .cloned()
+                                .unwrap_or(JsValue::Undefined)
+                        }
+                        JsValue::Function(closure_id) => {
+                            self.get_function_property(closure_id, name)?
+                        }
+                        JsValue::NativeFunction(native) => {
+                            self.get_native_function_property(native, name)
+                        }
                         _ => return Err(VmError::TypeError("property access expects object")),
                     };
-                    let object = self
-                        .objects
-                        .get(&object_id)
-                        .ok_or(VmError::UnknownObject(object_id))?;
-                    let value = object
-                        .properties
-                        .get(name)
-                        .cloned()
-                        .unwrap_or(JsValue::Undefined);
                     self.stack.push(value);
                 }
                 Opcode::GetPropertyByValue => {
                     let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let object_id = match receiver {
-                        JsValue::Object(id) => id,
+                    let value = match receiver {
+                        JsValue::Object(object_id) => {
+                            let object = self
+                                .objects
+                                .get(&object_id)
+                                .ok_or(VmError::UnknownObject(object_id))?;
+                            object
+                                .properties
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or(JsValue::Undefined)
+                        }
+                        JsValue::Function(closure_id) => {
+                            self.get_function_property(closure_id, &key)?
+                        }
+                        JsValue::NativeFunction(native) => {
+                            self.get_native_function_property(native, &key)
+                        }
                         _ => return Err(VmError::TypeError("property access expects object")),
                     };
-                    let object = self
-                        .objects
-                        .get(&object_id)
-                        .ok_or(VmError::UnknownObject(object_id))?;
-                    let value = object
-                        .properties
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or(JsValue::Undefined);
                     self.stack.push(value);
                 }
                 Opcode::DefineProperty(name) => {
@@ -278,32 +294,40 @@ impl Vm {
                 Opcode::SetProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let object_id = match receiver {
-                        JsValue::Object(id) => id,
+                    match receiver {
+                        JsValue::Object(object_id) => {
+                            let object = self
+                                .objects
+                                .get_mut(&object_id)
+                                .ok_or(VmError::UnknownObject(object_id))?;
+                            object.properties.insert(name.clone(), value.clone());
+                            self.stack.push(value);
+                        }
+                        JsValue::Function(_) | JsValue::NativeFunction(_) => {
+                            self.stack.push(value);
+                        }
                         _ => return Err(VmError::TypeError("property write expects object")),
-                    };
-                    let object = self
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(VmError::UnknownObject(object_id))?;
-                    object.properties.insert(name.clone(), value.clone());
-                    self.stack.push(value);
+                    }
                 }
                 Opcode::SetPropertyByValue => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let object_id = match receiver {
-                        JsValue::Object(id) => id,
+                    match receiver {
+                        JsValue::Object(object_id) => {
+                            let object = self
+                                .objects
+                                .get_mut(&object_id)
+                                .ok_or(VmError::UnknownObject(object_id))?;
+                            object.properties.insert(key, value.clone());
+                            self.stack.push(value);
+                        }
+                        JsValue::Function(_) | JsValue::NativeFunction(_) => {
+                            self.stack.push(value);
+                        }
                         _ => return Err(VmError::TypeError("property write expects object")),
-                    };
-                    let object = self
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(VmError::UnknownObject(object_id))?;
-                    object.properties.insert(key, value.clone());
-                    self.stack.push(value);
+                    }
                 }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
                 Opcode::ExitScope => {
@@ -455,7 +479,7 @@ impl Vm {
                     pc = target;
                     continue;
                 }
-                Opcode::Call(arg_count) => match self.execute_call(*arg_count, functions, realm) {
+                Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm) {
                     Ok(result) => self.stack.push(result),
                     Err(VmError::UncaughtException(exception)) => {
                         let target = self.throw_to_handler(exception, code.len())?;
@@ -486,12 +510,7 @@ impl Vm {
         Ok(ExecutionSignal::Halt)
     }
 
-    fn execute_call(
-        &mut self,
-        arg_count: usize,
-        functions: &[CompiledFunction],
-        realm: &Realm,
-    ) -> Result<JsValue, VmError> {
+    fn execute_call(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -500,17 +519,21 @@ impl Vm {
         args.reverse();
 
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        let closure_id = match callee {
-            JsValue::Function(id) => id,
+        let (closure_id, closure) = match callee {
+            JsValue::NativeFunction(native) => {
+                return self.execute_native_call(native, args, realm);
+            }
+            JsValue::Function(id) => (
+                id,
+                self.closures
+                    .get(&id)
+                    .cloned()
+                    .ok_or(VmError::UnknownClosure(id))?,
+            ),
             _ => return Err(VmError::NotCallable),
         };
-
-        let closure = self
-            .closures
-            .get(&closure_id)
-            .cloned()
-            .ok_or(VmError::UnknownClosure(closure_id))?;
-        let function = functions
+        let function = closure
+            .functions
             .get(closure.function_id)
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
@@ -555,7 +578,7 @@ impl Vm {
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
 
-        let signal = self.execute_code(&function.code, functions, realm, true);
+        let signal = self.execute_code(&function.code, closure.functions.as_ref(), realm, true);
         let value = match signal {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
@@ -573,6 +596,96 @@ impl Vm {
         self.exception_handlers = saved_handlers;
         self.pending_exception = saved_pending_exception;
         Ok(value)
+    }
+
+    fn execute_native_call(
+        &mut self,
+        native: NativeFunction,
+        args: Vec<JsValue>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        match native {
+            NativeFunction::Eval => match args.first() {
+                Some(JsValue::String(source)) => self.execute_eval(source, realm),
+                Some(value) => Ok(value.clone()),
+                None => Ok(JsValue::Undefined),
+            },
+            NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
+            NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
+            NativeFunction::NumberConstructor => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
+                Ok(JsValue::Number(self.to_number(&value)))
+            }
+        }
+    }
+
+    fn execute_eval(&mut self, source: &str, realm: &Realm) -> Result<JsValue, VmError> {
+        let script = parse_script(source)
+            .map_err(|err| VmError::UncaughtException(JsValue::String(err.message)))?;
+        let chunk = compile_script(&script);
+        self.execute_inline_chunk(&chunk, realm)
+    }
+
+    fn execute_function_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let (params, body) = if let Some(last) = args.last() {
+            let params = args[..args.len().saturating_sub(1)]
+                .iter()
+                .map(|arg| self.coerce_to_string(arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (params, self.coerce_to_string(last))
+        } else {
+            (String::new(), String::new())
+        };
+        let source = format!("(function({params}) {{\n{body}\n}})");
+        let expr = parse_expression(&source)
+            .map_err(|err| VmError::UncaughtException(JsValue::String(err.message)))?;
+        let chunk = compile_expression(&expr);
+        let value = self.execute_inline_chunk(&chunk, realm)?;
+
+        if let JsValue::Function(closure_id) = value {
+            if let Some(global_scope) = self.scopes.first().cloned() {
+                if let Some(closure) = self.closures.get_mut(&closure_id) {
+                    closure.captured_scopes = vec![global_scope];
+                }
+            }
+            Ok(JsValue::Function(closure_id))
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
+        match args.first() {
+            None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.create_object_value(),
+            Some(JsValue::Object(id)) => JsValue::Object(*id),
+            Some(value) => {
+                let object = self.create_object_value();
+                if let JsValue::Object(id) = object {
+                    if let Some(target) = self.objects.get_mut(&id) {
+                        target.properties.insert("value".to_string(), value.clone());
+                    }
+                    JsValue::Object(id)
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    fn execute_inline_chunk(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
+        let stack_depth = self.stack.len();
+        let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false) {
+            Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
+            Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
+            Err(err) => Err(err),
+        };
+        self.stack.truncate(stack_depth);
+        result
     }
 
     fn throw_to_handler(&mut self, exception: JsValue, code_len: usize) -> Result<usize, VmError> {
@@ -640,6 +753,7 @@ impl Vm {
             closure_id,
             Closure {
                 function_id,
+                functions: Rc::new(functions.to_vec()),
                 captured_scopes,
             },
         );
@@ -657,6 +771,43 @@ impl Vm {
             }
         }
         None
+    }
+
+    fn get_function_property(
+        &mut self,
+        closure_id: u64,
+        property: &str,
+    ) -> Result<JsValue, VmError> {
+        match property {
+            "length" => {
+                let closure = self
+                    .closures
+                    .get(&closure_id)
+                    .ok_or(VmError::UnknownClosure(closure_id))?;
+                let function = closure
+                    .functions
+                    .get(closure.function_id)
+                    .ok_or(VmError::UnknownFunction(closure.function_id))?;
+                Ok(JsValue::Number(function.params.len() as f64))
+            }
+            "prototype" => Ok(self.create_object_value()),
+            _ => Ok(JsValue::Undefined),
+        }
+    }
+
+    fn get_native_function_property(&mut self, native: NativeFunction, property: &str) -> JsValue {
+        match (native, property) {
+            (NativeFunction::NumberConstructor, "NaN") => JsValue::Number(f64::NAN),
+            (NativeFunction::NumberConstructor, "POSITIVE_INFINITY") => {
+                JsValue::Number(f64::INFINITY)
+            }
+            (NativeFunction::NumberConstructor, "NEGATIVE_INFINITY") => {
+                JsValue::Number(f64::NEG_INFINITY)
+            }
+            (_, "length") => JsValue::Number(1.0),
+            (_, "prototype") => self.create_object_value(),
+            _ => JsValue::Undefined,
+        }
     }
 
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
@@ -677,7 +828,7 @@ impl Vm {
             JsValue::Bool(boolean) => boolean.to_string(),
             JsValue::Null => "null".to_string(),
             JsValue::String(value) => value.clone(),
-            JsValue::Function(_) => "[function]".to_string(),
+            JsValue::Function(_) | JsValue::NativeFunction(_) => "[function]".to_string(),
             JsValue::Object(_) => "[object Object]".to_string(),
             JsValue::Undefined => "undefined".to_string(),
         }
@@ -690,7 +841,7 @@ impl Vm {
             JsValue::Bool(_) => "boolean",
             JsValue::Number(_) => "number",
             JsValue::String(_) => "string",
-            JsValue::Function(_) => "function",
+            JsValue::Function(_) | JsValue::NativeFunction(_) => "function",
             JsValue::Object(_) => "object",
         }
     }
@@ -718,7 +869,7 @@ impl Vm {
                     trimmed.parse::<f64>().unwrap_or(f64::NAN)
                 }
             }
-            JsValue::Function(_) | JsValue::Object(_) => f64::NAN,
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::Object(_) => f64::NAN,
             JsValue::Undefined => f64::NAN,
         }
     }
@@ -730,7 +881,7 @@ impl Vm {
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
             JsValue::String(value) => !value.is_empty(),
-            JsValue::Function(_) => true,
+            JsValue::Function(_) | JsValue::NativeFunction(_) => true,
             JsValue::Object(_) => true,
         }
     }

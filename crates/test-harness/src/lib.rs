@@ -2,6 +2,7 @@
 
 pub mod test262;
 
+use builtins::install_baseline;
 use bytecode::{compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};
@@ -31,6 +32,7 @@ fn execute_chunk_with_globals(
     globals: &[(&str, JsValue)],
 ) -> Result<JsValue, String> {
     let mut realm = Realm::default();
+    install_baseline(&mut realm);
     for (name, value) in globals {
         realm.define_global(name, value.clone());
     }
@@ -86,6 +88,46 @@ mod tests {
         );
         assert_eq!(run_expression("void 1"), Ok(JsValue::Undefined));
         assert_eq!(run_expression("delete x"), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn installs_baseline_globals() {
+        assert_eq!(
+            run_expression("typeof eval"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof Function"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof Object"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
+            run_expression("typeof Number"),
+            Ok(JsValue::String("function".to_string()))
+        );
+    }
+
+    #[test]
+    fn evaluates_eval_string_source() {
+        assert_eq!(run_script("eval('1 + 2');", &[]), Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn supports_function_constructor_baseline() {
+        let result = run_script(
+            "var add = Function('a', 'b', 'return a + b;'); add(20, 22);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn supports_number_constructor_baseline_properties() {
+        let result = run_script("Number.NaN !== Number.NaN;", &[]);
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

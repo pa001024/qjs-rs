@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+builtins.workspace = true
 bytecode.workspace = true
 parser.workspace = true
 runtime.workspace = true

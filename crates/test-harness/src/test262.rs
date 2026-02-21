@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::Realm;
@@ -168,7 +169,8 @@ pub fn execute_case(source: &str) -> ExecutionOutcome {
         println!("  stage: execute");
     }
     let mut vm = Vm::default();
-    let realm = Realm::default();
+    let mut realm = Realm::default();
+    install_baseline(&mut realm);
     match vm.execute_in_realm(&chunk, &realm) {
         Ok(_) => ExecutionOutcome::Pass,
         Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
