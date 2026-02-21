@@ -560,7 +560,11 @@ impl Parser {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_additive()?;
         loop {
-            let op = if self.matches(&TokenKind::EqualEqual) {
+            let op = if self.matches(&TokenKind::EqualEqualEqual) {
+                BinaryOp::StrictEqual
+            } else if self.matches(&TokenKind::BangEqualEqual) {
+                BinaryOp::StrictNotEqual
+            } else if self.matches(&TokenKind::EqualEqual) {
                 BinaryOp::Equal
             } else if self.matches(&TokenKind::BangEqual) {
                 BinaryOp::NotEqual
@@ -747,7 +751,9 @@ impl Parser {
             | TokenKind::Bang
             | TokenKind::Equal
             | TokenKind::EqualEqual
+            | TokenKind::EqualEqualEqual
             | TokenKind::BangEqual
+            | TokenKind::BangEqualEqual
             | TokenKind::Less
             | TokenKind::LessEqual
             | TokenKind::Greater
@@ -1049,6 +1055,21 @@ mod tests {
                 }),
             }),
             right: Box::new(Expr::Number(7.0)),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_strict_equality_expression() {
+        let parsed = parse_expression("1 === 1 !== 0").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::StrictNotEqual,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(Expr::Number(1.0)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+            right: Box::new(Expr::Number(0.0)),
         };
         assert_eq!(parsed, expected);
     }

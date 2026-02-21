@@ -97,6 +97,8 @@ mod tests {
         assert_eq!(run_expression("1 + 2 * 3 >= 7"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("3 == 4"), Ok(JsValue::Bool(false)));
         assert_eq!(run_expression("3 != 4"), Ok(JsValue::Bool(true)));
+        assert_eq!(run_expression("3 === 3"), Ok(JsValue::Bool(true)));
+        assert_eq!(run_expression("3 !== 4"), Ok(JsValue::Bool(true)));
     }
 
     #[test]

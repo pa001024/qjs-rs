@@ -821,6 +821,8 @@ impl Compiler {
                     BinaryOp::Div => Opcode::Div,
                     BinaryOp::Equal => Opcode::Eq,
                     BinaryOp::NotEqual => Opcode::Ne,
+                    BinaryOp::StrictEqual => Opcode::Eq,
+                    BinaryOp::StrictNotEqual => Opcode::Ne,
                     BinaryOp::Less => Opcode::Lt,
                     BinaryOp::LessEqual => Opcode::Le,
                     BinaryOp::Greater => Opcode::Gt,
@@ -1559,6 +1561,32 @@ mod tests {
                 Opcode::Neg,
                 Opcode::LoadNumber(-2.0),
                 Opcode::Ge,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_strict_equality_ops() {
+        let expr = Expr::Binary {
+            op: BinaryOp::StrictNotEqual,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(Expr::Number(1.0)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+            right: Box::new(Expr::Number(0.0)),
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::LoadNumber(1.0),
+                Opcode::Eq,
+                Opcode::LoadNumber(0.0),
+                Opcode::Ne,
                 Opcode::Halt,
             ],
             functions: vec![],
