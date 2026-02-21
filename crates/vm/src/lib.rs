@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use bytecode::{Chunk, Opcode};
-use runtime::JsValue;
+use runtime::{JsValue, Realm};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmError {
@@ -18,12 +18,20 @@ pub struct Vm {
 
 impl Vm {
     pub fn execute(&mut self, chunk: &Chunk) -> Result<JsValue, VmError> {
+        let empty_realm = Realm::default();
+        self.execute_in_realm(chunk, &empty_realm)
+    }
+
+    pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
         for instruction in &chunk.code {
             match instruction {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadIdentifier(name) => {
-                    return Err(VmError::UnknownIdentifier(name.clone()));
+                    let value = realm
+                        .resolve_identifier(name)
+                        .ok_or_else(|| VmError::UnknownIdentifier(name.clone()))?;
+                    self.stack.push(value);
                 }
                 Opcode::Add => {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs + rhs)?;
@@ -61,7 +69,7 @@ impl Vm {
 mod tests {
     use super::{Vm, VmError};
     use bytecode::{Chunk, Opcode};
-    use runtime::JsValue;
+    use runtime::{JsValue, Realm};
 
     #[test]
     fn executes_addition() {
@@ -102,5 +110,24 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Err(VmError::StackUnderflow));
+    }
+
+    #[test]
+    fn resolves_identifier_from_realm() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::LoadNumber(2.0),
+                Opcode::Mul,
+                Opcode::Halt,
+            ],
+        };
+        let mut realm = Realm::default();
+        realm.define_global("x", JsValue::Number(21.0));
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute_in_realm(&chunk, &realm),
+            Ok(JsValue::Number(42.0))
+        );
     }
 }

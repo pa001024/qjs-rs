@@ -2,19 +2,31 @@
 
 use bytecode::compile_expression;
 use parser::parse_expression;
-use runtime::JsValue;
+use runtime::{JsValue, Realm};
 use vm::Vm;
 
 pub fn run_expression(source: &str) -> Result<JsValue, String> {
+    run_expression_with_globals(source, &[])
+}
+
+pub fn run_expression_with_globals(
+    source: &str,
+    globals: &[(&str, JsValue)],
+) -> Result<JsValue, String> {
     let expr = parse_expression(source).map_err(|err| err.message)?;
     let chunk = compile_expression(&expr);
+    let mut realm = Realm::default();
+    for (name, value) in globals {
+        realm.define_global(name, value.clone());
+    }
     let mut vm = Vm::default();
-    vm.execute(&chunk).map_err(|err| format!("{err:?}"))
+    vm.execute_in_realm(&chunk, &realm)
+        .map_err(|err| format!("{err:?}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run_expression;
+    use super::{run_expression, run_expression_with_globals};
     use runtime::JsValue;
 
     #[test]
@@ -47,5 +59,11 @@ mod tests {
                 .expect_err("identifier lookup should fail")
                 .contains("UnknownIdentifier")
         );
+    }
+
+    #[test]
+    fn resolves_identifiers_from_globals() {
+        let result = run_expression_with_globals("foo * 2 + 1", &[("foo", JsValue::Number(20.0))]);
+        assert_eq!(result, Ok(JsValue::Number(41.0)));
     }
 }
