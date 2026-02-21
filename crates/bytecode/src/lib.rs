@@ -777,6 +777,15 @@ impl Compiler {
                     code.push(Opcode::DefineProperty(property.key.clone()));
                 }
             }
+            Expr::ArrayLiteral(elements) => {
+                code.push(Opcode::CreateObject);
+                for (index, element) in elements.iter().enumerate() {
+                    self.compile_expr(element, code);
+                    code.push(Opcode::DefineProperty(index.to_string()));
+                }
+                code.push(Opcode::LoadNumber(elements.len() as f64));
+                code.push(Opcode::DefineProperty("length".to_string()));
+            }
             Expr::Unary { op, expr } => {
                 self.compile_expr(expr, code);
                 let opcode = match op {
@@ -966,6 +975,26 @@ mod tests {
                 Opcode::DefineProperty("answer".to_string()),
                 Opcode::LoadIdentifier("key".to_string()),
                 Opcode::DefineProperty("key".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_array_literal_expression() {
+        let expr = Expr::ArrayLiteral(vec![Expr::Number(1.0), Expr::Number(2.0)]);
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateObject,
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineProperty("0".to_string()),
+                Opcode::LoadNumber(2.0),
+                Opcode::DefineProperty("1".to_string()),
+                Opcode::LoadNumber(2.0),
+                Opcode::DefineProperty("length".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],

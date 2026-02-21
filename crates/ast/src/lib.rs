@@ -36,6 +36,7 @@ pub enum Expr {
     String(String),
     Identifier(Identifier),
     ObjectLiteral(Vec<ObjectProperty>),
+    ArrayLiteral(Vec<Expr>),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

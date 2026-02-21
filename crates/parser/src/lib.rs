@@ -799,10 +799,7 @@ impl Parser {
                 Ok(expr)
             }
             TokenKind::LBrace => self.parse_object_literal(),
-            TokenKind::LBracket => Err(ParseError {
-                message: "unexpected '[' in expression".to_string(),
-                position,
-            }),
+            TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Plus
             | TokenKind::Minus
             | TokenKind::Star
@@ -872,6 +869,26 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
         Ok(Expr::ObjectLiteral(properties))
+    }
+
+    fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
+        self.expect(TokenKind::LBracket, "expected '[' before array literal")?;
+        let mut elements = Vec::new();
+        if self.matches(&TokenKind::RBracket) {
+            return Ok(Expr::ArrayLiteral(elements));
+        }
+        loop {
+            elements.push(self.parse_expression_inner()?);
+            if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBracket) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::RBracket, "expected ']' after array literal")?;
+        Ok(Expr::ArrayLiteral(elements))
     }
 
     fn expect_identifier(&mut self, message: &str) -> Result<String, ParseError> {
@@ -1114,6 +1131,17 @@ mod tests {
             parse_expression("'ok'").expect("parser should succeed"),
             Expr::String("ok".to_string())
         );
+    }
+
+    #[test]
+    fn parses_array_literal() {
+        let parsed = parse_expression("[1, 2, x]").expect("parser should succeed");
+        let expected = Expr::ArrayLiteral(vec![
+            Expr::Number(1.0),
+            Expr::Number(2.0),
+            Expr::Identifier(Identifier("x".to_string())),
+        ]);
+        assert_eq!(parsed, expected);
     }
 
     #[test]

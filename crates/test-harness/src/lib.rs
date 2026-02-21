@@ -435,6 +435,18 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_array_literal_and_index_access() {
+        let result = run_script("let arr = [1, 2, 3]; arr[0] + arr[1] + arr[2];", &[]);
+        assert_eq!(result, Ok(JsValue::Number(6.0)));
+    }
+
+    #[test]
+    fn evaluates_array_length_property() {
+        let result = run_script("let arr = [1, 2, 3]; arr.length;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
     fn evaluates_member_assignment_expression() {
         let result = run_script("let obj = {}; obj.value = 7; obj.value;", &[]);
         assert_eq!(result, Ok(JsValue::Number(7.0)));
