@@ -17,11 +17,11 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1837, skipped=22045, passed=1173, failed=664
+- `language max-cases=5000`: discovered=23882, executed=1837, skipped=22045, passed=1180, failed=657
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。
 - 目前 runner 会跳过明显依赖 harness 全局（`assert` / `Test262Error` / `$262`）的用例，直到 host-harness 机制补齐。
-- 当前轮次新增 statement-list 早期错误校验（`let/const` 重复声明、block/function 冲突、`switch` case block 冲突、`catch` 参数与词法声明冲突），并修复 VM `var/function` 重声明行为，`language` 基线净增 `+61` 通过。
+- 当前轮次新增 statement-list 早期错误校验（`let/const` 重复声明、block/function 冲突、`switch` case block 冲突、`catch` 参数与词法声明冲突），修复 VM `var/function` 重声明行为，并补齐 ASI 的 `if`/`do-while` 分号细节与 `U+2028/U+2029` 行终止符处理，`language` 基线净增 `+68` 通过。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

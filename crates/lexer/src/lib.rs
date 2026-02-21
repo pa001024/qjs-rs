@@ -52,6 +52,28 @@ pub struct LexError {
     pub position: usize,
 }
 
+fn unicode_line_terminator_len(bytes: &[u8], pos: usize) -> Option<usize> {
+    if pos + 2 < bytes.len()
+        && bytes[pos] == 0xE2
+        && bytes[pos + 1] == 0x80
+        && matches!(bytes[pos + 2], 0xA8 | 0xA9)
+    {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
+    if pos >= bytes.len() {
+        return None;
+    }
+    if matches!(bytes[pos], b'\n' | b'\r') {
+        return Some(1);
+    }
+    unicode_line_terminator_len(bytes, pos)
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
@@ -61,6 +83,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         let byte = bytes[pos];
         if byte.is_ascii_whitespace() {
             pos += 1;
+            continue;
+        }
+        if let Some(length) = unicode_line_terminator_len(bytes, pos) {
+            pos += length;
             continue;
         }
 
@@ -103,7 +129,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b'/' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'/' {
                 pos += 2;
-                while pos < bytes.len() && bytes[pos] != b'\n' {
+                while pos < bytes.len() && line_terminator_len_at(bytes, pos).is_none() {
                     pos += 1;
                 }
                 continue;
@@ -621,6 +647,24 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::Plus);
         assert_eq!(tokens[4].kind, TokenKind::Number(3.0));
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn treats_unicode_line_separators_as_whitespace() {
+        let tokens = lex("1\u{2028}+\u{2029}2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn line_comment_ends_on_unicode_line_separator() {
+        let tokens = lex("1//a\u{2028}+2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
     }
 
     #[test]

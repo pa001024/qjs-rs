@@ -907,7 +907,7 @@ impl Parser {
                 | Stmt::Labeled { .. }
                 | Stmt::Try { .. }
         );
-        if self.matches(&TokenKind::Semicolon) {
+        if needs_separator && self.matches(&TokenKind::Semicolon) {
             return Ok(statement);
         }
 
@@ -1469,9 +1469,9 @@ impl Parser {
         if current_start <= previous_end || current_start > self.source.len() {
             return false;
         }
-        self.source.as_bytes()[previous_end..current_start]
-            .iter()
-            .any(|byte| matches!(byte, b'\n' | b'\r'))
+        self.source[previous_end..current_start]
+            .chars()
+            .any(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
     }
 
     fn current(&self) -> Option<&Token> {
@@ -1785,6 +1785,18 @@ mod tests {
     }
 
     #[test]
+    fn allows_comment_line_separator_for_asi() {
+        let parsed = parse_script("''/*\u{2028}*/''").expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 2);
+    }
+
+    #[test]
+    fn allows_comment_paragraph_separator_for_asi() {
+        let parsed = parse_script("''/*\u{2029}*/''").expect("script parsing should succeed");
+        assert_eq!(parsed.statements.len(), 2);
+    }
+
+    #[test]
     fn parses_labeled_statement() {
         let parsed = parse_script("a: 1;").expect("script parsing should succeed");
         assert!(matches!(parsed.statements[0], Stmt::Labeled { .. }));
@@ -1986,6 +1998,16 @@ mod tests {
             err.message,
             "function declaration not allowed in statement position"
         );
+    }
+
+    #[test]
+    fn rejects_else_after_if_block_with_extra_semicolon() {
+        assert!(parse_script("if (false) {}; else {}").is_err());
+    }
+
+    #[test]
+    fn rejects_do_while_with_semicolon_after_block_body() {
+        assert!(parse_script("do {}; while (false)").is_err());
     }
 
     #[test]
