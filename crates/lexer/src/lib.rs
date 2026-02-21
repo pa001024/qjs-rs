@@ -22,6 +22,7 @@ pub enum TokenKind {
     LessEqual,
     Greater,
     GreaterEqual,
+    Dot,
     Comma,
     Colon,
     Semicolon,
@@ -175,6 +176,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b';' {
             tokens.push(Token {
                 kind: TokenKind::Semicolon,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'.' {
+            tokens.push(Token {
+                kind: TokenKind::Dot,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -426,6 +439,15 @@ mod tests {
         assert_eq!(tokens[8].kind, TokenKind::LessEqual);
         assert_eq!(tokens[10].kind, TokenKind::Greater);
         assert_eq!(tokens[12].kind, TokenKind::GreaterEqual);
+    }
+
+    #[test]
+    fn lexes_member_access_dot() {
+        let tokens = lex("obj.value").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("obj".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Dot);
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("value".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
     }
 
     #[test]

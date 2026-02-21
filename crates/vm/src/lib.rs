@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 type BindingId = u64;
+type ObjectId = u64;
 type Scope = BTreeMap<String, BindingId>;
 type ScopeRef = Rc<RefCell<Scope>>;
 
@@ -20,6 +21,11 @@ struct Binding {
 struct Closure {
     function_id: usize,
     captured_scopes: Vec<ScopeRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct JsObject {
+    properties: BTreeMap<String, JsValue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +46,7 @@ pub enum VmError {
     VariableAlreadyDefined(String),
     UnknownClosure(u64),
     UnknownFunction(usize),
+    UnknownObject(u64),
     NotCallable,
     TopLevelReturn,
     InvalidJump(usize),
@@ -61,6 +68,8 @@ pub struct Vm {
     scopes: Vec<ScopeRef>,
     bindings: BTreeMap<BindingId, Binding>,
     next_binding_id: BindingId,
+    objects: BTreeMap<ObjectId, JsObject>,
+    next_object_id: ObjectId,
     closures: BTreeMap<u64, Closure>,
     next_closure_id: u64,
     exception_handlers: Vec<ExceptionHandler>,
@@ -79,6 +88,8 @@ impl Vm {
         self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
         self.bindings.clear();
         self.next_binding_id = 0;
+        self.objects.clear();
+        self.next_object_id = 0;
         self.closures.clear();
         self.next_closure_id = 0;
         self.exception_handlers.clear();
@@ -102,6 +113,12 @@ impl Vm {
             match &code[pc] {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
+                Opcode::CreateObject => {
+                    let object_id = self.next_object_id;
+                    self.next_object_id += 1;
+                    self.objects.insert(object_id, JsObject::default());
+                    self.stack.push(JsValue::Object(object_id));
+                }
                 Opcode::LoadIdentifier(name) => {
                     let value = if let Some(binding_id) = self.resolve_binding_id(name) {
                         let binding = self
@@ -180,6 +197,51 @@ impl Vm {
                         return Err(VmError::ImmutableBinding(name.clone()));
                     }
                     binding.value = value.clone();
+                    self.stack.push(value);
+                }
+                Opcode::GetProperty(name) => {
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property access expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    let value = object
+                        .properties
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined);
+                    self.stack.push(value);
+                }
+                Opcode::DefineProperty(name) => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.properties.insert(name.clone(), value);
+                    self.stack.push(JsValue::Object(object_id));
+                }
+                Opcode::SetProperty(name) => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.properties.insert(name.clone(), value.clone());
                     self.stack.push(value);
                 }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
@@ -468,6 +530,7 @@ impl Vm {
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
             JsValue::Function(_) => true,
+            JsValue::Object(_) => true,
         }
     }
 }
@@ -825,5 +888,52 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn creates_object_and_reads_defined_property() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::LoadNumber(42.0),
+            Opcode::DefineProperty("answer".to_string()),
+            Opcode::GetProperty("answer".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn sets_object_property_and_returns_assigned_value() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::DefineVariable {
+                name: "obj".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::LoadNumber(7.0),
+            Opcode::SetProperty("value".to_string()),
+            Opcode::Pop,
+            Opcode::LoadIdentifier("obj".to_string()),
+            Opcode::GetProperty("value".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn errors_on_property_access_for_non_object_receiver() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::GetProperty("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::TypeError("property access expects object"))
+        );
     }
 }

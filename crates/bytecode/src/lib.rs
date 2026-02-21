@@ -9,6 +9,7 @@ use ast::{
 pub enum Opcode {
     LoadNumber(f64),
     LoadUndefined,
+    CreateObject,
     LoadIdentifier(String),
     DefineVariable {
         name: String,
@@ -19,6 +20,9 @@ pub enum Opcode {
         function_id: usize,
     },
     StoreVariable(String),
+    GetProperty(String),
+    DefineProperty(String),
+    SetProperty(String),
     EnterScope,
     ExitScope,
     Add,
@@ -757,6 +761,13 @@ impl Compiler {
     fn compile_expr(&mut self, expr: &Expr, code: &mut Vec<Opcode>) {
         match expr {
             Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
+            Expr::ObjectLiteral(properties) => {
+                code.push(Opcode::CreateObject);
+                for property in properties {
+                    self.compile_expr(&property.value, code);
+                    code.push(Opcode::DefineProperty(property.key.clone()));
+                }
+            }
             Expr::Unary { op, expr } => {
                 self.compile_expr(expr, code);
                 let opcode = match op {
@@ -773,7 +784,20 @@ impl Compiler {
                 self.compile_expr(value, code);
                 code.push(Opcode::StoreVariable(name.clone()));
             }
+            Expr::AssignMember {
+                object,
+                property,
+                value,
+            } => {
+                self.compile_expr(object, code);
+                self.compile_expr(value, code);
+                code.push(Opcode::SetProperty(property.clone()));
+            }
             Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
+            Expr::Member { object, property } => {
+                self.compile_expr(object, code);
+                code.push(Opcode::GetProperty(property.clone()));
+            }
             Expr::Call { callee, arguments } => {
                 self.compile_expr(callee, code);
                 for argument in arguments {
@@ -806,8 +830,8 @@ impl Compiler {
 mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-        SwitchCase, UnaryOp, VariableDeclaration,
+        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
+        ObjectProperty, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -835,6 +859,55 @@ mod tests {
             functions: vec![],
         };
 
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_object_literal_expression() {
+        let expr = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: "answer".to_string(),
+                value: Expr::Number(42.0),
+            },
+            ObjectProperty {
+                key: "key".to_string(),
+                value: Expr::Identifier(Identifier("key".to_string())),
+            },
+        ]);
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateObject,
+                Opcode::LoadNumber(42.0),
+                Opcode::DefineProperty("answer".to_string()),
+                Opcode::LoadIdentifier("key".to_string()),
+                Opcode::DefineProperty("key".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_member_assignment_expression() {
+        let expr = Expr::AssignMember {
+            object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+            property: "value".to_string(),
+            value: Box::new(Expr::Number(1.0)),
+        };
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("obj".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::SetProperty("value".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
         assert_eq!(chunk, expected);
     }
 

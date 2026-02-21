@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-    SwitchCase, UnaryOp, VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
+    Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -542,6 +542,11 @@ impl Parser {
                     target,
                     value: Box::new(value),
                 }),
+                Expr::Member { object, property } => Ok(Expr::AssignMember {
+                    object,
+                    property,
+                    value: Box::new(value),
+                }),
                 _ => Err(ParseError {
                     message: "invalid assignment target".to_string(),
                     position: assignment_position,
@@ -647,13 +652,25 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
-        while self.matches(&TokenKind::LParen) {
-            let arguments = self.parse_argument_list()?;
-            self.expect(TokenKind::RParen, "expected ')' after arguments")?;
-            expr = Expr::Call {
-                callee: Box::new(expr),
-                arguments,
-            };
+        loop {
+            if self.matches(&TokenKind::LParen) {
+                let arguments = self.parse_argument_list()?;
+                self.expect(TokenKind::RParen, "expected ')' after arguments")?;
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    arguments,
+                };
+                continue;
+            }
+            if self.matches(&TokenKind::Dot) {
+                let property = self.expect_identifier("expected property name after '.'")?;
+                expr = Expr::Member {
+                    object: Box::new(expr),
+                    property,
+                };
+                continue;
+            }
+            break;
         }
         Ok(expr)
     }
@@ -713,10 +730,7 @@ impl Parser {
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
-            TokenKind::LBrace => Err(ParseError {
-                message: "unexpected '{' in expression".to_string(),
-                position,
-            }),
+            TokenKind::LBrace => self.parse_object_literal(),
             TokenKind::Plus
             | TokenKind::Minus
             | TokenKind::Star
@@ -729,6 +743,7 @@ impl Parser {
             | TokenKind::LessEqual
             | TokenKind::Greater
             | TokenKind::GreaterEqual
+            | TokenKind::Dot
             | TokenKind::Comma
             | TokenKind::Colon => Err(ParseError {
                 message: "unexpected operator at expression start".to_string(),
@@ -751,6 +766,32 @@ impl Parser {
                 position,
             }),
         }
+    }
+
+    fn parse_object_literal(&mut self) -> Result<Expr, ParseError> {
+        self.expect(TokenKind::LBrace, "expected '{' before object literal")?;
+        let mut properties = Vec::new();
+        if self.matches(&TokenKind::RBrace) {
+            return Ok(Expr::ObjectLiteral(properties));
+        }
+        loop {
+            let key = self.expect_identifier("expected property name in object literal")?;
+            let value = if self.matches(&TokenKind::Colon) {
+                self.parse_expression_inner()?
+            } else {
+                Expr::Identifier(Identifier(key.clone()))
+            };
+            properties.push(ObjectProperty { key, value });
+            if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
+        Ok(Expr::ObjectLiteral(properties))
     }
 
     fn expect_identifier(&mut self, message: &str) -> Result<String, ParseError> {
@@ -878,8 +919,8 @@ impl Parser {
 mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
-        SwitchCase, UnaryOp, VariableDeclaration,
+        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
+        ObjectProperty, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -910,6 +951,43 @@ mod tests {
                     arguments: vec![Expr::Number(2.0), Expr::Number(3.0)],
                 },
             ],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_object_literal_and_member_assignment() {
+        let parsed =
+            parse_expression("obj.value = { answer: 42, key }").expect("parser should succeed");
+        let expected = Expr::AssignMember {
+            object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+            property: "value".to_string(),
+            value: Box::new(Expr::ObjectLiteral(vec![
+                ObjectProperty {
+                    key: "answer".to_string(),
+                    value: Expr::Number(42.0),
+                },
+                ObjectProperty {
+                    key: "key".to_string(),
+                    value: Expr::Identifier(Identifier("key".to_string())),
+                },
+            ])),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_member_chain_with_call() {
+        let parsed = parse_expression("obj.fn(1).value").expect("parser should succeed");
+        let expected = Expr::Member {
+            object: Box::new(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+                    property: "fn".to_string(),
+                }),
+                arguments: vec![Expr::Number(1.0)],
+            }),
+            property: "value".to_string(),
         };
         assert_eq!(parsed, expected);
     }

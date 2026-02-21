@@ -28,9 +28,14 @@ pub enum UnaryOp {
 pub enum Expr {
     Number(f64),
     Identifier(Identifier),
+    ObjectLiteral(Vec<ObjectProperty>),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
+    },
+    Member {
+        object: Box<Expr>,
+        property: String,
     },
     Call {
         callee: Box<Expr>,
@@ -45,6 +50,17 @@ pub enum Expr {
         target: Identifier,
         value: Box<Expr>,
     },
+    AssignMember {
+        object: Box<Expr>,
+        property: String,
+        value: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectProperty {
+    pub key: String,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

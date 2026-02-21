@@ -352,4 +352,19 @@ mod tests {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));
     }
+
+    #[test]
+    fn evaluates_object_literal_and_member_access() {
+        let result = run_script(
+            "let key = 1; let obj = { answer: 42, key }; obj.answer;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn evaluates_member_assignment_expression() {
+        let result = run_script("let obj = {}; obj.value = 7; obj.value;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(7.0)));
+    }
 }
