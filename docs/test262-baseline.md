@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3175, failed=1825
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3183, failed=1817
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -64,5 +64,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 标识符解析新增 `globalThis` 回退到全局对象，清理一批 `eval-code` 里的 `UnknownIdentifier("globalThis")`。
 - parser/ast/bytecode/vm 打通对象字面量 computed accessor（`get [k](){}` / `set [k](v){}`）最小执行链路，修复 `computed-property-names/object/accessor/*` 一批基线失败。
 - parser/ast/bytecode 新增带标签 `break`（`break label;`）链路，并修复函数体标签上下文隔离，清理 `block-scope/leave/*break*` 相关 parse 失败并消除编译期 panic。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3175/1825`（主要剩余在 `arguments-object` 语义、块级作用域细节、class/computed-property 与 strict 早期错误）。
+- parser/ast/bytecode 新增带标签 `continue`（`continue label;`）链路，并按函数边界隔离 label-set + 增加“continue 目标必须为迭代语句”早期错误校验，修复 `asi/S7.9_A1` 与 `block-scope/leave` 的一批标签控制流失败。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3183/1817`（主要剩余在 `arguments-object` 语义、块级作用域细节、class/computed-property 与 strict 早期错误）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

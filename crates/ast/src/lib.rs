@@ -201,6 +201,7 @@ pub enum Stmt {
     Break,
     BreakLabel(Identifier),
     Continue,
+    ContinueLabel(Identifier),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

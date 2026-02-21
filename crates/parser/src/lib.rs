@@ -38,7 +38,133 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
 }
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
+    validate_label_control_targets(statements)?;
     validate_statement_list_early_errors(statements, StatementListKind::ScriptOrFunction)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabelTarget {
+    name: String,
+    continue_is_valid: bool,
+}
+
+fn validate_label_control_targets(statements: &[Stmt]) -> Result<(), ParseError> {
+    let mut label_targets = Vec::new();
+    validate_label_control_targets_in_statements(statements, &mut label_targets)
+}
+
+fn validate_label_control_targets_in_statements(
+    statements: &[Stmt],
+    label_targets: &mut Vec<LabelTarget>,
+) -> Result<(), ParseError> {
+    for statement in statements {
+        validate_label_control_targets_in_statement(statement, label_targets)?;
+    }
+    Ok(())
+}
+
+fn validate_label_control_targets_in_statement(
+    statement: &Stmt,
+    label_targets: &mut Vec<LabelTarget>,
+) -> Result<(), ParseError> {
+    match statement {
+        Stmt::Labeled { label, body } => {
+            label_targets.push(LabelTarget {
+                name: label.0.clone(),
+                continue_is_valid: statement_allows_continue_label(body),
+            });
+            let result = validate_label_control_targets_in_statement(body, label_targets);
+            label_targets.pop();
+            result
+        }
+        Stmt::BreakLabel(Identifier(label)) => {
+            if !label_targets
+                .iter()
+                .rev()
+                .any(|target| target.name == *label)
+            {
+                return Err(ParseError {
+                    message: format!("undefined label: {label}"),
+                    position: 0,
+                });
+            }
+            Ok(())
+        }
+        Stmt::ContinueLabel(Identifier(label)) => {
+            let Some(target) = label_targets
+                .iter()
+                .rev()
+                .find(|target| target.name == *label)
+            else {
+                return Err(ParseError {
+                    message: format!("undefined label: {label}"),
+                    position: 0,
+                });
+            };
+            if !target.continue_is_valid {
+                return Err(ParseError {
+                    message: "continue target must be iteration statement".to_string(),
+                    position: 0,
+                });
+            }
+            Ok(())
+        }
+        Stmt::Block(statements) => {
+            validate_label_control_targets_in_statements(statements, label_targets)
+        }
+        Stmt::FunctionDeclaration(declaration) => validate_label_control_targets(&declaration.body),
+        Stmt::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            validate_label_control_targets_in_statement(consequent, label_targets)?;
+            if let Some(alternate) = alternate {
+                validate_label_control_targets_in_statement(alternate, label_targets)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
+            validate_label_control_targets_in_statement(body, label_targets)
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                validate_label_control_targets_in_statements(&case.consequent, label_targets)?;
+            }
+            Ok(())
+        }
+        Stmt::Try {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            validate_label_control_targets_in_statements(try_block, label_targets)?;
+            if let Some(catch_block) = catch_block {
+                validate_label_control_targets_in_statements(catch_block, label_targets)?;
+            }
+            if let Some(finally_block) = finally_block {
+                validate_label_control_targets_in_statements(finally_block, label_targets)?;
+            }
+            Ok(())
+        }
+        Stmt::Empty
+        | Stmt::VariableDeclaration(_)
+        | Stmt::VariableDeclarations(_)
+        | Stmt::Return(_)
+        | Stmt::Expression(_)
+        | Stmt::Throw(_)
+        | Stmt::Break
+        | Stmt::Continue => Ok(()),
+    }
+}
+
+fn statement_allows_continue_label(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => true,
+        Stmt::Labeled { body, .. } => statement_allows_continue_label(body),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +252,8 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
         | Stmt::Throw(_)
         | Stmt::Break
         | Stmt::BreakLabel(_)
-        | Stmt::Continue => Ok(()),
+        | Stmt::Continue
+        | Stmt::ContinueLabel(_) => Ok(()),
     }
 }
 
@@ -343,7 +470,8 @@ fn collect_var_declared_names(
         | Stmt::Throw(_)
         | Stmt::Break
         | Stmt::BreakLabel(_)
-        | Stmt::Continue => {}
+        | Stmt::Continue
+        | Stmt::ContinueLabel(_) => {}
     }
 }
 
@@ -1041,6 +1169,22 @@ impl Parser {
     }
 
     fn parse_continue_statement(&mut self) -> Result<Stmt, ParseError> {
+        if !self.has_line_terminator_between_prev_and_current() && self.check_identifier() {
+            let label = Identifier(
+                self.expect_binding_identifier("expected label identifier after 'continue'")?,
+            );
+            if !self
+                .label_stack
+                .iter()
+                .any(|candidate| candidate == &label.0)
+            {
+                return Err(ParseError {
+                    message: format!("undefined label: {}", label.0),
+                    position: self.previous_position(),
+                });
+            }
+            return Ok(Stmt::ContinueLabel(label));
+        }
         if self.loop_depth == 0 {
             return Err(ParseError {
                 message: "continue outside loop".to_string(),
@@ -3341,6 +3485,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_labeled_continue_statement() {
+        let parsed = parse_script("outer: for (;;) { continue outer; }")
+            .expect("script parsing should succeed");
+        let body = match &parsed.statements[0] {
+            Stmt::Labeled { body, .. } => body,
+            _ => panic!("expected labeled statement"),
+        };
+        let loop_body = match body.as_ref() {
+            Stmt::For { body, .. } => body,
+            _ => panic!("expected for statement"),
+        };
+        let statements = match loop_body.as_ref() {
+            Stmt::Block(statements) => statements,
+            _ => panic!("expected block body"),
+        };
+        assert!(matches!(
+            statements[0],
+            Stmt::ContinueLabel(Identifier(ref name)) if name == "outer"
+        ));
+    }
+
+    #[test]
     fn parses_switch_statement() {
         let parsed = parse_script("switch (x) { case 1: y = 2; break; default: y = 3; }")
             .expect("script parsing should succeed");
@@ -3427,6 +3593,12 @@ mod tests {
         let err = parse_script("outer: { function f() { break outer; } }")
             .expect_err("parser should fail");
         assert_eq!(err.message, "undefined label: outer");
+    }
+
+    #[test]
+    fn rejects_continue_to_non_iteration_label() {
+        let err = parse_script("outer: { continue outer; }").expect_err("parser should fail");
+        assert_eq!(err.message, "continue target must be iteration statement");
     }
 
     #[test]

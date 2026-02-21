@@ -778,4 +778,22 @@ mod tests {
             Ok(JsValue::Number(1.0))
         );
     }
+
+    #[test]
+    fn supports_continue_to_label_baseline() {
+        assert_eq!(
+            run_script(
+                "let x = 0; outer: for (let i = 0; i < 2; i = i + 1) { for (let j = 0; j < 2; j = j + 1) { if (j == 0) continue outer; x = x + 1; } } x;",
+                &[]
+            ),
+            Ok(JsValue::Number(0.0))
+        );
+        assert_eq!(
+            run_script(
+                "let reached = false; outer: for (let i = 0; i < 1; i = i + 1) { for (let j = 0; j < 2; j = j + 1) { if (j == 0) { continue\nouter; } reached = true; } } reached;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
 }

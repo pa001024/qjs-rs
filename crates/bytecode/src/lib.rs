@@ -123,6 +123,7 @@ struct BreakContext {
 struct LabelContext {
     name: String,
     break_context_index: usize,
+    continue_loop_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -631,6 +632,11 @@ impl Compiler {
                 self.label_contexts.push(LabelContext {
                     name: label.0.clone(),
                     break_context_index,
+                    continue_loop_index: if Self::statement_allows_continue_label(body) {
+                        Some(self.loops.len())
+                    } else {
+                        None
+                    },
                 });
 
                 let body_value = self.compile_stmt(body, code, keep_value);
@@ -692,6 +698,28 @@ impl Compiler {
                 self.loops
                     .last_mut()
                     .expect("continue outside loop")
+                    .continue_jumps
+                    .push(jump_pos);
+                false
+            }
+            Stmt::ContinueLabel(label) => {
+                let continue_loop_index = self
+                    .label_contexts
+                    .iter()
+                    .rev()
+                    .find(|context| context.name == label.0)
+                    .and_then(|context| context.continue_loop_index)
+                    .expect("continue label should resolve to iteration statement");
+                let (target_handler_depth, target_scope_depth) = {
+                    let loop_context = self
+                        .loops
+                        .get(continue_loop_index)
+                        .expect("loop context for continue label should exist");
+                    (loop_context.handler_depth, loop_context.scope_depth)
+                };
+                let jump_pos =
+                    self.emit_jump_with_finally(code, target_handler_depth, target_scope_depth);
+                self.loops[continue_loop_index]
                     .continue_jumps
                     .push(jump_pos);
                 false
@@ -870,6 +898,14 @@ impl Compiler {
         self.finally_contexts = saved_finally_contexts;
         self.function_nesting = saved_function_nesting;
         function_id
+    }
+
+    fn statement_allows_continue_label(statement: &Stmt) -> bool {
+        match statement {
+            Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => true,
+            Stmt::Labeled { body, .. } => Self::statement_allows_continue_label(body),
+            _ => false,
+        }
     }
 
     fn patch_loop_exits(
