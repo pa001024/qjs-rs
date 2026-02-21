@@ -24,6 +24,7 @@ pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
     })?;
     let mut parser = Parser::new(tokens, source);
     let expr = parser.parse_expression_inner()?;
+    validate_expression_strict_mode(&expr, false)?;
     parser.expect_eof()?;
     Ok(expr)
 }
@@ -36,6 +37,7 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
     let mut parser = Parser::new(tokens, source);
     let statements = parser.parse_statement_list(None)?;
     validate_early_errors(&statements)?;
+    validate_statement_list_strict_mode(&statements, false)?;
     parser.expect_eof()?;
     Ok(Script { statements })
 }
@@ -43,6 +45,282 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
     validate_label_control_targets(statements)?;
     validate_statement_list_early_errors(statements, StatementListKind::ScriptOrFunction)
+}
+
+fn validate_statement_list_strict_mode(
+    statements: &[Stmt],
+    inherited_strict: bool,
+) -> Result<(), ParseError> {
+    let strict = inherited_strict || statement_list_has_use_strict_directive(statements);
+    for statement in statements {
+        validate_statement_strict_mode(statement, strict)?;
+    }
+    Ok(())
+}
+
+fn statement_list_has_use_strict_directive(statements: &[Stmt]) -> bool {
+    for statement in statements {
+        match statement {
+            Stmt::Expression(Expr::String(value)) => {
+                if value == "use strict" {
+                    return true;
+                }
+            }
+            Stmt::Empty => {}
+            _ => break,
+        }
+    }
+    false
+}
+
+fn validate_statement_strict_mode(statement: &Stmt, strict: bool) -> Result<(), ParseError> {
+    match statement {
+        Stmt::Empty => Ok(()),
+        Stmt::VariableDeclaration(VariableDeclaration {
+            name: Identifier(name),
+            initializer,
+            ..
+        }) => {
+            validate_binding_identifier_strict_mode(name, strict)?;
+            if let Some(initializer) = initializer {
+                validate_expression_strict_mode(initializer, strict)?;
+            }
+            Ok(())
+        }
+        Stmt::VariableDeclarations(declarations) => {
+            for declaration in declarations {
+                validate_binding_identifier_strict_mode(&declaration.name.0, strict)?;
+                if let Some(initializer) = &declaration.initializer {
+                    validate_expression_strict_mode(initializer, strict)?;
+                }
+            }
+            Ok(())
+        }
+        Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
+            let function_strict = strict || statement_list_has_use_strict_directive(body);
+            validate_binding_identifier_strict_mode(&name.0, function_strict)?;
+            for param in params {
+                validate_binding_identifier_strict_mode(&param.0, function_strict)?;
+            }
+            validate_statement_list_strict_mode(body, function_strict)
+        }
+        Stmt::Return(value) => {
+            if let Some(value) = value {
+                validate_expression_strict_mode(value, strict)?;
+            }
+            Ok(())
+        }
+        Stmt::Expression(expr) | Stmt::Throw(expr) => validate_expression_strict_mode(expr, strict),
+        Stmt::Block(statements) => validate_statement_list_strict_mode(statements, strict),
+        Stmt::If {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            validate_expression_strict_mode(condition, strict)?;
+            validate_statement_strict_mode(consequent, strict)?;
+            if let Some(alternate) = alternate {
+                validate_statement_strict_mode(alternate, strict)?;
+            }
+            Ok(())
+        }
+        Stmt::While { condition, body } => {
+            validate_expression_strict_mode(condition, strict)?;
+            validate_statement_strict_mode(body, strict)
+        }
+        Stmt::DoWhile { body, condition } => {
+            validate_statement_strict_mode(body, strict)?;
+            validate_expression_strict_mode(condition, strict)
+        }
+        Stmt::For {
+            initializer,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(initializer) = initializer {
+                match initializer {
+                    ForInitializer::VariableDeclaration(declaration) => {
+                        validate_binding_identifier_strict_mode(&declaration.name.0, strict)?;
+                        if let Some(initializer) = &declaration.initializer {
+                            validate_expression_strict_mode(initializer, strict)?;
+                        }
+                    }
+                    ForInitializer::VariableDeclarations(declarations) => {
+                        for declaration in declarations {
+                            validate_binding_identifier_strict_mode(&declaration.name.0, strict)?;
+                            if let Some(initializer) = &declaration.initializer {
+                                validate_expression_strict_mode(initializer, strict)?;
+                            }
+                        }
+                    }
+                    ForInitializer::Expression(expr) => {
+                        validate_expression_strict_mode(expr, strict)?;
+                    }
+                }
+            }
+            if let Some(condition) = condition {
+                validate_expression_strict_mode(condition, strict)?;
+            }
+            if let Some(update) = update {
+                validate_expression_strict_mode(update, strict)?;
+            }
+            validate_statement_strict_mode(body, strict)
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            validate_expression_strict_mode(discriminant, strict)?;
+            for case in cases {
+                if let Some(test) = &case.test {
+                    validate_expression_strict_mode(test, strict)?;
+                }
+                validate_statement_list_strict_mode(&case.consequent, strict)?;
+            }
+            Ok(())
+        }
+        Stmt::Try {
+            try_block,
+            catch_param,
+            catch_block,
+            finally_block,
+        } => {
+            validate_statement_list_strict_mode(try_block, strict)?;
+            if let Some(catch_param) = catch_param {
+                validate_binding_identifier_strict_mode(&catch_param.0, strict)?;
+            }
+            if let Some(catch_block) = catch_block {
+                validate_statement_list_strict_mode(catch_block, strict)?;
+            }
+            if let Some(finally_block) = finally_block {
+                validate_statement_list_strict_mode(finally_block, strict)?;
+            }
+            Ok(())
+        }
+        Stmt::Labeled { body, .. } => validate_statement_strict_mode(body, strict),
+        Stmt::Break | Stmt::BreakLabel(_) | Stmt::Continue | Stmt::ContinueLabel(_) => Ok(()),
+    }
+}
+
+fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), ParseError> {
+    match expr {
+        Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::String(_)
+        | Expr::RegexLiteral { .. } => Ok(()),
+        Expr::This => Ok(()),
+        Expr::Identifier(Identifier(name)) => {
+            validate_identifier_reference_strict_mode(name, strict)
+        }
+        Expr::Function { name, params, body } => {
+            let function_strict = strict || statement_list_has_use_strict_directive(body);
+            if let Some(name) = name {
+                validate_binding_identifier_strict_mode(&name.0, function_strict)?;
+            }
+            for param in params {
+                validate_binding_identifier_strict_mode(&param.0, function_strict)?;
+            }
+            validate_statement_list_strict_mode(body, function_strict)
+        }
+        Expr::ObjectLiteral(properties) => {
+            for property in properties {
+                match &property.key {
+                    ObjectPropertyKey::Computed(key)
+                    | ObjectPropertyKey::AccessorGetComputed(key)
+                    | ObjectPropertyKey::AccessorSetComputed(key) => {
+                        validate_expression_strict_mode(key, strict)?;
+                    }
+                    ObjectPropertyKey::Static(_)
+                    | ObjectPropertyKey::AccessorGet(_)
+                    | ObjectPropertyKey::AccessorSet(_) => {}
+                }
+                validate_expression_strict_mode(&property.value, strict)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLiteral(elements) => {
+            for element in elements {
+                validate_expression_strict_mode(element, strict)?;
+            }
+            Ok(())
+        }
+        Expr::Unary { expr, .. } => validate_expression_strict_mode(expr, strict),
+        Expr::Conditional {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            validate_expression_strict_mode(condition, strict)?;
+            validate_expression_strict_mode(consequent, strict)?;
+            validate_expression_strict_mode(alternate, strict)
+        }
+        Expr::Member { object, .. } => validate_expression_strict_mode(object, strict),
+        Expr::MemberComputed { object, property } => {
+            validate_expression_strict_mode(object, strict)?;
+            validate_expression_strict_mode(property, strict)
+        }
+        Expr::Call { callee, arguments } | Expr::New { callee, arguments } => {
+            validate_expression_strict_mode(callee, strict)?;
+            for argument in arguments {
+                validate_expression_strict_mode(argument, strict)?;
+            }
+            Ok(())
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_expression_strict_mode(left, strict)?;
+            validate_expression_strict_mode(right, strict)
+        }
+        Expr::Assign {
+            target: Identifier(name),
+            value,
+        } => {
+            validate_identifier_reference_strict_mode(name, strict)?;
+            validate_expression_strict_mode(value, strict)
+        }
+        Expr::AssignMember { object, value, .. } => {
+            validate_expression_strict_mode(object, strict)?;
+            validate_expression_strict_mode(value, strict)
+        }
+        Expr::AssignMemberComputed {
+            object,
+            property,
+            value,
+        } => {
+            validate_expression_strict_mode(object, strict)?;
+            validate_expression_strict_mode(property, strict)?;
+            validate_expression_strict_mode(value, strict)
+        }
+        Expr::SpreadArgument(expr) => validate_expression_strict_mode(expr, strict),
+    }
+}
+
+fn validate_binding_identifier_strict_mode(name: &str, strict: bool) -> Result<(), ParseError> {
+    if strict && is_strict_mode_reserved_word(name) {
+        return Err(ParseError {
+            message: "reserved word cannot be binding identifier".to_string(),
+            position: 0,
+        });
+    }
+    Ok(())
+}
+
+fn validate_identifier_reference_strict_mode(name: &str, strict: bool) -> Result<(), ParseError> {
+    if strict && is_strict_mode_reserved_word(name) {
+        return Err(ParseError {
+            message: "reserved word cannot be identifier reference".to_string(),
+            position: 0,
+        });
+    }
+    Ok(())
+}
+
+fn is_strict_mode_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "implements" | "interface" | "package" | "private" | "protected" | "public" | "static"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3981,6 +4259,19 @@ mod tests {
             right: Box::new(Expr::Identifier(Identifier("static".to_string()))),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn rejects_future_reserved_binding_in_strict_mode() {
+        let err = parse_script("'use strict'; var public = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "reserved word cannot be binding identifier");
+    }
+
+    #[test]
+    fn rejects_future_reserved_reference_in_strict_mode() {
+        let err = parse_script("function f() { 'use strict'; public = 1; }")
+            .expect_err("parser should fail");
+        assert_eq!(err.message, "reserved word cannot be identifier reference");
     }
 
     #[test]
