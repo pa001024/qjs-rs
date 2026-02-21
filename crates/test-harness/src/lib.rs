@@ -301,6 +301,51 @@ mod tests {
     }
 
     #[test]
+    fn return_runs_finally_and_preserves_value_without_override() {
+        let result = run_script(
+            "function f() { try { return 1; } finally { let x = 0; x = x + 1; } } f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn return_in_finally_overrides_prior_return() {
+        let result = run_script(
+            "function f() { try { return 1; } finally { return 2; } } f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn break_runs_finally_before_loop_exit() {
+        let result = run_script(
+            "let x = 0; while (1) { try { x = 1; break; } finally { x = 2; } } x;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn continue_runs_finally_before_next_iteration() {
+        let result = run_script(
+            "let x = 0; for (let i = 0; i < 3; i = i + 1) { try { if (i == 1) continue; x = x + 1; } finally { x = x + 10; } } x;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(32.0)));
+    }
+
+    #[test]
+    fn return_in_finally_overrides_throw() {
+        let result = run_script(
+            "function f() { try { throw 1; } finally { return 9; } } f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(9.0)));
+    }
+
+    #[test]
     fn function_can_reference_itself() {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));

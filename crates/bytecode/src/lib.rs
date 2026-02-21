@@ -69,6 +69,7 @@ struct Compiler {
     handler_depth: usize,
     loops: Vec<LoopContext>,
     break_contexts: Vec<BreakContext>,
+    finally_contexts: Vec<FinallyContext>,
     next_switch_temp_id: usize,
 }
 
@@ -84,6 +85,12 @@ struct BreakContext {
     scope_depth: usize,
     handler_depth: usize,
     break_jumps: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct FinallyContext {
+    handler_depth: usize,
+    finally_block: Vec<Stmt>,
 }
 
 pub fn compile_script(script: &Script) -> Chunk {
@@ -186,7 +193,7 @@ impl Compiler {
                 } else {
                     code.push(Opcode::LoadUndefined);
                 }
-                code.push(Opcode::Return);
+                self.emit_return_with_finally(code);
                 true
             }
             Stmt::Expression(expr) => {
@@ -449,24 +456,34 @@ impl Compiler {
                 keep_value,
             ),
             Stmt::Break => {
-                let break_context = self
-                    .break_contexts
+                let (target_handler_depth, target_scope_depth) = {
+                    let break_context = self
+                        .break_contexts
+                        .last()
+                        .expect("break outside breakable context");
+                    (break_context.handler_depth, break_context.scope_depth)
+                };
+                let jump_pos =
+                    self.emit_jump_with_finally(code, target_handler_depth, target_scope_depth);
+                self.break_contexts
                     .last_mut()
-                    .expect("break outside breakable context");
-                Self::emit_handler_pops(self.handler_depth, break_context.handler_depth, code);
-                Self::emit_scope_exits(self.scope_depth, break_context.scope_depth, code);
-                let jump_pos = code.len();
-                code.push(Opcode::Jump(usize::MAX));
-                break_context.break_jumps.push(jump_pos);
+                    .expect("break outside breakable context")
+                    .break_jumps
+                    .push(jump_pos);
                 false
             }
             Stmt::Continue => {
-                let loop_context = self.loops.last_mut().expect("continue outside loop");
-                Self::emit_handler_pops(self.handler_depth, loop_context.handler_depth, code);
-                Self::emit_scope_exits(self.scope_depth, loop_context.scope_depth, code);
-                let jump_pos = code.len();
-                code.push(Opcode::Jump(usize::MAX));
-                loop_context.continue_jumps.push(jump_pos);
+                let (target_handler_depth, target_scope_depth) = {
+                    let loop_context = self.loops.last().expect("continue outside loop");
+                    (loop_context.handler_depth, loop_context.scope_depth)
+                };
+                let jump_pos =
+                    self.emit_jump_with_finally(code, target_handler_depth, target_scope_depth);
+                self.loops
+                    .last_mut()
+                    .expect("continue outside loop")
+                    .continue_jumps
+                    .push(jump_pos);
                 false
             }
         }
@@ -574,8 +591,13 @@ impl Compiler {
             finally_target: None,
         });
         self.handler_depth += 1;
+        self.finally_contexts.push(FinallyContext {
+            handler_depth: self.handler_depth,
+            finally_block: finally_block.to_vec(),
+        });
 
         self.compile_statement_list(try_block, code, false);
+        self.finally_contexts.pop();
         code.push(Opcode::PopExceptionHandler);
         self.handler_depth = self.handler_depth.saturating_sub(1);
 
@@ -609,6 +631,7 @@ impl Compiler {
         let saved_handler_depth = self.handler_depth;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_break_contexts = std::mem::take(&mut self.break_contexts);
+        let saved_finally_contexts = std::mem::take(&mut self.finally_contexts);
         self.scope_depth = 0;
         self.handler_depth = 0;
 
@@ -628,6 +651,7 @@ impl Compiler {
         self.handler_depth = saved_handler_depth;
         self.loops = saved_loops;
         self.break_contexts = saved_break_contexts;
+        self.finally_contexts = saved_finally_contexts;
         function_id
     }
 
@@ -650,6 +674,63 @@ impl Compiler {
     ) {
         for jump_pos in break_context.break_jumps {
             code[jump_pos] = Opcode::Jump(break_target);
+        }
+    }
+
+    fn emit_return_with_finally(&mut self, code: &mut Vec<Opcode>) {
+        let saved_handler_depth = self.handler_depth;
+        let saved_finally_contexts = self.finally_contexts.clone();
+
+        let target_handler_depth = 0;
+        self.emit_unwound_finally_blocks(code, target_handler_depth);
+        Self::emit_handler_pops(self.handler_depth, target_handler_depth, code);
+        self.handler_depth = target_handler_depth;
+        code.push(Opcode::Return);
+
+        self.handler_depth = saved_handler_depth;
+        self.finally_contexts = saved_finally_contexts;
+    }
+
+    fn emit_jump_with_finally(
+        &mut self,
+        code: &mut Vec<Opcode>,
+        target_handler_depth: usize,
+        target_scope_depth: usize,
+    ) -> usize {
+        let saved_handler_depth = self.handler_depth;
+        let saved_finally_contexts = self.finally_contexts.clone();
+
+        self.emit_unwound_finally_blocks(code, target_handler_depth);
+        Self::emit_handler_pops(self.handler_depth, target_handler_depth, code);
+        self.handler_depth = target_handler_depth;
+        Self::emit_scope_exits(self.scope_depth, target_scope_depth, code);
+        let jump_pos = code.len();
+        code.push(Opcode::Jump(usize::MAX));
+
+        self.handler_depth = saved_handler_depth;
+        self.finally_contexts = saved_finally_contexts;
+        jump_pos
+    }
+
+    fn emit_unwound_finally_blocks(&mut self, code: &mut Vec<Opcode>, target_handler_depth: usize) {
+        let unwind_count = self
+            .finally_contexts
+            .iter()
+            .rev()
+            .take_while(|ctx| ctx.handler_depth > target_handler_depth)
+            .count();
+        if unwind_count == 0 {
+            return;
+        }
+
+        let remaining = self.finally_contexts.len().saturating_sub(unwind_count);
+        let contexts_to_run = self.finally_contexts[remaining..].to_vec();
+        self.finally_contexts.truncate(remaining);
+
+        for context in contexts_to_run.iter().rev() {
+            code.push(Opcode::PopExceptionHandler);
+            self.handler_depth = self.handler_depth.saturating_sub(1);
+            self.compile_statement_list(&context.finally_block, code, false);
         }
     }
 

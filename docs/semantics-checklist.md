@@ -10,7 +10,7 @@
 ## Control Flow and Errors
 - [x] `if`, `while`, `for`.
 - [x] `switch`.
-- [ ] `try/catch/finally` propagation semantics (baseline landed; `finally` with `return`/`break`/`continue` pending).
+- [ ] `try/catch/finally` propagation semantics (baseline landed; expanded conformance vs test262 pending).
 - [x] `throw` behavior and stack/context handoff (baseline `throw`/catch/finally unwind landed).
 - [x] `return`, `break`, `continue` jump semantics (baseline jump behavior landed).
 
