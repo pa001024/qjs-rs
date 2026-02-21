@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3486, failed=1514
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3615, failed=1385
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -82,5 +82,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/VM 打通 class computed accessor 与受限构造路径：class body 支持 `get/set` 计算属性名解析并经 `Object.defineProperty` 降级定义；VM 仅对带内部 marker 的“类构造对象”开放 `new` 构造，避免把普通对象误判为可构造，`language` 基线提升至 `3464/1536`。
 - VM 将调用方 strict 状态沿 `Call/Construct` 链路传递到原生/宿主函数，并在 `eval` 解析阶段强制 strict 语义（修复 strict caller 下 direct eval 未触发早期错误的问题），`language` 基线提升至 `3474/1526`。
 - bytecode 为 `try`/`catch`/`finally` block 统一补齐词法作用域（`EnterScope/ExitScope`），并同步修正 finally unwind 路径，清理一批 `block-scope/leave|shadowing` 断言失败，`language` 基线提升至 `3486/1514`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3486/1514`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
+- VM 将 `LoadIdentifier` 产生的 `UnknownIdentifier` 接入异常处理器路由（可被 `try/catch` 捕获），并为 inline chunk（`eval`/`Function` 路径）隔离异常处理栈，避免跨字节码段错误跳转（`InvalidJump`），大幅修复 `try/catch` 与 `eval-code` 失败簇，`language` 基线提升至 `3615/1385`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3615/1385`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
