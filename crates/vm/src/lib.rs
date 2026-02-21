@@ -1614,7 +1614,7 @@ impl Vm {
 
     fn coerce_to_string(&self, value: &JsValue) -> String {
         match value {
-            JsValue::Number(number) => number.to_string(),
+            JsValue::Number(number) => Self::coerce_number_to_string(*number),
             JsValue::Bool(boolean) => boolean.to_string(),
             JsValue::Null => "null".to_string(),
             JsValue::String(value) => value.clone(),
@@ -1624,6 +1624,58 @@ impl Vm {
             JsValue::Object(_) => "[object Object]".to_string(),
             JsValue::Undefined => "undefined".to_string(),
         }
+    }
+
+    fn coerce_number_to_string(number: f64) -> String {
+        if number.is_nan() {
+            return "NaN".to_string();
+        }
+        if number == 0.0 {
+            return "0".to_string();
+        }
+        if number.is_infinite() {
+            return if number.is_sign_positive() {
+                "Infinity".to_string()
+            } else {
+                "-Infinity".to_string()
+            };
+        }
+        let abs = number.abs();
+        if !(1e-6..1e21).contains(&abs) {
+            let scientific = format!("{:e}", number);
+            let (mantissa_raw, exponent_raw) = scientific
+                .split_once('e')
+                .expect("scientific formatting must contain exponent");
+            let mut mantissa = mantissa_raw.to_string();
+            if mantissa.contains('.') {
+                while mantissa.ends_with('0') {
+                    mantissa.pop();
+                }
+                if mantissa.ends_with('.') {
+                    mantissa.pop();
+                }
+            }
+            return Self::normalize_exponent_string(format!("{mantissa}e{exponent_raw}"));
+        }
+        Self::normalize_exponent_string(number.to_string())
+    }
+
+    fn normalize_exponent_string(string: String) -> String {
+        let Some(exponent_pos) = string.find('e') else {
+            return string;
+        };
+        let mantissa = &string[..exponent_pos];
+        let exponent_raw = &string[exponent_pos + 1..];
+        let (sign, digits_raw) = if let Some(rest) = exponent_raw.strip_prefix('+') {
+            ('+', rest)
+        } else if let Some(rest) = exponent_raw.strip_prefix('-') {
+            ('-', rest)
+        } else {
+            ('+', exponent_raw)
+        };
+        let digits = digits_raw.trim_start_matches('0');
+        let digits = if digits.is_empty() { "0" } else { digits };
+        format!("{mantissa}e{sign}{digits}")
     }
 
     fn typeof_value(&self, value: &JsValue) -> &'static str {

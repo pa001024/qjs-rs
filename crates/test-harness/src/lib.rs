@@ -796,4 +796,29 @@ mod tests {
             Ok(JsValue::Bool(true))
         );
     }
+
+    #[test]
+    fn supports_computed_number_property_key_stringification_baseline() {
+        assert_eq!(
+            run_script(
+                "var object = { [1e55]: 'B', [-0]: 'D', [Infinity]: 'E' }; object['1e+55'] === 'B';",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var object = { [1e55]: 'B', [-0]: 'D', [Infinity]: 'E' }; object[0] === 'D';",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var object = { [1e55]: 'B', [-0]: 'D', [Infinity]: 'E' }; object['Infinity'] === 'E';",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
 }

@@ -739,6 +739,24 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
                 break;
             }
+            if pos < bytes.len() && matches!(bytes[pos], b'e' | b'E') {
+                let exponent_start = pos;
+                pos += 1;
+                if pos < bytes.len() && matches!(bytes[pos], b'+' | b'-') {
+                    pos += 1;
+                }
+                let exponent_digits_start = pos;
+                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+                if exponent_digits_start == pos {
+                    let raw = &source[start..exponent_start];
+                    return Err(LexError {
+                        message: format!("invalid number literal '{}'", &source[start..pos]),
+                        position: start + raw.len(),
+                    });
+                }
+            }
             let raw = &source[start..pos];
             let value = raw.parse::<f64>().map_err(|_| LexError {
                 message: format!("invalid number literal '{raw}'"),
@@ -935,6 +953,21 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Plus);
         assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_scientific_notation_numbers() {
+        let tokens = lex("1e3 + 2E-2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1000.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(0.02));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_invalid_scientific_notation_literal() {
+        let err = lex("1e+").expect_err("tokenization should fail");
+        assert_eq!(err.message, "invalid number literal '1e+'");
     }
 
     #[test]
