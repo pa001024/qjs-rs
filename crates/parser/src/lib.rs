@@ -38,18 +38,27 @@ pub fn parse_script(source: &str) -> Result<Script, ParseError> {
 }
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
-    validate_statement_list_early_errors(statements)
+    validate_statement_list_early_errors(statements, StatementListKind::ScriptOrFunction)
 }
 
-fn validate_statement_list_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementListKind {
+    ScriptOrFunction,
+    BlockLike,
+}
+
+fn validate_statement_list_early_errors(
+    statements: &[Stmt],
+    kind: StatementListKind,
+) -> Result<(), ParseError> {
     let mut lexical_names = BTreeSet::new();
     for statement in statements {
-        collect_direct_lexical_names(statement, &mut lexical_names)?;
+        collect_direct_lexical_names(statement, &mut lexical_names, kind)?;
     }
 
     let mut var_declared_names = BTreeSet::new();
     for statement in statements {
-        collect_var_declared_names(statement, &mut var_declared_names);
+        collect_var_declared_names(statement, &mut var_declared_names, kind);
     }
 
     if let Some(name) = lexical_names
@@ -71,10 +80,13 @@ fn validate_statement_list_early_errors(statements: &[Stmt]) -> Result<(), Parse
 
 fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseError> {
     match statement {
-        Stmt::Block(statements) => validate_statement_list_early_errors(statements),
-        Stmt::FunctionDeclaration(declaration) => {
-            validate_statement_list_early_errors(&declaration.body)
+        Stmt::Block(statements) => {
+            validate_statement_list_early_errors(statements, StatementListKind::BlockLike)
         }
+        Stmt::FunctionDeclaration(declaration) => validate_statement_list_early_errors(
+            &declaration.body,
+            StatementListKind::ScriptOrFunction,
+        ),
         Stmt::If {
             consequent,
             alternate,
@@ -97,12 +109,12 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
             catch_block,
             finally_block,
         } => {
-            validate_statement_list_early_errors(try_block)?;
+            validate_statement_list_early_errors(try_block, StatementListKind::BlockLike)?;
             if let Some(catch_block) = catch_block {
                 validate_catch_block_early_errors(catch_param.as_ref(), catch_block)?;
             }
             if let Some(finally_block) = finally_block {
-                validate_statement_list_early_errors(finally_block)?;
+                validate_statement_list_early_errors(finally_block, StatementListKind::BlockLike)?;
             }
             Ok(())
         }
@@ -121,14 +133,22 @@ fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseEr
     let mut lexical_names = BTreeSet::new();
     for case in cases {
         for statement in &case.consequent {
-            collect_direct_lexical_names(statement, &mut lexical_names)?;
+            collect_direct_lexical_names(
+                statement,
+                &mut lexical_names,
+                StatementListKind::BlockLike,
+            )?;
         }
     }
 
     let mut var_declared_names = BTreeSet::new();
     for case in cases {
         for statement in &case.consequent {
-            collect_var_declared_names(statement, &mut var_declared_names);
+            collect_var_declared_names(
+                statement,
+                &mut var_declared_names,
+                StatementListKind::BlockLike,
+            );
         }
     }
 
@@ -155,12 +175,16 @@ fn validate_catch_block_early_errors(
     catch_param: Option<&Identifier>,
     catch_block: &[Stmt],
 ) -> Result<(), ParseError> {
-    validate_statement_list_early_errors(catch_block)?;
+    validate_statement_list_early_errors(catch_block, StatementListKind::BlockLike)?;
 
     if let Some(catch_param) = catch_param {
         let mut lexical_names = BTreeSet::new();
         for statement in catch_block {
-            collect_direct_lexical_names(statement, &mut lexical_names)?;
+            collect_direct_lexical_names(
+                statement,
+                &mut lexical_names,
+                StatementListKind::BlockLike,
+            )?;
         }
         if lexical_names.contains(&catch_param.0) {
             return Err(ParseError {
@@ -179,6 +203,7 @@ fn validate_catch_block_early_errors(
 fn collect_direct_lexical_names(
     statement: &Stmt,
     lexical_names: &mut BTreeSet<String>,
+    kind: StatementListKind,
 ) -> Result<(), ParseError> {
     match statement {
         Stmt::VariableDeclaration(declaration) => {
@@ -187,6 +212,11 @@ fn collect_direct_lexical_names(
         Stmt::VariableDeclarations(declarations) => {
             for declaration in declarations {
                 add_lexical_name_if_needed(lexical_names, declaration)?;
+            }
+        }
+        Stmt::FunctionDeclaration(declaration) => {
+            if kind == StatementListKind::BlockLike {
+                add_lexical_name(lexical_names, &declaration.name.0)?;
             }
         }
         _ => {}
@@ -201,16 +231,24 @@ fn add_lexical_name_if_needed(
     if !matches!(declaration.kind, BindingKind::Let | BindingKind::Const) {
         return Ok(());
     }
-    if !lexical_names.insert(declaration.name.0.clone()) {
+    add_lexical_name(lexical_names, &declaration.name.0)
+}
+
+fn add_lexical_name(lexical_names: &mut BTreeSet<String>, name: &str) -> Result<(), ParseError> {
+    if !lexical_names.insert(name.to_string()) {
         return Err(ParseError {
-            message: format!("duplicate lexical declaration: {}", declaration.name.0),
+            message: format!("duplicate lexical declaration: {name}"),
             position: 0,
         });
     }
     Ok(())
 }
 
-fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSet<String>) {
+fn collect_var_declared_names(
+    statement: &Stmt,
+    var_declared_names: &mut BTreeSet<String>,
+    kind: StatementListKind,
+) {
     match statement {
         Stmt::VariableDeclaration(declaration) => {
             add_var_name_if_needed(var_declared_names, declaration);
@@ -221,11 +259,17 @@ fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSe
             }
         }
         Stmt::FunctionDeclaration(declaration) => {
-            var_declared_names.insert(declaration.name.0.clone());
+            if kind == StatementListKind::ScriptOrFunction {
+                var_declared_names.insert(declaration.name.0.clone());
+            }
         }
         Stmt::Block(statements) => {
             for statement in statements {
-                collect_var_declared_names(statement, var_declared_names);
+                collect_var_declared_names(
+                    statement,
+                    var_declared_names,
+                    StatementListKind::BlockLike,
+                );
             }
         }
         Stmt::If {
@@ -233,13 +277,13 @@ fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSe
             alternate,
             ..
         } => {
-            collect_var_declared_names(consequent, var_declared_names);
+            collect_var_declared_names(consequent, var_declared_names, kind);
             if let Some(alternate) = alternate {
-                collect_var_declared_names(alternate, var_declared_names);
+                collect_var_declared_names(alternate, var_declared_names, kind);
             }
         }
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
-            collect_var_declared_names(body, var_declared_names);
+            collect_var_declared_names(body, var_declared_names, kind);
         }
         Stmt::For {
             initializer, body, ..
@@ -247,12 +291,16 @@ fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSe
             if let Some(initializer) = initializer {
                 collect_var_declared_names_from_for_initializer(initializer, var_declared_names);
             }
-            collect_var_declared_names(body, var_declared_names);
+            collect_var_declared_names(body, var_declared_names, kind);
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 for statement in &case.consequent {
-                    collect_var_declared_names(statement, var_declared_names);
+                    collect_var_declared_names(
+                        statement,
+                        var_declared_names,
+                        StatementListKind::BlockLike,
+                    );
                 }
             }
         }
@@ -263,16 +311,28 @@ fn collect_var_declared_names(statement: &Stmt, var_declared_names: &mut BTreeSe
             ..
         } => {
             for statement in try_block {
-                collect_var_declared_names(statement, var_declared_names);
+                collect_var_declared_names(
+                    statement,
+                    var_declared_names,
+                    StatementListKind::BlockLike,
+                );
             }
             if let Some(catch_block) = catch_block {
                 for statement in catch_block {
-                    collect_var_declared_names(statement, var_declared_names);
+                    collect_var_declared_names(
+                        statement,
+                        var_declared_names,
+                        StatementListKind::BlockLike,
+                    );
                 }
             }
             if let Some(finally_block) = finally_block {
                 for statement in finally_block {
-                    collect_var_declared_names(statement, var_declared_names);
+                    collect_var_declared_names(
+                        statement,
+                        var_declared_names,
+                        StatementListKind::BlockLike,
+                    );
                 }
             }
         }
@@ -1959,6 +2019,30 @@ mod tests {
     #[test]
     fn rejects_lexical_function_redeclaration_in_block() {
         let err = parse_script("{ let f; function f() {} }").expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate lexical declaration: f");
+    }
+
+    #[test]
+    fn rejects_function_var_redeclaration_in_block() {
+        let err = parse_script("{ function f() {} var f; }").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "lexical declaration conflicts with var/function declaration: f"
+        );
+    }
+
+    #[test]
+    fn rejects_var_function_redeclaration_in_block() {
+        let err = parse_script("{ var f; function f() {} }").expect_err("parser should fail");
+        assert_eq!(
+            err.message,
+            "lexical declaration conflicts with var/function declaration: f"
+        );
+    }
+
+    #[test]
+    fn rejects_nested_block_var_conflict_with_block_function() {
+        let err = parse_script("{ function f() {} { var f; } }").expect_err("parser should fail");
         assert_eq!(
             err.message,
             "lexical declaration conflicts with var/function declaration: f"
@@ -1973,6 +2057,11 @@ mod tests {
     #[test]
     fn allows_function_var_redeclaration() {
         parse_script("function f() {} var f;").expect("parser should succeed");
+    }
+
+    #[test]
+    fn allows_var_function_redeclaration_at_script_scope() {
+        parse_script("var f; function f() {}").expect("parser should succeed");
     }
 
     #[test]

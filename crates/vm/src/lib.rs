@@ -136,20 +136,32 @@ impl Vm {
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    {
+                    let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
-                        if scope_ref.borrow().contains_key(name) {
+                        scope_ref.borrow().get(name).copied()
+                    };
+                    if let Some(existing_binding_id) = existing_binding_id {
+                        let existing_binding = self
+                            .bindings
+                            .get_mut(&existing_binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
+                        if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                    }
-                    let binding_id = self.create_binding(value, *mutable);
-                    let scope_ref = self.current_scope_ref()?;
-                    if scope_ref
-                        .borrow_mut()
-                        .insert(name.clone(), binding_id)
-                        .is_some()
-                    {
-                        return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        // Treat `var`-style redeclaration without initializer as a no-op.
+                        if value != JsValue::Undefined {
+                            existing_binding.value = value;
+                        }
+                    } else {
+                        let binding_id = self.create_binding(value, *mutable);
+                        let scope_ref = self.current_scope_ref()?;
+                        if scope_ref
+                            .borrow_mut()
+                            .insert(name.clone(), binding_id)
+                            .is_some()
+                        {
+                            return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        }
                     }
                 }
                 Opcode::DefineFunction { name, function_id } => {
@@ -159,21 +171,30 @@ impl Vm {
                     let closure_id = self.next_closure_id;
                     self.next_closure_id += 1;
 
-                    {
+                    let function_value = JsValue::Function(closure_id);
+                    let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
-                        if scope_ref.borrow().contains_key(name) {
+                        scope_ref.borrow().get(name).copied()
+                    };
+                    if let Some(existing_binding_id) = existing_binding_id {
+                        let existing_binding = self
+                            .bindings
+                            .get_mut(&existing_binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
+                        if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                    }
-                    let function_binding =
-                        self.create_binding(JsValue::Function(closure_id), false);
-                    let scope_ref = self.current_scope_ref()?;
-                    if scope_ref
-                        .borrow_mut()
-                        .insert(name.clone(), function_binding)
-                        .is_some()
-                    {
-                        return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        existing_binding.value = function_value;
+                    } else {
+                        let function_binding = self.create_binding(function_value, true);
+                        let scope_ref = self.current_scope_ref()?;
+                        if scope_ref
+                            .borrow_mut()
+                            .insert(name.clone(), function_binding)
+                            .is_some()
+                        {
+                            return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        }
                     }
 
                     let captured_scopes = self.scopes.clone();
@@ -785,6 +806,98 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn allows_var_style_redeclaration_and_updates_value() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(1.0),
+            Opcode::DefineVariable {
+                name: "x".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadNumber(2.0),
+            Opcode::DefineVariable {
+                name: "x".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn var_style_redeclaration_without_initializer_keeps_existing_value() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(7.0),
+            Opcode::DefineVariable {
+                name: "x".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadUndefined,
+            Opcode::DefineVariable {
+                name: "x".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn define_function_overwrites_existing_mutable_binding() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineVariable {
+                    name: "f".to_string(),
+                    mutable: true,
+                },
+                Opcode::DefineFunction {
+                    name: "f".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadIdentifier("f".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "f".to_string(),
+                params: vec![],
+                code: vec![Opcode::LoadUndefined, Opcode::Return],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Function(0)));
+    }
+
+    #[test]
+    fn var_redeclaration_without_initializer_keeps_function_binding() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::DefineFunction {
+                    name: "f".to_string(),
+                    function_id: 0,
+                },
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "f".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("f".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "f".to_string(),
+                params: vec![],
+                code: vec![Opcode::LoadUndefined, Opcode::Return],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Function(0)));
     }
 
     #[test]
