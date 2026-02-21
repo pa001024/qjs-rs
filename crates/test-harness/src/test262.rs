@@ -60,20 +60,26 @@ pub struct SuiteSummary {
 }
 
 pub fn parse_test262_case(source: &str) -> Result<Test262Case<'_>, String> {
-    let trimmed = source.trim_start();
-    if !trimmed.starts_with("/*---") {
-        return Ok(Test262Case {
-            frontmatter: Test262Frontmatter::default(),
-            body: source,
-        });
-    }
+    let metadata_start = match source.find("/*---") {
+        Some(index) => index,
+        None => {
+            return Ok(Test262Case {
+                frontmatter: Test262Frontmatter::default(),
+                body: source,
+            });
+        }
+    };
+    let metadata_content_start = metadata_start + "/*---".len();
+    let metadata_tail = &source[metadata_content_start..];
+    let metadata_end_rel = match metadata_tail.find("---*/") {
+        Some(index) => index,
+        None => return Err("unterminated test262 frontmatter".to_string()),
+    };
 
-    let metadata_end = trimmed
-        .find("---*/")
-        .ok_or_else(|| "unterminated test262 frontmatter".to_string())?;
-    let metadata_start = "/*---".len();
-    let metadata_raw = &trimmed[metadata_start..metadata_end];
-    let body = &trimmed[metadata_end + "---*/".len()..];
+    // If a line-comment appears before metadata, treat as regular test262 prelude.
+    let metadata_raw = &metadata_tail[..metadata_end_rel];
+    let body_start = metadata_content_start + metadata_end_rel + "---*/".len();
+    let body = &source[body_start..];
 
     let frontmatter = parse_frontmatter(metadata_raw)?;
     Ok(Test262Case { frontmatter, body })
@@ -343,6 +349,23 @@ throw 1;
         assert_eq!(case.frontmatter.flags, vec!["module".to_string()]);
         assert_eq!(case.frontmatter.features, vec!["BigInt".to_string()]);
         assert_eq!(case.frontmatter.includes, vec!["sta.js".to_string()]);
+    }
+
+    #[test]
+    fn parses_frontmatter_after_copyright_header() {
+        let source = r#"// Copyright (C) 2026
+// This code is governed by BSD.
+/*---
+negative:
+  phase: parse
+flags: [module]
+---*/
+import "x";
+"#;
+        let case = parse_test262_case(source).expect("frontmatter parse should succeed");
+        assert_eq!(case.frontmatter.negative_phase, Some(NegativePhase::Parse));
+        assert_eq!(case.frontmatter.flags, vec!["module".to_string()]);
+        assert!(case.body.contains("import \"x\""));
     }
 
     #[test]
