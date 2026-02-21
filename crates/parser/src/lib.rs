@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
-    VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
+    UnaryOp, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -39,6 +39,7 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     function_depth: usize,
+    loop_depth: usize,
 }
 
 impl Parser {
@@ -47,6 +48,7 @@ impl Parser {
             tokens,
             pos: 0,
             function_depth: 0,
+            loop_depth: 0,
         }
     }
 
@@ -73,6 +75,7 @@ impl Parser {
                     | Stmt::FunctionDeclaration(_)
                     | Stmt::If { .. }
                     | Stmt::While { .. }
+                    | Stmt::For { .. }
             );
             statements.push(statement);
 
@@ -107,6 +110,15 @@ impl Parser {
         }
         if self.matches_keyword("while") {
             return self.parse_while_statement();
+        }
+        if self.matches_keyword("for") {
+            return self.parse_for_statement();
+        }
+        if self.matches_keyword("break") {
+            return self.parse_break_statement();
+        }
+        if self.matches_keyword("continue") {
+            return self.parse_continue_statement();
         }
         if self.matches_keyword("return") {
             return self.parse_return_statement();
@@ -171,11 +183,95 @@ impl Parser {
         self.expect(TokenKind::LParen, "expected '(' after 'while'")?;
         let condition = self.parse_expression_inner()?;
         self.expect(TokenKind::RParen, "expected ')' after while condition")?;
-        let body = self.parse_embedded_statement(false)?;
+        self.loop_depth += 1;
+        let body = self.parse_embedded_statement(false);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        let body = body?;
         Ok(Stmt::While {
             condition,
             body: Box::new(body),
         })
+    }
+
+    fn parse_for_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after 'for'")?;
+
+        let initializer = if self.check(&TokenKind::Semicolon) {
+            None
+        } else if self.matches_keyword("let") {
+            let declaration = self.parse_variable_declaration(BindingKind::Let)?;
+            let declaration = match declaration {
+                Stmt::VariableDeclaration(declaration) => declaration,
+                _ => {
+                    return Err(ParseError {
+                        message: "invalid for initializer".to_string(),
+                        position: self.current_position(),
+                    });
+                }
+            };
+            Some(ForInitializer::VariableDeclaration(declaration))
+        } else if self.matches_keyword("const") {
+            let declaration = self.parse_variable_declaration(BindingKind::Const)?;
+            let declaration = match declaration {
+                Stmt::VariableDeclaration(declaration) => declaration,
+                _ => {
+                    return Err(ParseError {
+                        message: "invalid for initializer".to_string(),
+                        position: self.current_position(),
+                    });
+                }
+            };
+            Some(ForInitializer::VariableDeclaration(declaration))
+        } else {
+            Some(ForInitializer::Expression(self.parse_expression_inner()?))
+        };
+        self.expect(TokenKind::Semicolon, "expected ';' after for initializer")?;
+
+        let condition = if self.check(&TokenKind::Semicolon) {
+            None
+        } else {
+            Some(self.parse_expression_inner()?)
+        };
+        self.expect(TokenKind::Semicolon, "expected ';' after for condition")?;
+
+        let update = if self.check(&TokenKind::RParen) {
+            None
+        } else {
+            Some(self.parse_expression_inner()?)
+        };
+        self.expect(TokenKind::RParen, "expected ')' after for clauses")?;
+
+        self.loop_depth += 1;
+        let body = self.parse_embedded_statement(false);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        let body = body?;
+
+        Ok(Stmt::For {
+            initializer,
+            condition,
+            update,
+            body: Box::new(body),
+        })
+    }
+
+    fn parse_break_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.loop_depth == 0 {
+            return Err(ParseError {
+                message: "break outside loop".to_string(),
+                position: self.previous_position(),
+            });
+        }
+        Ok(Stmt::Break)
+    }
+
+    fn parse_continue_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.loop_depth == 0 {
+            return Err(ParseError {
+                message: "continue outside loop".to_string(),
+                position: self.previous_position(),
+            });
+        }
+        Ok(Stmt::Continue)
     }
 
     fn parse_embedded_statement(
@@ -185,7 +281,11 @@ impl Parser {
         let statement = self.parse_statement()?;
         let needs_separator = !matches!(
             statement,
-            Stmt::Block(_) | Stmt::FunctionDeclaration(_) | Stmt::If { .. } | Stmt::While { .. }
+            Stmt::Block(_)
+                | Stmt::FunctionDeclaration(_)
+                | Stmt::If { .. }
+                | Stmt::While { .. }
+                | Stmt::For { .. }
         );
         if self.matches(&TokenKind::Semicolon) {
             return Ok(statement);
@@ -596,8 +696,8 @@ impl Parser {
 mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
-        VariableDeclaration,
+        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
+        UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -770,9 +870,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_for_statement() {
+        let parsed = parse_script("for (let i = 0; i < 3; i = i + 1) i;")
+            .expect("script parsing should succeed");
+        let expected = Script {
+            statements: vec![Stmt::For {
+                initializer: Some(ForInitializer::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("i".to_string()),
+                    initializer: Some(Expr::Number(0.0)),
+                })),
+                condition: Some(Expr::Binary {
+                    op: BinaryOp::Less,
+                    left: Box::new(Expr::Identifier(Identifier("i".to_string()))),
+                    right: Box::new(Expr::Number(3.0)),
+                }),
+                update: Some(Expr::Assign {
+                    target: Identifier("i".to_string()),
+                    value: Box::new(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Identifier(Identifier("i".to_string()))),
+                        right: Box::new(Expr::Number(1.0)),
+                    }),
+                }),
+                body: Box::new(Stmt::Expression(Expr::Identifier(Identifier(
+                    "i".to_string(),
+                )))),
+            }],
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_break_and_continue_inside_loop() {
+        let parsed =
+            parse_script("for (;;) { continue; break; }").expect("script parsing should succeed");
+        let body = match &parsed.statements[0] {
+            Stmt::For { body, .. } => body,
+            _ => panic!("expected for statement"),
+        };
+        let statements = match body.as_ref() {
+            Stmt::Block(statements) => statements,
+            _ => panic!("expected block body"),
+        };
+        assert!(matches!(statements[0], Stmt::Continue));
+        assert!(matches!(statements[1], Stmt::Break));
+    }
+
+    #[test]
     fn rejects_return_outside_function() {
         let err = parse_script("return 1;").expect_err("parser should fail");
         assert_eq!(err.message, "return outside function");
+    }
+
+    #[test]
+    fn rejects_break_outside_loop() {
+        let err = parse_script("break;").expect_err("parser should fail");
+        assert_eq!(err.message, "break outside loop");
+    }
+
+    #[test]
+    fn rejects_continue_outside_loop() {
+        let err = parse_script("continue;").expect_err("parser should fail");
+        assert_eq!(err.message, "continue outside loop");
     }
 
     #[test]

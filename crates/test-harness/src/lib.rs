@@ -193,6 +193,42 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_for_statement() {
+        let result = run_script(
+            "let sum = 0; for (let i = 0; i < 4; i = i + 1) sum = sum + i; sum;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(6.0)));
+    }
+
+    #[test]
+    fn evaluates_break_statement() {
+        let result = run_script(
+            "let i = 0; while (1) { i = i + 1; if (i == 3) break; } i;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn evaluates_continue_statement() {
+        let result = run_script(
+            "let sum = 0; for (let i = 0; i < 5; i = i + 1) { if (i == 2) continue; sum = sum + i; } sum;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(8.0)));
+    }
+
+    #[test]
+    fn evaluates_continue_with_nested_block_scope() {
+        let result = run_script(
+            "let count = 0; for (let i = 0; i < 3; i = i + 1) { { if (i == 1) continue; } count = count + 1; } count;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
     fn function_can_reference_itself() {
         let result = run_script("function f() { return f; } f();", &[]);
         assert!(matches!(result, Ok(JsValue::Function(_))));

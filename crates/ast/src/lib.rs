@@ -68,6 +68,12 @@ pub struct FunctionDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ForInitializer {
+    VariableDeclaration(VariableDeclaration),
+    Expression(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VariableDeclaration(VariableDeclaration),
     FunctionDeclaration(FunctionDeclaration),
@@ -83,6 +89,14 @@ pub enum Stmt {
         condition: Expr,
         body: Box<Stmt>,
     },
+    For {
+        initializer: Option<ForInitializer>,
+        condition: Option<Expr>,
+        update: Option<Expr>,
+        body: Box<Stmt>,
+    },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

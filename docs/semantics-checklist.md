@@ -8,11 +8,11 @@
 - [ ] Prototype chain lookup and mutation.
 
 ## Control Flow and Errors
-- [x] `if`, `while`.
-- [ ] `for`, `switch`.
+- [x] `if`, `while`, `for`.
+- [ ] `switch`.
 - [ ] `try/catch/finally` propagation semantics.
 - [ ] `throw` behavior and stack/context handoff.
-- [ ] `return`, `break`, `continue` jump semantics (`return` landed; `break/continue` pending).
+- [x] `return`, `break`, `continue` jump semantics (baseline jump behavior landed).
 
 ## Runtime Model
 - [ ] `JSValue` representation stability and correctness.

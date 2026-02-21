@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
-    VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
+    UnaryOp, VariableDeclaration,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +51,15 @@ pub struct Chunk {
 #[derive(Debug, Default)]
 struct Compiler {
     functions: Vec<CompiledFunction>,
+    scope_depth: usize,
+    loops: Vec<LoopContext>,
+}
+
+#[derive(Debug, Default)]
+struct LoopContext {
+    scope_depth: usize,
+    break_jumps: Vec<usize>,
+    continue_jumps: Vec<usize>,
 }
 
 pub fn compile_script(script: &Script) -> Chunk {
@@ -167,11 +176,13 @@ impl Compiler {
             }
             Stmt::Block(statements) => {
                 code.push(Opcode::EnterScope);
+                self.scope_depth += 1;
                 let block_value = self.compile_statement_list(statements, code, keep_value);
                 if keep_value && !block_value {
                     code.push(Opcode::LoadUndefined);
                 }
                 code.push(Opcode::ExitScope);
+                self.scope_depth = self.scope_depth.saturating_sub(1);
                 keep_value
             }
             Stmt::If {
@@ -211,11 +222,20 @@ impl Compiler {
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
+                self.loops.push(LoopContext {
+                    scope_depth: self.scope_depth,
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
+
                 self.compile_stmt(body, code, false);
-                code.push(Opcode::Jump(loop_start));
+                let continue_target = loop_start;
+                code.push(Opcode::Jump(continue_target));
 
                 let loop_end = code.len();
                 code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+                let loop_context = self.loops.pop().expect("loop context should exist");
+                self.patch_loop_exits(loop_context, continue_target, loop_end, code);
 
                 if keep_value {
                     code.push(Opcode::LoadUndefined);
@@ -223,6 +243,88 @@ impl Compiler {
                 } else {
                     false
                 }
+            }
+            Stmt::For {
+                initializer,
+                condition,
+                update,
+                body,
+            } => {
+                code.push(Opcode::EnterScope);
+                self.scope_depth += 1;
+
+                if let Some(initializer) = initializer {
+                    match initializer {
+                        ForInitializer::VariableDeclaration(declaration) => {
+                            self.compile_stmt(
+                                &Stmt::VariableDeclaration(declaration.clone()),
+                                code,
+                                false,
+                            );
+                        }
+                        ForInitializer::Expression(expr) => {
+                            self.compile_expr(expr, code);
+                            code.push(Opcode::Pop);
+                        }
+                    }
+                }
+
+                let loop_start = code.len();
+                let jump_to_end_pos = if let Some(condition) = condition {
+                    self.compile_expr(condition, code);
+                    let jump_to_end_pos = code.len();
+                    code.push(Opcode::JumpIfFalse(usize::MAX));
+                    Some(jump_to_end_pos)
+                } else {
+                    None
+                };
+
+                self.loops.push(LoopContext {
+                    scope_depth: self.scope_depth,
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
+
+                self.compile_stmt(body, code, false);
+                let continue_target = code.len();
+                if let Some(update) = update {
+                    self.compile_expr(update, code);
+                    code.push(Opcode::Pop);
+                }
+                code.push(Opcode::Jump(loop_start));
+
+                let loop_end = code.len();
+                if let Some(jump_to_end_pos) = jump_to_end_pos {
+                    code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+                }
+                let loop_context = self.loops.pop().expect("loop context should exist");
+                self.patch_loop_exits(loop_context, continue_target, loop_end, code);
+
+                code.push(Opcode::ExitScope);
+                self.scope_depth = self.scope_depth.saturating_sub(1);
+
+                if keep_value {
+                    code.push(Opcode::LoadUndefined);
+                    true
+                } else {
+                    false
+                }
+            }
+            Stmt::Break => {
+                let loop_context = self.loops.last_mut().expect("break outside loop");
+                Self::emit_scope_exits(self.scope_depth, loop_context.scope_depth, code);
+                let jump_pos = code.len();
+                code.push(Opcode::Jump(usize::MAX));
+                loop_context.break_jumps.push(jump_pos);
+                false
+            }
+            Stmt::Continue => {
+                let loop_context = self.loops.last_mut().expect("continue outside loop");
+                Self::emit_scope_exits(self.scope_depth, loop_context.scope_depth, code);
+                let jump_pos = code.len();
+                code.push(Opcode::Jump(usize::MAX));
+                loop_context.continue_jumps.push(jump_pos);
+                false
             }
         }
     }
@@ -233,6 +335,10 @@ impl Compiler {
         params: &[Identifier],
         body: &[Stmt],
     ) -> usize {
+        let saved_scope_depth = self.scope_depth;
+        let saved_loops = std::mem::take(&mut self.loops);
+        self.scope_depth = 0;
+
         let mut code = Vec::new();
         self.compile_statement_list(body, &mut code, false);
         code.push(Opcode::LoadUndefined);
@@ -244,7 +350,32 @@ impl Compiler {
             params: params.iter().map(|param| param.0.clone()).collect(),
             code,
         });
+
+        self.scope_depth = saved_scope_depth;
+        self.loops = saved_loops;
         function_id
+    }
+
+    fn patch_loop_exits(
+        &self,
+        loop_context: LoopContext,
+        continue_target: usize,
+        break_target: usize,
+        code: &mut [Opcode],
+    ) {
+        for jump_pos in loop_context.break_jumps {
+            code[jump_pos] = Opcode::Jump(break_target);
+        }
+        for jump_pos in loop_context.continue_jumps {
+            code[jump_pos] = Opcode::Jump(continue_target);
+        }
+    }
+
+    fn emit_scope_exits(current_depth: usize, target_depth: usize, code: &mut Vec<Opcode>) {
+        let exits = current_depth.saturating_sub(target_depth);
+        for _ in 0..exits {
+            code.push(Opcode::ExitScope);
+        }
     }
 
     fn compile_expr(&mut self, expr: &Expr, code: &mut Vec<Opcode>) {
@@ -299,8 +430,8 @@ impl Compiler {
 mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, FunctionDeclaration, Identifier, Script, Stmt, UnaryOp,
-        VariableDeclaration,
+        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Script, Stmt,
+        UnaryOp, VariableDeclaration,
     };
 
     #[test]
@@ -644,6 +775,101 @@ mod tests {
                 Opcode::JumpIfFalse(4),
                 Opcode::LoadNumber(1.0),
                 Opcode::Jump(5),
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_for_statement() {
+        let script = Script {
+            statements: vec![Stmt::For {
+                initializer: Some(ForInitializer::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier("i".to_string()),
+                    initializer: Some(Expr::Number(0.0)),
+                })),
+                condition: Some(Expr::Binary {
+                    op: BinaryOp::Less,
+                    left: Box::new(Expr::Identifier(Identifier("i".to_string()))),
+                    right: Box::new(Expr::Number(2.0)),
+                }),
+                update: Some(Expr::Assign {
+                    target: Identifier("i".to_string()),
+                    value: Box::new(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Identifier(Identifier("i".to_string()))),
+                        right: Box::new(Expr::Number(1.0)),
+                    }),
+                }),
+                body: Box::new(Stmt::Expression(Expr::Identifier(Identifier(
+                    "i".to_string(),
+                )))),
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::EnterScope,
+                Opcode::LoadNumber(0.0),
+                Opcode::DefineVariable {
+                    name: "i".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::LoadNumber(2.0),
+                Opcode::Lt,
+                Opcode::JumpIfFalse(15),
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::Pop,
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Add,
+                Opcode::StoreVariable("i".to_string()),
+                Opcode::Pop,
+                Opcode::Jump(3),
+                Opcode::ExitScope,
+                Opcode::LoadUndefined,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_loop_control_with_scope_cleanup() {
+        let script = Script {
+            statements: vec![Stmt::While {
+                condition: Expr::Number(1.0),
+                body: Box::new(Stmt::Block(vec![
+                    Stmt::Block(vec![Stmt::Continue]),
+                    Stmt::Break,
+                ])),
+            }],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(1.0),
+                Opcode::JumpIfFalse(12),
+                Opcode::EnterScope,
+                Opcode::EnterScope,
+                Opcode::ExitScope,
+                Opcode::ExitScope,
+                Opcode::Jump(0),
+                Opcode::ExitScope,
+                Opcode::ExitScope,
+                Opcode::Jump(12),
+                Opcode::ExitScope,
+                Opcode::Jump(0),
                 Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
