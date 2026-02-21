@@ -535,8 +535,14 @@ impl Parser {
         if self.matches_keyword("switch") {
             return self.parse_switch_statement();
         }
+        if self.matches_keyword("with") {
+            return self.parse_with_statement();
+        }
         if self.matches_keyword("try") {
             return self.parse_try_statement();
+        }
+        if self.matches_keyword("debugger") {
+            return Ok(Stmt::Empty);
         }
         if self.matches_keyword("throw") {
             return self.parse_throw_statement();
@@ -750,6 +756,13 @@ impl Parser {
         })
     }
 
+    fn parse_with_statement(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(TokenKind::LParen, "expected '(' after 'with'")?;
+        let _ = self.parse_expression_inner()?;
+        self.expect(TokenKind::RParen, "expected ')' after with object")?;
+        self.parse_embedded_statement(false)
+    }
+
     fn parse_switch_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'switch'")?;
         let discriminant = self.parse_expression_inner()?;
@@ -947,7 +960,11 @@ impl Parser {
         &mut self,
         allow_else_terminator: bool,
     ) -> Result<Stmt, ParseError> {
-        let statement = self.parse_statement()?;
+        let statement = if self.check_keyword("let") && !self.check_next(&TokenKind::Colon) {
+            Stmt::Expression(self.parse_expression_inner()?)
+        } else {
+            self.parse_statement()?
+        };
         if matches!(statement, Stmt::FunctionDeclaration(_)) {
             return Err(
                 self.error_current("function declaration not allowed in statement position")
@@ -2639,6 +2656,21 @@ mod tests {
             .expect("script parsing should succeed");
         assert_eq!(parsed.statements.len(), 3);
         assert!(matches!(parsed.statements[1], Stmt::While { .. }));
+    }
+
+    #[test]
+    fn parses_debugger_statement_baseline() {
+        parse_script("while (false) debugger;").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_with_statement_baseline() {
+        parse_script("with ({}) { 'use strict'; }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_embedded_let_expression_statement_with_asi() {
+        parse_script("if (false) let\n{}").expect("script parsing should succeed");
     }
 
     #[test]
