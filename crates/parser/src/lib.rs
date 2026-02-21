@@ -1483,10 +1483,18 @@ impl Parser {
             }
             break;
         }
-        if self.matches(&TokenKind::PlusPlus) {
+        if self.check(&TokenKind::PlusPlus) {
+            if self.has_line_terminator_between_prev_and_current() {
+                return Ok(expr);
+            }
+            self.advance();
             return self.rewrite_update_target(expr, true);
         }
-        if self.matches(&TokenKind::MinusMinus) {
+        if self.check(&TokenKind::MinusMinus) {
+            if self.has_line_terminator_between_prev_and_current() {
+                return Ok(expr);
+            }
+            self.advance();
             return self.rewrite_update_target(expr, false);
         }
         Ok(expr)
@@ -1589,7 +1597,10 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
-                let expr = self.parse_expression_inner()?;
+                let mut expr = self.parse_expression_inner()?;
+                while self.matches(&TokenKind::Comma) {
+                    expr = self.parse_expression_inner()?;
+                }
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
@@ -2176,6 +2187,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_parenthesized_comma_expression_baseline() {
+        let parsed = parse_expression("(0, eval)").expect("parser should succeed");
+        assert_eq!(parsed, Expr::Identifier(Identifier("eval".to_string())));
+    }
+
+    #[test]
     fn parses_object_literal_and_member_assignment() {
         let parsed =
             parse_expression("obj.value = { answer: 42, key }").expect("parser should succeed");
@@ -2354,6 +2371,12 @@ mod tests {
             }),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn rejects_postfix_increment_with_line_terminator() {
+        let err = parse_script("x\n++;").expect_err("parser should fail");
+        assert!(err.message.starts_with("unexpected"));
     }
 
     #[test]

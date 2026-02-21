@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1557, failed=28
+- `language max-cases=5000`: discovered=23882, executed=1585, skipped=22297, passed=1558, failed=27
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -49,4 +49,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 增加 `with` / `debugger` 语句基线解析，并在嵌入语句位置对 `let` 优先按表达式语句处理（覆盖 ASI 场景），`language` 基线进一步提升到 `1551/34`。
 - parser 增加 `for-in` / `for-of` 语法形状 baseline（当前先降级为不迭代执行的兼容路径）并补齐 `for (let in ...)` 的非严格解析分支，`language` 基线进一步提升到 `1556/29`。
 - lexer 补齐 `U+000B`（vertical tab）空白字符跳过，修复 `white-space/after-regular-expression-literal-vertical-tab.js`，`language` 基线进一步提升到 `1557/28`。
+- parser 补齐 postfix `++/--` 的行终止符约束，并支持括号内最小逗号表达式形状（`(0, eval)`），修复 `eval-code/indirect/parse-failure-2.js`，`language` 基线进一步提升到 `1558/27`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
