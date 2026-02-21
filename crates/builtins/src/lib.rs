@@ -18,4 +18,8 @@ pub fn install_baseline(realm: &mut Realm) {
         "Number",
         JsValue::NativeFunction(NativeFunction::NumberConstructor),
     );
+    realm.define_global(
+        "RegExp",
+        JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+    );
 }

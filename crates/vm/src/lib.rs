@@ -535,6 +535,15 @@ impl Vm {
                     }
                     Err(err) => return Err(err),
                 },
+                Opcode::Construct(arg_count) => match self.execute_construct(*arg_count, realm) {
+                    Ok(result) => self.stack.push(result),
+                    Err(VmError::UncaughtException(exception)) => {
+                        let target = self.throw_to_handler(exception, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                },
                 Opcode::Return => {
                     if !allow_return {
                         return Err(VmError::TopLevelReturn);
@@ -567,6 +576,40 @@ impl Vm {
 
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         self.execute_callable(callee, None, args, realm)
+    }
+
+    fn execute_construct(&mut self, arg_count: usize, realm: &Realm) -> Result<JsValue, VmError> {
+        let mut args = Vec::with_capacity(arg_count);
+        for _ in 0..arg_count {
+            let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+            args.push(value);
+        }
+        args.reverse();
+        let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+        match callee {
+            JsValue::Function(closure_id) => {
+                let constructed = self.create_object_value();
+                let result =
+                    self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(constructed)
+                }
+            }
+            JsValue::NativeFunction(native) => self.execute_native_call(native, args, realm),
+            JsValue::HostFunction(host_id) => {
+                let constructed = self.create_object_value();
+                let result = self.execute_host_function_call(host_id, args, realm)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(constructed)
+                }
+            }
+            _ => Err(VmError::NotCallable),
+        }
     }
 
     fn execute_callable(
@@ -799,6 +842,30 @@ impl Vm {
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
+            }
+            NativeFunction::RegExpConstructor => {
+                let pattern = args
+                    .first()
+                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                let flags = args
+                    .get(1)
+                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                let object = self.create_object_value();
+                let object_id = match object {
+                    JsValue::Object(id) => id,
+                    _ => unreachable!(),
+                };
+                let target = self
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                target
+                    .properties
+                    .insert("source".to_string(), JsValue::String(pattern));
+                target
+                    .properties
+                    .insert("flags".to_string(), JsValue::String(flags));
+                Ok(JsValue::Object(object_id))
             }
         }
     }
@@ -1530,6 +1597,32 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn constructs_function_with_new_opcode() {
+        let chunk = Chunk {
+            code: vec![
+                Opcode::LoadFunction(0),
+                Opcode::Construct(0),
+                Opcode::GetProperty("answer".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![CompiledFunction {
+                name: "Ctor".to_string(),
+                params: vec![],
+                code: vec![
+                    Opcode::LoadIdentifier("this".to_string()),
+                    Opcode::LoadNumber(42.0),
+                    Opcode::SetProperty("answer".to_string()),
+                    Opcode::Pop,
+                    Opcode::LoadUndefined,
+                    Opcode::Return,
+                ],
+            }],
+        };
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
     }
 
     #[test]

@@ -1330,6 +1330,9 @@ impl Parser {
                 expr: Box::new(expr),
             });
         }
+        if self.matches_keyword("new") {
+            return self.parse_new_expression();
+        }
         self.parse_postfix()
     }
 
@@ -1376,6 +1379,42 @@ impl Parser {
                 position: self.current_position(),
             }),
         }
+    }
+
+    fn parse_new_expression(&mut self) -> Result<Expr, ParseError> {
+        let mut callee = self.parse_primary()?;
+        loop {
+            if self.matches(&TokenKind::Dot) {
+                let property = self.expect_identifier_name("expected property name after '.'")?;
+                callee = Expr::Member {
+                    object: Box::new(callee),
+                    property,
+                };
+                continue;
+            }
+            if self.matches(&TokenKind::LBracket) {
+                let property = self.parse_expression_inner()?;
+                self.expect(TokenKind::RBracket, "expected ']' after computed property")?;
+                callee = Expr::MemberComputed {
+                    object: Box::new(callee),
+                    property: Box::new(property),
+                };
+                continue;
+            }
+            break;
+        }
+
+        let arguments = if self.matches(&TokenKind::LParen) {
+            let args = self.parse_argument_list()?;
+            self.expect(TokenKind::RParen, "expected ')' after arguments")?;
+            args
+        } else {
+            Vec::new()
+        };
+        Ok(Expr::New {
+            callee: Box::new(callee),
+            arguments,
+        })
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -2288,6 +2327,16 @@ mod tests {
         let expected = Expr::RegexLiteral {
             pattern: "x".to_string(),
             flags: "g".to_string(),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_new_expression() {
+        let parsed = parse_expression("new f(1, 2)").expect("parser should succeed");
+        let expected = Expr::New {
+            callee: Box::new(Expr::Identifier(Identifier("f".to_string()))),
+            arguments: vec![Expr::Number(1.0), Expr::Number(2.0)],
         };
         assert_eq!(parsed, expected);
     }

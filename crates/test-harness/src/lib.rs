@@ -222,6 +222,18 @@ mod tests {
     }
 
     #[test]
+    fn supports_new_expression_baseline() {
+        let result = run_script("function F() { this.x = 1; } var o = new F(); o.x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_regexp_constructor_baseline() {
+        let result = run_script("var a = new RegExp('x', 'g'); a.source + a.flags;", &[]);
+        assert_eq!(result, Ok(JsValue::String("xg".to_string())));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

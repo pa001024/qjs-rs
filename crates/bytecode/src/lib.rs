@@ -58,6 +58,7 @@ pub enum Opcode {
     RethrowIfException,
     Throw,
     Call(usize),
+    Construct(usize),
     Return,
     Dup,
     Pop,
@@ -960,6 +961,13 @@ impl Compiler {
                     self.compile_expr(argument, code);
                 }
                 code.push(Opcode::Call(arguments.len()));
+            }
+            Expr::New { callee, arguments } => {
+                self.compile_expr(callee, code);
+                for argument in arguments {
+                    self.compile_expr(argument, code);
+                }
+                code.push(Opcode::Construct(arguments.len()));
             }
             Expr::Binary { op, left, right } => {
                 if *op == BinaryOp::LogicalAnd {

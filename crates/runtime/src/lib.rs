@@ -9,6 +9,7 @@ pub enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
     NumberConstructor,
+    RegExpConstructor,
 }
 
 #[derive(Debug, Clone, PartialEq)]

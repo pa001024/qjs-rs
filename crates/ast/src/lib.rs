@@ -66,6 +66,10 @@ pub enum Expr {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
     },
+    New {
+        callee: Box<Expr>,
+        arguments: Vec<Expr>,
+    },
     Binary {
         op: BinaryOp,
         left: Box<Expr>,
