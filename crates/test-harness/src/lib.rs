@@ -403,6 +403,27 @@ mod tests {
     }
 
     #[test]
+    fn supports_class_new_instance_method_baseline() {
+        let result = run_script("class C { method() { return 1; } } new C().method();", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_class_computed_getter_baseline() {
+        let result = run_script("class C { get ['a']() { return 'A'; } } new C().a;", &[]);
+        assert_eq!(result, Ok(JsValue::String("A".to_string())));
+    }
+
+    #[test]
+    fn supports_class_computed_setter_baseline() {
+        let result = run_script(
+            "var calls = 0; class C { set ['a'](v) { calls = calls + 1; } } var c = new C(); c.a = 1; calls;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn supports_class_static_method_baseline() {
         let result = run_script(
             "class C { static method() { return arguments.length; } } C.method(42, null);",

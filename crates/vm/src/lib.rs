@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -831,6 +832,13 @@ impl Vm {
                     Ok(constructed)
                 }
             }
+            JsValue::Object(object_id) => {
+                if self.is_class_constructor_object(object_id) {
+                    self.construct_from_class_object(object_id, realm)
+                } else {
+                    Err(VmError::NotCallable)
+                }
+            }
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
@@ -875,6 +883,13 @@ impl Vm {
                     Ok(constructed)
                 }
             }
+            JsValue::Object(object_id) => {
+                if self.is_class_constructor_object(object_id) {
+                    self.construct_from_class_object(object_id, realm)
+                } else {
+                    Err(VmError::NotCallable)
+                }
+            }
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
@@ -903,6 +918,51 @@ impl Vm {
         }
         args.reverse();
         Ok(args)
+    }
+
+    fn is_class_constructor_object(&self, object_id: ObjectId) -> bool {
+        self.objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get(CLASS_CONSTRUCTOR_MARKER))
+            .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
+    }
+
+    fn construct_from_class_object(
+        &mut self,
+        class_object_id: ObjectId,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let prototype = self.get_object_property(class_object_id, "prototype", realm)?;
+        let instance = self.create_object_value();
+        let JsValue::Object(instance_id) = instance else {
+            unreachable!();
+        };
+
+        if let JsValue::Object(prototype_id) = prototype {
+            let prototype_object = self
+                .objects
+                .get(&prototype_id)
+                .cloned()
+                .ok_or(VmError::UnknownObject(prototype_id))?;
+            let instance_object = self
+                .objects
+                .get_mut(&instance_id)
+                .ok_or(VmError::UnknownObject(instance_id))?;
+            for (key, value) in prototype_object.properties {
+                instance_object.properties.insert(key, value);
+            }
+            for (key, value) in prototype_object.getters {
+                instance_object.getters.insert(key, value);
+            }
+            for (key, value) in prototype_object.setters {
+                instance_object.setters.insert(key, value);
+            }
+            for (key, attributes) in prototype_object.property_attributes {
+                instance_object.property_attributes.insert(key, attributes);
+            }
+        }
+
+        Ok(JsValue::Object(instance_id))
     }
 
     fn expand_spread_arguments(

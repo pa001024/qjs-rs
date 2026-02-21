@@ -10,6 +10,7 @@ use lexer::{Token, TokenKind, lex};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -461,10 +462,18 @@ enum ClassMethodKey {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum ClassElementKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct ClassMethodDefinition {
     key: ClassMethodKey,
     value: Expr,
     is_static: bool,
+    kind: ClassElementKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -2408,6 +2417,16 @@ impl Parser {
                 self.advance();
             }
 
+            let kind = if self.check_keyword("get") && !self.check_next(&TokenKind::LParen) {
+                self.advance();
+                ClassElementKind::Getter
+            } else if self.check_keyword("set") && !self.check_next(&TokenKind::LParen) {
+                self.advance();
+                ClassElementKind::Setter
+            } else {
+                ClassElementKind::Method
+            };
+
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
             let (params, simple_parameters) = self.parse_parameter_list()?;
@@ -2416,6 +2435,12 @@ impl Parser {
                 "expected '{' before method body",
                 "expected '}' after method body",
             )?;
+            if matches!(kind, ClassElementKind::Getter) && !params.is_empty() {
+                return Err(self.error_current("getter must not have parameters"));
+            }
+            if matches!(kind, ClassElementKind::Setter) && params.len() != 1 {
+                return Err(self.error_current("setter must have exactly one parameter"));
+            }
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
             }
@@ -2428,6 +2453,7 @@ impl Parser {
                     body,
                 },
                 is_static,
+                kind,
             });
         }
 
@@ -2486,6 +2512,11 @@ impl Parser {
             }),
             Stmt::Expression(Expr::AssignMember {
                 object: Box::new(Expr::Identifier(class_ident.clone())),
+                property: CLASS_CONSTRUCTOR_MARKER.to_string(),
+                value: Box::new(Expr::Bool(true)),
+            }),
+            Stmt::Expression(Expr::AssignMember {
+                object: Box::new(Expr::Identifier(class_ident.clone())),
                 property: "prototype".to_string(),
                 value: Box::new(Expr::ObjectLiteral(vec![])),
             }),
@@ -2500,6 +2531,13 @@ impl Parser {
         ];
 
         for method in class_tail.methods {
+            if method.is_static && self.class_method_key_is_prototype(&method.key) {
+                body.push(Stmt::Throw(Expr::String(
+                    "TypeError: static class member named prototype".to_string(),
+                )));
+                continue;
+            }
+
             let target = if method.is_static {
                 Expr::Identifier(class_ident.clone())
             } else {
@@ -2508,19 +2546,59 @@ impl Parser {
                     property: "prototype".to_string(),
                 }
             };
-            let assignment = match method.key {
-                ClassMethodKey::Static(name) => Expr::AssignMember {
-                    object: Box::new(target),
-                    property: name,
-                    value: Box::new(method.value),
-                },
-                ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
-                    object: Box::new(target),
-                    property: Box::new(key),
-                    value: Box::new(method.value),
-                },
-            };
-            body.push(Stmt::Expression(assignment));
+            match method.kind {
+                ClassElementKind::Method => {
+                    let assignment = match method.key {
+                        ClassMethodKey::Static(name) => Expr::AssignMember {
+                            object: Box::new(target),
+                            property: name,
+                            value: Box::new(method.value),
+                        },
+                        ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
+                            object: Box::new(target),
+                            property: Box::new(key),
+                            value: Box::new(method.value),
+                        },
+                    };
+                    body.push(Stmt::Expression(assignment));
+                }
+                ClassElementKind::Getter | ClassElementKind::Setter => {
+                    let key_expr = match method.key {
+                        ClassMethodKey::Static(name) => Expr::String(name),
+                        ClassMethodKey::Computed(key) => key,
+                    };
+                    let mut descriptor_properties = vec![
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("configurable".to_string()),
+                            value: Expr::Bool(true),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("enumerable".to_string()),
+                            value: Expr::Bool(false),
+                        },
+                    ];
+                    let accessor_name = if matches!(method.kind, ClassElementKind::Getter) {
+                        "get"
+                    } else {
+                        "set"
+                    };
+                    descriptor_properties.push(ObjectProperty {
+                        key: ObjectPropertyKey::Static(accessor_name.to_string()),
+                        value: method.value,
+                    });
+                    body.push(Stmt::Expression(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "defineProperty".to_string(),
+                        }),
+                        arguments: vec![
+                            target,
+                            key_expr,
+                            Expr::ObjectLiteral(descriptor_properties),
+                        ],
+                    }));
+                }
+            }
         }
 
         body.push(Stmt::Return(Some(Expr::Identifier(class_ident))));
@@ -2539,6 +2617,14 @@ impl Parser {
         let name = format!("$__class_ctor_{}", self.class_temp_index);
         self.class_temp_index += 1;
         name
+    }
+
+    fn class_method_key_is_prototype(&self, key: &ClassMethodKey) -> bool {
+        match key {
+            ClassMethodKey::Static(name) => name == "prototype",
+            ClassMethodKey::Computed(Expr::String(name)) => name == "prototype",
+            _ => false,
+        }
     }
 
     fn consume_balanced_brace_block(
@@ -3745,6 +3831,18 @@ mod tests {
     fn parses_class_expression_baseline() {
         let parsed = parse_expression("class await {}").expect("parser should succeed");
         assert_eq!(parsed, Expr::ObjectLiteral(vec![]));
+    }
+
+    #[test]
+    fn parses_class_computed_accessors_baseline() {
+        parse_script("class C { get ['a']() { return 1; } set ['a'](v) {} }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_class_static_prototype_computed_member_baseline() {
+        parse_script("class C { static ['prototype']() {} }")
+            .expect("script parsing should succeed");
     }
 
     #[test]
