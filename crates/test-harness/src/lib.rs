@@ -607,6 +607,49 @@ mod tests {
     }
 
     #[test]
+    fn for_of_const_binding_iterates_array_baseline() {
+        let result = run_script(
+            "let s = ''; for (const x of [1, 2, 3]) { s = s + x; } s === '123';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_let_array_pattern_baseline() {
+        let result = run_script(
+            "var obj = Object.create(null); var value = ''; \
+             obj.key = 1; \
+             for (let [x] in obj) { value = x; } \
+             value === 'k' && typeof x === 'undefined';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_var_array_pattern_duplicate_bindings_baseline() {
+        let result = run_script(
+            "var iterCount = 0; var last = ''; \
+             for (var [x, x] in { ab: null }) { last = x; iterCount = iterCount + 1; } \
+             iterCount === 1 && last === 'b';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_head_let_pattern_default_initializer_scope_baseline() {
+        let result = run_script(
+            "var value = 0; \
+             for (let [_ = (value = 1)] in { '': 0 }) {} \
+             value === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn for_in_includes_enumerable_prototype_properties_baseline() {
         let result = run_script(
             "function Factory() { this.prop = 1; this.hint = 'hinted'; } \

@@ -193,6 +193,7 @@ pub struct Vm {
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     eval_contexts: Vec<EvalContext>,
+    var_scope_stack: Vec<usize>,
 }
 
 impl Vm {
@@ -224,6 +225,7 @@ impl Vm {
         self.exception_handlers.clear();
         self.pending_exception = None;
         self.eval_contexts.clear();
+        self.var_scope_stack.clear();
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -236,7 +238,10 @@ impl Vm {
         }
 
         let strict = self.code_is_strict(&chunk.code);
-        match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict)? {
+        self.var_scope_stack.push(0);
+        let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
+        let _ = self.var_scope_stack.pop();
+        match signal? {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
@@ -310,6 +315,31 @@ impl Vm {
                         }
                     }
                 }
+                Opcode::DefineVar(name) => {
+                    let existing_binding_id = {
+                        let scope_ref = self.current_var_scope_ref()?;
+                        scope_ref.borrow().get(name).copied()
+                    };
+                    if let Some(existing_binding_id) = existing_binding_id {
+                        let existing_binding = self
+                            .bindings
+                            .get(&existing_binding_id)
+                            .ok_or(VmError::ScopeUnderflow)?;
+                        if !existing_binding.mutable {
+                            return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        }
+                    } else {
+                        let binding_id = self.create_binding(JsValue::Undefined, true);
+                        let scope_ref = self.current_var_scope_ref()?;
+                        if scope_ref
+                            .borrow_mut()
+                            .insert(name.clone(), binding_id)
+                            .is_some()
+                        {
+                            return Err(VmError::VariableAlreadyDefined(name.clone()));
+                        }
+                    }
+                }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let existing_binding_id = {
@@ -375,6 +405,9 @@ impl Vm {
                             .bindings
                             .get_mut(&binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
+                        if matches!(binding.value, JsValue::Uninitialized) {
+                            return Err(VmError::UnknownIdentifier(name.clone()));
+                        }
                         if !binding.mutable {
                             return Err(VmError::ImmutableBinding(name.clone()));
                         }
@@ -1592,9 +1625,11 @@ impl Vm {
         let saved_handlers = std::mem::take(&mut self.exception_handlers);
         let saved_pending_exception = self.pending_exception.take();
         let saved_identifier_references = std::mem::take(&mut self.identifier_references);
+        let saved_var_scope_stack = std::mem::take(&mut self.var_scope_stack);
 
         self.scopes = closure.captured_scopes;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
+        self.var_scope_stack = vec![self.scopes.len().saturating_sub(1)];
         self.stack = Vec::new();
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
@@ -1622,6 +1657,7 @@ impl Vm {
                 self.exception_handlers = saved_handlers;
                 self.pending_exception = saved_pending_exception;
                 self.identifier_references = saved_identifier_references;
+                self.var_scope_stack = saved_var_scope_stack;
                 return Err(err);
             }
         };
@@ -1631,6 +1667,7 @@ impl Vm {
         self.exception_handlers = saved_handlers;
         self.pending_exception = saved_pending_exception;
         self.identifier_references = saved_identifier_references;
+        self.var_scope_stack = saved_var_scope_stack;
         Ok(value)
     }
 
@@ -1980,6 +2017,8 @@ impl Vm {
             NativeFunction::ObjectGetPrototypeOf => self.execute_object_get_prototype_of(&args),
             NativeFunction::ObjectIsExtensible => self.execute_object_is_extensible(&args),
             NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
+            NativeFunction::ObjectForOfValues => self.execute_object_for_of_values(&args, realm),
+            NativeFunction::ObjectTdzMarker => Ok(JsValue::Uninitialized),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
@@ -2663,6 +2702,16 @@ impl Vm {
         self.create_array_from_string_keys(keys)
     }
 
+    fn execute_object_for_of_values(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let values = self.collect_for_of_values(target, realm)?;
+        self.create_array_from_values(values)
+    }
+
     fn collect_for_in_keys(&self, start_id: ObjectId) -> Result<Vec<String>, VmError> {
         let mut keys = Vec::new();
         let mut seen = BTreeSet::new();
@@ -2716,7 +2765,34 @@ impl Vm {
         Ok(keys)
     }
 
+    fn collect_for_of_values(
+        &mut self,
+        target: JsValue,
+        realm: &Realm,
+    ) -> Result<Vec<JsValue>, VmError> {
+        match target {
+            JsValue::Object(object_id) => {
+                let length = self.array_length(object_id)?;
+                let mut values = Vec::with_capacity(length);
+                for index in 0..length {
+                    let property = index.to_string();
+                    values.push(self.get_object_property(object_id, &property, realm)?);
+                }
+                Ok(values)
+            }
+            JsValue::String(value) => Ok(value
+                .chars()
+                .map(|ch| JsValue::String(ch.to_string()))
+                .collect()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
     fn create_array_from_string_keys(&mut self, keys: Vec<String>) -> Result<JsValue, VmError> {
+        self.create_array_from_values(keys.into_iter().map(JsValue::String).collect())
+    }
+
+    fn create_array_from_values(&mut self, values: Vec<JsValue>) -> Result<JsValue, VmError> {
         let array = self.create_object_value();
         let array_id = match array {
             JsValue::Object(id) => id,
@@ -2726,11 +2802,11 @@ impl Vm {
             .objects
             .get_mut(&array_id)
             .ok_or(VmError::UnknownObject(array_id))?;
-        for (index, key) in keys.iter().enumerate() {
+        for (index, value) in values.iter().enumerate() {
             let index_key = index.to_string();
             array_object
                 .properties
-                .insert(index_key.clone(), JsValue::String(key.clone()));
+                .insert(index_key.clone(), value.clone());
             array_object
                 .property_attributes
                 .entry(index_key)
@@ -2738,7 +2814,7 @@ impl Vm {
         }
         array_object
             .properties
-            .insert("length".to_string(), JsValue::Number(keys.len() as f64));
+            .insert("length".to_string(), JsValue::Number(values.len() as f64));
         array_object.property_attributes.insert(
             "length".to_string(),
             PropertyAttributes {
@@ -3183,6 +3259,16 @@ impl Vm {
         self.scopes.last().cloned().ok_or(VmError::ScopeUnderflow)
     }
 
+    fn current_var_scope_ref(&self) -> Result<ScopeRef, VmError> {
+        let Some(scope_index) = self.var_scope_stack.last().copied() else {
+            return self.current_scope_ref();
+        };
+        self.scopes
+            .get(scope_index)
+            .cloned()
+            .ok_or(VmError::ScopeUnderflow)
+    }
+
     fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
         for scope_ref in self.scopes.iter().rev() {
             if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
@@ -3194,7 +3280,9 @@ impl Vm {
 
     fn with_object_from_value(&mut self, value: JsValue) -> Result<JsValue, VmError> {
         match value {
-            JsValue::Undefined | JsValue::Null => Err(VmError::TypeError("with expects object")),
+            JsValue::Undefined | JsValue::Uninitialized | JsValue::Null => {
+                Err(VmError::TypeError("with expects object"))
+            }
             JsValue::Object(_)
             | JsValue::Function(_)
             | JsValue::NativeFunction(_)
@@ -3269,7 +3357,11 @@ impl Vm {
                 }
                 Ok(matches!(property, "replace" | "toString" | "valueOf"))
             }
-            JsValue::Undefined | JsValue::Null | JsValue::Number(_) | JsValue::Bool(_) => Ok(false),
+            JsValue::Undefined
+            | JsValue::Uninitialized
+            | JsValue::Null
+            | JsValue::Number(_)
+            | JsValue::Bool(_) => Ok(false),
         }
     }
 
@@ -3431,11 +3523,14 @@ impl Vm {
         _strict: bool,
     ) -> Result<JsValue, VmError> {
         match reference {
-            IdentifierReference::Binding { binding_id, .. } => {
+            IdentifierReference::Binding { name, binding_id } => {
                 let binding = self
                     .bindings
                     .get(binding_id)
                     .ok_or(VmError::ScopeUnderflow)?;
+                if matches!(binding.value, JsValue::Uninitialized) {
+                    return Err(VmError::UnknownIdentifier(name.clone()));
+                }
                 Ok(binding.value.clone())
             }
             IdentifierReference::Property { base, property, .. } => {
@@ -3469,6 +3564,9 @@ impl Vm {
                     .bindings
                     .get_mut(&binding_id)
                     .ok_or(VmError::ScopeUnderflow)?;
+                if matches!(binding.value, JsValue::Uninitialized) {
+                    return Err(VmError::UnknownIdentifier(name));
+                }
                 if !binding.mutable {
                     return Err(VmError::ImmutableBinding(name));
                 }
@@ -3821,9 +3919,12 @@ impl Vm {
 
     fn skip_prologue_prefix(code: &[Opcode]) -> usize {
         let mut cursor = 0usize;
+        if matches!(code.get(cursor), Some(Opcode::MarkStrict)) {
+            cursor += 1;
+        }
         while cursor < code.len() {
             match &code[cursor] {
-                Opcode::DefineFunction { .. } => cursor += 1,
+                Opcode::DefineFunction { .. } | Opcode::DefineVar(_) => cursor += 1,
                 _ => break,
             }
         }
@@ -4261,6 +4362,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
+                | (NativeFunction::ObjectConstructor, "__forOfValues")
                 | (
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
@@ -4637,6 +4739,12 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "__forInKeys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForInKeys)
             }
+            (NativeFunction::ObjectConstructor, "__forOfValues") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForOfValues)
+            }
+            (NativeFunction::ObjectConstructor, "__tdzMarker") => {
+                JsValue::NativeFunction(NativeFunction::ObjectTdzMarker)
+            }
             (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)
             }
@@ -4940,6 +5048,7 @@ impl Vm {
                 .map_or("[object Object]".to_string(), |value| {
                     self.coerce_to_string(&value)
                 }),
+            JsValue::Uninitialized => "undefined".to_string(),
             JsValue::Undefined => "undefined".to_string(),
         }
     }
@@ -4999,6 +5108,7 @@ impl Vm {
     fn typeof_value(&self, value: &JsValue) -> &'static str {
         match value {
             JsValue::Undefined => "undefined",
+            JsValue::Uninitialized => "undefined",
             JsValue::Null => "object",
             JsValue::Bool(_) => "boolean",
             JsValue::Number(_) => "number",
@@ -5050,6 +5160,7 @@ impl Vm {
             JsValue::Object(object_id) => self
                 .boxed_primitive_value(*object_id)
                 .map_or(f64::NAN, |value| self.to_number(&value)),
+            JsValue::Uninitialized => f64::NAN,
             JsValue::Undefined => f64::NAN,
         }
     }
@@ -5163,6 +5274,7 @@ impl Vm {
     fn is_truthy(&self, value: &JsValue) -> bool {
         match value {
             JsValue::Undefined => false,
+            JsValue::Uninitialized => false,
             JsValue::Null => false,
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),

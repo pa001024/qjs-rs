@@ -22,6 +22,7 @@ pub enum Opcode {
         name: String,
         mutable: bool,
     },
+    DefineVar(String),
     DefineFunction {
         name: String,
         function_id: usize,
@@ -198,11 +199,7 @@ impl Compiler {
             let mut hoisted_var_names = BTreeSet::new();
             self.collect_hoisted_var_names(statements, &mut hoisted_var_names);
             for name in hoisted_var_names {
-                code.push(Opcode::LoadUndefined);
-                code.push(Opcode::DefineVariable {
-                    name,
-                    mutable: true,
-                });
+                code.push(Opcode::DefineVar(name));
             }
         }
 
@@ -370,11 +367,7 @@ impl Compiler {
                     code.push(Opcode::Throw);
                     return true;
                 }
-                if *kind == BindingKind::Var && self.scope_depth == 0 && initializer.is_none() {
-                    code.push(Opcode::Nop);
-                    return false;
-                }
-                if *kind == BindingKind::Var && self.scope_depth > 0 {
+                if *kind == BindingKind::Var {
                     if let Some(expr) = initializer {
                         self.compile_expr(expr, code);
                         code.push(Opcode::StoreVariable(binding_name.clone()));
@@ -2156,11 +2149,7 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
-                Opcode::LoadUndefined,
-                Opcode::DefineVariable {
-                    name: "x".to_string(),
-                    mutable: true,
-                },
+                Opcode::DefineVar("x".to_string()),
                 Opcode::Nop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,

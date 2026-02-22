@@ -16,6 +16,8 @@ pub enum NativeFunction {
     ObjectGetPrototypeOf,
     ObjectIsExtensible,
     ObjectForInKeys,
+    ObjectForOfValues,
+    ObjectTdzMarker,
     NumberConstructor,
     BooleanConstructor,
     DateConstructor,
@@ -38,6 +40,7 @@ pub enum JsValue {
     NativeFunction(NativeFunction),
     HostFunction(u64),
     Object(u64),
+    Uninitialized,
     Undefined,
 }
 

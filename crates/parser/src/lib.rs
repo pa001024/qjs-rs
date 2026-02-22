@@ -903,6 +903,13 @@ fn is_forbidden_binding_identifier(name: &str) -> bool {
     is_reserved_word(name)
 }
 
+#[derive(Debug, Clone)]
+struct ForHeadArrayPatternElement {
+    index: usize,
+    name: Identifier,
+    default_initializer: Option<Expr>,
+}
+
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
@@ -1245,6 +1252,11 @@ impl Parser {
         let initializer = if self.check(&TokenKind::Semicolon) {
             None
         } else if self.matches_keyword("let") {
+            if self.matches(&TokenKind::LBracket) {
+                let elements =
+                    self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
+                return self.parse_for_in_of_array_pattern_statement(BindingKind::Let, elements);
+            }
             if self.check_keyword("in") || self.check_keyword("of") {
                 Some(ForInitializer::Expression(Expr::Identifier(Identifier(
                     "let".to_string(),
@@ -1268,6 +1280,11 @@ impl Parser {
                 Some(declaration)
             }
         } else if self.matches_keyword("const") {
+            if self.matches(&TokenKind::LBracket) {
+                let elements =
+                    self.parse_for_head_array_pattern_after_lbracket(BindingKind::Const)?;
+                return self.parse_for_in_of_array_pattern_statement(BindingKind::Const, elements);
+            }
             let declaration = self.parse_variable_declaration(BindingKind::Const)?;
             let declaration = match declaration {
                 Stmt::VariableDeclaration(declaration) => {
@@ -1285,6 +1302,11 @@ impl Parser {
             };
             Some(declaration)
         } else if self.matches_keyword("var") {
+            if self.matches(&TokenKind::LBracket) {
+                let elements =
+                    self.parse_for_head_array_pattern_after_lbracket(BindingKind::Var)?;
+                return self.parse_for_in_of_array_pattern_statement(BindingKind::Var, elements);
+            }
             let declaration = self.parse_variable_declaration(BindingKind::Var)?;
             let declaration = match declaration {
                 Stmt::VariableDeclaration(declaration) => {
@@ -1324,6 +1346,9 @@ impl Parser {
 
             if loop_kind == "in" && Self::supports_for_in_lowering(initializer.as_ref()) {
                 return self.lower_for_in_statement(initializer, iterable, body);
+            }
+            if loop_kind == "of" && Self::supports_for_of_lowering(initializer.as_ref()) {
+                return self.lower_for_of_statement(initializer, iterable, body);
             }
             // Baseline: parse/compile unsupported `for-in`/`for-of` shapes as non-iterating loops.
             return Ok(Stmt::For {
@@ -1379,7 +1404,93 @@ impl Parser {
         }
     }
 
+    fn parse_for_head_array_pattern_after_lbracket(
+        &mut self,
+        kind: BindingKind,
+    ) -> Result<Vec<ForHeadArrayPatternElement>, ParseError> {
+        let mut elements = Vec::new();
+        let mut element_index = 0usize;
+        while !self.check(&TokenKind::RBracket) {
+            if self.matches(&TokenKind::Comma) {
+                element_index += 1;
+                continue;
+            }
+            let name = if kind == BindingKind::Var {
+                self.expect_var_binding_identifier("expected binding name")?
+            } else {
+                self.expect_binding_identifier("expected binding name")?
+            };
+            let default_initializer = if self.matches(&TokenKind::Equal) {
+                Some(self.parse_expression_inner()?)
+            } else {
+                None
+            };
+            elements.push(ForHeadArrayPatternElement {
+                index: element_index,
+                name: Identifier(name),
+                default_initializer,
+            });
+            element_index += 1;
+            if self.check(&TokenKind::RBracket) {
+                break;
+            }
+            self.expect(TokenKind::Comma, "expected ',' in array binding pattern")?;
+        }
+        self.expect(
+            TokenKind::RBracket,
+            "expected ']' after array binding pattern",
+        )?;
+        if elements.is_empty() {
+            return Err(self.error_current("expected binding name"));
+        }
+        Ok(elements)
+    }
+
+    fn parse_for_in_of_array_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        elements: Vec<ForHeadArrayPatternElement>,
+    ) -> Result<Stmt, ParseError> {
+        let loop_kind = if self.matches_keyword("in") {
+            "in"
+        } else if self.matches_keyword("of") {
+            "of"
+        } else {
+            return Err(self.error_current("expected 'in' or 'of' after array binding pattern"));
+        };
+        let iterable = self.parse_for_in_of_rhs_expression()?;
+        self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
+
+        self.loop_depth += 1;
+        self.breakable_depth += 1;
+        let body = self.parse_embedded_statement(false);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
+        let body = body?;
+
+        if loop_kind == "in" {
+            self.lower_for_in_array_pattern_statement(kind, elements, iterable, body)
+        } else {
+            self.lower_for_of_array_pattern_statement(kind, elements, iterable, body)
+        }
+    }
+
     fn supports_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
+        match initializer {
+            Some(ForInitializer::VariableDeclaration(VariableDeclaration {
+                initializer, ..
+            })) => initializer.is_none(),
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                declarations.len() == 1 && declarations[0].initializer.is_none()
+            }
+            Some(ForInitializer::Expression(target)) => {
+                Self::is_simple_assignment_target_expression(target)
+            }
+            None => false,
+        }
+    }
+
+    fn supports_for_of_lowering(initializer: Option<&ForInitializer>) -> bool {
         match initializer {
             Some(ForInitializer::VariableDeclaration(VariableDeclaration {
                 initializer, ..
@@ -1413,7 +1524,11 @@ impl Parser {
         let current_name = self.next_for_in_temp_identifier("current");
         let iterable_identifier = Expr::Identifier(iterable_name.clone());
 
-        let mut statements = vec![
+        let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
+            .into_iter()
+            .map(Self::tdz_marker_declaration)
+            .collect::<Vec<_>>();
+        statements.extend(vec![
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
                 name: iterable_name.clone(),
@@ -1451,7 +1566,7 @@ impl Parser {
                 name: index_name.clone(),
                 initializer: Some(Expr::Number(0.0)),
             }),
-        ];
+        ]);
 
         let current_key_expr = Expr::MemberComputed {
             object: Box::new(Expr::Identifier(keys_name.clone())),
@@ -1545,6 +1660,409 @@ impl Parser {
         Ok(Stmt::Block(statements))
     }
 
+    fn lower_for_of_statement(
+        &mut self,
+        initializer: Option<ForInitializer>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let values_name = self.next_for_in_temp_identifier("values");
+        let index_name = self.next_for_in_temp_identifier("index");
+        let current_name = self.next_for_in_temp_identifier("current");
+
+        let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
+            .into_iter()
+            .map(Self::tdz_marker_declaration)
+            .collect::<Vec<_>>();
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: values_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfValues".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterable_name)],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: index_name.clone(),
+                initializer: Some(Expr::Number(0.0)),
+            }),
+        ]);
+
+        let current_value_expr = Expr::MemberComputed {
+            object: Box::new(Expr::Identifier(values_name.clone())),
+            property: Box::new(Expr::Identifier(index_name.clone())),
+        };
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(current_value_expr),
+        });
+        let current_identifier_expr = Expr::Identifier(current_name);
+
+        let mut iteration_statements = Vec::new();
+        match initializer {
+            None => {}
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                if declarations.len() != 1 || declarations[0].initializer.is_some() {
+                    return Err(self.error_current("invalid for-of initializer"));
+                }
+                let declaration = declarations
+                    .into_iter()
+                    .next()
+                    .expect("for-of declaration should exist");
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::Expression(target)) => {
+                let assignment = self.rewrite_assignment_target(
+                    target,
+                    current_identifier_expr.clone(),
+                    None,
+                    self.current_position(),
+                )?;
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(assignment),
+                }));
+            }
+        }
+
+        iteration_statements.push(body);
+
+        let condition = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(Expr::Identifier(index_name.clone())),
+            right: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(values_name)),
+                property: "length".to_string(),
+            }),
+        };
+        let update = Expr::Assign {
+            target: index_name.clone(),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(index_name)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+
+        statements.push(Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: Some(update),
+            body: Box::new(Stmt::Block(vec![
+                current_declaration,
+                Stmt::Block(iteration_statements),
+            ])),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_in_array_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        elements: Vec<ForHeadArrayPatternElement>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let keys_name = self.next_for_in_temp_identifier("keys");
+        let index_name = self.next_for_in_temp_identifier("index");
+        let current_name = self.next_for_in_temp_identifier("current");
+        let iterable_identifier = Expr::Identifier(iterable_name.clone());
+
+        let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
+            elements
+                .iter()
+                .map(|element| Self::tdz_marker_declaration(element.name.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        op: BinaryOp::LogicalOr,
+                        left: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable.clone()),
+                            right: Box::new(Expr::Null),
+                        }),
+                        right: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable.clone()),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        }),
+                    }),
+                    consequent: Box::new(Expr::ObjectLiteral(Vec::new())),
+                    alternate: Box::new(iterable),
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: keys_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forInKeys".to_string(),
+                    }),
+                    arguments: vec![iterable_identifier],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: index_name.clone(),
+                initializer: Some(Expr::Number(0.0)),
+            }),
+        ]);
+
+        let current_key_expr = Expr::MemberComputed {
+            object: Box::new(Expr::Identifier(keys_name.clone())),
+            property: Box::new(Expr::Identifier(index_name.clone())),
+        };
+        let current_key_value_expr = Expr::Identifier(current_name.clone());
+
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name,
+            initializer: Some(current_key_expr),
+        });
+        let mut iteration_statements = Vec::new();
+        self.lower_array_pattern_bindings(
+            kind,
+            &elements,
+            &current_key_value_expr,
+            &mut statements,
+            &mut iteration_statements,
+        );
+        iteration_statements.push(body);
+
+        let guarded_iteration_body = Stmt::If {
+            condition: Expr::Binary {
+                op: BinaryOp::In,
+                left: Box::new(current_key_value_expr),
+                right: Box::new(Expr::Identifier(iterable_name.clone())),
+            },
+            consequent: Box::new(Stmt::Block(iteration_statements)),
+            alternate: None,
+        };
+
+        let condition = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(Expr::Identifier(index_name.clone())),
+            right: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(keys_name)),
+                property: "length".to_string(),
+            }),
+        };
+        let update = Expr::Assign {
+            target: index_name.clone(),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(index_name)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+
+        statements.push(Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: Some(update),
+            body: Box::new(Stmt::Block(vec![
+                current_declaration,
+                guarded_iteration_body,
+            ])),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_of_array_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        elements: Vec<ForHeadArrayPatternElement>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let values_name = self.next_for_in_temp_identifier("values");
+        let index_name = self.next_for_in_temp_identifier("index");
+        let current_name = self.next_for_in_temp_identifier("current");
+
+        let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
+            elements
+                .iter()
+                .map(|element| Self::tdz_marker_declaration(element.name.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: values_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfValues".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterable_name)],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: index_name.clone(),
+                initializer: Some(Expr::Number(0.0)),
+            }),
+        ]);
+
+        let current_value_expr = Expr::MemberComputed {
+            object: Box::new(Expr::Identifier(values_name.clone())),
+            property: Box::new(Expr::Identifier(index_name.clone())),
+        };
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(current_value_expr),
+        });
+        let current_identifier_expr = Expr::Identifier(current_name);
+
+        let mut iteration_statements = Vec::new();
+        self.lower_array_pattern_bindings(
+            kind,
+            &elements,
+            &current_identifier_expr,
+            &mut statements,
+            &mut iteration_statements,
+        );
+        iteration_statements.push(body);
+
+        let condition = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(Expr::Identifier(index_name.clone())),
+            right: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(values_name)),
+                property: "length".to_string(),
+            }),
+        };
+        let update = Expr::Assign {
+            target: index_name.clone(),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(index_name)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+
+        statements.push(Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: Some(update),
+            body: Box::new(Stmt::Block(vec![
+                current_declaration,
+                Stmt::Block(iteration_statements),
+            ])),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_array_pattern_bindings(
+        &mut self,
+        kind: BindingKind,
+        elements: &[ForHeadArrayPatternElement],
+        current_value_expr: &Expr,
+        outer_statements: &mut Vec<Stmt>,
+        iteration_statements: &mut Vec<Stmt>,
+    ) {
+        if kind == BindingKind::Var {
+            for element in elements {
+                outer_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name: element.name.clone(),
+                    initializer: None,
+                }));
+            }
+        }
+
+        for element in elements {
+            let value = Self::array_pattern_element_value_expr(current_value_expr, element);
+            if kind == BindingKind::Var {
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(Expr::Assign {
+                        target: element.name.clone(),
+                        value: Box::new(value),
+                    }),
+                }));
+            } else {
+                iteration_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+                    kind,
+                    name: element.name.clone(),
+                    initializer: Some(value),
+                }));
+            }
+        }
+    }
+
+    fn array_pattern_element_value_expr(
+        current_value_expr: &Expr,
+        element: &ForHeadArrayPatternElement,
+    ) -> Expr {
+        let extracted = Expr::MemberComputed {
+            object: Box::new(current_value_expr.clone()),
+            property: Box::new(Expr::Number(element.index as f64)),
+        };
+        if let Some(default_initializer) = &element.default_initializer {
+            Expr::Conditional {
+                condition: Box::new(Expr::Binary {
+                    op: BinaryOp::StrictEqual,
+                    left: Box::new(extracted.clone()),
+                    right: Box::new(Expr::Unary {
+                        op: UnaryOp::Void,
+                        expr: Box::new(Expr::Number(0.0)),
+                    }),
+                }),
+                consequent: Box::new(default_initializer.clone()),
+                alternate: Box::new(extracted),
+            }
+        } else {
+            extracted
+        }
+    }
+
     fn lower_for_in_initializer_declaration(
         &mut self,
         declaration: VariableDeclaration,
@@ -1576,6 +2094,36 @@ impl Parser {
             initializer: Some(current_key_expr.clone()),
         }));
         Ok(())
+    }
+
+    fn for_initializer_tdz_names(initializer: Option<&ForInitializer>) -> Vec<Identifier> {
+        match initializer {
+            Some(ForInitializer::VariableDeclaration(declaration))
+                if matches!(declaration.kind, BindingKind::Let | BindingKind::Const) =>
+            {
+                vec![declaration.name.clone()]
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => declarations
+                .iter()
+                .filter(|declaration| matches!(declaration.kind, BindingKind::Let | BindingKind::Const))
+                .map(|declaration| declaration.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn tdz_marker_declaration(name: Identifier) -> Stmt {
+        Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name,
+            initializer: Some(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "__tdzMarker".to_string(),
+                }),
+                arguments: Vec::new(),
+            }),
+        })
     }
 
     fn next_for_in_temp_identifier(&mut self, category: &str) -> Identifier {
@@ -4594,6 +5142,18 @@ mod tests {
     #[test]
     fn parses_for_in_const_initializerless_declaration() {
         parse_script("for (const x in { key: 0 }) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_of_const_initializerless_declaration_baseline() {
+        parse_script("for (const x of [1, 2, 3]) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_in_array_pattern_heads_baseline() {
+        parse_script("for (let [x] in obj) {}").expect("script parsing should succeed");
+        parse_script("for (var [x, x] in obj) {}").expect("script parsing should succeed");
+        parse_script("for (let [_ = probe = 1] in obj) {}").expect("script parsing should succeed");
     }
 
     #[test]
