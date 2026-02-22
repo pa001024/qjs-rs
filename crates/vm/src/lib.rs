@@ -97,6 +97,12 @@ enum HostFunction {
     AssertCompareArray,
     DateToString(ObjectId),
     DateValueOf(ObjectId),
+    FunctionToString {
+        target: JsValue,
+    },
+    FunctionValueOf {
+        target: JsValue,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +148,7 @@ pub struct Vm {
     objects: BTreeMap<ObjectId, JsObject>,
     next_object_id: ObjectId,
     closures: BTreeMap<u64, Closure>,
+    closure_objects: BTreeMap<u64, JsObject>,
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     next_host_function_id: u64,
@@ -167,6 +174,7 @@ impl Vm {
         self.objects.clear();
         self.next_object_id = 0;
         self.closures.clear();
+        self.closure_objects.clear();
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.next_host_function_id = 0;
@@ -546,9 +554,11 @@ impl Vm {
                                 self.set_object_property(object_id, name.clone(), value, realm)?;
                             self.stack.push(result);
                         }
-                        JsValue::Function(_)
-                        | JsValue::NativeFunction(_)
-                        | JsValue::HostFunction(_) => {
+                        JsValue::Function(closure_id) => {
+                            let result = self.set_closure_property(closure_id, name.clone(), value);
+                            self.stack.push(result);
+                        }
+                        JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                             self.stack.push(value);
                         }
                         _ => return Err(VmError::TypeError("property write expects object")),
@@ -564,9 +574,11 @@ impl Vm {
                             let result = self.set_object_property(object_id, key, value, realm)?;
                             self.stack.push(result);
                         }
-                        JsValue::Function(_)
-                        | JsValue::NativeFunction(_)
-                        | JsValue::HostFunction(_) => {
+                        JsValue::Function(closure_id) => {
+                            let result = self.set_closure_property(closure_id, key, value);
+                            self.stack.push(result);
+                        }
+                        JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                             self.stack.push(value);
                         }
                         _ => return Err(VmError::TypeError("property write expects object")),
@@ -600,26 +612,14 @@ impl Vm {
                         return Err(VmError::ScopeUnderflow);
                     }
                 }
-                Opcode::Add => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.primitive_for_add(left, realm, strict)?;
-                    let right = self.primitive_for_add(right, realm, strict)?;
-                    match (left, right) {
-                        (JsValue::String(lhs), rhs) => {
-                            let rhs = self.coerce_to_string(&rhs);
-                            self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
-                        }
-                        (lhs, JsValue::String(rhs)) => {
-                            let lhs = self.coerce_to_string(&lhs);
-                            self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
-                        }
-                        (lhs, rhs) => {
-                            self.stack
-                                .push(JsValue::Number(self.to_number(&lhs) + self.to_number(&rhs)));
-                        }
+                Opcode::Add => match self.evaluate_add(realm, strict) {
+                    Ok(result) => self.stack.push(result),
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
+                        pc = target;
+                        continue;
                     }
-                }
+                },
                 Opcode::Sub => {
                     let result = self.eval_numeric_binary(|lhs, rhs| lhs - rhs)?;
                     self.stack.push(JsValue::Number(result));
@@ -1447,6 +1447,11 @@ impl Vm {
                     .unwrap_or(0.0);
                 Ok(JsValue::Number(timestamp))
             }
+            HostFunction::FunctionToString { target } => Ok(JsValue::String(format!(
+                "{}() {{ [native code] }}",
+                self.function_name_for_display(&target)
+            ))),
+            HostFunction::FunctionValueOf { target } => Ok(target),
             HostFunction::AssertSameValue => {
                 let left = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -2529,18 +2534,23 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let JsValue::Object(object_id) = value else {
-            return Ok(value);
-        };
-        if let Some(boxed) = self.boxed_primitive_value(object_id) {
-            return Ok(boxed);
+        match value {
+            JsValue::Object(object_id) => {
+                if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                    return Ok(boxed);
+                }
+                self.ordinary_to_primitive_for_add(
+                    object_id,
+                    self.is_date_object(object_id),
+                    realm,
+                    caller_strict,
+                )
+            }
+            JsValue::Function(closure_id) => {
+                self.ordinary_to_primitive_for_function(closure_id, false, realm, caller_strict)
+            }
+            other => Ok(other),
         }
-        self.ordinary_to_primitive_for_add(
-            object_id,
-            self.is_date_object(object_id),
-            realm,
-            caller_strict,
-        )
     }
 
     fn ordinary_to_primitive_for_add(
@@ -2582,6 +2592,53 @@ impl Vm {
         }
 
         Ok(JsValue::String("[object Object]".to_string()))
+    }
+
+    fn ordinary_to_primitive_for_function(
+        &mut self,
+        closure_id: u64,
+        prefer_string: bool,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let method_names = if prefer_string {
+            ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
+        };
+        let mut invoked_callable = false;
+
+        for method_name in method_names {
+            let method = self.get_function_property(closure_id, method_name)?;
+            if !Self::is_callable_value(&method) {
+                continue;
+            }
+            invoked_callable = true;
+            let result = self.execute_callable(
+                method,
+                Some(JsValue::Function(closure_id)),
+                Vec::new(),
+                realm,
+                caller_strict,
+            )?;
+            if !matches!(
+                result,
+                JsValue::Object(_)
+                    | JsValue::Function(_)
+                    | JsValue::NativeFunction(_)
+                    | JsValue::HostFunction(_)
+            ) {
+                return Ok(result);
+            }
+        }
+
+        if invoked_callable {
+            return Err(VmError::TypeError(
+                "cannot convert object to primitive value",
+            ));
+        }
+
+        Ok(JsValue::String("[function]".to_string()))
     }
 
     fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {
@@ -2893,6 +2950,18 @@ impl Vm {
         Ok(value)
     }
 
+    fn set_closure_property(
+        &mut self,
+        closure_id: u64,
+        property: String,
+        value: JsValue,
+    ) -> JsValue {
+        let object = self.closure_objects.entry(closure_id).or_default();
+        object.properties.insert(property.clone(), value.clone());
+        object.property_attributes.entry(property).or_default();
+        value
+    }
+
     fn current_array_literal_target(&self) -> Result<ObjectId, VmError> {
         match self.stack.last() {
             Some(JsValue::Object(object_id)) => Ok(*object_id),
@@ -3027,9 +3096,10 @@ impl Vm {
     fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
         match receiver {
             JsValue::Object(object_id) => self.delete_object_property(object_id, &property),
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                Ok(true)
+            JsValue::Function(closure_id) => {
+                Ok(self.delete_closure_property(closure_id, &property))
             }
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(true),
             _ => Ok(true),
         }
     }
@@ -3060,6 +3130,26 @@ impl Vm {
         object.property_attributes.remove(property);
         object.argument_mappings.remove(property);
         Ok(true)
+    }
+
+    fn delete_closure_property(&mut self, closure_id: u64, property: &str) -> bool {
+        let Some(object) = self.closure_objects.get_mut(&closure_id) else {
+            return true;
+        };
+        let is_configurable = object
+            .property_attributes
+            .get(property)
+            .map(|attributes| attributes.configurable)
+            .unwrap_or(true);
+        if !is_configurable {
+            return false;
+        }
+        object.properties.remove(property);
+        object.getters.remove(property);
+        object.setters.remove(property);
+        object.property_attributes.remove(property);
+        object.argument_mappings.remove(property);
+        true
     }
 
     fn get_host_function_property(
@@ -3110,6 +3200,14 @@ impl Vm {
         closure_id: u64,
         property: &str,
     ) -> Result<JsValue, VmError> {
+        if let Some(value) = self
+            .closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get(property))
+            .cloned()
+        {
+            return Ok(value);
+        }
         match property {
             "length" => {
                 let closure = self
@@ -3135,7 +3233,31 @@ impl Vm {
                 method: FunctionMethod::Bind,
             })),
             "prototype" => Ok(self.create_object_value()),
+            "toString" => Ok(
+                self.create_host_function_value(HostFunction::FunctionToString {
+                    target: JsValue::Function(closure_id),
+                }),
+            ),
+            "valueOf" => Ok(
+                self.create_host_function_value(HostFunction::FunctionValueOf {
+                    target: JsValue::Function(closure_id),
+                }),
+            ),
             _ => Ok(JsValue::Undefined),
+        }
+    }
+
+    fn function_name_for_display(&self, value: &JsValue) -> String {
+        match value {
+            JsValue::Function(closure_id) => self
+                .closures
+                .get(closure_id)
+                .and_then(|closure| closure.functions.get(closure.function_id))
+                .map(|function| function.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "anonymous".to_string()),
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => "native".to_string(),
+            _ => "anonymous".to_string(),
         }
     }
 
@@ -3234,6 +3356,24 @@ impl Vm {
             (_, "prototype") => self.create_object_value(),
             _ => JsValue::Undefined,
         }
+    }
+
+    fn evaluate_add(&mut self, realm: &Realm, caller_strict: bool) -> Result<JsValue, VmError> {
+        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let left = self.primitive_for_add(left, realm, caller_strict)?;
+        let right = self.primitive_for_add(right, realm, caller_strict)?;
+        Ok(match (left, right) {
+            (JsValue::String(lhs), rhs) => {
+                let rhs = self.coerce_to_string(&rhs);
+                JsValue::String(format!("{lhs}{rhs}"))
+            }
+            (lhs, JsValue::String(rhs)) => {
+                let lhs = self.coerce_to_string(&lhs);
+                JsValue::String(format!("{lhs}{rhs}"))
+            }
+            (lhs, rhs) => JsValue::Number(self.to_number(&lhs) + self.to_number(&rhs)),
+        })
     }
 
     fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {

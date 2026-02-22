@@ -270,6 +270,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_addition_function_to_primitive_baseline() {
+        let result = run_script(
+            "function f() { return 0; } f.valueOf = function() { return 1; }; 1 + f;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(2.0)));
+    }
+
+    #[test]
+    fn catches_addition_to_primitive_throw_with_try_catch() {
+        let result = run_script(
+            "var caught = false; try { 1 + { valueOf: function() { throw 'x'; } }; } catch (e) { caught = e === 'x'; } caught;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_date_addition_prefers_string_baseline() {
         let result = run_script(
             "var date = new Date(0); date + 0 === date.toString() + '0';",
