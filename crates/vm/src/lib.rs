@@ -187,6 +187,7 @@ pub struct Vm {
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
     function_prototype_id: Option<ObjectId>,
+    array_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
     exception_handlers: Vec<ExceptionHandler>,
@@ -217,6 +218,7 @@ impl Vm {
         self.global_object_id = None;
         self.object_prototype_id = None;
         self.function_prototype_id = None;
+        self.array_prototype_id = None;
         self.with_objects.clear();
         self.identifier_references.clear();
         self.exception_handlers.clear();
@@ -227,6 +229,7 @@ impl Vm {
             self.object_prototype_id = Some(id);
         }
         let _ = self.function_prototype_value();
+        let _ = self.array_prototype_value();
         let global_object = self.create_object_value();
         if let JsValue::Object(id) = global_object {
             self.global_object_id = Some(id);
@@ -3116,7 +3119,11 @@ impl Vm {
         let JsValue::Object(object_id) = array else {
             unreachable!();
         };
+        if self.array_prototype_id.is_none() {
+            let _ = self.array_prototype_value();
+        }
         if let Some(object) = self.objects.get_mut(&object_id) {
+            object.prototype = self.array_prototype_id;
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -3582,6 +3589,42 @@ impl Vm {
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             self.function_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn array_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.array_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("length".to_string(), JsValue::Number(0.0));
+                object.property_attributes.insert(
+                    "length".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+            }
+            self.array_prototype_id = Some(id);
         }
         prototype
     }
@@ -4605,7 +4648,7 @@ impl Vm {
             }
             (NativeFunction::FunctionConstructor, "prototype") => self.function_prototype_value(),
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
-            (NativeFunction::ArrayConstructor, "prototype") => self.create_array_value(),
+            (NativeFunction::ArrayConstructor, "prototype") => self.array_prototype_value(),
             (NativeFunction::SymbolConstructor, "iterator") => {
                 JsValue::String("Symbol.iterator".to_string())
             }

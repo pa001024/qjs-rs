@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4275, failed=725
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4279, failed=721
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -112,5 +112,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 为 class 静态方法引入最小 `super` 绑定降级（方法体头部注入 `let super = Object.getPrototypeOf(C)`），修复 `super.x = rhs` / `super[expr] = rhs` 在 `[[Prototype]] = null` 场景下的 RHS 求值顺序偏差；`expressions/assignment` 子集由 `85/7` 提升至 `87/5`，`language` 基线进一步提升至 `4250/750`。
 - bytecode 为 `for` 语句补齐最小“迭代体完成值”聚合（非中断路径取最后一次 body completion），同时 VM 增加 `String.prototype.indexOf` host 函数基线；`for-in` 子集由 `40/21` 提升至 `49/12`，`language` 基线进一步提升至 `4253/747`。
 - parser/VM 为 `for-in` 引入内部键收集通道 `Object.__forInKeys`（覆盖原型链可枚举属性并做重复 key 去重），替换原先 `Object.keys` 的 own-only 策略；`for-in` 子集进一步提升到 `50/11`，`language` 基线进一步提升至 `4266/734`。
-- VM 修正 `in` 运算符对象分支为“沿 `[[Prototype]]` 链查找”，避免 `for-in` 迭代时把原型可枚举键误判为不存在；同时 bytecode 为 `while/do-while/for` 引入统一循环完成值槽位（表达式语句即时写回），parser 将 `for-in` 头部内部赋值降级为 `void (lhs = key)` 避免污染 completion value。该轮后 `for-in` 子集提升至 `54/7`，`language` 基线提升至 `4275/725`。
+- VM 修正 `in` 运算符对象分支为“沿 `[[Prototype]]` 链查找”，避免 `for-in` 迭代时把原型可枚举键误判为不存在；同时 bytecode 为 `while/do-while/for` 引入统一循环完成值槽位（表达式语句即时写回），parser 将 `for-in` 头部内部赋值降级为 `void (lhs = key)` 避免污染 completion value。随后 VM 为数组对象接入稳定 `Array.prototype` 链（`Array.prototype` 返回稳定原型对象，数组字面量/构造结果挂接该原型），修复 `head-lhs-let.js` 的 `MemberExpression` 赋值语义。该轮后 `for-in` 子集提升至 `55/6`，`language` 基线提升至 `4279/721`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
