@@ -157,6 +157,24 @@ mod tests {
     }
 
     #[test]
+    fn direct_eval_declaring_arguments_in_non_simple_function_throws() {
+        let result = run_script(
+            "var threw = false; function f(p = eval('var arguments')) {} try { f(); } catch (e) { threw = e instanceof SyntaxError; } threw;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn direct_eval_can_bind_arguments_inside_arrow_default_initializer() {
+        let result = run_script(
+            "const oldArguments = globalThis.arguments; const f = (p = eval(\"var arguments = 'param'\")) => arguments; var value = f(); value === 'param' && globalThis.arguments === oldArguments;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn catches_eval_reference_error_with_instanceof() {
         let result = run_script(
             "var ok = false; try { eval('missingName'); } catch (err) { ok = err instanceof ReferenceError; } ok;",

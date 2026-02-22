@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use ast::{BindingKind, ForInitializer, Identifier, Script, Stmt, VariableDeclaration};
 use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, NativeFunction, Realm};
@@ -121,6 +122,13 @@ enum ExecutionSignal {
     Return,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvalContext {
+    is_arrow_function: bool,
+    non_simple_params: bool,
+    has_arguments_param: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -137,6 +145,7 @@ pub struct Vm {
     object_prototype_id: Option<ObjectId>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
+    eval_contexts: Vec<EvalContext>,
 }
 
 impl Vm {
@@ -161,6 +170,7 @@ impl Vm {
         self.object_prototype_id = None;
         self.exception_handlers.clear();
         self.pending_exception = None;
+        self.eval_contexts.clear();
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -1121,9 +1131,9 @@ impl Vm {
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         let is_arrow_function = self.function_is_arrow(&function);
-        let mapped_arguments_enabled = !closure.strict
-            && !is_arrow_function
-            && !self.function_has_non_simple_params(&function);
+        let non_simple_params = self.function_has_non_simple_params(&function);
+        let has_arguments_param = function.params.iter().any(|name| name == "arguments");
+        let mapped_arguments_enabled = !closure.strict && !is_arrow_function && !non_simple_params;
 
         let mut frame_scope: Scope = BTreeMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
@@ -1205,6 +1215,11 @@ impl Vm {
         self.stack = Vec::new();
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
+        self.eval_contexts.push(EvalContext {
+            is_arrow_function,
+            non_simple_params,
+            has_arguments_param,
+        });
 
         let signal = self.execute_code(
             &function.code,
@@ -1213,6 +1228,7 @@ impl Vm {
             true,
             closure.strict,
         );
+        let _ = self.eval_contexts.pop();
         let value = match signal {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
@@ -1578,6 +1594,13 @@ impl Vm {
         let script = parse_script(parse_source.as_ref()).map_err(|err| {
             VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
         })?;
+        if self.current_eval_context_rejects_arguments_declaration()
+            && Self::script_declares_arguments_binding(&script)
+        {
+            return Err(VmError::UncaughtException(JsValue::String(
+                "SyntaxError: invalid eval declaration for arguments".to_string(),
+            )));
+        }
         let chunk = compile_script(&script);
         self.execute_inline_chunk(&chunk, realm, force_strict)
     }
@@ -2323,6 +2346,115 @@ impl Vm {
             }
         }
         cursor
+    }
+
+    fn current_eval_context_rejects_arguments_declaration(&self) -> bool {
+        let Some(context) = self.eval_contexts.last() else {
+            return false;
+        };
+        (context.non_simple_params && !context.is_arrow_function) || context.has_arguments_param
+    }
+
+    fn script_declares_arguments_binding(script: &Script) -> bool {
+        script
+            .statements
+            .iter()
+            .any(Self::statement_declares_arguments_binding)
+    }
+
+    fn statement_declares_arguments_binding(statement: &Stmt) -> bool {
+        match statement {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Var,
+                name: Identifier(name),
+                ..
+            }) => name == "arguments",
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let | BindingKind::Const,
+                ..
+            }) => false,
+            Stmt::VariableDeclarations(declarations) => declarations.iter().any(|declaration| {
+                declaration.kind == BindingKind::Var && declaration.name.0 == "arguments"
+            }),
+            Stmt::FunctionDeclaration(declaration) => declaration.name.0 == "arguments",
+            Stmt::Block(statements) => statements
+                .iter()
+                .any(Self::statement_declares_arguments_binding),
+            Stmt::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                if Self::statement_declares_arguments_binding(consequent) {
+                    return true;
+                }
+                alternate
+                    .as_ref()
+                    .is_some_and(|alternate| Self::statement_declares_arguments_binding(alternate))
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+                Self::statement_declares_arguments_binding(body)
+            }
+            Stmt::For {
+                initializer, body, ..
+            } => {
+                let initializer_declares_arguments =
+                    initializer
+                        .as_ref()
+                        .is_some_and(|initializer| match initializer {
+                            ForInitializer::VariableDeclaration(declaration) => {
+                                declaration.kind == BindingKind::Var
+                                    && declaration.name.0 == "arguments"
+                            }
+                            ForInitializer::VariableDeclarations(declarations) => {
+                                declarations.iter().any(|declaration| {
+                                    declaration.kind == BindingKind::Var
+                                        && declaration.name.0 == "arguments"
+                                })
+                            }
+                            ForInitializer::Expression(_) => false,
+                        });
+                initializer_declares_arguments || Self::statement_declares_arguments_binding(body)
+            }
+            Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+                case.consequent
+                    .iter()
+                    .any(Self::statement_declares_arguments_binding)
+            }),
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                if try_block
+                    .iter()
+                    .any(Self::statement_declares_arguments_binding)
+                {
+                    return true;
+                }
+                if catch_block.as_ref().is_some_and(|catch_block| {
+                    catch_block
+                        .iter()
+                        .any(Self::statement_declares_arguments_binding)
+                }) {
+                    return true;
+                }
+                finally_block.as_ref().is_some_and(|finally_block| {
+                    finally_block
+                        .iter()
+                        .any(Self::statement_declares_arguments_binding)
+                })
+            }
+            Stmt::Empty
+            | Stmt::Return(_)
+            | Stmt::Expression(_)
+            | Stmt::Throw(_)
+            | Stmt::Break
+            | Stmt::BreakLabel(_)
+            | Stmt::Continue
+            | Stmt::ContinueLabel(_) => false,
+        }
     }
 
     fn create_host_function_value(&mut self, host: HostFunction) -> JsValue {

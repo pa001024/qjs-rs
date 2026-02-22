@@ -12,6 +12,8 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 
+type DefaultParameterInitializer = (Identifier, Expr);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
@@ -1076,17 +1078,47 @@ impl Parser {
         self.prepend_marker(body, ARROW_FUNCTION_MARKER);
     }
 
+    fn prepend_parameter_initializers(
+        &self,
+        body: &mut Vec<Stmt>,
+        initializers: &[DefaultParameterInitializer],
+    ) {
+        if initializers.is_empty() {
+            return;
+        }
+        let mut prefix = Vec::with_capacity(initializers.len());
+        for (param, default_value) in initializers {
+            let condition = Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(Expr::Identifier(param.clone())),
+                right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+            };
+            let assignment = Stmt::Expression(Expr::Assign {
+                target: param.clone(),
+                value: Box::new(default_value.clone()),
+            });
+            prefix.push(Stmt::If {
+                condition,
+                consequent: Box::new(assignment),
+                alternate: None,
+            });
+        }
+        prefix.append(body);
+        *body = prefix;
+    }
+
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let _is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
-        let (params, simple_parameters) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -1778,7 +1810,8 @@ impl Parser {
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
         let saved_pos = self.pos;
 
-        let (params, _simple_parameters) = if self.matches(&TokenKind::LParen) {
+        let (params, _simple_parameters, default_initializers) = if self.matches(&TokenKind::LParen)
+        {
             let params = match self.parse_parameter_list() {
                 Ok(parsed) => parsed,
                 Err(_) => {
@@ -1800,6 +1833,7 @@ impl Parser {
                     self.expect_binding_identifier("expected parameter name")?,
                 )],
                 true,
+                Vec::new(),
             )
         } else {
             return Ok(None);
@@ -1824,6 +1858,7 @@ impl Parser {
         } else {
             vec![Stmt::Return(Some(self.parse_assignment()?))]
         };
+        self.prepend_parameter_initializers(&mut body, &default_initializers);
         self.prepend_arrow_function_marker(&mut body);
 
         Ok(Some(Expr::Function {
@@ -2258,12 +2293,15 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_parameter_list(&mut self) -> Result<(Vec<Identifier>, bool), ParseError> {
+    fn parse_parameter_list(
+        &mut self,
+    ) -> Result<(Vec<Identifier>, bool, Vec<DefaultParameterInitializer>), ParseError> {
         let mut params = Vec::new();
         let mut synthetic_index = 0usize;
         let mut simple_parameters = true;
+        let mut default_initializers = Vec::new();
         if self.check(&TokenKind::RParen) {
-            return Ok((params, simple_parameters));
+            return Ok((params, simple_parameters, default_initializers));
         }
         loop {
             let is_rest = self.matches(&TokenKind::Ellipsis);
@@ -2271,19 +2309,20 @@ impl Parser {
                 simple_parameters = false;
             }
             let name = if self.check_identifier() {
-                self.expect_binding_identifier("expected parameter name")?
+                Identifier(self.expect_binding_identifier("expected parameter name")?)
             } else {
                 simple_parameters = false;
                 self.consume_parameter_pattern("expected parameter name")?;
                 let generated = format!("$param_{synthetic_index}");
                 synthetic_index += 1;
-                generated
+                Identifier(generated)
             };
             if self.matches(&TokenKind::Equal) {
                 simple_parameters = false;
-                let _ = self.parse_expression_inner()?;
+                let initializer = self.parse_expression_inner()?;
+                default_initializers.push((name.clone(), initializer));
             }
-            params.push(Identifier(name));
+            params.push(name);
             if is_rest {
                 break;
             }
@@ -2295,7 +2334,7 @@ impl Parser {
             }
             break;
         }
-        Ok((params, simple_parameters))
+        Ok((params, simple_parameters, default_initializers))
     }
 
     fn consume_parameter_pattern(&mut self, error_message: &str) -> Result<(), ParseError> {
@@ -2359,13 +2398,14 @@ impl Parser {
             None
         };
         self.expect(TokenKind::LParen, "expected '(' after 'function'")?;
-        let (params, simple_parameters) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -2432,10 +2472,11 @@ impl Parser {
             } else {
                 ClassElementKind::Method
             };
+            let _is_generator = self.matches(&TokenKind::Star);
 
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
-            let (params, simple_parameters) = self.parse_parameter_list()?;
+            let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
             let mut body = self.parse_function_body(
                 "expected '{' before method body",
@@ -2447,6 +2488,7 @@ impl Parser {
             if matches!(kind, ClassElementKind::Setter) && params.len() != 1 {
                 return Err(self.error_current("setter must have exactly one parameter"));
             }
+            self.prepend_parameter_initializers(&mut body, &default_initializers);
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
             }
@@ -2922,8 +2964,14 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
+            let is_generator_method = self.matches(&TokenKind::Star);
             let key = self.parse_object_property_key()?;
             if let Some((accessor_key, accessor_value)) = self.try_parse_object_accessor(&key)? {
+                if is_generator_method {
+                    return Err(
+                        self.error_current("unexpected '*' before accessor in object literal")
+                    );
+                }
                 properties.push(ObjectProperty {
                     key: accessor_key,
                     value: accessor_value,
@@ -2936,7 +2984,9 @@ impl Parser {
                 }
                 break;
             }
-            let value = if self.matches(&TokenKind::Colon) {
+            let value = if is_generator_method {
+                self.parse_object_method_value()?
+            } else if self.matches(&TokenKind::Colon) {
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
                 self.parse_object_method_value()?
@@ -3015,13 +3065,14 @@ impl Parser {
         };
 
         self.expect(TokenKind::LParen, "expected '(' after accessor name")?;
-        let (params, simple_parameters) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body(
             "expected '{' before function body",
             "expected '}' after function body",
         )?;
+        self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -3077,13 +3128,14 @@ impl Parser {
 
     fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
-        let (params, simple_parameters) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body(
             "expected '{' before method body",
             "expected '}' after method body",
         )?;
+        self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -3440,6 +3492,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_generator_methods_in_object_literal_baseline() {
+        let parsed = parse_expression("({ *f() { return 1; }, *[k]() { return 2; } })")
+            .expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("f".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                },
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Computed(Box::new(Expr::Identifier(Identifier(
+                    "k".to_string(),
+                )))),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Number(2.0)))],
+                },
+            },
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_class_static_generator_computed_name_baseline() {
+        parse_script("class C { static *['prototype']() {} }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
     fn parses_getter_and_setter_in_object_literal() {
         let parsed =
             parse_expression("({ get foo() {}, set foo(v) {} })").expect("parser should succeed");
@@ -3562,6 +3647,18 @@ mod tests {
                     value: "$__qjs_arrow_function__$".to_string(),
                     has_escape: false,
                 })),
+                Stmt::If {
+                    condition: Expr::Binary {
+                        op: BinaryOp::StrictEqual,
+                        left: Box::new(Expr::Identifier(Identifier("p".to_string()))),
+                        right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                    },
+                    consequent: Box::new(Stmt::Expression(Expr::Assign {
+                        target: Identifier("p".to_string()),
+                        value: Box::new(Expr::Number(1.0)),
+                    })),
+                    alternate: None,
+                },
                 Stmt::Return(Some(Expr::Identifier(Identifier("arguments".to_string())))),
             ],
         };
