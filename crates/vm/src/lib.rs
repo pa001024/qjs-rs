@@ -211,6 +211,10 @@ impl Vm {
                     let object = self.create_object_value();
                     self.stack.push(object);
                 }
+                Opcode::CreateArray => {
+                    let array = self.create_array_value();
+                    self.stack.push(array);
+                }
                 Opcode::LoadFunction(function_id) => {
                     let function = self.instantiate_function(*function_id, functions, strict)?;
                     self.stack.push(function);
@@ -1545,6 +1549,7 @@ impl Vm {
             },
             NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
+            NativeFunction::ArrayConstructor => Ok(self.execute_array_constructor(&args)),
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
@@ -1759,6 +1764,49 @@ impl Vm {
                 }
             }
         }
+    }
+
+    fn execute_array_constructor(&mut self, args: &[JsValue]) -> JsValue {
+        let array = self.create_array_value();
+        let object_id = match array {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .expect("array object should exist");
+
+        if args.len() == 1 {
+            match args.first() {
+                Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
+                    let int_length = length.floor();
+                    if (int_length - length).abs() <= f64::EPSILON {
+                        object
+                            .properties
+                            .insert("length".to_string(), JsValue::Number(int_length));
+                        return JsValue::Object(object_id);
+                    }
+                }
+                Some(value) => {
+                    object.properties.insert("0".to_string(), value.clone());
+                    object
+                        .properties
+                        .insert("length".to_string(), JsValue::Number(1.0));
+                    return JsValue::Object(object_id);
+                }
+                None => return JsValue::Object(object_id),
+            }
+        }
+
+        for (index, value) in args.iter().enumerate() {
+            object.properties.insert(index.to_string(), value.clone());
+        }
+        object
+            .properties
+            .insert("length".to_string(), JsValue::Number(args.len() as f64));
+        JsValue::Object(object_id)
     }
 
     fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -2364,6 +2412,31 @@ impl Vm {
         self.next_object_id += 1;
         self.objects.insert(id, JsObject::default());
         JsValue::Object(id)
+    }
+
+    fn create_array_value(&mut self) -> JsValue {
+        let array = self.create_object_value();
+        let JsValue::Object(object_id) = array else {
+            unreachable!();
+        };
+        if let Some(object) = self.objects.get_mut(&object_id) {
+            object.properties.insert(
+                "constructor".to_string(),
+                JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+            );
+            object
+                .properties
+                .insert("length".to_string(), JsValue::Number(0.0));
+            object.property_attributes.insert(
+                "length".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+        }
+        JsValue::Object(object_id)
     }
 
     fn instantiate_function(
@@ -3006,6 +3079,8 @@ impl Vm {
             (NativeFunction::NumberConstructor, "NEGATIVE_INFINITY") => {
                 JsValue::Number(f64::NEG_INFINITY)
             }
+            (NativeFunction::NumberConstructor, "MAX_VALUE") => JsValue::Number(f64::MAX),
+            (NativeFunction::NumberConstructor, "MIN_VALUE") => JsValue::Number(f64::MIN_POSITIVE),
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
             }
@@ -3019,6 +3094,7 @@ impl Vm {
                 JsValue::NativeFunction(NativeFunction::ObjectGetPrototypeOf)
             }
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
+            (NativeFunction::ArrayConstructor, "prototype") => self.create_array_value(),
             (NativeFunction::SymbolConstructor, "iterator") => {
                 JsValue::String("Symbol.iterator".to_string())
             }

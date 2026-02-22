@@ -212,7 +212,8 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
         | Expr::Bool(_)
         | Expr::Null
         | Expr::String(_)
-        | Expr::RegexLiteral { .. } => Ok(()),
+        | Expr::RegexLiteral { .. }
+        | Expr::Elision => Ok(()),
         Expr::This => Ok(()),
         Expr::Identifier(Identifier(name)) => {
             validate_identifier_reference_strict_mode(name, strict)
@@ -3150,18 +3151,15 @@ impl Parser {
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LBracket, "expected '[' before array literal")?;
         let mut elements = Vec::new();
-        if self.matches(&TokenKind::RBracket) {
-            return Ok(Expr::ArrayLiteral(elements));
-        }
-        loop {
-            elements.push(self.parse_expression_inner()?);
+        while !self.check(&TokenKind::RBracket) {
             if self.matches(&TokenKind::Comma) {
-                if self.check(&TokenKind::RBracket) {
-                    break;
-                }
+                elements.push(Expr::Elision);
                 continue;
             }
-            break;
+            elements.push(self.parse_expression_inner()?);
+            if !self.matches(&TokenKind::Comma) {
+                break;
+            }
         }
         self.expect(TokenKind::RBracket, "expected ']' after array literal")?;
         Ok(Expr::ArrayLiteral(elements))
@@ -3842,6 +3840,17 @@ mod tests {
             Expr::Identifier(Identifier("x".to_string())),
         ]);
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_array_literal_with_elisions() {
+        let parsed = parse_expression("[1,,3,]").expect("parser should succeed");
+        let expected =
+            Expr::ArrayLiteral(vec![Expr::Number(1.0), Expr::Elision, Expr::Number(3.0)]);
+        assert_eq!(parsed, expected);
+
+        let parsed = parse_expression("[,]").expect("parser should succeed");
+        assert_eq!(parsed, Expr::ArrayLiteral(vec![Expr::Elision]));
     }
 
     #[test]

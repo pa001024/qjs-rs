@@ -14,6 +14,7 @@ pub enum Opcode {
     LoadString(String),
     LoadUndefined,
     CreateObject,
+    CreateArray,
     LoadIdentifier(String),
     LoadFunction(usize),
     DefineVariable {
@@ -1155,14 +1156,18 @@ impl Compiler {
                 }
             }
             Expr::ArrayLiteral(elements) => {
-                code.push(Opcode::CreateObject);
+                code.push(Opcode::CreateArray);
                 for (index, element) in elements.iter().enumerate() {
+                    if matches!(element, Expr::Elision) {
+                        continue;
+                    }
                     self.compile_expr(element, code);
                     code.push(Opcode::DefineProperty(index.to_string()));
                 }
                 code.push(Opcode::LoadNumber(elements.len() as f64));
                 code.push(Opcode::DefineArrayLength);
             }
+            Expr::Elision => code.push(Opcode::LoadUndefined),
             Expr::Unary { op, expr } => {
                 if *op == UnaryOp::Void {
                     self.compile_expr(expr, code);
@@ -1580,12 +1585,32 @@ mod tests {
         let chunk = compile_expression(&expr);
         let expected = Chunk {
             code: vec![
-                Opcode::CreateObject,
+                Opcode::CreateArray,
                 Opcode::LoadNumber(1.0),
                 Opcode::DefineProperty("0".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::DefineProperty("1".to_string()),
                 Opcode::LoadNumber(2.0),
+                Opcode::DefineArrayLength,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_array_literal_with_elisions() {
+        let expr = Expr::ArrayLiteral(vec![Expr::Number(1.0), Expr::Elision, Expr::Number(3.0)]);
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateArray,
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineProperty("0".to_string()),
+                Opcode::LoadNumber(3.0),
+                Opcode::DefineProperty("2".to_string()),
+                Opcode::LoadNumber(3.0),
                 Opcode::DefineArrayLength,
                 Opcode::Halt,
             ],

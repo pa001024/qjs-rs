@@ -66,6 +66,7 @@ pub enum Expr {
     },
     ObjectLiteral(Vec<ObjectProperty>),
     ArrayLiteral(Vec<Expr>),
+    Elision,
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

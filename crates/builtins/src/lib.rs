@@ -15,6 +15,10 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::ObjectConstructor),
     );
     realm.define_global(
+        "Array",
+        JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+    );
+    realm.define_global(
         "Number",
         JsValue::NativeFunction(NativeFunction::NumberConstructor),
     );

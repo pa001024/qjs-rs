@@ -105,6 +105,10 @@ mod tests {
             Ok(JsValue::String("function".to_string()))
         );
         assert_eq!(
+            run_expression("typeof Array"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
             run_expression("typeof Number"),
             Ok(JsValue::String("function".to_string()))
         );
