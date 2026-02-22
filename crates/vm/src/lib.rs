@@ -428,6 +428,23 @@ impl Vm {
                     );
                     self.stack.push(JsValue::Object(object_id));
                 }
+                Opcode::ArrayAppend => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = self.current_array_literal_target()?;
+                    self.array_push_value(object_id, value)?;
+                }
+                Opcode::ArrayAppendSpread => {
+                    let spread_source = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = self.current_array_literal_target()?;
+                    let values = self.collect_spread_arguments(spread_source)?;
+                    for value in values {
+                        self.array_push_value(object_id, value)?;
+                    }
+                }
+                Opcode::ArrayElision => {
+                    let object_id = self.current_array_literal_target()?;
+                    self.array_advance_length(object_id, 1)?;
+                }
                 Opcode::DefineGetter(name) => {
                     let getter = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -2874,6 +2891,58 @@ impl Vm {
             .entry(property)
             .or_insert_with(PropertyAttributes::default);
         Ok(value)
+    }
+
+    fn current_array_literal_target(&self) -> Result<ObjectId, VmError> {
+        match self.stack.last() {
+            Some(JsValue::Object(object_id)) => Ok(*object_id),
+            Some(_) => Err(VmError::TypeError("array literal target expects object")),
+            None => Err(VmError::StackUnderflow),
+        }
+    }
+
+    fn array_push_value(&mut self, object_id: ObjectId, value: JsValue) -> Result<(), VmError> {
+        let index = self.array_length(object_id)?;
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let key = index.to_string();
+        object.properties.insert(key.clone(), value);
+        object
+            .property_attributes
+            .entry(key)
+            .or_insert_with(PropertyAttributes::default);
+        object
+            .properties
+            .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+        Ok(())
+    }
+
+    fn array_advance_length(&mut self, object_id: ObjectId, by: usize) -> Result<(), VmError> {
+        let index = self.array_length(object_id)?;
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object
+            .properties
+            .insert("length".to_string(), JsValue::Number((index + by) as f64));
+        Ok(())
+    }
+
+    fn array_length(&self, object_id: ObjectId) -> Result<usize, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let length = object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0);
+        Ok(length as usize)
     }
 
     fn evaluate_in_operator(&mut self, key: String, right: JsValue) -> Result<bool, VmError> {

@@ -3156,7 +3156,13 @@ impl Parser {
                 elements.push(Expr::Elision);
                 continue;
             }
-            elements.push(self.parse_expression_inner()?);
+            let is_spread = self.matches(&TokenKind::Ellipsis);
+            let element = self.parse_expression_inner()?;
+            if is_spread {
+                elements.push(Expr::SpreadArgument(Box::new(element)));
+            } else {
+                elements.push(element);
+            }
             if !self.matches(&TokenKind::Comma) {
                 break;
             }
@@ -3851,6 +3857,17 @@ mod tests {
 
         let parsed = parse_expression("[,]").expect("parser should succeed");
         assert_eq!(parsed, Expr::ArrayLiteral(vec![Expr::Elision]));
+    }
+
+    #[test]
+    fn parses_array_literal_with_spread_elements() {
+        let parsed = parse_expression("[1, ...items, 3]").expect("parser should succeed");
+        let expected = Expr::ArrayLiteral(vec![
+            Expr::Number(1.0),
+            Expr::SpreadArgument(Box::new(Expr::Identifier(Identifier("items".to_string())))),
+            Expr::Number(3.0),
+        ]);
+        assert_eq!(parsed, expected);
     }
 
     #[test]

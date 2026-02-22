@@ -30,6 +30,9 @@ pub enum Opcode {
     GetPropertyByValue,
     DefineProperty(String),
     DefineArrayLength,
+    ArrayAppend,
+    ArrayAppendSpread,
+    ArrayElision,
     DefineGetter(String),
     DefineSetter(String),
     DefineGetterByValue,
@@ -1157,15 +1160,19 @@ impl Compiler {
             }
             Expr::ArrayLiteral(elements) => {
                 code.push(Opcode::CreateArray);
-                for (index, element) in elements.iter().enumerate() {
-                    if matches!(element, Expr::Elision) {
-                        continue;
+                for element in elements {
+                    match element {
+                        Expr::Elision => code.push(Opcode::ArrayElision),
+                        Expr::SpreadArgument(inner) => {
+                            self.compile_expr(inner, code);
+                            code.push(Opcode::ArrayAppendSpread);
+                        }
+                        _ => {
+                            self.compile_expr(element, code);
+                            code.push(Opcode::ArrayAppend);
+                        }
                     }
-                    self.compile_expr(element, code);
-                    code.push(Opcode::DefineProperty(index.to_string()));
                 }
-                code.push(Opcode::LoadNumber(elements.len() as f64));
-                code.push(Opcode::DefineArrayLength);
             }
             Expr::Elision => code.push(Opcode::LoadUndefined),
             Expr::Unary { op, expr } => {
@@ -1587,11 +1594,9 @@ mod tests {
             code: vec![
                 Opcode::CreateArray,
                 Opcode::LoadNumber(1.0),
-                Opcode::DefineProperty("0".to_string()),
+                Opcode::ArrayAppend,
                 Opcode::LoadNumber(2.0),
-                Opcode::DefineProperty("1".to_string()),
-                Opcode::LoadNumber(2.0),
-                Opcode::DefineArrayLength,
+                Opcode::ArrayAppend,
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -1607,11 +1612,34 @@ mod tests {
             code: vec![
                 Opcode::CreateArray,
                 Opcode::LoadNumber(1.0),
-                Opcode::DefineProperty("0".to_string()),
+                Opcode::ArrayAppend,
+                Opcode::ArrayElision,
                 Opcode::LoadNumber(3.0),
-                Opcode::DefineProperty("2".to_string()),
+                Opcode::ArrayAppend,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_array_literal_with_spread_elements() {
+        let expr = Expr::ArrayLiteral(vec![
+            Expr::Number(1.0),
+            Expr::SpreadArgument(Box::new(Expr::Identifier(Identifier("items".to_string())))),
+            Expr::Number(3.0),
+        ]);
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateArray,
+                Opcode::LoadNumber(1.0),
+                Opcode::ArrayAppend,
+                Opcode::LoadIdentifier("items".to_string()),
+                Opcode::ArrayAppendSpread,
                 Opcode::LoadNumber(3.0),
-                Opcode::DefineArrayLength,
+                Opcode::ArrayAppend,
                 Opcode::Halt,
             ],
             functions: vec![],

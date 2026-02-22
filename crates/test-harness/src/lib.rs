@@ -1009,6 +1009,18 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_array_literal_with_spread_elements() {
+        let result = run_script("let src = [2, 3]; let arr = [1, ...src, 4]; arr[3];", &[]);
+        assert_eq!(result, Ok(JsValue::Number(4.0)));
+    }
+
+    #[test]
+    fn evaluates_array_literal_with_elision_length() {
+        let result = run_script("let arr = [,]; arr.length;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn evaluates_member_assignment_expression() {
         let result = run_script("let obj = {}; obj.value = 7; obj.value;", &[]);
         assert_eq!(result, Ok(JsValue::Number(7.0)));
