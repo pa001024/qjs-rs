@@ -159,6 +159,7 @@ pub struct Vm {
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
+    function_prototype_id: Option<ObjectId>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     eval_contexts: Vec<EvalContext>,
@@ -186,6 +187,7 @@ impl Vm {
         self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
+        self.function_prototype_id = None;
         self.exception_handlers.clear();
         self.pending_exception = None;
         self.eval_contexts.clear();
@@ -193,6 +195,7 @@ impl Vm {
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
         }
+        let _ = self.function_prototype_value();
         let global_object = self.create_object_value();
         if let JsValue::Object(id) = global_object {
             self.global_object_id = Some(id);
@@ -2436,7 +2439,7 @@ impl Vm {
         }
 
         if property == "prototype" && !self.closure_is_arrow(closure_id)? {
-            let prototype_value = self.create_object_value();
+            let prototype_value = self.get_or_create_function_prototype_property(closure_id)?;
             return Ok(self.create_descriptor_object(vec![
                 ("value", prototype_value),
                 ("writable", JsValue::Bool(true)),
@@ -2486,18 +2489,15 @@ impl Vm {
 
     fn execute_object_get_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
-        if !matches!(
-            target,
-            JsValue::Object(_)
-                | JsValue::Function(_)
-                | JsValue::NativeFunction(_)
-                | JsValue::HostFunction(_)
-        ) {
-            return Err(VmError::TypeError(
+        match target {
+            JsValue::Object(_) => Ok(self.object_prototype_value()),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok(self.function_prototype_value())
+            }
+            _ => Err(VmError::TypeError(
                 "Object.getPrototypeOf target must be object",
-            ));
+            )),
         }
-        Ok(self.object_prototype_value())
     }
 
     fn execute_object_is_extensible(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -2714,6 +2714,17 @@ impl Vm {
         self.object_prototype_id
             .map(JsValue::Object)
             .unwrap_or(JsValue::Undefined)
+    }
+
+    fn function_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.function_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            self.function_prototype_id = Some(id);
+        }
+        prototype
     }
 
     fn boxed_primitive_value(&self, object_id: ObjectId) -> Option<JsValue> {
@@ -3187,6 +3198,55 @@ impl Vm {
         value
     }
 
+    fn get_or_create_function_prototype_property(
+        &mut self,
+        closure_id: u64,
+    ) -> Result<JsValue, VmError> {
+        if !self.closures.contains_key(&closure_id) {
+            return Err(VmError::UnknownClosure(closure_id));
+        }
+        if let Some(existing) = self
+            .closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get("prototype"))
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let prototype = self.create_object_value();
+        if let JsValue::Object(prototype_id) = prototype {
+            if let Some(prototype_object) = self.objects.get_mut(&prototype_id) {
+                prototype_object
+                    .properties
+                    .insert("constructor".to_string(), JsValue::Function(closure_id));
+                prototype_object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+        }
+
+        let object = self.closure_objects.entry(closure_id).or_default();
+        object
+            .properties
+            .insert("prototype".to_string(), prototype.clone());
+        object.property_attributes.insert(
+            "prototype".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+
+        Ok(prototype)
+    }
+
     fn closure_has_own_property(&self, closure_id: u64, property: &str) -> bool {
         self.closure_objects.get(&closure_id).is_some_and(|object| {
             object.properties.contains_key(property)
@@ -3572,7 +3632,7 @@ impl Vm {
                 if self.closure_is_arrow(closure_id)? {
                     Ok(JsValue::Undefined)
                 } else {
-                    Ok(self.create_object_value())
+                    self.get_or_create_function_prototype_property(closure_id)
                 }
             }
             "toString" => Ok(
@@ -3629,6 +3689,7 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "isExtensible") => {
                 JsValue::NativeFunction(NativeFunction::ObjectIsExtensible)
             }
+            (NativeFunction::FunctionConstructor, "prototype") => self.function_prototype_value(),
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
             (NativeFunction::ArrayConstructor, "prototype") => self.create_array_value(),
             (NativeFunction::SymbolConstructor, "iterator") => {

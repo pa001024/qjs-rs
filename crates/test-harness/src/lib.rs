@@ -507,6 +507,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_function_prototype_identity_baseline() {
+        let result = run_script(
+            "Object.getPrototypeOf(() => {}) === Function.prototype && !('prototype' in (() => {}));",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_function_prototype_property_stability_baseline() {
+        let result = run_script(
+            "function F() {} var a = F.prototype; var b = F.prototype; a === b && a.constructor === F;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn arrow_function_restricted_properties_throw_type_error() {
         let result = run_script(
             "var f = () => {}; assert.throws(TypeError, function() { f.caller; }); assert.throws(TypeError, function() { f.arguments = 1; }); true;",
