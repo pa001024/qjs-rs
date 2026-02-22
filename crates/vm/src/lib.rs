@@ -13,6 +13,7 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
+const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -94,6 +95,8 @@ enum HostFunction {
     AssertNotSameValue,
     AssertThrows,
     AssertCompareArray,
+    DateToString(ObjectId),
+    DateValueOf(ObjectId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -579,10 +582,9 @@ impl Vm {
                 Opcode::Add => {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.primitive_for_add(left, realm, strict)?;
+                    let right = self.primitive_for_add(right, realm, strict)?;
                     match (left, right) {
-                        (JsValue::Number(lhs), JsValue::Number(rhs)) => {
-                            self.stack.push(JsValue::Number(lhs + rhs));
-                        }
                         (JsValue::String(lhs), rhs) => {
                             let rhs = self.coerce_to_string(&rhs);
                             self.stack.push(JsValue::String(format!("{lhs}{rhs}")));
@@ -903,6 +905,9 @@ impl Vm {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
+                if matches!(native, NativeFunction::DateConstructor) {
+                    return self.execute_date_constructor(&args);
+                }
                 if matches!(
                     native,
                     NativeFunction::NumberConstructor
@@ -968,6 +973,9 @@ impl Vm {
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
+                }
+                if matches!(native, NativeFunction::DateConstructor) {
+                    return self.execute_date_constructor(&args);
                 }
                 if matches!(
                     native,
@@ -1397,6 +1405,27 @@ impl Vm {
                         || object.setters.contains_key(&key),
                 ))
             }
+            HostFunction::DateToString(object_id) => {
+                let timestamp = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get("value"))
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
+                Ok(JsValue::String(format!(
+                    "Date({})",
+                    Self::coerce_number_to_string(timestamp)
+                )))
+            }
+            HostFunction::DateValueOf(object_id) => {
+                let timestamp = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get("value"))
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
+                Ok(JsValue::Number(timestamp))
+            }
             HostFunction::AssertSameValue => {
                 let left = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -1531,6 +1560,16 @@ impl Vm {
             NativeFunction::BooleanConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Bool(false));
                 Ok(JsValue::Bool(self.is_truthy(&value)))
+            }
+            NativeFunction::DateConstructor => {
+                let timestamp = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
+                Ok(JsValue::String(format!(
+                    "Date({})",
+                    Self::coerce_number_to_string(timestamp)
+                )))
             }
             NativeFunction::StringConstructor => {
                 let value = args
@@ -1720,6 +1759,53 @@ impl Vm {
                 }
             }
         }
+    }
+
+    fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let timestamp = args
+            .first()
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let to_string = self.create_host_function_value(HostFunction::DateToString(object_id));
+        let value_of = self.create_host_function_value(HostFunction::DateValueOf(object_id));
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target
+            .properties
+            .insert(DATE_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
+        target
+            .properties
+            .insert("value".to_string(), JsValue::Number(timestamp));
+        target.properties.insert("toString".to_string(), to_string);
+        target.properties.insert("valueOf".to_string(), value_of);
+        target.properties.insert(
+            "constructor".to_string(),
+            JsValue::NativeFunction(NativeFunction::DateConstructor),
+        );
+        target.property_attributes.insert(
+            DATE_OBJECT_MARKER_KEY.to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        target.property_attributes.insert(
+            "value".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        Ok(JsValue::Object(object_id))
     }
 
     fn execute_object_define_property(
@@ -2338,6 +2424,74 @@ impl Vm {
             .get(&object_id)
             .and_then(|object| object.properties.get(BOXED_PRIMITIVE_VALUE_KEY))
             .cloned()
+    }
+
+    fn is_date_object(&self, object_id: ObjectId) -> bool {
+        self.objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get(DATE_OBJECT_MARKER_KEY))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)))
+    }
+
+    fn primitive_for_add(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let JsValue::Object(object_id) = value else {
+            return Ok(value);
+        };
+        if let Some(boxed) = self.boxed_primitive_value(object_id) {
+            return Ok(boxed);
+        }
+        self.ordinary_to_primitive_for_add(
+            object_id,
+            self.is_date_object(object_id),
+            realm,
+            caller_strict,
+        )
+    }
+
+    fn ordinary_to_primitive_for_add(
+        &mut self,
+        object_id: ObjectId,
+        prefer_string: bool,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let method_names = if prefer_string {
+            ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
+        };
+        let mut invoked_callable = false;
+
+        for method_name in method_names {
+            let method = self.get_object_property(object_id, method_name, realm)?;
+            if !Self::is_callable_value(&method) {
+                continue;
+            }
+            invoked_callable = true;
+            let result = self.execute_callable(
+                method,
+                Some(JsValue::Object(object_id)),
+                Vec::new(),
+                realm,
+                caller_strict,
+            )?;
+            if !matches!(result, JsValue::Object(_)) {
+                return Ok(result);
+            }
+        }
+
+        if invoked_callable {
+            return Err(VmError::TypeError(
+                "cannot convert object to primitive value",
+            ));
+        }
+
+        Ok(JsValue::String("[object Object]".to_string()))
     }
 
     fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {

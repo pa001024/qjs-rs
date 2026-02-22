@@ -113,6 +113,10 @@ mod tests {
             Ok(JsValue::String("function".to_string()))
         );
         assert_eq!(
+            run_expression("typeof Date"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
             run_expression("typeof String"),
             Ok(JsValue::String("function".to_string()))
         );
@@ -250,6 +254,24 @@ mod tests {
             ),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn supports_addition_object_to_primitive_baseline() {
+        let result = run_script(
+            "({ valueOf: function() { return 1; } } + 1) === 2 && (1 + { toString: function() { return 1; } }) === 2;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_date_addition_prefers_string_baseline() {
+        let result = run_script(
+            "var date = new Date(0); date + 0 === date.toString() + '0';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

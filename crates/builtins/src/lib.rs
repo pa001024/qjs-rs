@@ -23,6 +23,10 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::BooleanConstructor),
     );
     realm.define_global(
+        "Date",
+        JsValue::NativeFunction(NativeFunction::DateConstructor),
+    );
+    realm.define_global(
         "String",
         JsValue::NativeFunction(NativeFunction::StringConstructor),
     );

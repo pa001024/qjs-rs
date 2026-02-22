@@ -13,6 +13,7 @@ pub enum NativeFunction {
     ObjectGetPrototypeOf,
     NumberConstructor,
     BooleanConstructor,
+    DateConstructor,
     RegExpConstructor,
     StringConstructor,
     StringFromCharCode,
