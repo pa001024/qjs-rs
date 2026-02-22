@@ -66,6 +66,7 @@ struct ExceptionHandler {
     finally_target: Option<usize>,
     scope_depth: usize,
     stack_depth: usize,
+    with_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +108,28 @@ enum HostFunction {
     FunctionValueOf {
         target: JsValue,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IdentifierReference {
+    Binding {
+        name: String,
+        binding_id: BindingId,
+    },
+    Property {
+        base: JsValue,
+        property: String,
+        strict_on_missing: bool,
+    },
+    Unresolvable {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WithFrame {
+    object: JsValue,
+    scope_depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +183,8 @@ pub struct Vm {
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
     function_prototype_id: Option<ObjectId>,
+    with_objects: Vec<WithFrame>,
+    identifier_references: Vec<IdentifierReference>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     eval_contexts: Vec<EvalContext>,
@@ -188,6 +213,8 @@ impl Vm {
         self.global_object_id = None;
         self.object_prototype_id = None;
         self.function_prototype_id = None;
+        self.with_objects.clear();
+        self.identifier_references.clear();
         self.exception_handlers.clear();
         self.pending_exception = None;
         self.eval_contexts.clear();
@@ -237,12 +264,10 @@ impl Vm {
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
-                    let resolved = if let Some(binding_id) = self.resolve_binding_id(name) {
-                        let binding = self
-                            .bindings
-                            .get(&binding_id)
-                            .ok_or(VmError::ScopeUnderflow)?;
-                        Ok(binding.value.clone())
+                    let resolved = if let Some(reference) =
+                        self.resolve_binding_or_with_reference(name, realm)?
+                    {
+                        self.load_identifier_reference_value(&reference, realm, strict)
                     } else if name == "undefined" {
                         Ok(JsValue::Undefined)
                     } else if name == "NaN" {
@@ -258,13 +283,9 @@ impl Vm {
                     } else if let Some(value) = realm.resolve_identifier(name) {
                         Ok(value)
                     } else if let Some(global_object_id) = self.global_object_id {
-                        let has_global_property =
-                            self.objects.get(&global_object_id).is_some_and(|object| {
-                                object.properties.contains_key(name)
-                                    || object.getters.contains_key(name)
-                            });
-                        if has_global_property {
-                            self.get_object_property(global_object_id, name, realm)
+                        let receiver = JsValue::Object(global_object_id);
+                        if self.has_property_on_receiver(&receiver, name, realm)? {
+                            self.get_property_from_receiver(receiver, name, realm)
                         } else {
                             Err(VmError::UnknownIdentifier(name.clone()))
                         }
@@ -610,7 +631,26 @@ impl Vm {
                     }
                 }
                 Opcode::DeleteIdentifier(name) => {
-                    let deleted = self.resolve_binding_id(name).is_none();
+                    let deleted = if let Some(reference) =
+                        self.resolve_binding_or_with_reference(name, realm)?
+                    {
+                        match reference {
+                            IdentifierReference::Binding { .. } => false,
+                            IdentifierReference::Property { base, property, .. } => {
+                                self.delete_property(base, property)?
+                            }
+                            IdentifierReference::Unresolvable { .. } => true,
+                        }
+                    } else if let Some(global_object_id) = self.global_object_id {
+                        let receiver = JsValue::Object(global_object_id);
+                        if self.has_property_on_receiver(&receiver, name, realm)? {
+                            self.delete_property(receiver, name.clone())?
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    };
                     self.stack.push(JsValue::Bool(deleted));
                 }
                 Opcode::DeleteProperty(name) => {
@@ -631,9 +671,62 @@ impl Vm {
                     }
                     self.stack.push(JsValue::Bool(deleted));
                 }
+                Opcode::ResolveIdentifierReference(name) => {
+                    let reference = self.resolve_identifier_reference(name, realm, strict)?;
+                    self.identifier_references.push(reference);
+                }
+                Opcode::LoadReferenceValue => {
+                    let reference = self
+                        .identifier_references
+                        .last()
+                        .cloned()
+                        .ok_or(VmError::StackUnderflow)?;
+                    match self.load_identifier_reference_value(&reference, realm, strict) {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::StoreReferenceValue => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let reference = self
+                        .identifier_references
+                        .pop()
+                        .ok_or(VmError::StackUnderflow)?;
+                    match self.store_identifier_reference_value(reference, value, realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
                 Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
                 Opcode::ExitScope => {
                     if self.scopes.pop().is_none() || self.scopes.is_empty() {
+                        return Err(VmError::ScopeUnderflow);
+                    }
+                }
+                Opcode::EnterWith => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    match self.with_object_from_value(value) {
+                        Ok(object) => self.with_objects.push(WithFrame {
+                            object,
+                            scope_depth: self.scopes.len(),
+                        }),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::ExitWith => {
+                    if self.with_objects.pop().is_none() {
                         return Err(VmError::ScopeUnderflow);
                     }
                 }
@@ -950,6 +1043,7 @@ impl Vm {
                         finally_target: *finally_target,
                         scope_depth: self.scopes.len(),
                         stack_depth: self.stack.len(),
+                        with_depth: self.with_objects.len(),
                     });
                 }
                 Opcode::PopExceptionHandler => {
@@ -1461,12 +1555,14 @@ impl Vm {
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_handlers = std::mem::take(&mut self.exception_handlers);
         let saved_pending_exception = self.pending_exception.take();
+        let saved_identifier_references = std::mem::take(&mut self.identifier_references);
 
         self.scopes = closure.captured_scopes;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         self.stack = Vec::new();
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
+        self.identifier_references = Vec::new();
         self.eval_contexts.push(EvalContext {
             is_arrow_function,
             non_simple_params,
@@ -1489,6 +1585,7 @@ impl Vm {
                 self.scopes = saved_scopes;
                 self.exception_handlers = saved_handlers;
                 self.pending_exception = saved_pending_exception;
+                self.identifier_references = saved_identifier_references;
                 return Err(err);
             }
         };
@@ -1497,6 +1594,7 @@ impl Vm {
         self.scopes = saved_scopes;
         self.exception_handlers = saved_handlers;
         self.pending_exception = saved_pending_exception;
+        self.identifier_references = saved_identifier_references;
         Ok(value)
     }
 
@@ -2708,6 +2806,7 @@ impl Vm {
         let stack_depth = self.stack.len();
         let saved_handlers = std::mem::take(&mut self.exception_handlers);
         let saved_pending_exception = self.pending_exception.take();
+        let saved_identifier_references = std::mem::take(&mut self.identifier_references);
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
         let strict = force_strict || self.code_is_strict(&chunk.code);
@@ -2718,6 +2817,7 @@ impl Vm {
         };
         self.exception_handlers = saved_handlers;
         self.pending_exception = saved_pending_exception;
+        self.identifier_references = saved_identifier_references;
         self.stack.truncate(stack_depth);
         result
     }
@@ -2761,7 +2861,7 @@ impl Vm {
 
     fn throw_to_handler(&mut self, exception: JsValue, code_len: usize) -> Result<usize, VmError> {
         while let Some(handler) = self.exception_handlers.pop() {
-            self.unwind_to(handler.scope_depth, handler.stack_depth)?;
+            self.unwind_to(handler.scope_depth, handler.stack_depth, handler.with_depth)?;
 
             if let Some(catch_target) = handler.catch_target {
                 if catch_target >= code_len {
@@ -2781,7 +2881,12 @@ impl Vm {
         Err(VmError::UncaughtException(exception))
     }
 
-    fn unwind_to(&mut self, scope_depth: usize, stack_depth: usize) -> Result<(), VmError> {
+    fn unwind_to(
+        &mut self,
+        scope_depth: usize,
+        stack_depth: usize,
+        with_depth: usize,
+    ) -> Result<(), VmError> {
         while self.scopes.len() > scope_depth {
             self.scopes.pop();
         }
@@ -2792,6 +2897,9 @@ impl Vm {
             return Err(VmError::StackUnderflow);
         }
         self.stack.truncate(stack_depth);
+        while self.with_objects.len() > with_depth {
+            self.with_objects.pop();
+        }
         Ok(())
     }
 
@@ -2873,6 +2981,296 @@ impl Vm {
             }
         }
         None
+    }
+
+    fn with_object_from_value(&mut self, value: JsValue) -> Result<JsValue, VmError> {
+        match value {
+            JsValue::Undefined | JsValue::Null => Err(VmError::TypeError("with expects object")),
+            JsValue::Object(_)
+            | JsValue::Function(_)
+            | JsValue::NativeFunction(_)
+            | JsValue::HostFunction(_)
+            | JsValue::String(_) => Ok(value),
+            primitive @ (JsValue::Number(_) | JsValue::Bool(_)) => {
+                let object = self.create_object_value();
+                let object_id = match object {
+                    JsValue::Object(id) => id,
+                    _ => unreachable!(),
+                };
+                let target = self
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                target
+                    .properties
+                    .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
+                Ok(JsValue::Object(object_id))
+            }
+        }
+    }
+
+    fn has_property_on_receiver(
+        &mut self,
+        receiver: &JsValue,
+        property: &str,
+        _realm: &Realm,
+    ) -> Result<bool, VmError> {
+        match receiver {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get(object_id)
+                    .ok_or(VmError::UnknownObject(*object_id))?;
+                Ok(object.properties.contains_key(property)
+                    || object.getters.contains_key(property)
+                    || object.setters.contains_key(property)
+                    || matches!(property, "hasOwnProperty" | "toString")
+                    || (property == "push" && object.properties.contains_key("length"))
+                    || (property == "forEach" && object.properties.contains_key("length")))
+            }
+            JsValue::Function(closure_id) => Ok(self
+                .closure_has_own_property(*closure_id, property)
+                || matches!(
+                    property,
+                    "length"
+                        | "prototype"
+                        | "call"
+                        | "apply"
+                        | "bind"
+                        | "toString"
+                        | "valueOf"
+                        | "hasOwnProperty"
+                        | "constructor"
+                )),
+            JsValue::NativeFunction(native) => Ok(!matches!(
+                self.get_native_function_property(*native, property),
+                JsValue::Undefined
+            )),
+            JsValue::HostFunction(host_id) => Ok(!matches!(
+                self.get_host_function_property(*host_id, property)?,
+                JsValue::Undefined
+            )),
+            JsValue::String(_receiver) => {
+                if property == "length" {
+                    return Ok(true);
+                }
+                if property.parse::<usize>().is_ok() {
+                    return Ok(true);
+                }
+                Ok(matches!(property, "replace" | "toString" | "valueOf"))
+            }
+            JsValue::Undefined | JsValue::Null | JsValue::Number(_) | JsValue::Bool(_) => Ok(false),
+        }
+    }
+
+    fn get_property_from_receiver(
+        &mut self,
+        receiver: JsValue,
+        property: &str,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        match receiver {
+            JsValue::Object(object_id) => self.get_object_property(object_id, property, realm),
+            JsValue::Function(closure_id) => self.get_function_property(closure_id, property),
+            JsValue::NativeFunction(native) => {
+                Ok(self.get_native_function_property(native, property))
+            }
+            JsValue::HostFunction(host_id) => self.get_host_function_property(host_id, property),
+            JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
+            _ => Err(VmError::TypeError("property access expects object")),
+        }
+    }
+
+    fn set_property_on_receiver(
+        &mut self,
+        receiver: JsValue,
+        property: String,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        match receiver {
+            JsValue::Object(object_id) => {
+                self.set_object_property(object_id, property, value, realm)
+            }
+            JsValue::Function(closure_id) => {
+                if self.function_rejects_caller_arguments(closure_id)?
+                    && matches!(property.as_str(), "caller" | "arguments")
+                    && !self.closure_has_own_property(closure_id, &property)
+                {
+                    return Err(VmError::TypeError("restricted function property access"));
+                }
+                Ok(self.set_closure_property(closure_id, property, value))
+            }
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(value),
+            _ => Err(VmError::TypeError("property write expects object")),
+        }
+    }
+
+    fn resolve_with_property_base_for_scope_depth(
+        &mut self,
+        name: &str,
+        realm: &Realm,
+        scope_depth: usize,
+    ) -> Result<Option<JsValue>, VmError> {
+        let candidates = self.with_objects.clone();
+        for frame in candidates.iter().rev() {
+            if frame.scope_depth == scope_depth
+                && self.has_property_on_receiver(&frame.object, name, realm)?
+            {
+                return Ok(Some(frame.object.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_binding_or_with_reference(
+        &mut self,
+        name: &str,
+        realm: &Realm,
+    ) -> Result<Option<IdentifierReference>, VmError> {
+        let scope_count = self.scopes.len();
+        for scope_index in (0..scope_count).rev() {
+            let scope_depth_marker = scope_index + 1;
+            if let Some(base) =
+                self.resolve_with_property_base_for_scope_depth(name, realm, scope_depth_marker)?
+            {
+                return Ok(Some(IdentifierReference::Property {
+                    base,
+                    property: name.to_string(),
+                    strict_on_missing: true,
+                }));
+            }
+            let scope_ref = self
+                .scopes
+                .get(scope_index)
+                .cloned()
+                .ok_or(VmError::ScopeUnderflow)?;
+            if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
+                return Ok(Some(IdentifierReference::Binding {
+                    name: name.to_string(),
+                    binding_id,
+                }));
+            }
+        }
+        if let Some(base) = self.resolve_with_property_base_for_scope_depth(name, realm, 0)? {
+            return Ok(Some(IdentifierReference::Property {
+                base,
+                property: name.to_string(),
+                strict_on_missing: true,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn resolve_identifier_reference(
+        &mut self,
+        name: &str,
+        realm: &Realm,
+        _strict: bool,
+    ) -> Result<IdentifierReference, VmError> {
+        if let Some(reference) = self.resolve_binding_or_with_reference(name, realm)? {
+            return Ok(reference);
+        }
+        if let Some(global_object_id) = self.global_object_id {
+            let base = JsValue::Object(global_object_id);
+            if self.has_property_on_receiver(&base, name, realm)? {
+                return Ok(IdentifierReference::Property {
+                    base,
+                    property: name.to_string(),
+                    strict_on_missing: true,
+                });
+            }
+            if let Some(value) = realm.resolve_identifier(name) {
+                let _ =
+                    self.set_object_property(global_object_id, name.to_string(), value, realm)?;
+                return Ok(IdentifierReference::Property {
+                    base,
+                    property: name.to_string(),
+                    strict_on_missing: false,
+                });
+            }
+        }
+        Ok(IdentifierReference::Unresolvable {
+            name: name.to_string(),
+        })
+    }
+
+    fn load_identifier_reference_value(
+        &mut self,
+        reference: &IdentifierReference,
+        realm: &Realm,
+        _strict: bool,
+    ) -> Result<JsValue, VmError> {
+        match reference {
+            IdentifierReference::Binding { binding_id, .. } => {
+                let binding = self
+                    .bindings
+                    .get(binding_id)
+                    .ok_or(VmError::ScopeUnderflow)?;
+                Ok(binding.value.clone())
+            }
+            IdentifierReference::Property { base, property, .. } => {
+                self.get_property_from_receiver(base.clone(), property, realm)
+            }
+            IdentifierReference::Unresolvable { name } => {
+                if name == "undefined" {
+                    return Ok(JsValue::Undefined);
+                }
+                if name == "NaN" {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
+                if name == "Infinity" {
+                    return Ok(JsValue::Number(f64::INFINITY));
+                }
+                Err(VmError::UnknownIdentifier(name.clone()))
+            }
+        }
+    }
+
+    fn store_identifier_reference_value(
+        &mut self,
+        reference: IdentifierReference,
+        value: JsValue,
+        realm: &Realm,
+        strict: bool,
+    ) -> Result<JsValue, VmError> {
+        match reference {
+            IdentifierReference::Binding { name, binding_id } => {
+                let binding = self
+                    .bindings
+                    .get_mut(&binding_id)
+                    .ok_or(VmError::ScopeUnderflow)?;
+                if !binding.mutable {
+                    return Err(VmError::ImmutableBinding(name));
+                }
+                binding.value = value.clone();
+                Ok(value)
+            }
+            IdentifierReference::Property {
+                base,
+                property,
+                strict_on_missing,
+            } => {
+                let still_exists = self.has_property_on_receiver(&base, &property, realm)?;
+                if strict && strict_on_missing && !still_exists {
+                    return Err(VmError::UnknownIdentifier(property));
+                }
+                self.set_property_on_receiver(base, property, value, realm)
+            }
+            IdentifierReference::Unresolvable { name } => {
+                if strict {
+                    return Err(VmError::UnknownIdentifier(name));
+                }
+                let global_scope = self
+                    .scopes
+                    .first()
+                    .cloned()
+                    .ok_or(VmError::ScopeUnderflow)?;
+                let binding_id = self.create_binding(value.clone(), true);
+                global_scope.borrow_mut().insert(name, binding_id);
+                Ok(value)
+            }
+        }
     }
 
     fn global_this_value(&self) -> JsValue {
@@ -3149,9 +3547,10 @@ impl Vm {
                     .as_ref()
                     .is_some_and(|alternate| Self::statement_declares_arguments_binding(alternate))
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
-                Self::statement_declares_arguments_binding(body)
-            }
+            Stmt::While { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Labeled { body, .. } => Self::statement_declares_arguments_binding(body),
             Stmt::For {
                 initializer, body, ..
             } => {

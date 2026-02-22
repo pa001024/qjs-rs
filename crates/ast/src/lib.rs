@@ -200,6 +200,10 @@ pub enum Stmt {
         condition: Expr,
         body: Box<Stmt>,
     },
+    With {
+        object: Expr,
+        body: Box<Stmt>,
+    },
     DoWhile {
         body: Box<Stmt>,
         condition: Expr,

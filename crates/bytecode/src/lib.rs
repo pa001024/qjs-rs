@@ -43,8 +43,13 @@ pub enum Opcode {
     DeleteIdentifier(String),
     DeleteProperty(String),
     DeletePropertyByValue,
+    ResolveIdentifierReference(String),
+    LoadReferenceValue,
+    StoreReferenceValue,
     EnterScope,
     ExitScope,
+    EnterWith,
+    ExitWith,
     Add,
     Sub,
     Mul,
@@ -141,10 +146,16 @@ struct LabelContext {
     continue_loop_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 struct FinallyContext {
     handler_depth: usize,
-    finally_block: Vec<Stmt>,
+    action: FinallyAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FinallyAction {
+    Statements(Vec<Stmt>),
+    ExitWith,
 }
 
 pub fn compile_script(script: &Script) -> Chunk {
@@ -280,7 +291,10 @@ impl Compiler {
                     self.collect_hoisted_var_names_from_stmt(alternate, names);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+            Stmt::While { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Labeled { body, .. } => {
                 self.collect_hoisted_var_names_from_stmt(body, names);
             }
             Stmt::For {
@@ -490,6 +504,9 @@ impl Compiler {
                 } else {
                     false
                 }
+            }
+            Stmt::With { object, body } => {
+                self.compile_with_statement(object, body, code, keep_value)
             }
             Stmt::DoWhile { body, condition } => {
                 let loop_start = code.len();
@@ -918,7 +935,7 @@ impl Compiler {
         self.handler_depth += 1;
         self.finally_contexts.push(FinallyContext {
             handler_depth: self.handler_depth,
-            finally_block: finally_block.to_vec(),
+            action: FinallyAction::Statements(finally_block.to_vec()),
         });
 
         self.compile_scoped_statement_list(try_block, code);
@@ -943,6 +960,53 @@ impl Compiler {
             true
         } else {
             false
+        }
+    }
+
+    fn compile_with_statement(
+        &mut self,
+        object: &Expr,
+        body: &Stmt,
+        code: &mut Vec<Opcode>,
+        keep_value: bool,
+    ) -> bool {
+        self.compile_expr(object, code);
+        code.push(Opcode::EnterWith);
+
+        let handler_pos = code.len();
+        code.push(Opcode::PushExceptionHandler {
+            catch_target: None,
+            finally_target: None,
+        });
+        self.handler_depth += 1;
+        self.finally_contexts.push(FinallyContext {
+            handler_depth: self.handler_depth,
+            action: FinallyAction::ExitWith,
+        });
+
+        let body_value = self.compile_stmt(body, code, keep_value);
+
+        self.finally_contexts.pop();
+        code.push(Opcode::PopExceptionHandler);
+        self.handler_depth = self.handler_depth.saturating_sub(1);
+
+        let jump_to_cleanup_pos = code.len();
+        code.push(Opcode::Jump(usize::MAX));
+        let cleanup_start = code.len();
+        code[handler_pos] = Opcode::PushExceptionHandler {
+            catch_target: None,
+            finally_target: Some(cleanup_start),
+        };
+        code[jump_to_cleanup_pos] = Opcode::Jump(cleanup_start);
+
+        code.push(Opcode::ExitWith);
+        code.push(Opcode::RethrowIfException);
+
+        if keep_value && !body_value {
+            code.push(Opcode::LoadUndefined);
+            true
+        } else {
+            body_value
         }
     }
 
@@ -1070,7 +1134,14 @@ impl Compiler {
         for context in contexts_to_run.iter().rev() {
             code.push(Opcode::PopExceptionHandler);
             self.handler_depth = self.handler_depth.saturating_sub(1);
-            self.compile_scoped_statement_list(&context.finally_block, code);
+            match &context.action {
+                FinallyAction::Statements(statements) => {
+                    self.compile_scoped_statement_list(statements, code);
+                }
+                FinallyAction::ExitWith => {
+                    code.push(Opcode::ExitWith);
+                }
+            }
         }
     }
 
@@ -1248,27 +1319,57 @@ impl Compiler {
                 target: Identifier(name),
                 value,
             } => {
-                self.compile_expr(value, code);
-                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::ResolveIdentifierReference(name.clone()));
+                if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
+                    code.push(Opcode::LoadReferenceValue);
+                    self.compile_expr(right, code);
+                    code.push(Self::binary_opcode(op));
+                } else {
+                    self.compile_expr(value, code);
+                }
+                code.push(Opcode::StoreReferenceValue);
             }
             Expr::AssignMember {
                 object,
                 property,
                 value,
             } => {
-                self.compile_expr(object, code);
-                self.compile_expr(value, code);
-                code.push(Opcode::SetProperty(property.clone()));
+                if let Some((op, right)) =
+                    Self::match_member_compound_value(object, property, value)
+                {
+                    self.compile_expr(object, code);
+                    code.push(Opcode::Dup);
+                    code.push(Opcode::GetProperty(property.clone()));
+                    self.compile_expr(right, code);
+                    code.push(Self::binary_opcode(op));
+                    code.push(Opcode::SetProperty(property.clone()));
+                } else {
+                    self.compile_expr(object, code);
+                    self.compile_expr(value, code);
+                    code.push(Opcode::SetProperty(property.clone()));
+                }
             }
             Expr::AssignMemberComputed {
                 object,
                 property,
                 value,
             } => {
-                self.compile_expr(object, code);
-                self.compile_expr(property, code);
-                self.compile_expr(value, code);
-                code.push(Opcode::SetPropertyByValue);
+                if let Some((op, right)) =
+                    Self::match_member_computed_compound_value(object, property, value)
+                {
+                    self.compile_expr(object, code);
+                    self.compile_expr(property, code);
+                    code.push(Opcode::Dup2);
+                    code.push(Opcode::GetPropertyByValue);
+                    self.compile_expr(right, code);
+                    code.push(Self::binary_opcode(op));
+                    code.push(Opcode::SetPropertyByValue);
+                } else {
+                    self.compile_expr(object, code);
+                    self.compile_expr(property, code);
+                    self.compile_expr(value, code);
+                    code.push(Opcode::SetPropertyByValue);
+                }
             }
             Expr::Update {
                 target,
@@ -1368,13 +1469,14 @@ impl Compiler {
     ) {
         match target {
             UpdateTarget::Identifier(Identifier(name)) => {
-                code.push(Opcode::LoadIdentifier(name.clone()));
+                code.push(Opcode::ResolveIdentifierReference(name.clone()));
+                code.push(Opcode::LoadReferenceValue);
                 if !prefix {
                     code.push(Opcode::Dup);
                 }
                 code.push(Opcode::LoadNumber(1.0));
                 code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::StoreReferenceValue);
                 if !prefix {
                     code.push(Opcode::Pop);
                 }
@@ -1416,6 +1518,79 @@ impl Compiler {
                     code.push(Opcode::Pop);
                 }
             }
+        }
+    }
+
+    fn is_compound_assign_op(op: BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::UnsignedShiftRight
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+        )
+    }
+
+    fn match_identifier_compound_value<'a>(
+        name: &str,
+        value: &'a Expr,
+    ) -> Option<(BinaryOp, &'a Expr)> {
+        let Expr::Binary { op, left, right } = value else {
+            return None;
+        };
+        if !Self::is_compound_assign_op(*op) {
+            return None;
+        }
+        match &**left {
+            Expr::Identifier(Identifier(lhs_name)) if lhs_name == name => Some((*op, right)),
+            _ => None,
+        }
+    }
+
+    fn match_member_compound_value<'a>(
+        object: &Expr,
+        property: &str,
+        value: &'a Expr,
+    ) -> Option<(BinaryOp, &'a Expr)> {
+        let Expr::Binary { op, left, right } = value else {
+            return None;
+        };
+        if !Self::is_compound_assign_op(*op) {
+            return None;
+        }
+        match &**left {
+            Expr::Member {
+                object: left_object,
+                property: left_property,
+            } if **left_object == *object && left_property == property => Some((*op, right)),
+            _ => None,
+        }
+    }
+
+    fn match_member_computed_compound_value<'a>(
+        object: &Expr,
+        property: &Expr,
+        value: &'a Expr,
+    ) -> Option<(BinaryOp, &'a Expr)> {
+        let Expr::Binary { op, left, right } = value else {
+            return None;
+        };
+        if !Self::is_compound_assign_op(*op) {
+            return None;
+        }
+        match &**left {
+            Expr::MemberComputed {
+                object: left_object,
+                property: left_property,
+            } if **left_object == *object && **left_property == *property => Some((*op, right)),
+            _ => None,
         }
     }
 
@@ -1772,10 +1947,11 @@ mod tests {
         let chunk = compile_expression(&expr);
         let expected = Chunk {
             code: vec![
-                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -1843,10 +2019,11 @@ mod tests {
                     name: "x".to_string(),
                     mutable: true,
                 },
-                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(2.0),
                 Opcode::Add,
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
@@ -2069,13 +2246,15 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(10),
+                Opcode::JumpIfFalse(11),
+                Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadNumber(1.0),
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(13),
+                Opcode::Jump(15),
+                Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadNumber(2.0),
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
@@ -2125,11 +2304,12 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(3.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(12),
-                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::JumpIfFalse(13),
+                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
                 Opcode::Jump(2),
                 Opcode::LoadIdentifier("x".to_string()),
@@ -2231,13 +2411,14 @@ mod tests {
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(15),
+                Opcode::JumpIfFalse(16),
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::Pop,
-                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::ResolveIdentifierReference("i".to_string()),
+                Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreVariable("i".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
                 Opcode::Jump(3),
                 Opcode::ExitScope,
@@ -2327,13 +2508,15 @@ mod tests {
                 Opcode::Eq,
                 Opcode::JumpIfFalse(8),
                 Opcode::Jump(9),
-                Opcode::Jump(13),
+                Opcode::Jump(14),
+                Opcode::ResolveIdentifierReference("y".to_string()),
                 Opcode::LoadNumber(1.0),
-                Opcode::StoreVariable("y".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(16),
+                Opcode::Jump(18),
+                Opcode::ResolveIdentifierReference("y".to_string()),
                 Opcode::LoadNumber(2.0),
-                Opcode::StoreVariable("y".to_string()),
+                Opcode::StoreReferenceValue,
                 Opcode::Pop,
                 Opcode::ExitScope,
                 Opcode::LoadUndefined,

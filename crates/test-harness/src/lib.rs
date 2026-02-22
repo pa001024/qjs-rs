@@ -816,6 +816,37 @@ mod tests {
     }
 
     #[test]
+    fn with_compound_assignment_uses_original_reference_baseline() {
+        let result = run_script(
+            "function f() { \
+                var x = 0; \
+                var scope = { get x() { delete this.x; return 2; } }; \
+                with (scope) { x *= 3; } \
+                return scope.x * 10 + x; \
+             } \
+             f();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(60.0)));
+    }
+
+    #[test]
+    fn strict_compound_assignment_in_with_throws_reference_error_baseline() {
+        let result = run_script(
+            "var scope = { get x() { delete this.x; return 2; } }; \
+             with (scope) { \
+                (function() { \
+                    'use strict'; \
+                    assert.throws(ReferenceError, function() { x ^= 3; }); \
+                })(); \
+             } \
+             'x' in scope;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(false)));
+    }
+
+    #[test]
     fn hoists_var_from_nested_block_inside_function() {
         let result = run_script(
             "function f() { if (true) { var x = 1; } return x; } f();",

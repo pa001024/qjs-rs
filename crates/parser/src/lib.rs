@@ -132,6 +132,16 @@ fn validate_statement_strict_mode(statement: &Stmt, strict: bool) -> Result<(), 
             validate_expression_strict_mode(condition, strict)?;
             validate_statement_strict_mode(body, strict)
         }
+        Stmt::With { object, body } => {
+            if strict {
+                return Err(ParseError {
+                    message: "with statement not allowed in strict mode".to_string(),
+                    position: 0,
+                });
+            }
+            validate_expression_strict_mode(object, strict)?;
+            validate_statement_strict_mode(body, strict)
+        }
         Stmt::DoWhile { body, condition } => {
             validate_statement_strict_mode(body, strict)?;
             validate_expression_strict_mode(condition, strict)
@@ -420,7 +430,10 @@ fn validate_label_control_targets_in_statement(
             }
             Ok(())
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
+        Stmt::While { body, .. }
+        | Stmt::With { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. } => {
             validate_label_control_targets_in_statement(body, label_targets)
         }
         Stmt::Switch { cases, .. } => {
@@ -547,6 +560,7 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
             Ok(())
         }
         Stmt::While { body, .. }
+        | Stmt::With { body, .. }
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::Labeled { body, .. } => validate_nested_statement_early_errors(body),
@@ -732,7 +746,10 @@ fn collect_var_declared_names(
                 collect_var_declared_names(alternate, var_declared_names, kind);
             }
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+        Stmt::While { body, .. }
+        | Stmt::With { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Labeled { body, .. } => {
             collect_var_declared_names(body, var_declared_names, kind);
         }
         Stmt::For {
@@ -939,6 +956,7 @@ impl Parser {
                     | Stmt::FunctionDeclaration(_)
                     | Stmt::If { .. }
                     | Stmt::While { .. }
+                    | Stmt::With { .. }
                     | Stmt::DoWhile { .. }
                     | Stmt::For { .. }
                     | Stmt::Switch { .. }
@@ -1330,9 +1348,13 @@ impl Parser {
 
     fn parse_with_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'with'")?;
-        let _ = self.parse_expression_inner()?;
+        let object = self.parse_expression_inner()?;
         self.expect(TokenKind::RParen, "expected ')' after with object")?;
-        self.parse_embedded_statement(false)
+        let body = self.parse_embedded_statement(false)?;
+        Ok(Stmt::With {
+            object,
+            body: Box::new(body),
+        })
     }
 
     fn parse_switch_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -1598,6 +1620,7 @@ impl Parser {
                 | Stmt::FunctionDeclaration(_)
                 | Stmt::If { .. }
                 | Stmt::While { .. }
+                | Stmt::With { .. }
                 | Stmt::DoWhile { .. }
                 | Stmt::For { .. }
                 | Stmt::Switch { .. }
@@ -4191,6 +4214,13 @@ mod tests {
     #[test]
     fn parses_with_statement_baseline() {
         parse_script("with ({}) { 'use strict'; }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn rejects_with_statement_in_strict_mode() {
+        let err = parse_script("\"use strict\"; with ({}) {}")
+            .expect_err("strict mode with statement should fail");
+        assert_eq!(err.message, "with statement not allowed in strict mode");
     }
 
     #[test]
