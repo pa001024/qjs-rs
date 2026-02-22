@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3989, failed=1011
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3997, failed=1003
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -94,4 +94,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 的 `+` 运算新增对象到原始值（`ToPrimitive`）的最小调用链（`valueOf`/`toString`）并接入 Date 对象的 string-preferred 分支；baseline globals 新增 `Date` 构造器最小实现，修复 `expressions/addition` 下一批对象/Date 相关失败。
 - runtime/builtins/vm/bytecode 新增 `Array` baseline（全局构造器、`CreateArray` 指令、数组字面量默认 `constructor` 绑定）并补齐 `Number.MAX_VALUE` / `Number.MIN_VALUE`，`language` 基线由 `3938/1062` 提升至 `3983/1017`。
 - ast/parser/bytecode 新增数组空位（elision）语法链路（如 `[,]`、`[1,,3,]`）并按索引稀疏编译，`language` 基线进一步提升至 `3989/1011`。
+- parser/bytecode/vm 新增数组字面量 `...spread` 执行链路（含与 elision 混用），`expressions/array/spread-*` parse 失败簇清理，`language` 基线进一步提升至 `3997/1003`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
