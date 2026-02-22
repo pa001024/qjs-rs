@@ -847,6 +847,40 @@ mod tests {
     }
 
     #[test]
+    fn comma_expression_preserves_eval_side_effects_for_assignment_reference() {
+        let result = run_script(
+            "function testAssignment() { \
+                var x = 0; \
+                var innerX = (function() { \
+                    x = (eval(\"var x = 2;\"), 1); \
+                    return x; \
+                })(); \
+                return innerX * 10 + x; \
+            } \
+            testAssignment();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(21.0)));
+    }
+
+    #[test]
+    fn comma_expression_preserves_with_rhs_side_effects() {
+        let result = run_script(
+            "function testAssignment() { \
+                var x = 0; \
+                var scope = {}; \
+                with (scope) { \
+                    x = (scope.x = 2, 1); \
+                } \
+                return scope.x * 10 + x; \
+            } \
+            testAssignment();",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(21.0)));
+    }
+
+    #[test]
     fn hoists_var_from_nested_block_inside_function() {
         let result = run_script(
             "function f() { if (true) { var x = 1; } return x; } f();",

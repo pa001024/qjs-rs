@@ -89,6 +89,7 @@ pub enum Expr {
         consequent: Box<Expr>,
         alternate: Box<Expr>,
     },
+    Sequence(Vec<Expr>),
     Member {
         object: Box<Expr>,
         property: String,

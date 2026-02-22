@@ -1315,6 +1315,19 @@ impl Compiler {
                 code[jump_to_alternate_pos] = Opcode::JumpIfFalse(alternate_start);
                 code[jump_to_end_pos] = Opcode::Jump(end);
             }
+            Expr::Sequence(expressions) => {
+                let mut iter = expressions.iter().peekable();
+                if iter.peek().is_none() {
+                    code.push(Opcode::LoadUndefined);
+                    return;
+                }
+                while let Some(item) = iter.next() {
+                    self.compile_expr(item, code);
+                    if iter.peek().is_some() {
+                        code.push(Opcode::Pop);
+                    }
+                }
+            }
             Expr::Assign {
                 target: Identifier(name),
                 value,
@@ -1651,6 +1664,32 @@ mod tests {
                 Opcode::LoadNumber(3.0),
                 Opcode::Mul,
                 Opcode::Add,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_sequence_expression_with_side_effect_order() {
+        let expr = Expr::Sequence(vec![
+            Expr::Assign {
+                target: Identifier("x".to_string()),
+                value: Box::new(Expr::Number(2.0)),
+            },
+            Expr::Number(1.0),
+        ]);
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::LoadNumber(2.0),
+                Opcode::StoreReferenceValue,
+                Opcode::Pop,
+                Opcode::LoadNumber(1.0),
                 Opcode::Halt,
             ],
             functions: vec![],

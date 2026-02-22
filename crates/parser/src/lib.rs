@@ -271,6 +271,12 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
             validate_expression_strict_mode(consequent, strict)?;
             validate_expression_strict_mode(alternate, strict)
         }
+        Expr::Sequence(expressions) => {
+            for expression in expressions {
+                validate_expression_strict_mode(expression, strict)?;
+            }
+            Ok(())
+        }
         Expr::Member { object, .. } => validate_expression_strict_mode(object, strict),
         Expr::MemberComputed { object, property } => {
             validate_expression_strict_mode(object, strict)?;
@@ -2800,12 +2806,18 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
-                let mut expr = self.parse_expression_inner()?;
+                let mut expressions = vec![self.parse_expression_inner()?];
                 while self.matches(&TokenKind::Comma) {
-                    expr = self.parse_expression_inner()?;
+                    expressions.push(self.parse_expression_inner()?);
                 }
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
-                Ok(expr)
+                if expressions.len() == 1 {
+                    Ok(expressions
+                        .pop()
+                        .expect("parenthesized expression should exist"))
+                } else {
+                    Ok(Expr::Sequence(expressions))
+                }
             }
             TokenKind::Slash => self.parse_regex_literal(),
             TokenKind::LBrace => self.parse_object_literal(),
@@ -3471,7 +3483,13 @@ mod tests {
     #[test]
     fn parses_parenthesized_comma_expression_baseline() {
         let parsed = parse_expression("(0, eval)").expect("parser should succeed");
-        assert_eq!(parsed, Expr::Identifier(Identifier("eval".to_string())));
+        assert_eq!(
+            parsed,
+            Expr::Sequence(vec![
+                Expr::Number(0.0),
+                Expr::Identifier(Identifier("eval".to_string())),
+            ])
+        );
     }
 
     #[test]
