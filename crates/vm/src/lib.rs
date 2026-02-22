@@ -376,13 +376,22 @@ impl Vm {
                         if strict {
                             return Err(VmError::UnknownIdentifier(name.clone()));
                         }
-                        let global_scope = self
-                            .scopes
-                            .first()
-                            .cloned()
-                            .ok_or(VmError::ScopeUnderflow)?;
-                        let binding_id = self.create_binding(value.clone(), true);
-                        global_scope.borrow_mut().insert(name.clone(), binding_id);
+                        if let Some(global_object_id) = self.global_object_id {
+                            let _ = self.set_object_property(
+                                global_object_id,
+                                name.clone(),
+                                value.clone(),
+                                realm,
+                            )?;
+                        } else {
+                            let global_scope = self
+                                .scopes
+                                .first()
+                                .cloned()
+                                .ok_or(VmError::ScopeUnderflow)?;
+                            let binding_id = self.create_binding(value.clone(), true);
+                            global_scope.borrow_mut().insert(name.clone(), binding_id);
+                        }
                     }
                     self.stack.push(value);
                 }
@@ -3265,13 +3274,18 @@ impl Vm {
                 if strict {
                     return Err(VmError::UnknownIdentifier(name));
                 }
-                let global_scope = self
-                    .scopes
-                    .first()
-                    .cloned()
-                    .ok_or(VmError::ScopeUnderflow)?;
-                let binding_id = self.create_binding(value.clone(), true);
-                global_scope.borrow_mut().insert(name, binding_id);
+                if let Some(global_object_id) = self.global_object_id {
+                    let _ =
+                        self.set_object_property(global_object_id, name, value.clone(), realm)?;
+                } else {
+                    let global_scope = self
+                        .scopes
+                        .first()
+                        .cloned()
+                        .ok_or(VmError::ScopeUnderflow)?;
+                    let binding_id = self.create_binding(value.clone(), true);
+                    global_scope.borrow_mut().insert(name, binding_id);
+                }
                 Ok(value)
             }
         }

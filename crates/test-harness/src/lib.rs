@@ -488,6 +488,18 @@ mod tests {
     }
 
     #[test]
+    fn sloppy_unresolvable_assignment_creates_global_property_baseline() {
+        let result = run_script(
+            "function foo() { __qjs_test_unresolvable__ = 42; } \
+             foo(); \
+             var desc = Object.getOwnPropertyDescriptor(this, '__qjs_test_unresolvable__'); \
+             desc.value === 42 && desc.writable === true && desc.enumerable === true && desc.configurable === true;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),
