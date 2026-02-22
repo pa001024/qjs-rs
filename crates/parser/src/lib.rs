@@ -1310,7 +1310,7 @@ impl Parser {
             None
         };
         if let Some(loop_kind) = loop_kind {
-            let iterable = self.parse_expression_inner()?;
+            let iterable = self.parse_for_in_of_rhs_expression()?;
             self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
 
             self.loop_depth += 1;
@@ -1320,7 +1320,7 @@ impl Parser {
             self.breakable_depth = self.breakable_depth.saturating_sub(1);
             let body = body?;
 
-            if loop_kind == "in" && Self::supports_simple_for_in_lowering(initializer.as_ref()) {
+            if loop_kind == "in" && Self::supports_for_in_lowering(initializer.as_ref()) {
                 return self.lower_for_in_statement(initializer, iterable, body);
             }
             // Baseline: parse/compile unsupported `for-in`/`for-of` shapes as non-iterating loops.
@@ -1362,14 +1362,40 @@ impl Parser {
         })
     }
 
-    fn supports_simple_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
-        matches!(
-            initializer,
+    fn parse_for_in_of_rhs_expression(&mut self) -> Result<Expr, ParseError> {
+        let mut expressions = vec![self.parse_expression_inner()?];
+        while self.matches(&TokenKind::Comma) {
+            expressions.push(self.parse_expression_inner()?);
+        }
+        if expressions.len() == 1 {
+            Ok(expressions
+                .into_iter()
+                .next()
+                .expect("for-in/of rhs expression should exist"))
+        } else {
+            Ok(Expr::Sequence(expressions))
+        }
+    }
+
+    fn supports_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
+        match initializer {
             Some(ForInitializer::VariableDeclaration(VariableDeclaration {
-                kind: BindingKind::Let,
-                initializer: None,
-                ..
-            }))
+                initializer, ..
+            })) => initializer.is_none(),
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                declarations.len() == 1 && declarations[0].initializer.is_none()
+            }
+            Some(ForInitializer::Expression(target)) => {
+                Self::is_simple_assignment_target_expression(target)
+            }
+            None => false,
+        }
+    }
+
+    fn is_simple_assignment_target_expression(expression: &Expr) -> bool {
+        matches!(
+            expression,
+            Expr::Identifier(_) | Expr::Member { .. } | Expr::MemberComputed { .. }
         )
     }
 
@@ -1379,19 +1405,42 @@ impl Parser {
         iterable: Expr,
         body: Stmt,
     ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
         let keys_name = self.next_for_in_temp_identifier("keys");
         let index_name = self.next_for_in_temp_identifier("index");
+        let iterable_identifier = Expr::Identifier(iterable_name.clone());
 
         let mut statements = vec![
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
                 name: keys_name.clone(),
-                initializer: Some(Expr::Call {
-                    callee: Box::new(Expr::Member {
-                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                        property: "keys".to_string(),
+                initializer: Some(Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        op: BinaryOp::LogicalOr,
+                        left: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable_identifier.clone()),
+                            right: Box::new(Expr::Null),
+                        }),
+                        right: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable_identifier.clone()),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        }),
                     }),
-                    arguments: vec![iterable],
+                    consequent: Box::new(Expr::ArrayLiteral(vec![])),
+                    alternate: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "keys".to_string(),
+                        }),
+                        arguments: vec![iterable_identifier],
+                    }),
                 }),
             }),
             Stmt::VariableDeclaration(VariableDeclaration {
@@ -1845,7 +1894,10 @@ impl Parser {
                 None
             };
 
-            if kind == BindingKind::Const && initializer.is_none() {
+            if kind == BindingKind::Const
+                && initializer.is_none()
+                && !(self.check_keyword("in") || self.check_keyword("of"))
+            {
                 return Err(ParseError {
                     message: "const declaration requires an initializer".to_string(),
                     position: self.current_position(),
@@ -4448,6 +4500,16 @@ mod tests {
     #[test]
     fn parses_for_in_expression_initializer() {
         parse_script("for (x in y) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_in_const_initializerless_declaration() {
+        parse_script("for (const x in { key: 0 }) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_in_rhs_comma_expression() {
+        parse_script("for (x in null, { key: 0 }) {}").expect("script parsing should succeed");
     }
 
     #[test]

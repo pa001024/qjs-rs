@@ -535,6 +535,69 @@ mod tests {
     }
 
     #[test]
+    fn for_in_var_binding_iterates_properties_baseline() {
+        let result = run_script(
+            "var seenA = false; var seenB = false; var count = 0; \
+             for (var key in { a: 1, b: 2 }) { \
+               if (key === 'a') seenA = true; \
+               if (key === 'b') seenB = true; \
+               count = count + 1; \
+             } \
+             seenA && seenB && count === 2;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_member_assignment_target_iterates_baseline() {
+        let result = run_script(
+            "var holder = { key: '' }; var count = 0; \
+             for (holder.key in { attr: null }) { \
+               if (holder.key === 'attr') count = count + 1; \
+             } \
+             count === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_rhs_supports_sequence_expression_baseline() {
+        let result = run_script(
+            "var count = 0; \
+             for (var key in (null, { item: true })) { \
+               if (key === 'item') count = count + 1; \
+             } \
+             count === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_const_binding_without_initializer_baseline() {
+        let result = run_script(
+            "var capture = ''; \
+             for (const key in { x: 1 }) { capture = key; } \
+             capture === 'x';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_nullish_rhs_does_not_throw_baseline() {
+        let result = run_script(
+            "var threw = false; \
+             try { for (var key in undefined) {} for (key in null) {} } catch (e) { threw = true; } \
+             threw === false;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),
@@ -569,6 +632,20 @@ mod tests {
             ),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn supports_object_create_and_set_prototype_of_baseline() {
+        let result = run_script(
+            "var base = { inherited: 1 }; \
+             var object = Object.create(base); \
+             var before = object.inherited === 1; \
+             Object.setPrototypeOf(object, null); \
+             var after = object.inherited === undefined; \
+             before && after && Object.getPrototypeOf(object) === null;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

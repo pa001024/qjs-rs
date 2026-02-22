@@ -1937,6 +1937,8 @@ impl Vm {
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => Ok(self.execute_array_constructor(&args)),
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
+            NativeFunction::ObjectCreate => self.execute_object_create(&args),
+            NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
             }
@@ -2194,6 +2196,58 @@ impl Vm {
             .properties
             .insert("length".to_string(), JsValue::Number(args.len() as f64));
         JsValue::Object(object_id)
+    }
+
+    fn execute_object_create(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let prototype = match args.first().cloned().unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => Some(object_id),
+            JsValue::Null => None,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object prototype may only be an Object or null",
+                ));
+            }
+        };
+
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = prototype;
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_object_set_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target_id = match args.first().cloned().unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object.setPrototypeOf target must be object",
+                ));
+            }
+        };
+
+        let prototype = match args.get(1).cloned().unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => Some(object_id),
+            JsValue::Null => None,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object prototype may only be an Object or null",
+                ));
+            }
+        };
+
+        let target = self
+            .objects
+            .get_mut(&target_id)
+            .ok_or(VmError::UnknownObject(target_id))?;
+        target.prototype = prototype;
+        Ok(JsValue::Object(target_id))
     }
 
     fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -2789,7 +2843,16 @@ impl Vm {
     fn execute_object_get_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         match target {
-            JsValue::Object(_) => Ok(self.object_prototype_value()),
+            JsValue::Object(target_id) => {
+                let object = self
+                    .objects
+                    .get(&target_id)
+                    .ok_or(VmError::UnknownObject(target_id))?;
+                Ok(object
+                    .prototype
+                    .map(JsValue::Object)
+                    .unwrap_or(JsValue::Null))
+            }
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                 Ok(self.function_prototype_value())
             }
@@ -2943,7 +3006,13 @@ impl Vm {
     fn create_object_value(&mut self) -> JsValue {
         let id = self.next_object_id;
         self.next_object_id += 1;
-        self.objects.insert(id, JsObject::default());
+        self.objects.insert(
+            id,
+            JsObject {
+                prototype: self.object_prototype_id,
+                ..JsObject::default()
+            },
+        );
         JsValue::Object(id)
     }
 
@@ -4051,6 +4120,8 @@ impl Vm {
             (native, property),
             (NativeFunction::ObjectConstructor, "defineProperty")
                 | (NativeFunction::ObjectConstructor, "keys")
+                | (NativeFunction::ObjectConstructor, "create")
+                | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
@@ -4422,6 +4493,12 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "keys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectKeys)
+            }
+            (NativeFunction::ObjectConstructor, "create") => {
+                JsValue::NativeFunction(NativeFunction::ObjectCreate)
+            }
+            (NativeFunction::ObjectConstructor, "setPrototypeOf") => {
+                JsValue::NativeFunction(NativeFunction::ObjectSetPrototypeOf)
             }
             (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)
