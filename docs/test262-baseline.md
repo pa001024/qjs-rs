@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4041, failed=959
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4115, failed=885
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -99,4 +99,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 补齐共享 `Object.prototype.toString` fallback（稳定函数身份，避免每次读取生成新函数）并保持 Date 对象自有 `toString` 路径；结合前一轮 `ToPrimitive` 修正后，`language` 基线进一步提升至 `4009/991`。
 - runtime/vm 补齐函数值 `hasOwnProperty`、`Array.prototype.forEach`、`Object.isExtensible`、箭头/strict 函数 `caller/arguments` 受限访问，以及 `Object.getOwnPropertyDescriptor` 对函数目标的最小支持；`language` 基线进一步提升至 `4037/963`。
 - VM 新增稳定 `Function.prototype` 对象与函数 `prototype` 惰性缓存（含 `constructor` 回填），并修正 `Object.getPrototypeOf(function-like)` 返回路径，清理一批函数原型身份不稳定导致的断言失败；`language` 基线进一步提升至 `4041/959`。
+- VM 在数值运算/位运算/关系运算中补齐对象与函数的 `ToPrimitive(ToNumber)` 转换链路，并将相关运行时错误接入异常处理器路由；同时实现 `==/!=` 抽象相等比较与字符串关系比较（`< <= > >=`）基线，显著清理 `compound-assignment`、`equals/does-not-equals`、`relational` 失败簇，`language` 基线提升至 `4115/885`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
