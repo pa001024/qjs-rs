@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3924, failed=1076
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3938, failed=1062
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -91,5 +91,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 在 strict 执行上下文下将“未声明标识符赋值”从“隐式创建全局绑定”修正为 `ReferenceError`（`StoreVariable` 路径），`directive-prologue` 子集由 `51/11` 提升到 `62/0`，并显著压降 `eval-code/direct` 的 `assert.throws` 失败簇，`language` 基线提升至 `3661/1339`。
 - parser 为默认参数新增函数体前置初始化降级（`if (param === undefined) param = initializer`），并补齐对象/class generator method 的基础语法吞吐；VM 为 direct eval 新增上下文约束：在非简单参数函数上下文中拒绝 `var/function arguments` 声明（箭头函数上下文保留绑定行为），`eval-code/direct` 子集显著收敛。
 - runtime/builtins/vm 增加 `Boolean` 全局构造器并补齐 `new Number/new Boolean/new String` 的装箱构造路径；同时在 `ToString`/`ToNumber` 最小实现中打通装箱对象解包，修复 `eval-code/(direct|indirect)/non-string-object.js` 等一批对象入参 `eval` 误行为，`language` 基线进一步提升。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3924/1076`（主要剩余在块级作用域细节、`super` 语义、`for-in` 迭代语义与部分内建缺失）。
+- VM 的 `+` 运算新增对象到原始值（`ToPrimitive`）的最小调用链（`valueOf`/`toString`）并接入 Date 对象的 string-preferred 分支；baseline globals 新增 `Date` 构造器最小实现，修复 `expressions/addition` 下一批对象/Date 相关失败。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3938/1062`（主要剩余在块级作用域细节、`super` 语义、`for-in` 迭代语义与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
