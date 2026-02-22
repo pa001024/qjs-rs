@@ -279,6 +279,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_numeric_object_to_primitive_baseline() {
+        let result = run_script(
+            "var o = { valueOf: function() { return 2; } }; (o * 3) === 6 && (o & 1) === 0;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_abstract_equality_and_string_relational_baseline() {
+        let result = run_script(
+            "('1' == 1) && ('2' != 1) && (null == undefined) && ('x' > '1');",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_object_tostring_baseline() {
         let result = run_script("({}).toString();", &[]);
         assert_eq!(result, Ok(JsValue::String("[object Object]".to_string())));

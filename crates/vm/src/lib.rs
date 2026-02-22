@@ -646,72 +646,180 @@ impl Vm {
                     }
                 },
                 Opcode::Sub => {
-                    let result = self.eval_numeric_binary(|lhs, rhs| lhs - rhs)?;
-                    self.stack.push(JsValue::Number(result));
+                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs - rhs) {
+                        Ok(result) => self.stack.push(JsValue::Number(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Mul => {
-                    let result = self.eval_numeric_binary(|lhs, rhs| lhs * rhs)?;
-                    self.stack.push(JsValue::Number(result));
+                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs * rhs) {
+                        Ok(result) => self.stack.push(JsValue::Number(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Div => {
-                    let result = self.eval_numeric_binary(|lhs, rhs| lhs / rhs)?;
-                    self.stack.push(JsValue::Number(result));
+                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs / rhs) {
+                        Ok(result) => self.stack.push(JsValue::Number(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Mod => {
-                    let result = self.eval_numeric_binary(|lhs, rhs| lhs % rhs)?;
-                    self.stack.push(JsValue::Number(result));
+                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs % rhs) {
+                        Ok(result) => self.stack.push(JsValue::Number(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Shl => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let shift = self.to_uint32(&right) & 0x1F;
-                    let result = self.to_int32(&left) << shift;
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
+                        let result = self.coerce_int32_runtime(left, realm, strict)? << shift;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Shr => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let shift = self.to_uint32(&right) & 0x1F;
-                    let result = self.to_int32(&left) >> shift;
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
+                        let result = self.coerce_int32_runtime(left, realm, strict)? >> shift;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::UShr => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let shift = self.to_uint32(&right) & 0x1F;
-                    let result = self.to_uint32(&left) >> shift;
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
+                        let result = self.coerce_uint32_runtime(left, realm, strict)? >> shift;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::BitAnd => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = self.to_int32(&left) & self.to_int32(&right);
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let result = self.coerce_int32_runtime(left, realm, strict)?
+                            & self.coerce_int32_runtime(right, realm, strict)?;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::BitOr => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = self.to_int32(&left) | self.to_int32(&right);
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let result = self.coerce_int32_runtime(left, realm, strict)?
+                            | self.coerce_int32_runtime(right, realm, strict)?;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::BitXor => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = self.to_int32(&left) ^ self.to_int32(&right);
-                    self.stack.push(JsValue::Number(result as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let result = self.coerce_int32_runtime(left, realm, strict)?
+                            ^ self.coerce_int32_runtime(right, realm, strict)?;
+                        Ok(JsValue::Number(result as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Neg => {
-                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    self.stack.push(JsValue::Number(-self.to_number(&value)));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let value = self.coerce_number_runtime(value, realm, strict)?;
+                        Ok(JsValue::Number(-value))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Not => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(JsValue::Bool(!self.is_truthy(&value)));
                 }
                 Opcode::BitNot => {
-                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    self.stack
-                        .push(JsValue::Number((!self.to_int32(&value)) as f64));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let value = self.coerce_int32_runtime(value, realm, strict)?;
+                        Ok(JsValue::Number((!value) as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Typeof => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -740,31 +848,69 @@ impl Vm {
                         .push(JsValue::String(self.typeof_value(&value).to_string()));
                 }
                 Opcode::Eq => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    self.stack.push(JsValue::Bool(left == right));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let equal = self.abstract_equality_compare(left, right, realm, strict)?;
+                        Ok(JsValue::Bool(equal))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::Ne => {
-                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    self.stack.push(JsValue::Bool(left != right));
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let equal = self.abstract_equality_compare(left, right, realm, strict)?;
+                        Ok(JsValue::Bool(!equal))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
-                Opcode::Lt => {
-                    let result = self.eval_numeric_compare(|lhs, rhs| lhs < rhs)?;
-                    self.stack.push(JsValue::Bool(result));
-                }
-                Opcode::Le => {
-                    let result = self.eval_numeric_compare(|lhs, rhs| lhs <= rhs)?;
-                    self.stack.push(JsValue::Bool(result));
-                }
-                Opcode::Gt => {
-                    let result = self.eval_numeric_compare(|lhs, rhs| lhs > rhs)?;
-                    self.stack.push(JsValue::Bool(result));
-                }
-                Opcode::Ge => {
-                    let result = self.eval_numeric_compare(|lhs, rhs| lhs >= rhs)?;
-                    self.stack.push(JsValue::Bool(result));
-                }
+                Opcode::Lt => match self.eval_relational_operator(realm, strict, Opcode::Lt) {
+                    Ok(result) => self.stack.push(JsValue::Bool(result)),
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                },
+                Opcode::Le => match self.eval_relational_operator(realm, strict, Opcode::Le) {
+                    Ok(result) => self.stack.push(JsValue::Bool(result)),
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                },
+                Opcode::Gt => match self.eval_relational_operator(realm, strict, Opcode::Gt) {
+                    Ok(result) => self.stack.push(JsValue::Bool(result)),
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                },
+                Opcode::Ge => match self.eval_relational_operator(realm, strict, Opcode::Ge) {
+                    Ok(result) => self.stack.push(JsValue::Bool(result)),
+                    Err(err) => {
+                        let target = self.route_runtime_error_to_handler(err, code.len())?;
+                        pc = target;
+                        continue;
+                    }
+                },
                 Opcode::In => {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -3787,16 +3933,186 @@ impl Vm {
         })
     }
 
-    fn eval_numeric_binary(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<f64, VmError> {
-        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        Ok(op(self.to_number(&left), self.to_number(&right)))
+    fn primitive_for_numeric(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        match value {
+            JsValue::Object(object_id) => {
+                if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                    return Ok(boxed);
+                }
+                self.ordinary_to_primitive_for_add(object_id, false, realm, caller_strict)
+            }
+            JsValue::Function(closure_id) => {
+                self.ordinary_to_primitive_for_function(closure_id, false, realm, caller_strict)
+            }
+            other => Ok(other),
+        }
     }
 
-    fn eval_numeric_compare(&mut self, op: impl FnOnce(f64, f64) -> bool) -> Result<bool, VmError> {
+    fn coerce_number_runtime(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<f64, VmError> {
+        let primitive = self.primitive_for_numeric(value, realm, caller_strict)?;
+        Ok(self.to_number(&primitive))
+    }
+
+    fn coerce_uint32_runtime(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<u32, VmError> {
+        let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+        Ok(Self::to_uint32_number(number))
+    }
+
+    fn coerce_int32_runtime(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<i32, VmError> {
+        let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+        Ok(Self::to_int32_number(number))
+    }
+
+    fn eval_numeric_binary(
+        &mut self,
+        realm: &Realm,
+        caller_strict: bool,
+        op: impl FnOnce(f64, f64) -> f64,
+    ) -> Result<f64, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        Ok(op(self.to_number(&left), self.to_number(&right)))
+        let left = self.coerce_number_runtime(left, realm, caller_strict)?;
+        let right = self.coerce_number_runtime(right, realm, caller_strict)?;
+        Ok(op(left, right))
+    }
+
+    fn abstract_relational_compare(
+        &mut self,
+        left: JsValue,
+        right: JsValue,
+        left_first: bool,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Option<bool>, VmError> {
+        let (left_primitive, right_primitive) = if left_first {
+            (
+                self.primitive_for_numeric(left, realm, caller_strict)?,
+                self.primitive_for_numeric(right, realm, caller_strict)?,
+            )
+        } else {
+            let right_primitive = self.primitive_for_numeric(right, realm, caller_strict)?;
+            let left_primitive = self.primitive_for_numeric(left, realm, caller_strict)?;
+            (left_primitive, right_primitive)
+        };
+
+        if let (JsValue::String(left_string), JsValue::String(right_string)) =
+            (&left_primitive, &right_primitive)
+        {
+            return Ok(Some(left_string < right_string));
+        }
+
+        let left_number = self.to_number(&left_primitive);
+        let right_number = self.to_number(&right_primitive);
+        if left_number.is_nan() || right_number.is_nan() {
+            return Ok(None);
+        }
+        Ok(Some(left_number < right_number))
+    }
+
+    fn eval_relational_operator(
+        &mut self,
+        realm: &Realm,
+        caller_strict: bool,
+        op: Opcode,
+    ) -> Result<bool, VmError> {
+        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+        match op {
+            Opcode::Lt => Ok(self
+                .abstract_relational_compare(left, right, true, realm, caller_strict)?
+                .unwrap_or(false)),
+            Opcode::Gt => Ok(self
+                .abstract_relational_compare(right, left, false, realm, caller_strict)?
+                .unwrap_or(false)),
+            Opcode::Le => {
+                let compared =
+                    self.abstract_relational_compare(right, left, false, realm, caller_strict)?;
+                Ok(compared.is_some_and(|result| !result))
+            }
+            Opcode::Ge => {
+                let compared =
+                    self.abstract_relational_compare(left, right, true, realm, caller_strict)?;
+                Ok(compared.is_some_and(|result| !result))
+            }
+            _ => unreachable!("invalid relational opcode"),
+        }
+    }
+
+    fn strict_equality_compare(&self, left: &JsValue, right: &JsValue) -> bool {
+        match (left, right) {
+            (JsValue::Number(lhs), JsValue::Number(rhs)) => {
+                !lhs.is_nan() && !rhs.is_nan() && lhs == rhs
+            }
+            _ => left == right,
+        }
+    }
+
+    fn abstract_equality_compare(
+        &mut self,
+        left: JsValue,
+        right: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<bool, VmError> {
+        if std::mem::discriminant(&left) == std::mem::discriminant(&right) {
+            return Ok(self.strict_equality_compare(&left, &right));
+        }
+
+        match (left, right) {
+            (JsValue::Null, JsValue::Undefined) | (JsValue::Undefined, JsValue::Null) => Ok(true),
+            (JsValue::Number(number), JsValue::String(string)) => {
+                let rhs = self.to_number(&JsValue::String(string));
+                Ok(!number.is_nan() && !rhs.is_nan() && number == rhs)
+            }
+            (JsValue::String(string), JsValue::Number(number)) => {
+                let lhs = self.to_number(&JsValue::String(string));
+                Ok(!lhs.is_nan() && !number.is_nan() && lhs == number)
+            }
+            (JsValue::Bool(boolean), other) => {
+                let number = if boolean { 1.0 } else { 0.0 };
+                self.abstract_equality_compare(JsValue::Number(number), other, realm, caller_strict)
+            }
+            (other, JsValue::Bool(boolean)) => {
+                let number = if boolean { 1.0 } else { 0.0 };
+                self.abstract_equality_compare(other, JsValue::Number(number), realm, caller_strict)
+            }
+            (
+                left @ (JsValue::Object(_) | JsValue::Function(_)),
+                right @ (JsValue::String(_) | JsValue::Number(_)),
+            ) => {
+                let primitive = self.primitive_for_numeric(left, realm, caller_strict)?;
+                self.abstract_equality_compare(primitive, right, realm, caller_strict)
+            }
+            (
+                left @ (JsValue::String(_) | JsValue::Number(_)),
+                right @ (JsValue::Object(_) | JsValue::Function(_)),
+            ) => {
+                let primitive = self.primitive_for_numeric(right, realm, caller_strict)?;
+                self.abstract_equality_compare(left, primitive, realm, caller_strict)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn coerce_to_string(&self, value: &JsValue) -> String {
@@ -3927,8 +4243,7 @@ impl Vm {
         }
     }
 
-    fn to_uint32(&self, value: &JsValue) -> u32 {
-        let number = self.to_number(value);
+    fn to_uint32_number(number: f64) -> u32 {
         if !number.is_finite() || number == 0.0 {
             return 0;
         }
@@ -3940,8 +4255,8 @@ impl Vm {
         int as u32
     }
 
-    fn to_int32(&self, value: &JsValue) -> i32 {
-        let uint = self.to_uint32(value);
+    fn to_int32_number(number: f64) -> i32 {
+        let uint = Self::to_uint32_number(number);
         if uint >= 0x8000_0000 {
             (uint as i64 - 0x1_0000_0000_i64) as i32
         } else {
