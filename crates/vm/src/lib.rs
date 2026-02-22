@@ -41,6 +41,7 @@ struct JsObject {
     setters: BTreeMap<String, JsValue>,
     property_attributes: BTreeMap<String, PropertyAttributes>,
     argument_mappings: BTreeMap<String, BindingId>,
+    prototype: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1209,6 +1210,14 @@ impl Vm {
                     return Err(VmError::NotCallable);
                 }
                 let constructed = self.create_object_value();
+                if let (JsValue::Object(instance_id), JsValue::Object(prototype_id)) = (
+                    constructed.clone(),
+                    self.get_or_create_function_prototype_property(closure_id)?,
+                ) {
+                    if let Some(instance) = self.objects.get_mut(&instance_id) {
+                        instance.prototype = Some(prototype_id);
+                    }
+                }
                 self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
@@ -1278,6 +1287,14 @@ impl Vm {
                     return Err(VmError::NotCallable);
                 }
                 let constructed = self.create_object_value();
+                if let (JsValue::Object(instance_id), JsValue::Object(prototype_id)) = (
+                    constructed.clone(),
+                    self.get_or_create_function_prototype_property(closure_id)?,
+                ) {
+                    if let Some(instance) = self.objects.get_mut(&instance_id) {
+                        instance.prototype = Some(prototype_id);
+                    }
+                }
                 self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
@@ -3030,14 +3047,15 @@ impl Vm {
     ) -> Result<bool, VmError> {
         match receiver {
             JsValue::Object(object_id) => {
+                let has_property = self.object_has_property_in_chain(*object_id, property)?;
+                if has_property {
+                    return Ok(true);
+                }
                 let object = self
                     .objects
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
-                Ok(object.properties.contains_key(property)
-                    || object.getters.contains_key(property)
-                    || object.setters.contains_key(property)
-                    || matches!(property, "hasOwnProperty" | "toString")
+                Ok(matches!(property, "hasOwnProperty" | "toString")
                     || (property == "push" && object.properties.contains_key("length"))
                     || (property == "forEach" && object.properties.contains_key("length")))
             }
@@ -3074,6 +3092,25 @@ impl Vm {
             }
             JsValue::Undefined | JsValue::Null | JsValue::Number(_) | JsValue::Bool(_) => Ok(false),
         }
+    }
+
+    fn object_has_property_in_chain(
+        &self,
+        object_id: ObjectId,
+        property: &str,
+    ) -> Result<bool, VmError> {
+        let mut current = Some(object_id);
+        while let Some(id) = current {
+            let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
+            if object.properties.contains_key(property)
+                || object.getters.contains_key(property)
+                || object.setters.contains_key(property)
+            {
+                return Ok(true);
+            }
+            current = object.prototype;
+        }
+        Ok(false)
     }
 
     fn get_property_from_receiver(
@@ -3741,22 +3778,6 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
         }
-        let getter = self
-            .objects
-            .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?
-            .getters
-            .get(property)
-            .cloned();
-        if let Some(getter) = getter {
-            return self.execute_callable(
-                getter,
-                Some(JsValue::Object(object_id)),
-                Vec::new(),
-                realm,
-                false,
-            );
-        }
         let mapped_binding = self
             .objects
             .get(&object_id)
@@ -3766,12 +3787,29 @@ impl Vm {
                 return Ok(binding.value.clone());
             }
         }
-        let object = self
-            .objects
-            .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
-        if let Some(value) = object.properties.get(property).cloned() {
-            return Ok(value);
+        let mut current_id = Some(object_id);
+        while let Some(id) = current_id {
+            let (getter, value, next) = {
+                let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
+                (
+                    object.getters.get(property).cloned(),
+                    object.properties.get(property).cloned(),
+                    object.prototype,
+                )
+            };
+            if let Some(getter) = getter {
+                return self.execute_callable(
+                    getter,
+                    Some(JsValue::Object(object_id)),
+                    Vec::new(),
+                    realm,
+                    false,
+                );
+            }
+            if let Some(value) = value {
+                return Ok(value);
+            }
+            current_id = next;
         }
         if property == "toString" {
             return Ok(self.shared_object_to_string_function());
@@ -3786,21 +3824,26 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let mapped_binding_id = self
-            .objects
-            .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?
-            .argument_mappings
-            .get(&property)
-            .copied();
-        let setter = self
-            .objects
-            .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?
-            .setters
-            .get(&property)
-            .cloned();
-        if let Some(setter) = setter {
+        let (mapped_binding_id, own_setter, own_getter_exists, own_data_writable, own_prototype) = {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            (
+                object.argument_mappings.get(&property).copied(),
+                object.setters.get(&property).cloned(),
+                object.getters.contains_key(&property),
+                object.properties.get(&property).map(|_| {
+                    object
+                        .property_attributes
+                        .get(&property)
+                        .is_none_or(|attributes| attributes.writable)
+                }),
+                object.prototype,
+            )
+        };
+
+        if let Some(setter) = own_setter {
             let _ = self.execute_callable(
                 setter,
                 Some(JsValue::Object(object_id)),
@@ -3810,16 +3853,57 @@ impl Vm {
             )?;
             return Ok(value);
         }
-        if self
-            .objects
-            .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?
-            .property_attributes
-            .get(&property)
-            .is_some_and(|attributes| !attributes.writable)
-        {
+        if own_getter_exists {
             return Ok(value);
         }
+        if own_data_writable == Some(false) {
+            return Ok(value);
+        }
+
+        if own_data_writable.is_none() {
+            let mut current = own_prototype;
+            while let Some(proto_id) = current {
+                let (setter, getter_exists, data_writable, next) = {
+                    let object = self
+                        .objects
+                        .get(&proto_id)
+                        .ok_or(VmError::UnknownObject(proto_id))?;
+                    (
+                        object.setters.get(&property).cloned(),
+                        object.getters.contains_key(&property),
+                        object.properties.get(&property).map(|_| {
+                            object
+                                .property_attributes
+                                .get(&property)
+                                .is_none_or(|attributes| attributes.writable)
+                        }),
+                        object.prototype,
+                    )
+                };
+
+                if let Some(setter) = setter {
+                    let _ = self.execute_callable(
+                        setter,
+                        Some(JsValue::Object(object_id)),
+                        vec![value.clone()],
+                        realm,
+                        false,
+                    )?;
+                    return Ok(value);
+                }
+                if getter_exists {
+                    return Ok(value);
+                }
+                if data_writable == Some(false) {
+                    return Ok(value);
+                }
+                if data_writable == Some(true) {
+                    break;
+                }
+                current = next;
+            }
+        }
+
         if let Some(binding_id) = mapped_binding_id {
             if let Some(binding) = self.bindings.get_mut(&binding_id) {
                 binding.value = value.clone();

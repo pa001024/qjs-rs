@@ -500,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn assignment_respects_non_writable_property_on_prototype_baseline() {
+        let result = run_script(
+            "function foo() {}; \
+             Object.defineProperty(foo.prototype, 'bar', { value: 'unwritable' }); \
+             var o = new foo(); \
+             o.bar = 'overridden'; \
+             !o.hasOwnProperty('bar') && o.bar === 'unwritable';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),

@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4240, failed=760
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4243, failed=757
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -106,4 +106,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - ast/parser/bytecode 新增 `Sequence`（逗号表达式）语义链路，修复此前括号内逗号表达式只保留末项、前项副作用丢失的问题；`expressions/assignment` 与 `expressions/compound-assignment` 的 `A6` PutValue/eval 失败簇清空，`language` 基线提升至 `4234/766`。
 - VM 新增最小 `Math` 全局对象按需注入（`Math` 标识符解析 + `typeof Math` 路径），补齐只读常量（`E/PI/LN10/LN2/LOG10E/LOG2E/SQRT1_2/SQRT2`）的属性特性，修复 `S8.12.4_A1` 与相关 `Math` 访问失败，`language` 基线提升至 `4237/763`。
 - VM 修正非严格模式下“未解析标识符赋值”语义：`PutValue` 改为在全局对象上创建默认属性（`writable/enumerable/configurable = true`），不再仅创建词法绑定；修复 `11.13.1-4-1.js` 与相关 descriptor/delete 语义偏差，`language` 基线提升至 `4240/760`。
+- VM 为普通对象补齐最小 `[[Prototype]]` 链路（构造实例时挂接 `f.prototype`，对象属性 `Get/Has/Set` 按链路查找），并在赋值时处理“原型上只读数据属性/无 setter accessor 不可写”场景，修复 `8.14.4-8-b_1.js` 等原型写入语义偏差；`language` 基线提升至 `4243/757`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
