@@ -129,6 +129,10 @@ mod tests {
             Ok(JsValue::String("function".to_string()))
         );
         assert_eq!(
+            run_expression("typeof Math"),
+            Ok(JsValue::String("object".to_string()))
+        );
+        assert_eq!(
             run_expression("typeof isNaN"),
             Ok(JsValue::String("function".to_string()))
         );
@@ -152,6 +156,12 @@ mod tests {
             run_script("globalThis === this;", &[]),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn math_constant_is_read_only_baseline() {
+        let result = run_script("var e = Math.E; Math.E = 1; Math.E === e;", &[]);
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

@@ -276,6 +276,8 @@ impl Vm {
                         Ok(JsValue::Number(f64::INFINITY))
                     } else if name == "globalThis" {
                         Ok(self.global_this_value())
+                    } else if name == "Math" {
+                        self.math_object_value()
                     } else if name == "this" {
                         Ok(realm
                             .resolve_identifier(name)
@@ -934,6 +936,8 @@ impl Vm {
                         JsValue::Number(f64::INFINITY)
                     } else if name == "globalThis" {
                         self.global_this_value()
+                    } else if name == "Math" {
+                        self.math_object_value()?
                     } else {
                         realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
                     };
@@ -3277,6 +3281,69 @@ impl Vm {
         self.global_object_id
             .map(JsValue::Object)
             .unwrap_or(JsValue::Undefined)
+    }
+
+    fn math_object_value(&mut self) -> Result<JsValue, VmError> {
+        let global_object_id = self.global_object_id.ok_or(VmError::ScopeUnderflow)?;
+        if let Some(existing) = self
+            .objects
+            .get(&global_object_id)
+            .and_then(|object| object.properties.get("Math"))
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let math = self.create_object_value();
+        let math_id = match math {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        {
+            let math_object = self
+                .objects
+                .get_mut(&math_id)
+                .ok_or(VmError::UnknownObject(math_id))?;
+            for (name, value) in [
+                ("E", std::f64::consts::E),
+                ("PI", std::f64::consts::PI),
+                ("LN10", std::f64::consts::LN_10),
+                ("LN2", std::f64::consts::LN_2),
+                ("LOG10E", std::f64::consts::LOG10_E),
+                ("LOG2E", std::f64::consts::LOG2_E),
+                ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+                ("SQRT2", std::f64::consts::SQRT_2),
+            ] {
+                math_object
+                    .properties
+                    .insert(name.to_string(), JsValue::Number(value));
+                math_object.property_attributes.insert(
+                    name.to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+            }
+        }
+
+        let global_object = self
+            .objects
+            .get_mut(&global_object_id)
+            .ok_or(VmError::UnknownObject(global_object_id))?;
+        global_object
+            .properties
+            .insert("Math".to_string(), JsValue::Object(math_id));
+        global_object.property_attributes.insert(
+            "Math".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(math_id))
     }
 
     fn object_prototype_value(&self) -> JsValue {
