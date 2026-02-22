@@ -385,6 +385,28 @@ impl Vm {
                         .or_insert_with(PropertyAttributes::default);
                     self.stack.push(JsValue::Object(object_id));
                 }
+                Opcode::DefineArrayLength => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    object.properties.insert("length".to_string(), value);
+                    object.property_attributes.insert(
+                        "length".to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: false,
+                        },
+                    );
+                    self.stack.push(JsValue::Object(object_id));
+                }
                 Opcode::DefineGetter(name) => {
                     let getter = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;

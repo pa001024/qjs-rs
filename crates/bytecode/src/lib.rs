@@ -28,6 +28,7 @@ pub enum Opcode {
     GetProperty(String),
     GetPropertyByValue,
     DefineProperty(String),
+    DefineArrayLength,
     DefineGetter(String),
     DefineSetter(String),
     DefineGetterByValue,
@@ -1139,7 +1140,7 @@ impl Compiler {
                     code.push(Opcode::DefineProperty(index.to_string()));
                 }
                 code.push(Opcode::LoadNumber(elements.len() as f64));
-                code.push(Opcode::DefineProperty("length".to_string()));
+                code.push(Opcode::DefineArrayLength);
             }
             Expr::Unary { op, expr } => {
                 if *op == UnaryOp::Void {
@@ -1560,7 +1561,7 @@ mod tests {
                 Opcode::LoadNumber(2.0),
                 Opcode::DefineProperty("1".to_string()),
                 Opcode::LoadNumber(2.0),
-                Opcode::DefineProperty("length".to_string()),
+                Opcode::DefineArrayLength,
                 Opcode::Halt,
             ],
             functions: vec![],
