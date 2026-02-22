@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3997, failed=1003
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4001, failed=999
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -95,4 +95,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - runtime/builtins/vm/bytecode 新增 `Array` baseline（全局构造器、`CreateArray` 指令、数组字面量默认 `constructor` 绑定）并补齐 `Number.MAX_VALUE` / `Number.MIN_VALUE`，`language` 基线由 `3938/1062` 提升至 `3983/1017`。
 - ast/parser/bytecode 新增数组空位（elision）语法链路（如 `[,]`、`[1,,3,]`）并按索引稀疏编译，`language` 基线进一步提升至 `3989/1011`。
 - parser/bytecode/vm 新增数组字面量 `...spread` 执行链路（含与 elision 混用），`expressions/array/spread-*` parse 失败簇清理，`language` 基线进一步提升至 `3997/1003`。
+- VM 为用户函数补齐最小“可扩展属性”存储（支持 `f.valueOf = ...` 这类覆盖），并在 `+` 运算里将函数对象接入 `ToPrimitive` 路径；同时将 `Opcode::Add` 的运行时异常接入 handler 路由，修复一批 `addition`/`try-catch` 相关误报，`language` 基线提升至 `4001/999`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
