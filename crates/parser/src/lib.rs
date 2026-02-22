@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
-    ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -62,8 +62,8 @@ fn validate_statement_list_strict_mode(
 fn statement_list_has_use_strict_directive(statements: &[Stmt]) -> bool {
     for statement in statements {
         match statement {
-            Stmt::Expression(Expr::String(value)) => {
-                if value == "use strict" {
+            Stmt::Expression(Expr::String(StringLiteral { value, has_escape })) => {
+                if value == "use strict" && !has_escape {
                     return true;
                 }
             }
@@ -1059,7 +1059,13 @@ impl Parser {
     }
 
     fn prepend_marker(&self, body: &mut Vec<Stmt>, marker: &str) {
-        body.insert(0, Stmt::Expression(Expr::String(marker.to_string())));
+        body.insert(
+            0,
+            Stmt::Expression(Expr::String(StringLiteral {
+                value: marker.to_string(),
+                has_escape: false,
+            })),
+        );
     }
 
     fn prepend_non_simple_params_marker(&self, body: &mut Vec<Stmt>) {
@@ -2532,9 +2538,10 @@ impl Parser {
 
         for method in class_tail.methods {
             if method.is_static && self.class_method_key_is_prototype(&method.key) {
-                body.push(Stmt::Throw(Expr::String(
-                    "TypeError: static class member named prototype".to_string(),
-                )));
+                body.push(Stmt::Throw(Expr::String(StringLiteral {
+                    value: "TypeError: static class member named prototype".to_string(),
+                    has_escape: false,
+                })));
                 continue;
             }
 
@@ -2564,7 +2571,10 @@ impl Parser {
                 }
                 ClassElementKind::Getter | ClassElementKind::Setter => {
                     let key_expr = match method.key {
-                        ClassMethodKey::Static(name) => Expr::String(name),
+                        ClassMethodKey::Static(name) => Expr::String(StringLiteral {
+                            value: name,
+                            has_escape: false,
+                        }),
                         ClassMethodKey::Computed(key) => key,
                     };
                     let mut descriptor_properties = vec![
@@ -2622,7 +2632,10 @@ impl Parser {
     fn class_method_key_is_prototype(&self, key: &ClassMethodKey) -> bool {
         match key {
             ClassMethodKey::Static(name) => name == "prototype",
-            ClassMethodKey::Computed(Expr::String(name)) => name == "prototype",
+            ClassMethodKey::Computed(Expr::String(StringLiteral {
+                value: name,
+                has_escape: false,
+            })) => name == "prototype",
             _ => false,
         }
     }
@@ -2671,8 +2684,13 @@ impl Parser {
                 Ok(Expr::Number(value))
             }
             TokenKind::String(value) => {
+                let has_escape = self
+                    .source
+                    .get(token.span.start..token.span.end)
+                    .map(|slice| slice.contains('\\'))
+                    .unwrap_or(false);
                 self.advance();
-                Ok(Expr::String(value))
+                Ok(Expr::String(StringLiteral { value, has_escape }))
             }
             TokenKind::Identifier(name) => {
                 if self.identifier_token_matches_keyword(&token, "async")
@@ -3335,7 +3353,8 @@ mod tests {
     use super::{parse_expression, parse_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-        ObjectProperty, ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+        ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
+        VariableDeclaration,
     };
 
     #[test]
@@ -3497,7 +3516,10 @@ mod tests {
             name: None,
             params: vec![],
             body: vec![
-                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_arrow_function__$".to_string(),
+                    has_escape: false,
+                })),
                 Stmt::Return(Some(Expr::Number(1.0))),
             ],
         };
@@ -3511,7 +3533,10 @@ mod tests {
             name: None,
             params: vec![Identifier("x".to_string())],
             body: vec![
-                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_arrow_function__$".to_string(),
+                    has_escape: false,
+                })),
                 Stmt::Return(Some(Expr::Binary {
                     op: BinaryOp::Add,
                     left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
@@ -3533,7 +3558,10 @@ mod tests {
                 Identifier("arguments".to_string()),
             ],
             body: vec![
-                Stmt::Expression(Expr::String("$__qjs_arrow_function__$".to_string())),
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_arrow_function__$".to_string(),
+                    has_escape: false,
+                })),
                 Stmt::Return(Some(Expr::Identifier(Identifier("arguments".to_string())))),
             ],
         };
@@ -3697,7 +3725,10 @@ mod tests {
         );
         assert_eq!(
             parse_expression("'ok'").expect("parser should succeed"),
-            Expr::String("ok".to_string())
+            Expr::String(StringLiteral {
+                value: "ok".to_string(),
+                has_escape: false,
+            })
         );
         assert_eq!(
             parse_expression("this").expect("parser should succeed"),
@@ -3740,7 +3771,10 @@ mod tests {
         let parsed = parse_expression("'arguments' in this").expect("parser should succeed");
         let expected = Expr::Binary {
             op: BinaryOp::In,
-            left: Box::new(Expr::String("arguments".to_string())),
+            left: Box::new(Expr::String(StringLiteral {
+                value: "arguments".to_string(),
+                has_escape: false,
+            })),
             right: Box::new(Expr::This),
         };
         assert_eq!(parsed, expected);

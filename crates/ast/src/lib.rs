@@ -3,6 +3,12 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identifier(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringLiteral {
+    pub value: String,
+    pub has_escape: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
@@ -46,7 +52,7 @@ pub enum Expr {
     Number(f64),
     Bool(bool),
     Null,
-    String(String),
+    String(StringLiteral),
     RegexLiteral {
         pattern: String,
         flags: String,

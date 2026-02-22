@@ -813,6 +813,7 @@ impl Vm {
                     }
                     return Ok(ExecutionSignal::Return);
                 }
+                Opcode::MarkStrict => {}
                 Opcode::Dup => {
                     let value = self.stack.last().cloned().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(value);
@@ -2273,23 +2274,23 @@ impl Vm {
     }
 
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
-        let mut cursor = Self::skip_prologue_prefix(code);
-        while cursor + 1 < code.len() {
-            match (&code[cursor], &code[cursor + 1]) {
-                (Opcode::LoadString(value), Opcode::Pop) => {
-                    if value == "use strict" {
-                        return true;
-                    }
-                    cursor += 2;
-                }
-                _ => break,
-            }
+        let cursor = Self::skip_prologue_prefix(code);
+        if matches!(code.get(cursor), Some(Opcode::MarkStrict)) {
+            return true;
+        }
+        if cursor != 0 && matches!(code.first(), Some(Opcode::MarkStrict)) {
+            return true;
         }
         false
     }
 
     fn code_has_marker(&self, code: &[Opcode], marker: &str) -> bool {
         let mut cursor = Self::skip_prologue_prefix(code);
+        if matches!(code.get(cursor), Some(Opcode::MarkStrict)) {
+            cursor += 1;
+        } else if cursor != 0 && matches!(code.first(), Some(Opcode::MarkStrict)) {
+            cursor = 1;
+        }
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {

@@ -2,7 +2,7 @@
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-    ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, VariableDeclaration,
 };
 use std::collections::BTreeSet;
 
@@ -78,6 +78,7 @@ pub enum Opcode {
     CallWithSpread(Vec<bool>),
     Construct(usize),
     ConstructWithSpread(Vec<bool>),
+    MarkStrict,
     Return,
     Dup,
     Pop,
@@ -170,6 +171,9 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         preserve_value: bool,
     ) -> bool {
+        if self.statement_list_has_use_strict_directive(statements) {
+            code.push(Opcode::MarkStrict);
+        }
         if self.scope_depth == 0 {
             let mut hoisted_var_names = BTreeSet::new();
             self.collect_hoisted_var_names(statements, &mut hoisted_var_names);
@@ -217,6 +221,21 @@ impl Compiler {
         }
 
         produced_value
+    }
+
+    fn statement_list_has_use_strict_directive(&self, statements: &[Stmt]) -> bool {
+        for statement in statements {
+            match statement {
+                Stmt::Expression(Expr::String(StringLiteral { value, has_escape })) => {
+                    if value == "use strict" && !has_escape {
+                        return true;
+                    }
+                }
+                Stmt::Empty => break,
+                _ => break,
+            }
+        }
+        false
     }
 
     fn collect_hoisted_var_names(&self, statements: &[Stmt], names: &mut BTreeSet<String>) {
@@ -1080,7 +1099,9 @@ impl Compiler {
             Expr::Number(value) => code.push(Opcode::LoadNumber(*value)),
             Expr::Bool(value) => code.push(Opcode::LoadBool(*value)),
             Expr::Null => code.push(Opcode::LoadNull),
-            Expr::String(value) => code.push(Opcode::LoadString(value.clone())),
+            Expr::String(StringLiteral { value, .. }) => {
+                code.push(Opcode::LoadString(value.clone()))
+            }
             Expr::RegexLiteral { pattern, flags } => {
                 code.push(Opcode::CreateObject);
                 code.push(Opcode::LoadString(pattern.clone()));
@@ -1347,7 +1368,8 @@ mod tests {
     use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-        ObjectProperty, ObjectPropertyKey, Script, Stmt, SwitchCase, UnaryOp, VariableDeclaration,
+        ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
+        VariableDeclaration,
     };
 
     #[test]
@@ -1398,7 +1420,10 @@ mod tests {
             }
         );
 
-        let string_chunk = compile_expression(&Expr::String("ok".to_string()));
+        let string_chunk = compile_expression(&Expr::String(StringLiteral {
+            value: "ok".to_string(),
+            has_escape: false,
+        }));
         assert_eq!(
             string_chunk,
             Chunk {
@@ -2298,7 +2323,10 @@ mod tests {
     fn compiles_in_operator() {
         let expr = Expr::Binary {
             op: BinaryOp::In,
-            left: Box::new(Expr::String("x".to_string())),
+            left: Box::new(Expr::String(StringLiteral {
+                value: "x".to_string(),
+                has_escape: false,
+            })),
             right: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
         };
         let chunk = compile_expression(&expr);
