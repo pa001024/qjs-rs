@@ -315,6 +315,9 @@ impl Vm {
                         }
                         binding.value = value.clone();
                     } else {
+                        if strict {
+                            return Err(VmError::UnknownIdentifier(name.clone()));
+                        }
                         let global_scope = self
                             .scopes
                             .first()
@@ -3165,6 +3168,21 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn strict_assignment_to_undeclared_name_throws_reference_error() {
+        let chunk = empty_chunk(vec![
+            Opcode::MarkStrict,
+            Opcode::LoadNumber(1.0),
+            Opcode::StoreVariable("x".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.execute(&chunk),
+            Err(VmError::UnknownIdentifier("x".to_string()))
+        );
     }
 
     #[test]
