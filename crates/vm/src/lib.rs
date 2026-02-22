@@ -86,6 +86,7 @@ enum HostFunction {
     StringReplace {
         receiver: String,
     },
+    ArrayPush(ObjectId),
     ObjectHasOwnProperty(ObjectId),
     AssertSameValue,
     AssertNotSameValue,
@@ -797,6 +798,7 @@ impl Vm {
                 Opcode::Pop => {
                     self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 }
+                Opcode::Nop => {}
                 Opcode::Halt => return Ok(ExecutionSignal::Halt),
             }
 
@@ -1277,6 +1279,40 @@ impl Vm {
                     Ok(JsValue::String(receiver))
                 }
             }
+            HostFunction::ArrayPush(object_id) => {
+                let mut length = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get("length"))
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    .max(0.0) as usize;
+                let object = self
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                for arg in args {
+                    let key = length.to_string();
+                    object.properties.insert(key.clone(), arg);
+                    object
+                        .property_attributes
+                        .entry(key)
+                        .or_insert_with(PropertyAttributes::default);
+                    length += 1;
+                }
+                object
+                    .properties
+                    .insert("length".to_string(), JsValue::Number(length as f64));
+                object
+                    .property_attributes
+                    .entry("length".to_string())
+                    .or_insert(PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: false,
+                    });
+                Ok(JsValue::Number(length as f64))
+            }
             HostFunction::ObjectHasOwnProperty(object_id) => {
                 let key = args
                     .first()
@@ -1411,6 +1447,7 @@ impl Vm {
             },
             NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
+            NativeFunction::ObjectKeys => self.execute_object_keys(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
             }
@@ -1843,6 +1880,89 @@ impl Vm {
         Ok(JsValue::Object(target_id))
     }
 
+    fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target_id = match args.first() {
+            Some(JsValue::Object(id)) => *id,
+            _ => return Err(VmError::TypeError("Object.keys target must be object")),
+        };
+
+        let object = self
+            .objects
+            .get(&target_id)
+            .ok_or(VmError::UnknownObject(target_id))?;
+
+        let mut keys = Vec::new();
+        for key in object.properties.keys() {
+            let enumerable = object
+                .property_attributes
+                .get(key)
+                .map(|attrs| attrs.enumerable)
+                .unwrap_or(true);
+            if enumerable {
+                keys.push(key.clone());
+            }
+        }
+        for key in object.getters.keys() {
+            if object.properties.contains_key(key) {
+                continue;
+            }
+            let enumerable = object
+                .property_attributes
+                .get(key)
+                .map(|attrs| attrs.enumerable)
+                .unwrap_or(true);
+            if enumerable {
+                keys.push(key.clone());
+            }
+        }
+        for key in object.setters.keys() {
+            if object.properties.contains_key(key) || object.getters.contains_key(key) {
+                continue;
+            }
+            let enumerable = object
+                .property_attributes
+                .get(key)
+                .map(|attrs| attrs.enumerable)
+                .unwrap_or(true);
+            if enumerable {
+                keys.push(key.clone());
+            }
+        }
+
+        let array = self.create_object_value();
+        let array_id = match array {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let array_object = self
+            .objects
+            .get_mut(&array_id)
+            .ok_or(VmError::UnknownObject(array_id))?;
+        for (index, key) in keys.iter().enumerate() {
+            let index_key = index.to_string();
+            array_object
+                .properties
+                .insert(index_key.clone(), JsValue::String(key.clone()));
+            array_object
+                .property_attributes
+                .entry(index_key)
+                .or_insert_with(PropertyAttributes::default);
+        }
+        array_object
+            .properties
+            .insert("length".to_string(), JsValue::Number(keys.len() as f64));
+        array_object.property_attributes.insert(
+            "length".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+
+        Ok(JsValue::Object(array_id))
+    }
+
     fn execute_object_get_own_property_descriptor(
         &mut self,
         args: &[JsValue],
@@ -2197,6 +2317,14 @@ impl Vm {
                 self.create_host_function_value(HostFunction::ObjectHasOwnProperty(object_id))
             );
         }
+        if property == "push"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
+        }
         let getter = self
             .objects
             .get(&object_id)
@@ -2496,6 +2624,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
+            }
+            (NativeFunction::ObjectConstructor, "keys") => {
+                JsValue::NativeFunction(NativeFunction::ObjectKeys)
             }
             (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)

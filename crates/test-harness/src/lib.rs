@@ -349,6 +349,32 @@ mod tests {
     }
 
     #[test]
+    fn supports_array_push_baseline() {
+        assert_eq!(
+            run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var a = [1]; var n = a.push(2, 3); n === 3 && a.length === 3 && a[2] === 3;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn supports_object_keys_baseline() {
+        assert_eq!(
+            run_script(
+                "var k = Object.keys({ x: 1, y: 2 }); k.length === 2 && k[0] === 'x' && k[1] === 'y';",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn supports_object_literal_accessor_this_binding() {
         assert_eq!(
             run_script("var o = { get foo() { return this; } }; o.foo === o;", &[]),

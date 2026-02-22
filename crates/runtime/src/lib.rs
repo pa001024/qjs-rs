@@ -7,6 +7,7 @@ pub enum NativeFunction {
     Eval,
     FunctionConstructor,
     ObjectConstructor,
+    ObjectKeys,
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetPrototypeOf,

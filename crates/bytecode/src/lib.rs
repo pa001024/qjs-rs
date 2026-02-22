@@ -80,6 +80,7 @@ pub enum Opcode {
     Return,
     Dup,
     Pop,
+    Nop,
     Halt,
 }
 
@@ -207,6 +208,7 @@ impl Compiler {
         let last_executable = executable_indexes.last().copied();
         for (index, stmt) in statements.iter().enumerate() {
             if matches!(stmt, Stmt::FunctionDeclaration(_)) {
+                code.push(Opcode::Nop);
                 continue;
             }
             let keep_value = preserve_value && Some(index) == last_executable;
@@ -305,6 +307,7 @@ impl Compiler {
                     code.push(Opcode::LoadUndefined);
                     true
                 } else {
+                    code.push(Opcode::Nop);
                     false
                 }
             }
@@ -325,12 +328,15 @@ impl Compiler {
                     return true;
                 }
                 if *kind == BindingKind::Var && self.scope_depth == 0 && initializer.is_none() {
+                    code.push(Opcode::Nop);
                     return false;
                 }
                 if *kind == BindingKind::Var && self.scope_depth > 0 {
                     if let Some(expr) = initializer {
                         self.compile_expr(expr, code);
                         code.push(Opcode::StoreVariable(binding_name.clone()));
+                    } else {
+                        code.push(Opcode::Nop);
                     }
                     return false;
                 }
@@ -1668,6 +1674,7 @@ mod tests {
                     name: "x".to_string(),
                     mutable: true,
                 },
+                Opcode::Nop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
@@ -1750,6 +1757,7 @@ mod tests {
                     name: "add".to_string(),
                     function_id: 0,
                 },
+                Opcode::Nop,
                 Opcode::LoadIdentifier("add".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::LoadNumber(2.0),
@@ -1801,6 +1809,7 @@ mod tests {
                 Opcode::LoadIdentifier("id".to_string()),
                 Opcode::LoadNumber(42.0),
                 Opcode::Call(1),
+                Opcode::Nop,
                 Opcode::Halt,
             ],
             functions: vec![CompiledFunction {

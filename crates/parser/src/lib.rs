@@ -67,7 +67,7 @@ fn statement_list_has_use_strict_directive(statements: &[Stmt]) -> bool {
                     return true;
                 }
             }
-            Stmt::Empty => {}
+            Stmt::Empty => break,
             _ => break,
         }
     }
