@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3627, failed=1373
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=3629, failed=1371
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -87,5 +87,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 补齐字符串行继续（`\\` + `LF/CRLF/U+2028/U+2029`）词法吞吐，并新增对应单测，修复 `directive-prologue/14.1-4-s.js` 等相关 parse 失败，`language` 基线提升至 `3624/1376`。
 - VM/runtime 新增 `Array.prototype.push` 与 `Object.keys` 最小可用链路；同时 bytecode/vm 增加 `Nop` 指令用于保留 directive-prologue 边界，parser 将 `Stmt::Empty` 视为 strict 指令中断点，修复一批 strict 误判路径，`language` 基线提升至 `3626/1374`。
 - bytecode/vm 为数组字面量引入 `DefineArrayLength` 指令，确保 `length` 属性默认不可枚举（`enumerable: false`），修复 `Object.keys([ ... ])` / 枚举相关偏差，`language` 基线提升至 `3627/1373`。
-- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3627/1373`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
+- ast/parser/bytecode/vm 增加字符串字面量 `has_escape` 元数据与 `MarkStrict` 字节码标记，VM strict 判定改为以编译期标记为准（不再仅靠 `"use strict"` 运行时字面量扫描），修复 directive-prologue 中带行继续字面量的 strict 误判，`language` 基线提升至 `3629/1371`。
+- 在当前 `language max-cases=5000` 口径下，执行规模提升至 `5000`，当前通过/失败为 `3629/1371`（主要剩余在块级作用域细节、`super` 语义、strict/directive-prologue 早期错误与部分内建缺失）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
