@@ -607,6 +607,24 @@ mod tests {
     }
 
     #[test]
+    fn for_in_includes_enumerable_prototype_properties_baseline() {
+        let result = run_script(
+            "function Factory() { this.prop = 1; this.hint = 'hinted'; } \
+             Factory.prototype = { feat: 2, hint: 'protohint' }; \
+             var instance = new Factory(); \
+             var sawProp = false; var sawFeat = false; var hintCount = 0; \
+             for (var key in instance) { \
+               if (key === 'prop' && instance[key] === 1) sawProp = true; \
+               if (key === 'feat' && instance[key] === 2) sawFeat = true; \
+               if (key === 'hint') hintCount = hintCount + 1; \
+             } \
+             sawProp && sawFeat && hintCount === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),

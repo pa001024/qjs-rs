@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4253, failed=747
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4266, failed=734
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -111,4 +111,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 扩展 `for-in` 降级覆盖到 `var/const/表达式左值` 头部形状，并支持 `for (... in a, b)` 右侧逗号表达式；`for-in` 在 `null/undefined` 右值下按基线语义走“空迭代不抛错”。同时 VM/runtime 增加 `Object.create` 与 `Object.setPrototypeOf` 最小内建，并将普通对象默认原型接到 `Object.prototype`；`language` 基线进一步提升至 `4249/751`。
 - parser 为 class 静态方法引入最小 `super` 绑定降级（方法体头部注入 `let super = Object.getPrototypeOf(C)`），修复 `super.x = rhs` / `super[expr] = rhs` 在 `[[Prototype]] = null` 场景下的 RHS 求值顺序偏差；`expressions/assignment` 子集由 `85/7` 提升至 `87/5`，`language` 基线进一步提升至 `4250/750`。
 - bytecode 为 `for` 语句补齐最小“迭代体完成值”聚合（非中断路径取最后一次 body completion），同时 VM 增加 `String.prototype.indexOf` host 函数基线；`for-in` 子集由 `40/21` 提升至 `49/12`，`language` 基线进一步提升至 `4253/747`。
+- parser/VM 为 `for-in` 引入内部键收集通道 `Object.__forInKeys`（覆盖原型链可枚举属性并做重复 key 去重），替换原先 `Object.keys` 的 own-only 策略；`for-in` 子集进一步提升到 `50/11`，`language` 基线进一步提升至 `4266/734`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

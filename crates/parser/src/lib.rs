@@ -1439,7 +1439,7 @@ impl Parser {
                     alternate: Box::new(Expr::Call {
                         callee: Box::new(Expr::Member {
                             object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                            property: "keys".to_string(),
+                            property: "__forInKeys".to_string(),
                         }),
                         arguments: vec![iterable_identifier],
                     }),

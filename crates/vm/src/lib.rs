@@ -6,7 +6,7 @@ use parser::{parse_expression, parse_script};
 use runtime::{JsValue, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
@@ -1976,6 +1976,7 @@ impl Vm {
             }
             NativeFunction::ObjectGetPrototypeOf => self.execute_object_get_prototype_of(&args),
             NativeFunction::ObjectIsExtensible => self.execute_object_is_extensible(&args),
+            NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
@@ -2646,7 +2647,70 @@ impl Vm {
                 keys.push(key.clone());
             }
         }
+        self.create_array_from_string_keys(keys)
+    }
 
+    fn execute_object_for_in_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let keys = match target {
+            JsValue::Object(object_id) => self.collect_for_in_keys(object_id)?,
+            JsValue::Null | JsValue::Undefined => Vec::new(),
+            _ => Vec::new(),
+        };
+        self.create_array_from_string_keys(keys)
+    }
+
+    fn collect_for_in_keys(&self, start_id: ObjectId) -> Result<Vec<String>, VmError> {
+        let mut keys = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut current = Some(start_id);
+        while let Some(object_id) = current {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            for key in object.properties.keys() {
+                let enumerable = object
+                    .property_attributes
+                    .get(key)
+                    .map(|attrs| attrs.enumerable)
+                    .unwrap_or(true);
+                if enumerable && seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+            for key in object.getters.keys() {
+                if object.properties.contains_key(key) {
+                    continue;
+                }
+                let enumerable = object
+                    .property_attributes
+                    .get(key)
+                    .map(|attrs| attrs.enumerable)
+                    .unwrap_or(true);
+                if enumerable && seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+            for key in object.setters.keys() {
+                if object.properties.contains_key(key) || object.getters.contains_key(key) {
+                    continue;
+                }
+                let enumerable = object
+                    .property_attributes
+                    .get(key)
+                    .map(|attrs| attrs.enumerable)
+                    .unwrap_or(true);
+                if enumerable && seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+            current = object.prototype;
+        }
+        Ok(keys)
+    }
+
+    fn create_array_from_string_keys(&mut self, keys: Vec<String>) -> Result<JsValue, VmError> {
         let array = self.create_object_value();
         let array_id = match array {
             JsValue::Object(id) => id,
@@ -2677,7 +2741,6 @@ impl Vm {
                 configurable: false,
             },
         );
-
         Ok(JsValue::Object(array_id))
     }
 
@@ -4151,6 +4214,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "keys")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
+                | (NativeFunction::ObjectConstructor, "__forInKeys")
                 | (
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
@@ -4531,6 +4595,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "setPrototypeOf") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSetPrototypeOf)
+            }
+            (NativeFunction::ObjectConstructor, "__forInKeys") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForInKeys)
             }
             (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)
