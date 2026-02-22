@@ -1302,8 +1302,15 @@ impl Parser {
         } else {
             Some(ForInitializer::Expression(self.parse_expression_no_in()?))
         };
-        if self.matches_keyword("in") || self.matches_keyword("of") {
-            let _ = self.parse_expression_inner()?;
+        let loop_kind = if self.matches_keyword("in") {
+            Some("in")
+        } else if self.matches_keyword("of") {
+            Some("of")
+        } else {
+            None
+        };
+        if let Some(loop_kind) = loop_kind {
+            let iterable = self.parse_expression_inner()?;
             self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
 
             self.loop_depth += 1;
@@ -1313,7 +1320,10 @@ impl Parser {
             self.breakable_depth = self.breakable_depth.saturating_sub(1);
             let body = body?;
 
-            // Baseline: parse/compile `for-in` and `for-of` shape as non-iterating loops.
+            if loop_kind == "in" && Self::supports_simple_for_in_lowering(initializer.as_ref()) {
+                return self.lower_for_in_statement(initializer, iterable, body);
+            }
+            // Baseline: parse/compile unsupported `for-in`/`for-of` shapes as non-iterating loops.
             return Ok(Stmt::For {
                 initializer: None,
                 condition: Some(Expr::Bool(false)),
@@ -1350,6 +1360,152 @@ impl Parser {
             update,
             body: Box::new(body),
         })
+    }
+
+    fn supports_simple_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
+        matches!(
+            initializer,
+            Some(ForInitializer::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                initializer: None,
+                ..
+            }))
+        )
+    }
+
+    fn lower_for_in_statement(
+        &mut self,
+        initializer: Option<ForInitializer>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let keys_name = self.next_for_in_temp_identifier("keys");
+        let index_name = self.next_for_in_temp_identifier("index");
+
+        let mut statements = vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: keys_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "keys".to_string(),
+                    }),
+                    arguments: vec![iterable],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: index_name.clone(),
+                initializer: Some(Expr::Number(0.0)),
+            }),
+        ];
+
+        let current_key_expr = Expr::MemberComputed {
+            object: Box::new(Expr::Identifier(keys_name.clone())),
+            property: Box::new(Expr::Identifier(index_name.clone())),
+        };
+
+        let mut loop_statements = Vec::new();
+        match initializer {
+            None => {}
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_key_expr,
+                    &mut statements,
+                    &mut loop_statements,
+                )?;
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                if declarations.len() != 1 {
+                    return Err(self.error_current("invalid for-in initializer"));
+                }
+                let declaration = declarations
+                    .into_iter()
+                    .next()
+                    .expect("for-in declaration should exist");
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_key_expr,
+                    &mut statements,
+                    &mut loop_statements,
+                )?;
+            }
+            Some(ForInitializer::Expression(target)) => {
+                let assignment = self.rewrite_assignment_target(
+                    target,
+                    current_key_expr.clone(),
+                    None,
+                    self.current_position(),
+                )?;
+                loop_statements.push(Stmt::Expression(assignment));
+            }
+        }
+
+        loop_statements.push(body);
+
+        let condition = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(Expr::Identifier(index_name.clone())),
+            right: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(keys_name.clone())),
+                property: "length".to_string(),
+            }),
+        };
+        let update = Expr::Assign {
+            target: index_name.clone(),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(index_name)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+
+        statements.push(Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: Some(update),
+            body: Box::new(Stmt::Block(loop_statements)),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_in_initializer_declaration(
+        &mut self,
+        declaration: VariableDeclaration,
+        current_key_expr: &Expr,
+        outer_statements: &mut Vec<Stmt>,
+        loop_statements: &mut Vec<Stmt>,
+    ) -> Result<(), ParseError> {
+        if declaration.initializer.is_some() {
+            return Err(self.error_current("invalid for-in initializer"));
+        }
+        if declaration.kind == BindingKind::Var {
+            outer_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Var,
+                name: declaration.name.clone(),
+                initializer: None,
+            }));
+            loop_statements.push(Stmt::Expression(Expr::Assign {
+                target: declaration.name,
+                value: Box::new(current_key_expr.clone()),
+            }));
+            return Ok(());
+        }
+        loop_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+            kind: declaration.kind,
+            name: declaration.name,
+            initializer: Some(current_key_expr.clone()),
+        }));
+        Ok(())
+    }
+
+    fn next_for_in_temp_identifier(&mut self, category: &str) -> Identifier {
+        let name = format!("$__for_in_{category}_{}", self.class_temp_index);
+        self.class_temp_index += 1;
+        Identifier(name)
     }
 
     fn parse_with_statement(&mut self) -> Result<Stmt, ParseError> {

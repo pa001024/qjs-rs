@@ -2957,6 +2957,14 @@ impl Vm {
                 "constructor".to_string(),
                 JsValue::NativeFunction(NativeFunction::ArrayConstructor),
             );
+            object.property_attributes.insert(
+                "constructor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
             object
                 .properties
                 .insert("length".to_string(), JsValue::Number(0.0));

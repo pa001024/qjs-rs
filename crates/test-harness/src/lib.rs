@@ -513,6 +513,28 @@ mod tests {
     }
 
     #[test]
+    fn for_in_acquires_array_indices_baseline() {
+        let result = run_script(
+            "function props(x) { var array = []; for (let p in x) array.push(p); return array; } \
+             var subject = props([1, 2, 3]); \
+             subject.length === 3 && subject[0] === '0' && subject[1] === '1' && subject[2] === '2';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn for_in_acquires_object_keys_baseline() {
+        let result = run_script(
+            "function props(x) { var array = []; for (let p in x) array.push(p); return array; } \
+             var subject = props({ x: 1, y: 2 }); \
+             subject.length === 2 && subject[0] === 'x' && subject[1] === 'y';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),
