@@ -915,6 +915,7 @@ struct Parser {
     breakable_depth: usize,
     label_stack: Vec<String>,
     class_temp_index: usize,
+    allow_super_reference: bool,
 }
 
 impl Parser {
@@ -930,6 +931,7 @@ impl Parser {
             breakable_depth: 0,
             label_stack: Vec::new(),
             class_temp_index: 0,
+            allow_super_reference: false,
         }
     }
 
@@ -2716,10 +2718,14 @@ impl Parser {
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
             let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
-            let mut body = self.parse_function_body(
+            let saved_allow_super_reference = self.allow_super_reference;
+            self.allow_super_reference = is_static;
+            let body = self.parse_function_body(
                 "expected '{' before method body",
                 "expected '}' after method body",
-            )?;
+            );
+            self.allow_super_reference = saved_allow_super_reference;
+            let mut body = body?;
             if matches!(kind, ClassElementKind::Getter) && !params.is_empty() {
                 return Err(self.error_current("getter must not have parameters"));
             }
@@ -2817,7 +2823,13 @@ impl Parser {
         ];
 
         for method in class_tail.methods {
-            if method.is_static && self.class_method_key_is_prototype(&method.key) {
+            let ClassMethodDefinition {
+                key,
+                value,
+                is_static,
+                kind,
+            } = method;
+            if is_static && self.class_method_key_is_prototype(&key) {
                 body.push(Stmt::Throw(Expr::String(StringLiteral {
                     value: "TypeError: static class member named prototype".to_string(),
                     has_escape: false,
@@ -2825,7 +2837,9 @@ impl Parser {
                 continue;
             }
 
-            let target = if method.is_static {
+            let method_value =
+                self.lower_class_method_with_super_binding(value, is_static, &class_ident);
+            let target = if is_static {
                 Expr::Identifier(class_ident.clone())
             } else {
                 Expr::Member {
@@ -2833,24 +2847,24 @@ impl Parser {
                     property: "prototype".to_string(),
                 }
             };
-            match method.kind {
+            match kind {
                 ClassElementKind::Method => {
-                    let assignment = match method.key {
+                    let assignment = match key {
                         ClassMethodKey::Static(name) => Expr::AssignMember {
                             object: Box::new(target),
                             property: name,
-                            value: Box::new(method.value),
+                            value: Box::new(method_value),
                         },
                         ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
                             object: Box::new(target),
                             property: Box::new(key),
-                            value: Box::new(method.value),
+                            value: Box::new(method_value),
                         },
                     };
                     body.push(Stmt::Expression(assignment));
                 }
                 ClassElementKind::Getter | ClassElementKind::Setter => {
-                    let key_expr = match method.key {
+                    let key_expr = match key {
                         ClassMethodKey::Static(name) => Expr::String(StringLiteral {
                             value: name,
                             has_escape: false,
@@ -2867,14 +2881,14 @@ impl Parser {
                             value: Expr::Bool(false),
                         },
                     ];
-                    let accessor_name = if matches!(method.kind, ClassElementKind::Getter) {
+                    let accessor_name = if matches!(kind, ClassElementKind::Getter) {
                         "get"
                     } else {
                         "set"
                     };
                     descriptor_properties.push(ObjectProperty {
                         key: ObjectPropertyKey::Static(accessor_name.to_string()),
-                        value: method.value,
+                        value: method_value,
                     });
                     body.push(Stmt::Expression(Expr::Call {
                         callee: Box::new(Expr::Member {
@@ -2907,6 +2921,42 @@ impl Parser {
         let name = format!("$__class_ctor_{}", self.class_temp_index);
         self.class_temp_index += 1;
         name
+    }
+
+    fn lower_class_method_with_super_binding(
+        &self,
+        value: Expr,
+        is_static: bool,
+        class_ident: &Identifier,
+    ) -> Expr {
+        let Expr::Function { name, params, body } = value else {
+            return value;
+        };
+        let super_base = if is_static {
+            Expr::Identifier(class_ident.clone())
+        } else {
+            Expr::Member {
+                object: Box::new(Expr::Identifier(class_ident.clone())),
+                property: "prototype".to_string(),
+            }
+        };
+        let mut lowered_body = vec![Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: Identifier("super".to_string()),
+            initializer: Some(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "getPrototypeOf".to_string(),
+                }),
+                arguments: vec![super_base],
+            }),
+        })];
+        lowered_body.extend(body);
+        Expr::Function {
+            name,
+            params,
+            body: lowered_body,
+        }
     }
 
     fn class_method_key_is_prototype(&self, key: &ClassMethodKey) -> bool {
@@ -3002,7 +3052,8 @@ impl Parser {
                         self.parse_class_expression_after_keyword()
                     }
                     _ if self.identifier_token_is_raw_name(&token, &name)
-                        && is_forbidden_identifier_reference(&name) =>
+                        && is_forbidden_identifier_reference(&name)
+                        && !(self.allow_super_reference && name == "super") =>
                     {
                         Err(ParseError {
                             message: "reserved word cannot be identifier reference".to_string(),
@@ -4237,6 +4288,19 @@ mod tests {
     fn parses_class_computed_accessors_baseline() {
         parse_script("class C { get ['a']() { return 1; } set ['a'](v) {} }")
             .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_class_static_super_assignment_baseline() {
+        let parsed = parse_script("class C { static m() { super.x = 1; } }")
+            .expect("script parsing should succeed");
+        match &parsed.statements[0] {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                initializer: Some(Expr::Call { .. }),
+                ..
+            }) => {}
+            _ => panic!("expected lowered class initializer call expression"),
+        }
     }
 
     #[test]

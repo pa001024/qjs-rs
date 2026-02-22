@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4249, failed=751
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4250, failed=750
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -109,4 +109,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 为普通对象补齐最小 `[[Prototype]]` 链路（构造实例时挂接 `f.prototype`，对象属性 `Get/Has/Set` 按链路查找），并在赋值时处理“原型上只读数据属性/无 setter accessor 不可写”场景，修复 `8.14.4-8-b_1.js` 等原型写入语义偏差；`language` 基线提升至 `4243/757`。
 - parser 对 `for-in` 引入“选择性可运行降级”：当前仅对 `for (let <id> in <expr>)` 形状展开为 `Object.keys` + 索引循环（其余 `for-in/for-of` 形状仍保持保守非迭代降级，避免扩大回归面）；同时 VM 修正数组 `constructor` 为不可枚举属性（匹配数组枚举基线），`language` 基线进一步提升至 `4245/755`。
 - parser 扩展 `for-in` 降级覆盖到 `var/const/表达式左值` 头部形状，并支持 `for (... in a, b)` 右侧逗号表达式；`for-in` 在 `null/undefined` 右值下按基线语义走“空迭代不抛错”。同时 VM/runtime 增加 `Object.create` 与 `Object.setPrototypeOf` 最小内建，并将普通对象默认原型接到 `Object.prototype`；`language` 基线进一步提升至 `4249/751`。
+- parser 为 class 静态方法引入最小 `super` 绑定降级（方法体头部注入 `let super = Object.getPrototypeOf(C)`），修复 `super.x = rhs` / `super[expr] = rhs` 在 `[[Prototype]] = null` 场景下的 RHS 求值顺序偏差；`expressions/assignment` 子集由 `85/7` 提升至 `87/5`，`language` 基线进一步提升至 `4250/750`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

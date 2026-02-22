@@ -828,6 +828,34 @@ mod tests {
     }
 
     #[test]
+    fn class_static_super_assignment_evaluates_rhs_before_type_error_baseline() {
+        let result = run_script(
+            "var count = 0; \
+             class C { static m() { super.x = count += 1; } } \
+             Object.setPrototypeOf(C, null); \
+             var threw = false; \
+             try { C.m(); } catch (e) { threw = true; } \
+             threw && count === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn class_static_super_computed_assignment_evaluates_rhs_before_type_error_baseline() {
+        let result = run_script(
+            "var count = 0; \
+             class C { static m() { super[0] = count += 1; } } \
+             Object.setPrototypeOf(C, null); \
+             var threw = false; \
+             try { C.m(); } catch (e) { threw = true; } \
+             threw && count === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_constructor_property_on_constructed_object_baseline() {
         let result = run_script(
             "var ok = false; function C() { ok = this.constructor === C; } new C(); ok;",
