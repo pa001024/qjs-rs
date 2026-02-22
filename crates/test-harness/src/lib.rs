@@ -598,6 +598,15 @@ mod tests {
     }
 
     #[test]
+    fn for_in_completion_value_tracks_last_body_completion_baseline() {
+        let result = run_script(
+            "var out = eval('2; for (var key in { x: 0 }) { 3; }'); out === 3;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_array_push_baseline() {
         assert_eq!(
             run_script("var a = []; var n = a.push(1); n === 1 && a[0] === 1;", &[]),
@@ -771,6 +780,15 @@ mod tests {
     fn supports_string_replace_callback_strict_this() {
         let result = run_script(
             "var x = 1; var out = 'ab'.replace('b', function() { 'use strict'; x = this; return 'a'; }); (out === 'aa') && (x === undefined);",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_string_index_of_baseline() {
+        let result = run_script(
+            "var s = 'abcd'; s.indexOf('bc') === 1 && s.indexOf('x') === -1 && s.indexOf('b', 2) === -1;",
             &[],
         );
         assert_eq!(result, Ok(JsValue::Bool(true)));

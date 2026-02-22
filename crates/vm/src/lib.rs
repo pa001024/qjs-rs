@@ -91,6 +91,9 @@ enum HostFunction {
     StringReplace {
         receiver: String,
     },
+    StringIndexOf {
+        receiver: String,
+    },
     ArrayPush(ObjectId),
     ArrayForEach(ObjectId),
     HasOwnProperty {
@@ -1700,6 +1703,32 @@ impl Vm {
                 } else {
                     Ok(JsValue::String(receiver))
                 }
+            }
+            HostFunction::StringIndexOf { receiver } => {
+                let search_value = args.first().map_or_else(
+                    || "undefined".to_string(),
+                    |value| self.coerce_to_string(value),
+                );
+                let start_index = args
+                    .get(1)
+                    .map(|value| self.to_number(value))
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .map_or(0usize, |value| value as usize);
+                let receiver_chars: Vec<char> = receiver.chars().collect();
+                let search_chars: Vec<char> = search_value.chars().collect();
+                let bounded_start = start_index.min(receiver_chars.len());
+                if search_chars.is_empty() {
+                    return Ok(JsValue::Number(bounded_start as f64));
+                }
+                if search_chars.len() > receiver_chars.len().saturating_sub(bounded_start) {
+                    return Ok(JsValue::Number(-1.0));
+                }
+                for index in bounded_start..=receiver_chars.len() - search_chars.len() {
+                    if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
+                        return Ok(JsValue::Number(index as f64));
+                    }
+                }
+                Ok(JsValue::Number(-1.0))
             }
             HostFunction::ArrayPush(object_id) => {
                 let mut length = self
@@ -4381,6 +4410,9 @@ impl Vm {
         match property {
             "length" => JsValue::Number(receiver.chars().count() as f64),
             "replace" => self.create_host_function_value(HostFunction::StringReplace {
+                receiver: receiver.to_string(),
+            }),
+            "indexOf" => self.create_host_function_value(HostFunction::StringIndexOf {
                 receiver: receiver.to_string(),
             }),
             _ => match property.parse::<usize>() {

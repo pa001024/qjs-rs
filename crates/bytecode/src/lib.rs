@@ -576,6 +576,17 @@ impl Compiler {
                         }
                     }
                 }
+                let completion_name = if keep_value {
+                    let name = self.next_loop_completion_temp_name();
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::DefineVariable {
+                        name: name.clone(),
+                        mutable: true,
+                    });
+                    Some(name)
+                } else {
+                    None
+                };
 
                 let loop_start = code.len();
                 let jump_to_end_pos = if let Some(condition) = condition {
@@ -598,7 +609,13 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                 });
 
-                self.compile_stmt(body, code, false);
+                let body_produced_value = self.compile_stmt(body, code, completion_name.is_some());
+                if let Some(name) = &completion_name {
+                    if body_produced_value {
+                        code.push(Opcode::StoreVariable(name.clone()));
+                        code.push(Opcode::Pop);
+                    }
+                }
                 let continue_target = code.len();
                 if let Some(update) = update {
                     self.compile_expr(update, code);
@@ -617,16 +634,14 @@ impl Compiler {
                 let loop_context = self.loops.pop().expect("loop context should exist");
                 self.patch_loop_exits(loop_context, continue_target, code);
                 self.patch_break_exits(break_context, loop_end, code);
+                if let Some(name) = completion_name {
+                    code.push(Opcode::LoadIdentifier(name));
+                }
 
                 code.push(Opcode::ExitScope);
                 self.scope_depth = self.scope_depth.saturating_sub(1);
 
-                if keep_value {
-                    code.push(Opcode::LoadUndefined);
-                    true
-                } else {
-                    false
-                }
+                keep_value
             }
             Stmt::Switch {
                 discriminant,
@@ -1157,6 +1172,12 @@ impl Compiler {
         let id = self.next_switch_temp_id;
         self.next_switch_temp_id += 1;
         format!("$__switch_tmp_{id}")
+    }
+
+    fn next_loop_completion_temp_name(&mut self) -> String {
+        let id = self.next_switch_temp_id;
+        self.next_switch_temp_id += 1;
+        format!("$__loop_completion_{id}")
     }
 
     fn emit_handler_pops(current_depth: usize, target_depth: usize, code: &mut Vec<Opcode>) {
@@ -2447,11 +2468,17 @@ mod tests {
                     name: "i".to_string(),
                     mutable: true,
                 },
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_0".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(16),
+                Opcode::JumpIfFalse(19),
                 Opcode::LoadIdentifier("i".to_string()),
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::ResolveIdentifierReference("i".to_string()),
                 Opcode::LoadReferenceValue,
@@ -2459,9 +2486,9 @@ mod tests {
                 Opcode::Add,
                 Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(3),
+                Opcode::Jump(5),
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::ExitScope,
-                Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
             functions: vec![],
