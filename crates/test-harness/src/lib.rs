@@ -456,6 +456,17 @@ mod tests {
     }
 
     #[test]
+    fn supports_array_foreach_baseline() {
+        assert_eq!(
+            run_script(
+                "var thisArg = { marker: 1 }; var seen = false; var sum = 0; [1, 2].forEach(function(v, i, a) { if (this === thisArg && i < a.length) { seen = true; } sum = sum + v; }, thisArg); seen && sum === 3;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn supports_object_keys_baseline() {
         assert_eq!(
             run_script(
@@ -464,6 +475,44 @@ mod tests {
             ),
             Ok(JsValue::Bool(true))
         );
+    }
+
+    #[test]
+    fn supports_function_has_own_property_baseline() {
+        let result = run_script(
+            "var f = function() {}; f.hasOwnProperty('length') && !f.hasOwnProperty('caller') && !f.hasOwnProperty('arguments');",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_object_get_own_property_descriptor_on_function_baseline() {
+        let result = run_script(
+            "var f = function() {}; Object.getOwnPropertyDescriptor(f, 'caller') === undefined;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_object_is_extensible_baseline() {
+        assert_eq!(
+            run_script(
+                "Object.isExtensible(() => {}) && Object.isExtensible(function(){}) && Object.isExtensible({});",
+                &[],
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn arrow_function_restricted_properties_throw_type_error() {
+        let result = run_script(
+            "var f = () => {}; assert.throws(TypeError, function() { f.caller; }); assert.throws(TypeError, function() { f.arguments = 1; }); true;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

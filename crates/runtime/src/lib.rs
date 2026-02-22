@@ -12,6 +12,7 @@ pub enum NativeFunction {
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetPrototypeOf,
+    ObjectIsExtensible,
     NumberConstructor,
     BooleanConstructor,
     DateConstructor,
