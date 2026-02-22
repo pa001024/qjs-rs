@@ -279,6 +279,12 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_tostring_baseline() {
+        let result = run_script("({}).toString();", &[]);
+        assert_eq!(result, Ok(JsValue::String("[object Object]".to_string())));
+    }
+
+    #[test]
     fn catches_addition_to_primitive_throw_with_try_catch() {
         let result = run_script(
             "var caught = false; try { 1 + { valueOf: function() { throw 'x'; } }; } catch (e) { caught = e === 'x'; } caught;",

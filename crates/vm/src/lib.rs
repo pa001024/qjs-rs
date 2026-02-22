@@ -91,6 +91,7 @@ enum HostFunction {
     },
     ArrayPush(ObjectId),
     ObjectHasOwnProperty(ObjectId),
+    ObjectToString,
     AssertSameValue,
     AssertNotSameValue,
     AssertThrows,
@@ -152,6 +153,7 @@ pub struct Vm {
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     next_host_function_id: u64,
+    object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
     exception_handlers: Vec<ExceptionHandler>,
@@ -178,6 +180,7 @@ impl Vm {
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.next_host_function_id = 0;
+        self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
         self.exception_handlers.clear();
@@ -1426,6 +1429,7 @@ impl Vm {
                         || object.setters.contains_key(&key),
                 ))
             }
+            HostFunction::ObjectToString => Ok(JsValue::String("[object Object]".to_string())),
             HostFunction::DateToString(object_id) => {
                 let timestamp = self
                     .objects
@@ -2837,6 +2841,17 @@ impl Vm {
         JsValue::HostFunction(id)
     }
 
+    fn shared_object_to_string_function(&mut self) -> JsValue {
+        if let Some(host_id) = self.object_to_string_host_id {
+            return JsValue::HostFunction(host_id);
+        }
+        let id = self.next_host_function_id;
+        self.next_host_function_id += 1;
+        self.host_functions.insert(id, HostFunction::ObjectToString);
+        self.object_to_string_host_id = Some(id);
+        JsValue::HostFunction(id)
+    }
+
     fn get_object_property(
         &mut self,
         object_id: ObjectId,
@@ -2885,11 +2900,13 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        Ok(object
-            .properties
-            .get(property)
-            .cloned()
-            .unwrap_or(JsValue::Undefined))
+        if let Some(value) = object.properties.get(property).cloned() {
+            return Ok(value);
+        }
+        if property == "toString" {
+            return Ok(self.shared_object_to_string_function());
+        }
+        Ok(JsValue::Undefined)
     }
 
     fn set_object_property(
