@@ -109,6 +109,10 @@ mod tests {
             Ok(JsValue::String("function".to_string()))
         );
         assert_eq!(
+            run_expression("typeof Boolean"),
+            Ok(JsValue::String("function".to_string()))
+        );
+        assert_eq!(
             run_expression("typeof String"),
             Ok(JsValue::String("function".to_string()))
         );
@@ -217,6 +221,19 @@ mod tests {
     }
 
     #[test]
+    fn supports_boolean_constructor_baseline() {
+        assert_eq!(run_script("Boolean(0);", &[]), Ok(JsValue::Bool(false)));
+        assert_eq!(run_script("Boolean('x');", &[]), Ok(JsValue::Bool(true)));
+        assert_eq!(
+            run_script(
+                "var x = new Boolean(true); eval(x) === x && (0, eval)(x) === x;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn supports_string_and_isnan_baseline() {
         assert_eq!(
             run_script("String(123);", &[]),
@@ -224,6 +241,13 @@ mod tests {
         );
         assert_eq!(
             run_script("isNaN(Number.NaN);", &[]),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var x = new String('1+1'); eval(x) === x && (0, eval)(x) === x;",
+                &[]
+            ),
             Ok(JsValue::Bool(true))
         );
     }

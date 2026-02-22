@@ -12,6 +12,7 @@ use std::rc::Rc;
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
+const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -902,6 +903,19 @@ impl Vm {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
+                if matches!(
+                    native,
+                    NativeFunction::NumberConstructor
+                        | NativeFunction::BooleanConstructor
+                        | NativeFunction::StringConstructor
+                ) {
+                    return self.execute_boxed_primitive_constructor(
+                        native,
+                        args,
+                        realm,
+                        caller_strict,
+                    );
+                }
                 self.execute_native_call(native, args, realm, caller_strict)
             }
             JsValue::HostFunction(host_id) => {
@@ -954,6 +968,19 @@ impl Vm {
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
+                }
+                if matches!(
+                    native,
+                    NativeFunction::NumberConstructor
+                        | NativeFunction::BooleanConstructor
+                        | NativeFunction::StringConstructor
+                ) {
+                    return self.execute_boxed_primitive_constructor(
+                        native,
+                        args,
+                        realm,
+                        caller_strict,
+                    );
                 }
                 self.execute_native_call(native, args, realm, caller_strict)
             }
@@ -1501,6 +1528,10 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
                 Ok(JsValue::Number(self.to_number(&value)))
             }
+            NativeFunction::BooleanConstructor => {
+                let value = args.first().cloned().unwrap_or(JsValue::Bool(false));
+                Ok(JsValue::Bool(self.is_truthy(&value)))
+            }
             NativeFunction::StringConstructor => {
                 let value = args
                     .first()
@@ -1578,6 +1609,40 @@ impl Vm {
                 Ok(JsValue::Object(object_id))
             }
         }
+    }
+
+    fn execute_boxed_primitive_constructor(
+        &mut self,
+        native: NativeFunction,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let primitive = self.execute_native_call(native, args, realm, caller_strict)?;
+        let object = self.create_object_value();
+        let object_id = match &object {
+            JsValue::Object(id) => *id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target
+            .properties
+            .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
+        target.property_attributes.insert(
+            BOXED_PRIMITIVE_VALUE_KEY.to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        target
+            .properties
+            .insert("constructor".to_string(), JsValue::NativeFunction(native));
+        Ok(object)
     }
 
     fn execute_eval(
@@ -2268,6 +2333,13 @@ impl Vm {
             .unwrap_or(JsValue::Undefined)
     }
 
+    fn boxed_primitive_value(&self, object_id: ObjectId) -> Option<JsValue> {
+        self.objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get(BOXED_PRIMITIVE_VALUE_KEY))
+            .cloned()
+    }
+
     fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {
         match this_arg {
             None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.global_this_value(),
@@ -2886,7 +2958,11 @@ impl Vm {
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                 "[function]".to_string()
             }
-            JsValue::Object(_) => "[object Object]".to_string(),
+            JsValue::Object(object_id) => self
+                .boxed_primitive_value(*object_id)
+                .map_or("[object Object]".to_string(), |value| {
+                    self.coerce_to_string(&value)
+                }),
             JsValue::Undefined => "undefined".to_string(),
         }
     }
@@ -2991,10 +3067,12 @@ impl Vm {
                     trimmed.parse::<f64>().unwrap_or(f64::NAN)
                 }
             }
-            JsValue::Function(_)
-            | JsValue::NativeFunction(_)
-            | JsValue::HostFunction(_)
-            | JsValue::Object(_) => f64::NAN,
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                f64::NAN
+            }
+            JsValue::Object(object_id) => self
+                .boxed_primitive_value(*object_id)
+                .map_or(f64::NAN, |value| self.to_number(&value)),
             JsValue::Undefined => f64::NAN,
         }
     }
