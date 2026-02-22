@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
-    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, VariableDeclaration,
+    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget,
+    VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -296,6 +297,16 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
             validate_expression_strict_mode(property, strict)?;
             validate_expression_strict_mode(value, strict)
         }
+        Expr::Update { target, .. } => match target {
+            UpdateTarget::Identifier(Identifier(name)) => {
+                validate_identifier_reference_strict_mode(name, strict)
+            }
+            UpdateTarget::Member { object, .. } => validate_expression_strict_mode(object, strict),
+            UpdateTarget::MemberComputed { object, property } => {
+                validate_expression_strict_mode(object, strict)?;
+                validate_expression_strict_mode(property, strict)
+            }
+        },
         Expr::SpreadArgument(expr) => validate_expression_strict_mode(expr, strict),
     }
 }
@@ -2113,41 +2124,30 @@ impl Parser {
 
     fn parse_prefix_update_expression(&mut self, increment: bool) -> Result<Expr, ParseError> {
         let target = self.parse_unary()?;
-        self.rewrite_update_target(target, increment)
+        self.rewrite_update_target(target, increment, true)
     }
 
-    fn rewrite_update_target(&self, target: Expr, increment: bool) -> Result<Expr, ParseError> {
-        let op = if increment {
-            BinaryOp::Add
-        } else {
-            BinaryOp::Sub
-        };
+    fn rewrite_update_target(
+        &self,
+        target: Expr,
+        increment: bool,
+        prefix: bool,
+    ) -> Result<Expr, ParseError> {
         match target {
-            Expr::Identifier(identifier) => Ok(Expr::Assign {
-                target: identifier.clone(),
-                value: Box::new(Expr::Binary {
-                    op,
-                    left: Box::new(Expr::Identifier(identifier)),
-                    right: Box::new(Expr::Number(1.0)),
-                }),
+            Expr::Identifier(identifier) => Ok(Expr::Update {
+                target: UpdateTarget::Identifier(identifier),
+                increment,
+                prefix,
             }),
-            Expr::Member { object, property } => Ok(Expr::AssignMember {
-                object: object.clone(),
-                property: property.clone(),
-                value: Box::new(Expr::Binary {
-                    op,
-                    left: Box::new(Expr::Member { object, property }),
-                    right: Box::new(Expr::Number(1.0)),
-                }),
+            Expr::Member { object, property } => Ok(Expr::Update {
+                target: UpdateTarget::Member { object, property },
+                increment,
+                prefix,
             }),
-            Expr::MemberComputed { object, property } => Ok(Expr::AssignMemberComputed {
-                object: object.clone(),
-                property: property.clone(),
-                value: Box::new(Expr::Binary {
-                    op,
-                    left: Box::new(Expr::MemberComputed { object, property }),
-                    right: Box::new(Expr::Number(1.0)),
-                }),
+            Expr::MemberComputed { object, property } => Ok(Expr::Update {
+                target: UpdateTarget::MemberComputed { object, property },
+                increment,
+                prefix,
             }),
             _ => Err(ParseError {
                 message: "invalid update target".to_string(),
@@ -2258,14 +2258,14 @@ impl Parser {
                 return Ok(expr);
             }
             self.advance();
-            return self.rewrite_update_target(expr, true);
+            return self.rewrite_update_target(expr, true, false);
         }
         if self.check(&TokenKind::MinusMinus) {
             if self.has_line_terminator_between_prev_and_current() {
                 return Ok(expr);
             }
             self.advance();
-            return self.rewrite_update_target(expr, false);
+            return self.rewrite_update_target(expr, false, false);
         }
         Ok(expr)
     }
@@ -3410,7 +3410,7 @@ mod tests {
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
-        VariableDeclaration,
+        UpdateTarget, VariableDeclaration,
     };
 
     #[test]
@@ -3714,13 +3714,10 @@ mod tests {
     #[test]
     fn parses_prefix_increment_expression() {
         let parsed = parse_expression("++x").expect("parser should succeed");
-        let expected = Expr::Assign {
-            target: Identifier("x".to_string()),
-            value: Box::new(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
-                right: Box::new(Expr::Number(1.0)),
-            }),
+        let expected = Expr::Update {
+            target: UpdateTarget::Identifier(Identifier("x".to_string())),
+            increment: true,
+            prefix: true,
         };
         assert_eq!(parsed, expected);
     }
@@ -3728,13 +3725,10 @@ mod tests {
     #[test]
     fn parses_postfix_increment_expression() {
         let parsed = parse_expression("x++").expect("parser should succeed");
-        let expected = Expr::Assign {
-            target: Identifier("x".to_string()),
-            value: Box::new(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(Identifier("x".to_string()))),
-                right: Box::new(Expr::Number(1.0)),
-            }),
+        let expected = Expr::Update {
+            target: UpdateTarget::Identifier(Identifier("x".to_string())),
+            increment: true,
+            prefix: false,
         };
         assert_eq!(parsed, expected);
     }

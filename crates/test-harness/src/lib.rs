@@ -357,6 +357,25 @@ mod tests {
     }
 
     #[test]
+    fn postfix_update_returns_previous_value_for_identifier() {
+        let result = run_script("let x = 1; let y = x++; y * 10 + x;", &[]);
+        assert_eq!(result, Ok(JsValue::Number(12.0)));
+    }
+
+    #[test]
+    fn postfix_computed_update_evaluates_property_expression_once() {
+        let result = run_script(
+            "let hits = 0; \
+             let obj = { x: 1 }; \
+             function key() { hits = hits + 1; return 'x'; } \
+             let result = obj[key()]++; \
+             hits * 100 + result * 10 + obj.x;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Number(112.0)));
+    }
+
+    #[test]
     fn supports_function_call_apply_bind_baseline() {
         assert_eq!(
             run_script(

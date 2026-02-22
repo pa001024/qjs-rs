@@ -48,6 +48,19 @@ pub enum UnaryOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum UpdateTarget {
+    Identifier(Identifier),
+    Member {
+        object: Box<Expr>,
+        property: String,
+    },
+    MemberComputed {
+        object: Box<Expr>,
+        property: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(f64),
     Bool(bool),
@@ -110,6 +123,11 @@ pub enum Expr {
         object: Box<Expr>,
         property: Box<Expr>,
         value: Box<Expr>,
+    },
+    Update {
+        target: UpdateTarget,
+        increment: bool,
+        prefix: bool,
     },
     SpreadArgument(Box<Expr>),
 }

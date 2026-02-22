@@ -1026,6 +1026,31 @@ impl Vm {
                     let value = self.stack.last().cloned().ok_or(VmError::StackUnderflow)?;
                     self.stack.push(value);
                 }
+                Opcode::Dup2 => {
+                    let len = self.stack.len();
+                    if len < 2 {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    let first = self.stack[len - 2].clone();
+                    let second = self.stack[len - 1].clone();
+                    self.stack.push(first);
+                    self.stack.push(second);
+                }
+                Opcode::Swap => {
+                    let len = self.stack.len();
+                    if len < 2 {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    self.stack.swap(len - 1, len - 2);
+                }
+                Opcode::RotRight4 => {
+                    let len = self.stack.len();
+                    if len < 4 {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    let top = self.stack.remove(len - 1);
+                    self.stack.insert(len - 4, top);
+                }
                 Opcode::Pop => {
                     self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 }

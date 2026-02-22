@@ -2,7 +2,8 @@
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, VariableDeclaration,
+    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget,
+    VariableDeclaration,
 };
 use std::collections::BTreeSet;
 
@@ -85,6 +86,9 @@ pub enum Opcode {
     MarkStrict,
     Return,
     Dup,
+    Dup2,
+    Swap,
+    RotRight4,
     Pop,
     Nop,
     Halt,
@@ -1266,6 +1270,11 @@ impl Compiler {
                 self.compile_expr(value, code);
                 code.push(Opcode::SetPropertyByValue);
             }
+            Expr::Update {
+                target,
+                increment,
+                prefix,
+            } => self.compile_update_expression(target, *increment, *prefix, code),
             Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
             Expr::Member { object, property } => {
                 self.compile_expr(object, code);
@@ -1341,36 +1350,99 @@ impl Compiler {
                 }
                 self.compile_expr(left, code);
                 self.compile_expr(right, code);
-                let opcode = match op {
-                    BinaryOp::Add => Opcode::Add,
-                    BinaryOp::Sub => Opcode::Sub,
-                    BinaryOp::Mul => Opcode::Mul,
-                    BinaryOp::Div => Opcode::Div,
-                    BinaryOp::Mod => Opcode::Mod,
-                    BinaryOp::ShiftLeft => Opcode::Shl,
-                    BinaryOp::ShiftRight => Opcode::Shr,
-                    BinaryOp::UnsignedShiftRight => Opcode::UShr,
-                    BinaryOp::BitAnd => Opcode::BitAnd,
-                    BinaryOp::BitOr => Opcode::BitOr,
-                    BinaryOp::BitXor => Opcode::BitXor,
-                    BinaryOp::Equal => Opcode::Eq,
-                    BinaryOp::NotEqual => Opcode::Ne,
-                    BinaryOp::StrictEqual => Opcode::Eq,
-                    BinaryOp::StrictNotEqual => Opcode::Ne,
-                    BinaryOp::Less => Opcode::Lt,
-                    BinaryOp::LessEqual => Opcode::Le,
-                    BinaryOp::Greater => Opcode::Gt,
-                    BinaryOp::GreaterEqual => Opcode::Ge,
-                    BinaryOp::In => Opcode::In,
-                    BinaryOp::InstanceOf => Opcode::InstanceOf,
-                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
-                };
-                code.push(opcode);
+                code.push(Self::binary_opcode(*op));
             }
             Expr::SpreadArgument(inner) => {
                 // Spread arguments are lowered at call/construct sites.
                 self.compile_expr(inner, code);
             }
+        }
+    }
+
+    fn compile_update_expression(
+        &mut self,
+        target: &UpdateTarget,
+        increment: bool,
+        prefix: bool,
+        code: &mut Vec<Opcode>,
+    ) {
+        match target {
+            UpdateTarget::Identifier(Identifier(name)) => {
+                code.push(Opcode::LoadIdentifier(name.clone()));
+                if !prefix {
+                    code.push(Opcode::Dup);
+                }
+                code.push(Opcode::LoadNumber(1.0));
+                code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                code.push(Opcode::StoreVariable(name.clone()));
+                if !prefix {
+                    code.push(Opcode::Pop);
+                }
+            }
+            UpdateTarget::Member { object, property } => {
+                self.compile_expr(object, code);
+                code.push(Opcode::Dup);
+                code.push(Opcode::GetProperty(property.clone()));
+                if prefix {
+                    code.push(Opcode::LoadNumber(1.0));
+                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                    code.push(Opcode::SetProperty(property.clone()));
+                } else {
+                    code.push(Opcode::Dup2);
+                    code.push(Opcode::LoadNumber(1.0));
+                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                    code.push(Opcode::SetProperty(property.clone()));
+                    code.push(Opcode::Pop);
+                    code.push(Opcode::Swap);
+                    code.push(Opcode::Pop);
+                }
+            }
+            UpdateTarget::MemberComputed { object, property } => {
+                self.compile_expr(object, code);
+                self.compile_expr(property, code);
+                code.push(Opcode::Dup2);
+                code.push(Opcode::GetPropertyByValue);
+                if prefix {
+                    code.push(Opcode::LoadNumber(1.0));
+                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                    code.push(Opcode::SetPropertyByValue);
+                } else {
+                    code.push(Opcode::Dup);
+                    code.push(Opcode::LoadNumber(1.0));
+                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                    code.push(Opcode::Swap);
+                    code.push(Opcode::RotRight4);
+                    code.push(Opcode::SetPropertyByValue);
+                    code.push(Opcode::Pop);
+                }
+            }
+        }
+    }
+
+    fn binary_opcode(op: BinaryOp) -> Opcode {
+        match op {
+            BinaryOp::Add => Opcode::Add,
+            BinaryOp::Sub => Opcode::Sub,
+            BinaryOp::Mul => Opcode::Mul,
+            BinaryOp::Div => Opcode::Div,
+            BinaryOp::Mod => Opcode::Mod,
+            BinaryOp::ShiftLeft => Opcode::Shl,
+            BinaryOp::ShiftRight => Opcode::Shr,
+            BinaryOp::UnsignedShiftRight => Opcode::UShr,
+            BinaryOp::BitAnd => Opcode::BitAnd,
+            BinaryOp::BitOr => Opcode::BitOr,
+            BinaryOp::BitXor => Opcode::BitXor,
+            BinaryOp::Equal => Opcode::Eq,
+            BinaryOp::NotEqual => Opcode::Ne,
+            BinaryOp::StrictEqual => Opcode::Eq,
+            BinaryOp::StrictNotEqual => Opcode::Ne,
+            BinaryOp::Less => Opcode::Lt,
+            BinaryOp::LessEqual => Opcode::Le,
+            BinaryOp::Greater => Opcode::Gt,
+            BinaryOp::GreaterEqual => Opcode::Ge,
+            BinaryOp::In => Opcode::In,
+            BinaryOp::InstanceOf => Opcode::InstanceOf,
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!(),
         }
     }
 }
@@ -1381,7 +1453,7 @@ mod tests {
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
-        VariableDeclaration,
+        UpdateTarget, VariableDeclaration,
     };
 
     #[test]
@@ -1683,6 +1755,58 @@ mod tests {
                 Opcode::LoadIdentifier("key".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::SetPropertyByValue,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_prefix_update_expression() {
+        let expr = Expr::Update {
+            target: UpdateTarget::Identifier(Identifier("x".to_string())),
+            increment: true,
+            prefix: true,
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("x".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::Add,
+                Opcode::StoreVariable("x".to_string()),
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_postfix_computed_update_expression() {
+        let expr = Expr::Update {
+            target: UpdateTarget::MemberComputed {
+                object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+                property: Box::new(Expr::Identifier(Identifier("key".to_string()))),
+            },
+            increment: true,
+            prefix: false,
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("obj".to_string()),
+                Opcode::LoadIdentifier("key".to_string()),
+                Opcode::Dup2,
+                Opcode::GetPropertyByValue,
+                Opcode::Dup,
+                Opcode::LoadNumber(1.0),
+                Opcode::Add,
+                Opcode::Swap,
+                Opcode::RotRight4,
+                Opcode::SetPropertyByValue,
+                Opcode::Pop,
                 Opcode::Halt,
             ],
             functions: vec![],
