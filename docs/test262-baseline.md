@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4127, failed=873
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4205, failed=795
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -101,4 +101,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 新增稳定 `Function.prototype` 对象与函数 `prototype` 惰性缓存（含 `constructor` 回填），并修正 `Object.getPrototypeOf(function-like)` 返回路径，清理一批函数原型身份不稳定导致的断言失败；`language` 基线进一步提升至 `4041/959`。
 - VM 在数值运算/位运算/关系运算中补齐对象与函数的 `ToPrimitive(ToNumber)` 转换链路，并将相关运行时错误接入异常处理器路由；同时实现 `==/!=` 抽象相等比较与字符串关系比较（`< <= > >=`）基线，显著清理 `compound-assignment`、`equals/does-not-equals`、`relational` 失败簇，`language` 基线提升至 `4115/885`。
 - ast/parser/bytecode/vm 为 `++/--` 引入显式 update 表达式语义：区分前缀/后缀返回值，并通过新增栈指令（`Dup2`/`Swap`/`RotRight4`）保证成员与计算属性 update 的引用只求值一次；`language` 基线进一步提升至 `4127/873`。
+- ast/parser/bytecode/vm 打通 `with` 语句最小执行链路（`Stmt::With` + `EnterWith/ExitWith`），并在 VM 中加入 with 环境帧参与标识符解析优先级（内层词法作用域 > with 对象环境 > 外层词法作用域），修复一批 object environment record 相关偏差。
+- bytecode/vm 为标识符赋值路径新增“引用解析/读写分离”指令（`ResolveIdentifierReference` / `LoadReferenceValue` / `StoreReferenceValue`），确保 `=`、复合赋值、`++/--` 在 `eval` 与 `with` 场景下沿用同一左值引用（PutValue 语义）；`language` 基线进一步提升至 `4205/795`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
