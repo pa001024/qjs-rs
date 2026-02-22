@@ -2675,7 +2675,8 @@ impl Vm {
                     .get(key)
                     .map(|attrs| attrs.enumerable)
                     .unwrap_or(true);
-                if enumerable && seen.insert(key.clone()) {
+                let is_new = seen.insert(key.clone());
+                if is_new && enumerable {
                     keys.push(key.clone());
                 }
             }
@@ -2688,7 +2689,8 @@ impl Vm {
                     .get(key)
                     .map(|attrs| attrs.enumerable)
                     .unwrap_or(true);
-                if enumerable && seen.insert(key.clone()) {
+                let is_new = seen.insert(key.clone());
+                if is_new && enumerable {
                     keys.push(key.clone());
                 }
             }
@@ -2701,7 +2703,8 @@ impl Vm {
                     .get(key)
                     .map(|attrs| attrs.enumerable)
                     .unwrap_or(true);
-                if enumerable && seen.insert(key.clone()) {
+                let is_new = seen.insert(key.clone());
+                if is_new && enumerable {
                     keys.push(key.clone());
                 }
             }
@@ -4303,15 +4306,7 @@ impl Vm {
 
     fn evaluate_in_operator(&mut self, key: String, right: JsValue) -> Result<bool, VmError> {
         match right {
-            JsValue::Object(object_id) => {
-                let object = self
-                    .objects
-                    .get(&object_id)
-                    .ok_or(VmError::UnknownObject(object_id))?;
-                Ok(object.properties.contains_key(&key)
-                    || object.getters.contains_key(&key)
-                    || object.setters.contains_key(&key))
-            }
+            JsValue::Object(object_id) => self.object_has_property_in_chain(object_id, &key),
             JsValue::Function(closure_id) => {
                 let value = self.get_function_property(closure_id, &key)?;
                 Ok(!matches!(value, JsValue::Undefined))

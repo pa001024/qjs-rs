@@ -1410,6 +1410,7 @@ impl Parser {
         let iterable_name = self.next_for_in_temp_identifier("iterable");
         let keys_name = self.next_for_in_temp_identifier("keys");
         let index_name = self.next_for_in_temp_identifier("index");
+        let current_name = self.next_for_in_temp_identifier("current");
         let iterable_identifier = Expr::Identifier(iterable_name.clone());
 
         let mut statements = vec![
@@ -1456,16 +1457,22 @@ impl Parser {
             object: Box::new(Expr::Identifier(keys_name.clone())),
             property: Box::new(Expr::Identifier(index_name.clone())),
         };
+        let current_key_value_expr = Expr::Identifier(current_name.clone());
 
-        let mut loop_statements = Vec::new();
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name,
+            initializer: Some(current_key_expr),
+        });
+        let mut iteration_statements = Vec::new();
         match initializer {
             None => {}
             Some(ForInitializer::VariableDeclaration(declaration)) => {
                 self.lower_for_in_initializer_declaration(
                     declaration,
-                    &current_key_expr,
+                    &current_key_value_expr,
                     &mut statements,
-                    &mut loop_statements,
+                    &mut iteration_statements,
                 )?;
             }
             Some(ForInitializer::VariableDeclarations(declarations)) => {
@@ -1478,23 +1485,35 @@ impl Parser {
                     .expect("for-in declaration should exist");
                 self.lower_for_in_initializer_declaration(
                     declaration,
-                    &current_key_expr,
+                    &current_key_value_expr,
                     &mut statements,
-                    &mut loop_statements,
+                    &mut iteration_statements,
                 )?;
             }
             Some(ForInitializer::Expression(target)) => {
                 let assignment = self.rewrite_assignment_target(
                     target,
-                    current_key_expr.clone(),
+                    current_key_value_expr.clone(),
                     None,
                     self.current_position(),
                 )?;
-                loop_statements.push(Stmt::Expression(assignment));
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(assignment),
+                }));
             }
         }
 
-        loop_statements.push(body);
+        iteration_statements.push(body);
+        let guarded_iteration_body = Stmt::If {
+            condition: Expr::Binary {
+                op: BinaryOp::In,
+                left: Box::new(current_key_value_expr),
+                right: Box::new(Expr::Identifier(iterable_name.clone())),
+            },
+            consequent: Box::new(Stmt::Block(iteration_statements)),
+            alternate: None,
+        };
 
         let condition = Expr::Binary {
             op: BinaryOp::Less,
@@ -1517,7 +1536,10 @@ impl Parser {
             initializer: None,
             condition: Some(condition),
             update: Some(update),
-            body: Box::new(Stmt::Block(loop_statements)),
+            body: Box::new(Stmt::Block(vec![
+                current_declaration,
+                guarded_iteration_body,
+            ])),
         });
 
         Ok(Stmt::Block(statements))
@@ -1539,9 +1561,12 @@ impl Parser {
                 name: declaration.name.clone(),
                 initializer: None,
             }));
-            loop_statements.push(Stmt::Expression(Expr::Assign {
-                target: declaration.name,
-                value: Box::new(current_key_expr.clone()),
+            loop_statements.push(Stmt::Expression(Expr::Unary {
+                op: UnaryOp::Void,
+                expr: Box::new(Expr::Assign {
+                    target: declaration.name,
+                    value: Box::new(current_key_expr.clone()),
+                }),
             }));
             return Ok(());
         }

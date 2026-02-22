@@ -122,6 +122,7 @@ struct Compiler {
     label_contexts: Vec<LabelContext>,
     finally_contexts: Vec<FinallyContext>,
     next_switch_temp_id: usize,
+    loop_completion_targets: Vec<String>,
     function_nesting: usize,
 }
 
@@ -418,11 +419,15 @@ impl Compiler {
             }
             Stmt::Expression(expr) => {
                 self.compile_expr(expr, code);
-                if !keep_value {
+                if keep_value {
+                    true
+                } else if let Some(name) = self.loop_completion_targets.last() {
+                    code.push(Opcode::StoreVariable(name.clone()));
                     code.push(Opcode::Pop);
                     false
                 } else {
-                    true
+                    code.push(Opcode::Pop);
+                    false
                 }
             }
             Stmt::Block(statements) => {
@@ -469,6 +474,17 @@ impl Compiler {
                 keep_value
             }
             Stmt::While { condition, body } => {
+                let completion_name = if keep_value {
+                    let name = self.next_loop_completion_temp_name();
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::DefineVariable {
+                        name: name.clone(),
+                        mutable: true,
+                    });
+                    Some(name)
+                } else {
+                    None
+                };
                 let loop_start = code.len();
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
@@ -484,7 +500,15 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                 });
 
+                if let Some(name) = &completion_name {
+                    self.loop_completion_targets.push(name.clone());
+                }
                 self.compile_stmt(body, code, false);
+                if completion_name.is_some() {
+                    self.loop_completion_targets
+                        .pop()
+                        .expect("loop completion target should exist");
+                }
                 let continue_target = loop_start;
                 code.push(Opcode::Jump(continue_target));
 
@@ -498,8 +522,8 @@ impl Compiler {
                 self.patch_loop_exits(loop_context, continue_target, code);
                 self.patch_break_exits(break_context, loop_end, code);
 
-                if keep_value {
-                    code.push(Opcode::LoadUndefined);
+                if let Some(name) = completion_name {
+                    code.push(Opcode::LoadIdentifier(name));
                     true
                 } else {
                     false
@@ -509,6 +533,17 @@ impl Compiler {
                 self.compile_with_statement(object, body, code, keep_value)
             }
             Stmt::DoWhile { body, condition } => {
+                let completion_name = if keep_value {
+                    let name = self.next_loop_completion_temp_name();
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::DefineVariable {
+                        name: name.clone(),
+                        mutable: true,
+                    });
+                    Some(name)
+                } else {
+                    None
+                };
                 let loop_start = code.len();
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
@@ -521,7 +556,15 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                 });
 
+                if let Some(name) = &completion_name {
+                    self.loop_completion_targets.push(name.clone());
+                }
                 self.compile_stmt(body, code, false);
+                if completion_name.is_some() {
+                    self.loop_completion_targets
+                        .pop()
+                        .expect("loop completion target should exist");
+                }
                 let continue_target = code.len();
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
@@ -538,8 +581,8 @@ impl Compiler {
                 self.patch_loop_exits(loop_context, continue_target, code);
                 self.patch_break_exits(break_context, loop_end, code);
 
-                if keep_value {
-                    code.push(Opcode::LoadUndefined);
+                if let Some(name) = completion_name {
+                    code.push(Opcode::LoadIdentifier(name));
                     true
                 } else {
                     false
@@ -609,12 +652,14 @@ impl Compiler {
                     continue_jumps: Vec::new(),
                 });
 
-                let body_produced_value = self.compile_stmt(body, code, completion_name.is_some());
                 if let Some(name) = &completion_name {
-                    if body_produced_value {
-                        code.push(Opcode::StoreVariable(name.clone()));
-                        code.push(Opcode::Pop);
-                    }
+                    self.loop_completion_targets.push(name.clone());
+                }
+                self.compile_stmt(body, code, false);
+                if completion_name.is_some() {
+                    self.loop_completion_targets
+                        .pop()
+                        .expect("loop completion target should exist");
                 }
                 let continue_target = code.len();
                 if let Some(update) = update {
@@ -1037,6 +1082,7 @@ impl Compiler {
         let saved_break_contexts = std::mem::take(&mut self.break_contexts);
         let saved_label_contexts = std::mem::take(&mut self.label_contexts);
         let saved_finally_contexts = std::mem::take(&mut self.finally_contexts);
+        let saved_loop_completion_targets = std::mem::take(&mut self.loop_completion_targets);
         let saved_function_nesting = self.function_nesting;
         self.scope_depth = 0;
         self.handler_depth = 0;
@@ -1062,6 +1108,7 @@ impl Compiler {
         self.break_contexts = saved_break_contexts;
         self.label_contexts = saved_label_contexts;
         self.finally_contexts = saved_finally_contexts;
+        self.loop_completion_targets = saved_loop_completion_targets;
         self.function_nesting = saved_function_nesting;
         function_id
     }
@@ -2392,12 +2439,18 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_0".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(1.0),
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::LoadNumber(0.0),
-                Opcode::JumpIfFalse(5),
-                Opcode::Jump(0),
-                Opcode::LoadUndefined,
+                Opcode::JumpIfFalse(8),
+                Opcode::Jump(2),
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -2512,19 +2565,24 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
-                Opcode::LoadNumber(1.0),
-                Opcode::JumpIfFalse(12),
-                Opcode::EnterScope,
-                Opcode::EnterScope,
-                Opcode::ExitScope,
-                Opcode::ExitScope,
-                Opcode::Jump(0),
-                Opcode::ExitScope,
-                Opcode::ExitScope,
-                Opcode::Jump(12),
-                Opcode::ExitScope,
-                Opcode::Jump(0),
                 Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_0".to_string(),
+                    mutable: true,
+                },
+                Opcode::LoadNumber(1.0),
+                Opcode::JumpIfFalse(14),
+                Opcode::EnterScope,
+                Opcode::EnterScope,
+                Opcode::ExitScope,
+                Opcode::ExitScope,
+                Opcode::Jump(2),
+                Opcode::ExitScope,
+                Opcode::ExitScope,
+                Opcode::Jump(14),
+                Opcode::ExitScope,
+                Opcode::Jump(2),
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],
