@@ -16,6 +16,7 @@ const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
 const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor__$";
+const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
@@ -3852,6 +3853,22 @@ impl Parser {
                 object: Box::new(Expr::Identifier(class_ident.clone())),
                 property: CLASS_DERIVED_CONSTRUCTOR_MARKER.to_string(),
                 value: Box::new(Expr::Bool(true)),
+            }));
+            body.push(Stmt::Expression(Expr::AssignMember {
+                object: Box::new(Expr::Identifier(class_ident.clone())),
+                property: CLASS_CONSTRUCTOR_PARENT_MARKER.to_string(),
+                value: Box::new(Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        op: BinaryOp::StrictEqual,
+                        left: Box::new(Expr::Identifier(super_ident.clone())),
+                        right: Box::new(Expr::Null),
+                    }),
+                    consequent: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Function".to_string()))),
+                        property: "prototype".to_string(),
+                    }),
+                    alternate: Box::new(Expr::Identifier(super_ident.clone())),
+                }),
             }));
         }
         body.extend([

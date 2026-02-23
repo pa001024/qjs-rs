@@ -16,6 +16,7 @@ const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor__$";
+const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
@@ -5096,6 +5097,13 @@ impl Vm {
                             .map(JsValue::Object)
                             .unwrap_or(JsValue::Null));
                     }
+                    if let Some(parent) = closure_object
+                        .properties
+                        .get(CLASS_CONSTRUCTOR_PARENT_MARKER)
+                        .cloned()
+                    {
+                        return Ok(parent);
+                    }
                 }
                 Ok(self.function_prototype_value())
             }
@@ -8214,6 +8222,13 @@ impl Vm {
                             .prototype
                             .map(JsValue::Object)
                             .unwrap_or(JsValue::Null));
+                    }
+                    if let Some(parent) = closure_object
+                        .properties
+                        .get(CLASS_CONSTRUCTOR_PARENT_MARKER)
+                        .cloned()
+                    {
+                        return Ok(parent);
                     }
                 }
                 Ok(self.function_prototype_value())
