@@ -7,6 +7,9 @@ use ast::{
 };
 use std::collections::BTreeSet;
 
+const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
+const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
     LoadNumber(f64),
@@ -113,6 +116,7 @@ pub enum Opcode {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompiledFunction {
     pub name: String,
+    pub length: usize,
     pub params: Vec<String>,
     pub code: Vec<Opcode>,
 }
@@ -1123,10 +1127,12 @@ impl Compiler {
         code.push(Opcode::Return);
 
         let function_id = self.functions.len();
+        let length = Self::compute_expected_function_length(params, body);
         self.functions.push(CompiledFunction {
             name: name
                 .map(|identifier| identifier.0.clone())
                 .unwrap_or_else(|| "<anonymous>".to_string()),
+            length,
             params: params.iter().map(|param| param.0.clone()).collect(),
             code,
         });
@@ -1140,6 +1146,79 @@ impl Compiler {
         self.loop_completion_targets = saved_loop_completion_targets;
         self.function_nesting = saved_function_nesting;
         function_id
+    }
+
+    fn compute_expected_function_length(params: &[Identifier], body: &[Stmt]) -> usize {
+        if params.is_empty() {
+            return 0;
+        }
+        let mut defaulted = BTreeSet::new();
+        for stmt in body {
+            if Self::is_function_parameter_prelude(stmt) {
+                continue;
+            }
+            let Some(name) = Self::extract_default_initializer_param(stmt) else {
+                break;
+            };
+            defaulted.insert(name);
+        }
+
+        params
+            .iter()
+            .position(|param| defaulted.contains(&param.0))
+            .unwrap_or(params.len())
+    }
+
+    fn is_function_parameter_prelude(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Expression(Expr::String(StringLiteral { value, .. })) => {
+                value == NON_SIMPLE_PARAMS_MARKER
+                    || value == ARROW_FUNCTION_MARKER
+                    || value == "use strict"
+            }
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(name),
+                ..
+            }) => name == "super",
+            _ => false,
+        }
+    }
+
+    fn extract_default_initializer_param(stmt: &Stmt) -> Option<String> {
+        let Stmt::If {
+            condition:
+                Expr::Binary {
+                    op: BinaryOp::StrictEqual,
+                    left,
+                    right,
+                },
+            consequent,
+            alternate: None,
+        } = stmt
+        else {
+            return None;
+        };
+        let Expr::Identifier(Identifier(condition_name)) = left.as_ref() else {
+            return None;
+        };
+        let Expr::Identifier(Identifier(undefined_name)) = right.as_ref() else {
+            return None;
+        };
+        if undefined_name != "undefined" {
+            return None;
+        }
+        let Stmt::Expression(Expr::Assign {
+            target: Identifier(target_name),
+            ..
+        }) = consequent.as_ref()
+        else {
+            return None;
+        };
+        if target_name != condition_name {
+            return None;
+        }
+        Some(condition_name.clone())
     }
 
     fn statement_allows_continue_label(statement: &Stmt) -> bool {
@@ -1995,6 +2074,7 @@ mod tests {
             functions: vec![
                 CompiledFunction {
                     name: "<anonymous>".to_string(),
+                    length: 0,
                     params: vec![],
                     code: vec![
                         Opcode::LoadNumber(1.0),
@@ -2005,6 +2085,7 @@ mod tests {
                 },
                 CompiledFunction {
                     name: "<anonymous>".to_string(),
+                    length: 1,
                     params: vec!["v".to_string()],
                     code: vec![Opcode::LoadUndefined, Opcode::Return],
                 },
@@ -2027,6 +2108,7 @@ mod tests {
             code: vec![Opcode::LoadFunction(0), Opcode::Halt],
             functions: vec![CompiledFunction {
                 name: "<anonymous>".to_string(),
+                length: 1,
                 params: vec!["x".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("x".to_string()),
@@ -2352,6 +2434,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "add".to_string(),
+                length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("a".to_string()),
@@ -2402,6 +2485,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "id".to_string(),
+                length: 1,
                 params: vec!["x".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("x".to_string()),

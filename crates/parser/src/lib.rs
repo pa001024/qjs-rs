@@ -12,6 +12,7 @@ use lexer::{Token, TokenKind, lex};
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
+const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
 
@@ -3458,8 +3459,9 @@ impl Parser {
                 continue;
             }
 
-            let method_value =
-                self.lower_class_method_with_super_binding(value, is_static, &class_ident);
+            let method_value = self.mark_class_method_non_constructible(
+                self.lower_class_method_with_super_binding(value, is_static, &class_ident),
+            );
             let target = if is_static {
                 Expr::Identifier(class_ident.clone())
             } else {
@@ -3621,6 +3623,25 @@ impl Parser {
             name,
             params,
             body: lowered_body,
+        }
+    }
+
+    fn mark_class_method_non_constructible(&self, method_value: Expr) -> Expr {
+        let method_ident = Identifier("$__class_method_fn".to_string());
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![method_ident.clone()],
+                body: vec![
+                    Stmt::Expression(Expr::AssignMember {
+                        object: Box::new(Expr::Identifier(method_ident.clone())),
+                        property: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        value: Box::new(Expr::Bool(true)),
+                    }),
+                    Stmt::Return(Some(Expr::Identifier(method_ident))),
+                ],
+            }),
+            arguments: vec![method_value],
         }
     }
 

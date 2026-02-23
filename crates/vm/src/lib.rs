@@ -14,6 +14,7 @@ use std::time::Instant;
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
+const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
@@ -1793,7 +1794,9 @@ impl Vm {
 
         match callee {
             JsValue::Function(closure_id) => {
-                if self.closure_is_arrow(closure_id)? {
+                if self.closure_is_arrow(closure_id)?
+                    || self.closure_has_no_prototype(closure_id)
+                {
                     return Err(VmError::NotCallable);
                 }
                 let constructed = self.create_object_value();
@@ -1869,7 +1872,9 @@ impl Vm {
 
         match callee {
             JsValue::Function(closure_id) => {
-                if self.closure_is_arrow(closure_id)? {
+                if self.closure_is_arrow(closure_id)?
+                    || self.closure_has_no_prototype(closure_id)
+                {
                     return Err(VmError::NotCallable);
                 }
                 let constructed = self.create_object_value();
@@ -3819,14 +3824,17 @@ impl Vm {
                 .get(closure.function_id)
                 .ok_or(VmError::UnknownFunction(closure.function_id))?;
             return Ok(self.create_descriptor_object(vec![
-                ("value", JsValue::Number(function.params.len() as f64)),
+                ("value", JsValue::Number(function.length as f64)),
                 ("writable", JsValue::Bool(false)),
                 ("enumerable", JsValue::Bool(false)),
                 ("configurable", JsValue::Bool(true)),
             ]));
         }
 
-        if property == "prototype" && !self.closure_is_arrow(closure_id)? {
+        if property == "prototype"
+            && !self.closure_is_arrow(closure_id)?
+            && !self.closure_has_no_prototype(closure_id)
+        {
             let prototype_value = self.get_or_create_function_prototype_property(closure_id)?;
             return Ok(self.create_descriptor_object(vec![
                 ("value", prototype_value),
@@ -4207,7 +4215,10 @@ impl Vm {
                     return Ok(true);
                 }
                 if property == "prototype" {
-                    return Ok(!self.closure_is_arrow(*closure_id)?);
+                    return Ok(
+                        !self.closure_is_arrow(*closure_id)?
+                            && !self.closure_has_no_prototype(*closure_id),
+                    );
                 }
                 Ok(matches!(
                     property,
@@ -4936,6 +4947,13 @@ impl Vm {
         self.closure_objects
             .get(&closure_id)
             .and_then(|object| object.properties.get(CLASS_CONSTRUCTOR_MARKER))
+            .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
+    }
+
+    fn closure_has_no_prototype(&self, closure_id: u64) -> bool {
+        self.closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get(CLASS_METHOD_NO_PROTOTYPE_MARKER))
             .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
     }
 
@@ -5911,7 +5929,7 @@ impl Vm {
                     .functions
                     .get(closure.function_id)
                     .ok_or(VmError::UnknownFunction(closure.function_id))?;
-                Ok(JsValue::Number(function.params.len() as f64))
+                Ok(JsValue::Number(function.length as f64))
             }
             "hasOwnProperty" => Ok(
                 self.create_host_function_value(HostFunction::HasOwnProperty {
@@ -5931,7 +5949,9 @@ impl Vm {
                 method: FunctionMethod::Bind,
             })),
             "prototype" => {
-                if self.closure_is_arrow(closure_id)? {
+                if self.closure_is_arrow(closure_id)?
+                    || self.closure_has_no_prototype(closure_id)
+                {
                     Ok(JsValue::Undefined)
                 } else {
                     self.get_or_create_function_prototype_property(closure_id)
@@ -6977,6 +6997,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "f".to_string(),
+                length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadUndefined, Opcode::Return],
             }],
@@ -6991,6 +7012,7 @@ mod tests {
             code: vec![Opcode::LoadFunction(0), Opcode::Call(0), Opcode::Halt],
             functions: vec![CompiledFunction {
                 name: "<anonymous>".to_string(),
+                length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadNumber(3.0), Opcode::Return],
             }],
@@ -7010,6 +7032,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "Ctor".to_string(),
+                length: 0,
                 params: vec![],
                 code: vec![
                     Opcode::LoadIdentifier("this".to_string()),
@@ -7043,6 +7066,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "f".to_string(),
+                length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadUndefined, Opcode::Return],
             }],
@@ -7233,6 +7257,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "add".to_string(),
+                length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("a".to_string()),
@@ -7285,6 +7310,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "sum".to_string(),
+                length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("arguments".to_string()),
@@ -7327,6 +7353,7 @@ mod tests {
             ],
             functions: vec![CompiledFunction {
                 name: "add".to_string(),
+                length: 1,
                 params: vec!["v".to_string()],
                 code: vec![
                     Opcode::LoadIdentifier("x".to_string()),

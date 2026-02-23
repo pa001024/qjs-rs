@@ -6,7 +6,7 @@
 | QuickJS area | qjs-rs crate | 状态 | 已落地能力（当前基线） | 下一步缺口 |
 | --- | --- | --- | --- | --- |
 | Tokenization | `crates/lexer` | In Progress | 覆盖常见运算符、关键标点、注释、字符串、Unicode 标识符与部分转义路径。 | 继续补齐边界词法与和 parser 联动的语义错误上下文。 |
-| Parser / AST | `crates/parser`, `crates/ast` | In Progress | 支持脚本主路径、函数、控制流、异常、对象/数组字面量、class/arrow 等基线形状。 | 模块语义、早期错误覆盖深度与复杂语法边角仍需收敛。 |
+| Parser / AST | `crates/parser`, `crates/ast` | In Progress | 支持脚本主路径、函数、控制流、异常、对象/数组字面量、class/arrow 等基线形状；class method/accessor 已注入“不可构造”标记。 | 模块语义、早期错误覆盖深度与复杂语法边角仍需收敛。 |
 | Bytecode compiler | `crates/bytecode` | In Progress | 已形成 AST 到指令集的主降级路径，包含函数/作用域/跳转/异常处理相关 opcode。 | 继续稳定 completion record 与复杂控制流的编译约束。 |
 | VM execution | `crates/vm` | In Progress | 可执行脚本链路，支持作用域栈、调用、异常传播、对象读写、部分内建交互；已新增 `CallMethod*` 与 `CallIdentifier*` 路径以对齐 receiver/base-object `this` 绑定语义；函数对象已支持 `Object.defineProperty` accessor 路径。 | `this`、严格模式细节、descriptor 细节与 corner cases 仍需对齐。 |
 | Value/object model | `crates/runtime` | In Progress | 提供 `JsValue`、`Realm` 与对象存储基线，支撑当前执行路径；已提供 `Realm.globals_values()` 供 GC root 收集。函数闭包对象已区分默认原型与显式 `[[Prototype]]` 覆盖（含 `setPrototypeOf(fn, null)`）。 | 对象属性描述符细节、宿主对象生命周期与跨 realm 行为仍需收敛。 |

@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4498`、`failed=502`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4507`、`failed=493`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -34,6 +34,8 @@
   - 构造路径移除“实例强制写入自有 `constructor`”行为，恢复通过原型链解析 `constructor`，修复 `class { ['constructor']() {} }` 语义偏差。
   - bytecode 将 `var` 初始化改为 reference-aware PutValue 路径（`ResolveIdentifierReference + StoreReferenceValue`），修复 `with` 语句内 `var x = ...` 错误绕过对象环境的问题。
   - regex 运行时最小可用链路增强：regex literal 改为调用 `RegExp(pattern, flags)`、`RegExp` 对象补齐 `global/ignoreCase/multiline/unicode/sticky/dotAll/lastIndex` 属性，并新增 `test()` host 路径（Rust regex backend），收敛 `literals/regexp` 的 `NotCallable` 与 `instanceof` 失败。
+  - class method/accessor 函数新增“不可构造、无 prototype”标记，VM 在 `new`/`in`/属性读取路径按该标记处理，进一步对齐 class 方法行为。
+  - 函数 `length` 从“形参总数”修正为“首个默认参数前的形参数量”（含 class/object/arrow/function 默认参数场景），清理 `dflt-params-trailing-comma` 失败簇。
 
 ## 3. 分阶段状态
 
@@ -53,7 +55,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 函数/eval 环境语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/function`、`statements/class`）。
+4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`）。
 
 ## 5. 下一步执行
 
