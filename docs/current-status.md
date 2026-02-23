@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4774`、`failed=226`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v11.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4781`、`failed=219`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v12.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -94,7 +94,8 @@
   - parser 修复相等运算与关系运算优先级（`===/!==` 高于 `in/instanceof/<...`），并在 `Object.prototype` 补齐 `valueOf`，`language/expressions/in` 子集提升至 `15/1`（仅剩 generator `yield` 场景）。
   - VM/runtime 补齐 `Reflect` 最小对象、`Object.defineProperties` 基线路径、`RegExp.prototype.exec` 最小可调用路径，并将 Error 系列构造器改为对象返回；同时 `typeof identifier` 路径补齐全局对象属性回退（含 getter 求值）。
   - parser 修复 conditional `?:` 的 consequent 分支在 `no_in` 上下文中的 `in` 解析（按规范强制 `+In`），`language/expressions/conditional` 子集收敛至 `18/0`。
-  - 子集回归（latest+6）：`language/expressions/property-accessors` 保持 `21/0`，`language/expressions/in` 保持 `15/1`，`language/expressions/typeof` 保持 `13/0`，`language/expressions/conditional` 提升至 `18/0`，`language/rest-parameters` 保持 `8/0`，`language/expressions/arrow-function` 保持 `71/4`，`language` 基线提升至 `4774/226`。
+  - VM `instanceof` 语义补齐：原型链遍历扩展到 function-like 原型值、`Error/TypeError` 原型链稳定化，并支持在 `Object.defineProperty(Function.prototype, "prototype", { get() {} })` 场景下按需触发 getter（primitive LHS 保持不触发）。
+  - 子集回归（latest+7）：`language/expressions/property-accessors` 保持 `21/0`，`language/expressions/in` 保持 `15/1`，`language/expressions/typeof` 保持 `13/0`，`language/expressions/conditional` 保持 `18/0`，`language/expressions/instanceof` 提升至 `39/0`，`language/rest-parameters` 保持 `8/0`，`language/expressions/arrow-function` 保持 `71/4`，`language` 基线提升至 `4781/219`。
 
 ## 3. 分阶段状态
 

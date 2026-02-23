@@ -268,10 +268,13 @@ pub struct Vm {
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
     function_prototype_host_id: Option<u64>,
+    function_prototype_prototype_getter: Option<JsValue>,
     array_prototype_id: Option<ObjectId>,
     string_prototype_id: Option<ObjectId>,
     number_prototype_id: Option<ObjectId>,
     boolean_prototype_id: Option<ObjectId>,
+    error_prototype_id: Option<ObjectId>,
+    type_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
@@ -323,10 +326,13 @@ impl Vm {
         self.global_object_id = None;
         self.object_prototype_id = None;
         self.function_prototype_host_id = None;
+        self.function_prototype_prototype_getter = None;
         self.array_prototype_id = None;
         self.string_prototype_id = None;
         self.number_prototype_id = None;
         self.boolean_prototype_id = None;
+        self.error_prototype_id = None;
+        self.type_error_prototype_id = None;
         self.date_prototype_id = None;
         self.with_objects.clear();
         self.identifier_references.clear();
@@ -557,6 +563,8 @@ impl Vm {
             self.string_prototype_id,
             self.number_prototype_id,
             self.boolean_prototype_id,
+            self.error_prototype_id,
+            self.type_error_prototype_id,
             self.date_prototype_id,
         ]
         .into_iter()
@@ -566,6 +574,9 @@ impl Vm {
         }
         if let Some(host_id) = self.function_prototype_host_id {
             roots.push(JsValue::HostFunction(host_id));
+        }
+        if let Some(getter) = &self.function_prototype_prototype_getter {
+            roots.push(getter.clone());
         }
         roots.extend(realm.globals_values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
@@ -3679,6 +3690,20 @@ impl Vm {
         self.create_error_exception(constructor, name, message)
     }
 
+    fn error_prototype_for_constructor(&mut self, constructor: NativeFunction) -> Option<ObjectId> {
+        match constructor {
+            NativeFunction::ErrorConstructor => match self.error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::TypeErrorConstructor => match self.type_error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn create_regexp_value(&mut self, pattern: String, flags: String) -> Result<JsValue, VmError> {
         let object = self.create_object_value();
         let object_id = match object {
@@ -4127,6 +4152,45 @@ impl Vm {
         args: &[JsValue],
         _realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        if let Some(JsValue::HostFunction(host_id)) = args.first() {
+            if Some(*host_id) == self.function_prototype_host_id {
+                let property = args
+                    .get(1)
+                    .map(|value| self.coerce_to_property_key(value))
+                    .unwrap_or_default();
+                if property == "prototype" {
+                    let descriptor_id = match args.get(2) {
+                        Some(JsValue::Object(id)) => Some(*id),
+                        _ => None,
+                    };
+                    if let Some(descriptor_id) = descriptor_id {
+                        let descriptor = self
+                            .objects
+                            .get(&descriptor_id)
+                            .ok_or(VmError::UnknownObject(descriptor_id))?;
+                        if let Some(getter) = descriptor.properties.get("get").cloned() {
+                            if !matches!(getter, JsValue::Undefined)
+                                && !Self::is_callable_value(&getter)
+                            {
+                                return Err(VmError::TypeError(
+                                    "getter must be callable or undefined",
+                                ));
+                            }
+                            self.function_prototype_prototype_getter = if matches!(
+                                getter,
+                                JsValue::Undefined
+                            ) {
+                                None
+                            } else {
+                                Some(getter)
+                            };
+                        }
+                    }
+                    return Ok(JsValue::HostFunction(*host_id));
+                }
+            }
+        }
+
         enum DefinePropertyTarget {
             Object(ObjectId),
             Function(u64),
@@ -5037,7 +5101,9 @@ impl Vm {
         let JsValue::Object(object_id) = error else {
             unreachable!();
         };
+        let prototype = self.error_prototype_for_constructor(constructor);
         if let Some(object) = self.objects.get_mut(&object_id) {
+            object.prototype = prototype;
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(constructor),
@@ -6542,6 +6608,61 @@ impl Vm {
         prototype
     }
 
+    fn error_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.error_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.error_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn type_error_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.type_error_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let error_proto = match self.error_prototype_value() {
+                JsValue::Object(error_id) => Some(error_id),
+                _ => None,
+            };
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = error_proto;
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.type_error_prototype_id = Some(id);
+        }
+        prototype
+    }
+
     fn date_prototype_value(&mut self) -> JsValue {
         if let Some(id) = self.date_prototype_id {
             return JsValue::Object(id);
@@ -7810,8 +7931,33 @@ impl Vm {
                 if !Self::is_object_like_value(&left) {
                     return Ok(false);
                 }
-                let prototype =
-                    self.get_property_from_receiver(right.clone(), "prototype", realm)?;
+                let prototype = if let JsValue::HostFunction(host_id) = right {
+                    if Some(host_id) == self.function_prototype_host_id {
+                        if let Some(getter) = self.function_prototype_prototype_getter.clone() {
+                            self.execute_callable(
+                                getter,
+                                Some(JsValue::HostFunction(host_id)),
+                                Vec::new(),
+                                realm,
+                                false,
+                            )?
+                        } else {
+                            self.get_property_from_receiver(
+                                JsValue::HostFunction(host_id),
+                                "prototype",
+                                realm,
+                            )?
+                        }
+                    } else {
+                        self.get_property_from_receiver(
+                            JsValue::HostFunction(host_id),
+                            "prototype",
+                            realm,
+                        )?
+                    }
+                } else {
+                    self.get_property_from_receiver(right.clone(), "prototype", realm)?
+                };
                 if !Self::is_object_like_value(&prototype) {
                     return Err(VmError::TypeError(
                         "Function has non-object prototype in instanceof",
@@ -7824,7 +7970,7 @@ impl Vm {
                     }
                 }
                 let mut current = self.get_prototype_of_value(&left)?;
-                while let JsValue::Object(_) = current {
+                while Self::is_object_like_value(&current) {
                     if self.same_value(&current, &prototype) {
                         return Ok(true);
                     }
@@ -8206,6 +8352,10 @@ impl Vm {
             (NativeFunction::StringConstructor, "prototype") => self.string_prototype_value(),
             (NativeFunction::NumberConstructor, "prototype") => self.number_prototype_value(),
             (NativeFunction::BooleanConstructor, "prototype") => self.boolean_prototype_value(),
+            (NativeFunction::ErrorConstructor, "prototype") => self.error_prototype_value(),
+            (NativeFunction::TypeErrorConstructor, "prototype") => {
+                self.type_error_prototype_value()
+            }
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
@@ -10327,6 +10477,49 @@ mod tests {
         realm.define_global(
             "Ctor",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn type_error_instances_are_instanceof_error_and_type_error() {
+        let script =
+            parse_script("let e = new TypeError('x'); (e instanceof Error) && (e instanceof TypeError);")
+                .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn instanceof_uses_function_prototype_getter_for_object_lhs_only() {
+        let script = parse_script(
+            "var called = 0; Object.defineProperty(Function.prototype, 'prototype', { get: function() { called++; return Array.prototype; } }); var a = [] instanceof Function.prototype; var b = 0 instanceof Function.prototype; a && !b && called === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));

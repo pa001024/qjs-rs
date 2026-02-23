@@ -51,6 +51,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+30)`: discovered=23882, executed=5000, skipped=18579, passed=4763, failed=237
 - `language max-cases=5000 (latest+31)`: discovered=23882, executed=5000, skipped=18579, passed=4773, failed=227
 - `language max-cases=5000 (latest+32)`: discovered=23882, executed=5000, skipped=18579, passed=4774, failed=226
+- `language max-cases=5000 (latest+33)`: discovered=23882, executed=5000, skipped=18579, passed=4781, failed=219
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -66,6 +67,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/in (latest)`: discovered=36, executed=16, skipped=20, passed=15, failed=1
 - `language/expressions/typeof (latest)`: discovered=16, executed=13, skipped=3, passed=13, failed=0
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
+- `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -211,4 +213,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 将相等运算与关系运算拆分为独立优先级层级（修复 `true in obj !== "true" in obj` 解析偏差），VM 在 `Object.prototype` 补齐 `valueOf`。该轮后 `language/expressions/in` 提升至 `15/1`，整体 `language` 基线提升至 `4763/237`。
 - VM/runtime 继续补齐 `typeof` 相关缺口：新增 `Reflect` 最小对象、`Object.defineProperties`、`RegExp.prototype.exec` 最小可调用路径，并将 Error 系列构造器统一为对象返回；同时 `typeof identifier` 读取路径补齐全局对象 fallback。该轮后 `language/expressions/typeof` 收敛至 `13/0`，整体 `language` 基线提升至 `4773/227`。
 - parser 修复 conditional `?:` consequent 分支在 `for` 头 `no_in` 上下文中的 `in` 解析（按规范使用 `AssignmentExpression[+In]`）；该轮后 `language/expressions/conditional` 收敛至 `18/0`，整体 `language` 基线提升至 `4774/226`。
+- VM 在 `instanceof` 路径补齐 function-like 原型链遍历（含 `Function.prototype`）、`Error/TypeError` 原型链稳定化，并支持 `Object.defineProperty(Function.prototype, "prototype", { get() {} })` 的 getter 触发语义（primitive LHS 不触发）。该轮后 `language/expressions/instanceof` 收敛至 `39/0`，整体 `language` 基线提升至 `4781/219`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
