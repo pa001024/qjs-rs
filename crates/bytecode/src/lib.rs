@@ -55,6 +55,7 @@ pub enum Opcode {
     DeleteIdentifier(String),
     DeleteProperty(String),
     DeletePropertyByValue,
+    DeleteSuperProperty,
     ResolveIdentifierReference(String),
     LoadReferenceValue,
     StoreReferenceValue,
@@ -1544,13 +1545,21 @@ impl Compiler {
                             code.push(Opcode::DeleteIdentifier(name.clone()));
                         }
                         Expr::Member { object, property } => {
-                            self.compile_expr(object, code);
-                            code.push(Opcode::DeleteProperty(property.clone()));
+                            if Self::is_super_identifier(object) {
+                                code.push(Opcode::DeleteSuperProperty);
+                            } else {
+                                self.compile_expr(object, code);
+                                code.push(Opcode::DeleteProperty(property.clone()));
+                            }
                         }
                         Expr::MemberComputed { object, property } => {
-                            self.compile_expr(object, code);
-                            self.compile_expr(property, code);
-                            code.push(Opcode::DeletePropertyByValue);
+                            if Self::is_super_identifier(object) {
+                                code.push(Opcode::DeleteSuperProperty);
+                            } else {
+                                self.compile_expr(object, code);
+                                self.compile_expr(property, code);
+                                code.push(Opcode::DeletePropertyByValue);
+                            }
                         }
                         _ => {
                             self.compile_expr(expr, code);

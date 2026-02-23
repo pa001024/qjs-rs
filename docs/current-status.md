@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4700`、`failed=300`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4725`、`failed=275`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -72,6 +72,9 @@
   - VM 新增 primitive boxing 路径（非严格函数 `this` + `GetProperty` on number/bool），并补齐函数值 `constructor` 回退属性，修复 `function-code` 的 `10.4.3` / `S10.2.1` 失败簇。
   - parser 为对象参数模式增加最小副作用降级（computed key 与属性默认值 initializer），修复 `eval-param-env-with-*` 两条 function-code 剩余失败。
   - `language/function-code` 子集提升至 `173/0`（executed=173）。
+  - bytecode 将 unary plus 降级改为 `ToNumber` 语义（`expr - 0`），并在 VM 数值转换路径收紧 `Infinity` 大小写匹配，`language/expressions/unary-plus` 收敛至 `16/0`。
+  - VM 补齐 delete 关键语义：`null/undefined` base 抛 TypeError、`delete super[...]` 抛 ReferenceError（且不触发 `ToPropertyKey`）、全局常量属性（`NaN/Infinity/undefined`）不可配置、全局 `var` 与 `globalThis` 属性联动。
+  - VM 新增 `JSON` 最小对象（`stringify/parse`）与 `Array.isArray`，`language/expressions/delete` 收敛至 `56/0`。
 
 ## 3. 分阶段状态
 

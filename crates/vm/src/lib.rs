@@ -126,6 +126,8 @@ enum HostFunction {
     StringToLowerCase {
         receiver: String,
     },
+    JsonStringify,
+    JsonParse,
     ArrayPush(ObjectId),
     ArrayForEach(ObjectId),
     ArrayReduce(ObjectId),
@@ -339,6 +341,7 @@ impl Vm {
         if let JsValue::Object(id) = global_object {
             self.global_object_id = Some(id);
         }
+        self.seed_global_constant_properties()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
@@ -661,6 +664,8 @@ impl Vm {
             | HostFunction::StringIndexOf { .. }
             | HostFunction::StringSplit { .. }
             | HostFunction::StringToLowerCase { .. }
+            | HostFunction::JsonStringify
+            | HostFunction::JsonParse
             | HostFunction::ObjectToString
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
@@ -734,6 +739,8 @@ impl Vm {
                         Ok(self.global_this_value())
                     } else if name == "Math" {
                         self.math_object_value()
+                    } else if name == "JSON" {
+                        self.json_object_value()
                     } else if name == "super" {
                         if let Some(base) = self.resolve_super_base_value() {
                             Ok(base)
@@ -793,6 +800,7 @@ impl Vm {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     }
+                    self.define_global_var_property(name)?;
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -863,17 +871,20 @@ impl Vm {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     if let Some(binding_id) = self.resolve_binding_id(name) {
-                        let binding = self
-                            .bindings
-                            .get_mut(&binding_id)
-                            .ok_or(VmError::ScopeUnderflow)?;
-                        if matches!(binding.value, JsValue::Uninitialized) {
-                            return Err(VmError::UnknownIdentifier(name.clone()));
+                        {
+                            let binding = self
+                                .bindings
+                                .get_mut(&binding_id)
+                                .ok_or(VmError::ScopeUnderflow)?;
+                            if matches!(binding.value, JsValue::Uninitialized) {
+                                return Err(VmError::UnknownIdentifier(name.clone()));
+                            }
+                            if !binding.mutable {
+                                return Err(VmError::ImmutableBinding(name.clone()));
+                            }
+                            binding.value = value.clone();
                         }
-                        if !binding.mutable {
-                            return Err(VmError::ImmutableBinding(name.clone()));
-                        }
-                        binding.value = value.clone();
+                        self.sync_global_property_from_binding(name, binding_id)?;
                     } else {
                         if strict {
                             return Err(VmError::UnknownIdentifier(name.clone()));
@@ -1309,6 +1320,14 @@ impl Vm {
                         return Err(VmError::TypeError("cannot delete property"));
                     }
                     self.stack.push(JsValue::Bool(deleted));
+                }
+                Opcode::DeleteSuperProperty => {
+                    let target = self.route_runtime_error_to_handler(
+                        VmError::UnknownIdentifier("super".to_string()),
+                        code.len(),
+                    )?;
+                    pc = target;
+                    continue;
                 }
                 Opcode::ResolveIdentifierReference(name) => {
                     let reference = self.resolve_identifier_reference(name, realm, strict)?;
@@ -2713,6 +2732,8 @@ impl Vm {
             HostFunction::StringToLowerCase { receiver } => {
                 Ok(JsValue::String(receiver.to_lowercase()))
             }
+            HostFunction::JsonStringify => Ok(self.execute_json_stringify(args.first())),
+            HostFunction::JsonParse => Ok(self.execute_json_parse(args.first())),
             HostFunction::ArrayPush(object_id) => {
                 let mut length = self
                     .objects
@@ -3030,6 +3051,18 @@ impl Vm {
             NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => Ok(self.execute_array_constructor(&args)),
+            NativeFunction::ArrayIsArray => {
+                let is_array = args.first().is_some_and(|value| match value {
+                    JsValue::Object(object_id) => {
+                        self.objects.get(object_id).is_some_and(|object| {
+                            object.properties.contains_key("length")
+                                && object.prototype == self.array_prototype_id
+                        })
+                    }
+                    _ => false,
+                });
+                Ok(JsValue::Bool(is_array))
+            }
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
             NativeFunction::ObjectCreate => self.execute_object_create(&args),
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
@@ -5340,6 +5373,9 @@ impl Vm {
                 if name == "Math" {
                     return self.math_object_value();
                 }
+                if name == "JSON" {
+                    return self.json_object_value();
+                }
                 if name == "this" {
                     return Ok(realm
                         .resolve_identifier(name)
@@ -5381,11 +5417,14 @@ impl Vm {
                     }
                 }
                 self.maybe_set_inferred_function_name(&value, &name);
-                let binding = self
-                    .bindings
-                    .get_mut(&binding_id)
-                    .ok_or(VmError::ScopeUnderflow)?;
-                binding.value = value.clone();
+                {
+                    let binding = self
+                        .bindings
+                        .get_mut(&binding_id)
+                        .ok_or(VmError::ScopeUnderflow)?;
+                    binding.value = value.clone();
+                }
+                self.sync_global_property_from_binding(&name, binding_id)?;
                 Ok(value)
             }
             IdentifierReference::Property {
@@ -5419,6 +5458,115 @@ impl Vm {
                 Ok(value)
             }
         }
+    }
+
+    fn seed_global_constant_properties(&mut self) -> Result<(), VmError> {
+        let Some(global_object_id) = self.global_object_id else {
+            return Ok(());
+        };
+        for (name, value) in [
+            ("NaN", JsValue::Number(f64::NAN)),
+            ("Infinity", JsValue::Number(f64::INFINITY)),
+            ("undefined", JsValue::Undefined),
+        ] {
+            self.define_global_property_with_attributes(
+                global_object_id,
+                name,
+                value,
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn define_global_property_with_attributes(
+        &mut self,
+        object_id: ObjectId,
+        name: &str,
+        value: JsValue,
+        attributes: PropertyAttributes,
+    ) -> Result<(), VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object.properties.insert(name.to_string(), value);
+        object
+            .property_attributes
+            .insert(name.to_string(), attributes);
+        Ok(())
+    }
+
+    fn define_global_var_property(&mut self, name: &str) -> Result<(), VmError> {
+        if self.var_scope_stack.last().copied() != Some(0) {
+            return Ok(());
+        }
+        let Some(global_object_id) = self.global_object_id else {
+            return Ok(());
+        };
+        let binding_id = self
+            .scopes
+            .first()
+            .and_then(|scope| scope.borrow().get(name).copied());
+        let Some(binding_id) = binding_id else {
+            return Ok(());
+        };
+        let value = self
+            .bindings
+            .get(&binding_id)
+            .map(|binding| binding.value.clone())
+            .unwrap_or(JsValue::Undefined);
+        let already_defined = self
+            .objects
+            .get(&global_object_id)
+            .is_some_and(|object| object.properties.contains_key(name));
+        if already_defined {
+            return Ok(());
+        }
+        self.define_global_property_with_attributes(
+            global_object_id,
+            name,
+            value,
+            PropertyAttributes {
+                writable: true,
+                enumerable: true,
+                configurable: false,
+            },
+        )
+    }
+
+    fn sync_global_property_from_binding(
+        &mut self,
+        name: &str,
+        binding_id: BindingId,
+    ) -> Result<(), VmError> {
+        let Some(global_object_id) = self.global_object_id else {
+            return Ok(());
+        };
+        let is_global_binding = self
+            .scopes
+            .first()
+            .is_some_and(|scope| scope.borrow().get(name) == Some(&binding_id));
+        if !is_global_binding {
+            return Ok(());
+        }
+        let value = self
+            .bindings
+            .get(&binding_id)
+            .map(|binding| binding.value.clone())
+            .ok_or(VmError::ScopeUnderflow)?;
+        let object = self
+            .objects
+            .get_mut(&global_object_id)
+            .ok_or(VmError::UnknownObject(global_object_id))?;
+        if object.properties.contains_key(name) {
+            object.properties.insert(name.to_string(), value);
+        }
+        Ok(())
     }
 
     fn global_this_value(&self) -> JsValue {
@@ -5520,6 +5668,69 @@ impl Vm {
             },
         );
         Ok(JsValue::Object(math_id))
+    }
+
+    fn json_object_value(&mut self) -> Result<JsValue, VmError> {
+        let global_object_id = self.global_object_id.ok_or(VmError::ScopeUnderflow)?;
+        if let Some(existing) = self
+            .objects
+            .get(&global_object_id)
+            .and_then(|object| object.properties.get("JSON"))
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let json = self.create_object_value();
+        let json_id = match json {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let stringify = self.create_host_function_value(HostFunction::JsonStringify);
+        let parse = self.create_host_function_value(HostFunction::JsonParse);
+        {
+            let json_object = self
+                .objects
+                .get_mut(&json_id)
+                .ok_or(VmError::UnknownObject(json_id))?;
+            json_object
+                .properties
+                .insert("stringify".to_string(), stringify);
+            json_object.property_attributes.insert(
+                "stringify".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            json_object.properties.insert("parse".to_string(), parse);
+            json_object.property_attributes.insert(
+                "parse".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
+
+        let global_object = self
+            .objects
+            .get_mut(&global_object_id)
+            .ok_or(VmError::UnknownObject(global_object_id))?;
+        global_object
+            .properties
+            .insert("JSON".to_string(), JsValue::Object(json_id));
+        global_object.property_attributes.insert(
+            "JSON".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(json_id))
     }
 
     fn object_prototype_value(&self) -> JsValue {
@@ -6533,6 +6744,7 @@ impl Vm {
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
                 )
+                | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "freeze")
@@ -6874,6 +7086,9 @@ impl Vm {
                 Ok(self.delete_closure_property(closure_id, &property))
             }
             JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(true),
+            JsValue::Null | JsValue::Undefined | JsValue::Uninitialized => {
+                Err(VmError::TypeError("property access expects object"))
+            }
             _ => Ok(true),
         }
     }
@@ -7102,6 +7317,9 @@ impl Vm {
             (NativeFunction::NumberConstructor, "MIN_VALUE") => JsValue::Number(f64::from_bits(1)),
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
+            }
+            (NativeFunction::ArrayConstructor, "isArray") => {
+                JsValue::NativeFunction(NativeFunction::ArrayIsArray)
             }
             (NativeFunction::ObjectConstructor, "keys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectKeys)
@@ -7615,6 +7833,75 @@ impl Vm {
             }
             primitive => Ok(self.coerce_to_string(&primitive)),
         }
+    }
+
+    fn execute_json_stringify(&self, value: Option<&JsValue>) -> JsValue {
+        let Some(value) = value else {
+            return JsValue::Undefined;
+        };
+        match value {
+            JsValue::Undefined
+            | JsValue::Function(_)
+            | JsValue::NativeFunction(_)
+            | JsValue::HostFunction(_) => JsValue::Undefined,
+            JsValue::Null => JsValue::String("null".to_string()),
+            JsValue::Bool(boolean) => JsValue::String(boolean.to_string()),
+            JsValue::Number(number) => {
+                if number.is_finite() {
+                    JsValue::String(Self::coerce_number_to_string(*number))
+                } else {
+                    JsValue::String("null".to_string())
+                }
+            }
+            JsValue::String(text) => {
+                JsValue::String(format!("\"{}\"", Self::escape_json_string(text)))
+            }
+            JsValue::Object(object_id) => {
+                if self
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|object| object.properties.contains_key("length"))
+                {
+                    JsValue::String("[]".to_string())
+                } else {
+                    JsValue::String("{}".to_string())
+                }
+            }
+            JsValue::Uninitialized => JsValue::Undefined,
+        }
+    }
+
+    fn execute_json_parse(&self, value: Option<&JsValue>) -> JsValue {
+        let Some(value) = value else {
+            return JsValue::Undefined;
+        };
+        let text = self.coerce_to_string(value);
+        match text.trim() {
+            "null" => JsValue::Null,
+            "true" => JsValue::Bool(true),
+            "false" => JsValue::Bool(false),
+            source => source
+                .parse::<f64>()
+                .map(JsValue::Number)
+                .unwrap_or(JsValue::Undefined),
+        }
+    }
+
+    fn escape_json_string(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '"' => escaped.push_str("\\\""),
+                '\\' => escaped.push_str("\\\\"),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                '\u{08}' => escaped.push_str("\\b"),
+                '\u{0C}' => escaped.push_str("\\f"),
+                other => escaped.push(other),
+            }
+        }
+        escaped
     }
 
     fn parse_int_baseline(&self, args: &[JsValue]) -> f64 {

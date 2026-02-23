@@ -40,11 +40,14 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+19)`: discovered=23882, executed=5000, skipped=18579, passed=4667, failed=333
 - `language max-cases=5000 (latest+20)`: discovered=23882, executed=5000, skipped=18579, passed=4698, failed=302
 - `language max-cases=5000 (latest+21)`: discovered=23882, executed=5000, skipped=18579, passed=4700, failed=300
+- `language max-cases=5000 (latest+22)`: discovered=23882, executed=5000, skipped=18579, passed=4725, failed=275
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
 - `language/eval-code/direct (latest)`: discovered=286, executed=143, skipped=143, passed=143, failed=0
 - `language/function-code (latest)`: discovered=217, executed=173, skipped=44, passed=173, failed=0
+- `language/expressions/unary-plus (latest)`: discovered=17, executed=16, skipped=1, passed=16, failed=0
+- `language/expressions/delete (latest)`: discovered=69, executed=56, skipped=13, passed=56, failed=0
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -180,4 +183,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 修复箭头函数默认参数路径未注入 `NON_SIMPLE_PARAMS` marker 的回归（与 VM `EnterParamInitScope/ExitParamInitScope` 对齐），清理 `eval-code/direct` 的 `UnknownIdentifier("p")` 失败簇；`language/eval-code/direct` 收敛至 `143/0`，`language` 基线提升至 `4667/333`。
 - VM `code_has_marker` 改为全字节码扫描，修复 class method 在 super lowering 前导语句后 marker 失效的问题；同时补齐 primitive receiver boxing（非严格 `this`、number/bool 属性读取）和函数 `constructor` 属性回退。该轮后 `language/function-code` 提升至 `171/2`，整体 `language` 基线提升至 `4698/302`。
 - parser 为对象参数模式增加最小副作用降级（computed key 与属性默认值 initializer），补齐 `eval-param-env-with-*` 两条 case，`language/function-code` 收敛至 `173/0`，整体 `language` 基线提升至 `4700/300`。
+- bytecode 将 unary plus 降级改为 `ToNumber`（`expr - 0`），VM 收紧字符串到数值的 `Infinity` 大小写处理；同时补齐 delete 关键路径（`null/undefined` base TypeError、`delete super` ReferenceError、全局常量不可配置、全局 var 属性联动）并新增 `JSON` 最小对象与 `Array.isArray`。该轮后 `unary-plus` 与 `delete` 子集均收敛至 `0` 失败，整体 `language` 基线提升至 `4725/275`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
