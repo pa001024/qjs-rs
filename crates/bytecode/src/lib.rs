@@ -11,6 +11,7 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
 const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
+const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
@@ -40,6 +41,7 @@ pub enum Opcode {
     PrepareSuperMethod(String),
     PrepareSuperMethodByValue,
     DefineProperty(String),
+    DefineProtoProperty,
     DefineArrayLength,
     ArrayAppend,
     ArrayAppendSpread,
@@ -1280,6 +1282,7 @@ impl Compiler {
                     || value == ARROW_FUNCTION_MARKER
                     || value == PARAM_INIT_SCOPE_START_MARKER
                     || value == PARAM_INIT_SCOPE_END_MARKER
+                    || value == CLASS_METHOD_NO_PROTOTYPE_MARKER
                     || value == "use strict"
             }
             Stmt::VariableDeclaration(VariableDeclaration {
@@ -1480,6 +1483,10 @@ impl Compiler {
                 code.push(Opcode::CreateObject);
                 for property in properties {
                     match &property.key {
+                        ObjectPropertyKey::ProtoSetter => {
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::DefineProtoProperty);
+                        }
                         ObjectPropertyKey::Static(name) => {
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::DefineProperty(name.clone()));

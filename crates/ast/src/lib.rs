@@ -136,6 +136,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectPropertyKey {
     Static(String),
+    ProtoSetter,
     Computed(Box<Expr>),
     AccessorGet(String),
     AccessorSet(String),

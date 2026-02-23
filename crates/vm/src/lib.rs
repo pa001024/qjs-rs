@@ -1033,22 +1033,32 @@ impl Vm {
                         .objects
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
-                    if name == "__proto__" {
-                        match value {
-                            JsValue::Object(proto_id) => {
-                                object.prototype = Some(proto_id);
-                            }
-                            JsValue::Null => {
-                                object.prototype = None;
-                            }
-                            _ => {}
+                    object.properties.insert(name.clone(), value);
+                    object
+                        .property_attributes
+                        .entry(name.clone())
+                        .or_insert_with(PropertyAttributes::default);
+                    self.stack.push(JsValue::Object(object_id));
+                }
+                Opcode::DefineProtoProperty => {
+                    let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let object_id = match receiver {
+                        JsValue::Object(id) => id,
+                        _ => return Err(VmError::TypeError("property write expects object")),
+                    };
+                    let object = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    match value {
+                        JsValue::Object(proto_id) => {
+                            object.prototype = Some(proto_id);
                         }
-                    } else {
-                        object.properties.insert(name.clone(), value);
-                        object
-                            .property_attributes
-                            .entry(name.clone())
-                            .or_insert_with(PropertyAttributes::default);
+                        JsValue::Null => {
+                            object.prototype = None;
+                        }
+                        _ => {}
                     }
                     self.stack.push(JsValue::Object(object_id));
                 }
@@ -2917,7 +2927,11 @@ impl Vm {
             HostFunction::ArrayJoinThis => {
                 let receiver_id = match this_arg {
                     Some(JsValue::Object(id)) => id,
-                    _ => return Err(VmError::TypeError("Array.prototype.join receiver must be object")),
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.join receiver must be object",
+                        ));
+                    }
                 };
                 let separator = match args.first() {
                     None | Some(JsValue::Undefined) => ",".to_string(),
@@ -9307,6 +9321,48 @@ mod tests {
         let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(7.0)));
+    }
+
+    #[test]
+    fn object_literal_proto_setter_and_shorthand_are_distinct() {
+        let script = parse_script(
+            "let a = { __proto__: null }; let __proto__ = 2; let b = { __proto__, __proto__ }; a.toString === undefined && b.hasOwnProperty('__proto__') && b.__proto__ === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_method_length_ignores_default_trailing_comma() {
+        let script = parse_script("let obj = { method(a, b = 39,) {} }; obj.method.length;")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn object_method_param_eval_scope_rest_close() {
+        let script = parse_script(
+            "var callCount = 0; ({ m(...[_ = (callCount = callCount + 1)]) {} }.m()); callCount === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_method_param_eval_scope_rest_open() {
+        let script = parse_script(
+            "var x = 'outside'; var probe1, probe2; ({ m(_ = probe1 = function() { return x; }, ...[__ = (x = 'inside', probe2 = function() { return x; })]) {} }.m()); probe1() === 'inside' && probe2() === 'inside';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]

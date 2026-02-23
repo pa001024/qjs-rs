@@ -261,6 +261,7 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
                         validate_expression_strict_mode(key, strict)?;
                     }
                     ObjectPropertyKey::Static(_)
+                    | ObjectPropertyKey::ProtoSetter
                     | ObjectPropertyKey::AccessorGet(_)
                     | ObjectPropertyKey::AccessorSet(_) => {}
                 }
@@ -3294,6 +3295,8 @@ impl Parser {
                 let generated_identifier = Identifier(generated);
                 let effects = if self.check(&TokenKind::LBrace) {
                     self.parse_object_parameter_pattern_effects(&generated_identifier)?
+                } else if self.check(&TokenKind::LBracket) {
+                    self.parse_array_parameter_pattern_effects(&generated_identifier)?
                 } else {
                     self.consume_parameter_pattern("expected parameter name")?;
                     Vec::new()
@@ -3430,6 +3433,86 @@ impl Parser {
         self.expect(
             TokenKind::RBrace,
             "expected '}' after object parameter pattern",
+        )?;
+        Ok(effects)
+    }
+
+    fn parse_array_parameter_pattern_effects(
+        &mut self,
+        synthetic_param: &Identifier,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        self.expect(
+            TokenKind::LBracket,
+            "expected '[' in array parameter pattern",
+        )?;
+        let mut effects = Vec::new();
+        let mut index = 0usize;
+        if self.check(&TokenKind::RBracket) {
+            self.advance();
+            return Ok(effects);
+        }
+
+        loop {
+            if self.matches(&TokenKind::Comma) {
+                index += 1;
+                if self.check(&TokenKind::RBracket) {
+                    break;
+                }
+                continue;
+            }
+
+            let is_rest = self.matches(&TokenKind::Ellipsis);
+            if self.check_identifier() {
+                let _ = self.expect_binding_identifier("expected parameter name")?;
+            } else {
+                self.consume_parameter_pattern("expected parameter name")?;
+            }
+
+            if self.matches(&TokenKind::Equal) {
+                let initializer = self.parse_expression_inner()?;
+                if is_rest {
+                    effects.push(Stmt::Expression(initializer));
+                } else {
+                    let condition = Expr::Binary {
+                        op: BinaryOp::LogicalOr,
+                        left: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(Expr::Identifier(synthetic_param.clone())),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        }),
+                        right: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(Expr::MemberComputed {
+                                object: Box::new(Expr::Identifier(synthetic_param.clone())),
+                                property: Box::new(Expr::Number(index as f64)),
+                            }),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        }),
+                    };
+                    effects.push(Stmt::If {
+                        condition,
+                        consequent: Box::new(Stmt::Expression(initializer)),
+                        alternate: None,
+                    });
+                }
+            }
+
+            if is_rest {
+                break;
+            }
+            index += 1;
+            if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBracket) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+
+        self.expect(
+            TokenKind::RBracket,
+            "expected ']' after array parameter pattern",
         )?;
         Ok(effects)
     }
@@ -4460,7 +4543,7 @@ impl Parser {
         }
         loop {
             let is_generator_method = self.matches(&TokenKind::Star);
-            let key = self.parse_object_property_key()?;
+            let mut key = self.parse_object_property_key()?;
             if let Some((accessor_key, accessor_value)) = self.try_parse_object_accessor(&key)? {
                 if is_generator_method {
                     return Err(
@@ -4482,6 +4565,9 @@ impl Parser {
             let value = if is_generator_method {
                 self.parse_object_method_value()?
             } else if self.matches(&TokenKind::Colon) {
+                if matches!(&key, ObjectPropertyKey::Static(name) if name == "__proto__") {
+                    key = ObjectPropertyKey::ProtoSetter;
+                }
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
                 self.parse_object_method_value()?
@@ -4506,6 +4592,11 @@ impl Parser {
                     | ObjectPropertyKey::AccessorGetComputed(_)
                     | ObjectPropertyKey::AccessorSetComputed(_) => {
                         return Err(self.error_current("unexpected accessor in object literal"));
+                    }
+                    ObjectPropertyKey::ProtoSetter => {
+                        return Err(
+                            self.error_current("unexpected __proto__ setter in object literal")
+                        );
                     }
                 }
             };

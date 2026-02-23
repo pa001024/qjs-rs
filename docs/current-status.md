@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4735`、`failed=265`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4746`、`failed=254`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v2.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -85,6 +85,9 @@
   - object 方法/访问器通过 marker 标记为“无 prototype、不可构造”，并修复 `hasOwnProperty('prototype')` 对该标记的判断。
   - VM 补齐 `Object.getOwnPropertyNames`（Object constructor 静态方法），修复 `computed-property-evaluation-order.js` 的 `NotCallable`。
   - 子集回归（latest）：`language/expressions/object` 进一步提升到 `266/5`；`language` 基线进一步提升到 `4735/265`。
+  - 对齐 QuickJS `quickjs.c` object literal 分支（`OP_set_proto` 仅在 `PropertyName : AssignmentExpression` 且 key 为 `__proto__` 时触发）：在 AST/bytecode/vm 增加 `ProtoSetter/DefineProtoProperty` 专用链路，shorthand `__proto__` 不再错误改写原型。
+  - parser 补齐 array parameter pattern 默认值副作用提取（覆盖 `...[x = expr]`），并对 object/class method 的 `CLASS_METHOD_NO_PROTOTYPE` marker 纳入函数 `length` 预导语句识别，修复 `dflt-params-trailing-comma` 与 `scope-meth-param-rest-elem-var-*`。
+  - 子集回归（latest+1）：`language/expressions/object` 提升至 `271/0`；`language` 基线提升至 `4746/254`。
 
 ## 3. 分阶段状态
 
