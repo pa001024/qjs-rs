@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4753`、`failed=247`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v4.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4754`、`failed=246`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v5.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -89,7 +89,7 @@
   - parser 补齐 array parameter pattern 默认值副作用提取（覆盖 `...[x = expr]`），并对 object/class method 的 `CLASS_METHOD_NO_PROTOTYPE` marker 纳入函数 `length` 预导语句识别，修复 `dflt-params-trailing-comma` 与 `scope-meth-param-rest-elem-var-*`。
   - 子集回归（latest+1）：`language/expressions/object` 提升至 `271/0`；`language` 基线提升至 `4746/254`。
   - parser/bytecode/vm 新增 rest 参数内部 marker（`$__qjs_rest_param__$<index>`）并在调用绑定阶段构造真实 rest 数组，函数 `length` 计算同步纳入 rest 截断规则（取默认参数与 rest 的最早位置）。
-  - 子集回归（latest+2）：`language/rest-parameters` 提升至 `7/1`，`language/expressions/arrow-function` 提升至 `71/4`，`language` 基线提升至 `4753/247`。
+  - 子集回归（latest+2）：`language/rest-parameters` 提升至 `8/0`，`language/expressions/arrow-function` 提升至 `71/4`，`language` 基线提升至 `4754/246`。
 
 ## 3. 分阶段状态
 

@@ -46,6 +46,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+25)`: discovered=23882, executed=5000, skipped=18579, passed=4735, failed=265
 - `language max-cases=5000 (latest+26)`: discovered=23882, executed=5000, skipped=18579, passed=4746, failed=254
 - `language max-cases=5000 (latest+27)`: discovered=23882, executed=5000, skipped=18579, passed=4753, failed=247
+- `language max-cases=5000 (latest+28)`: discovered=23882, executed=5000, skipped=18579, passed=4754, failed=246
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -55,7 +56,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/delete (latest)`: discovered=69, executed=56, skipped=13, passed=56, failed=0
 - `language/expressions/object (latest)`: discovered=1170, executed=271, skipped=899, passed=271, failed=0
 - `language/expressions/class (latest)`: discovered=4059, executed=47, skipped=4012, passed=29, failed=18
-- `language/rest-parameters (latest)`: discovered=11, executed=8, skipped=3, passed=7, failed=1
+- `language/rest-parameters (latest)`: discovered=11, executed=8, skipped=3, passed=8, failed=0
 - `language/expressions/arrow-function (latest)`: discovered=343, executed=75, skipped=268, passed=71, failed=4
 
 备注：
@@ -197,5 +198,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - bytecode/vm 新增 `ToPropertyKey` opcode 并前移到 object literal computed key/accessor 的 value 求值之前；VM 同步收敛对象 `ToPrimitive`（`toString/valueOf`）与函数 `prototype` own-property 判定。并将 `Object.prototype.toString` / `Array.prototype.toString` 落到真实原型链上，移除对象属性读取里的隐式 `toString` fallback。该轮后 `language/expressions/object` 进一步提升至 `265/6`，整体 `language` 基线提升至 `4734/266`。
 - VM 补齐 `Object.getOwnPropertyNames` 最小链路（含 Object constructor 静态属性挂接与数组返回），修复 `language/expressions/object/computed-property-evaluation-order.js` 的 `NotCallable`；该轮后 `language/expressions/object` 进一步提升至 `266/5`，整体 `language` 基线提升至 `4735/265`。
 - 对齐 QuickJS `quickjs.c` object literal 分支（`name == JS_ATOM___proto__` 时才走 `OP_set_proto`）：qjs-rs 新增 `ObjectPropertyKey::ProtoSetter` + `Opcode::DefineProtoProperty`，将 `__proto__:` 与 shorthand `__proto__` 语义分离；同时 parser 增加 array parameter pattern 默认值副作用提取，bytecode 将 `CLASS_METHOD_NO_PROTOTYPE` 视为函数参数前导 marker 参与 `length` 计算。该轮后 `language/expressions/object` 收敛至 `271/0`，整体 `language` 基线提升至 `4746/254`。
-- parser/bytecode/vm 新增 rest 参数内部 marker（`$__qjs_rest_param__$<index>`）并在 `execute_closure_call` 参数绑定阶段按 marker 构造真实 rest 数组；函数 `length` 计算同步按“默认参数或 rest 的最早位置”截断。该轮后 `language/rest-parameters` 提升至 `7/1`，`language/expressions/arrow-function` 提升至 `71/4`，整体 `language` 基线提升至 `4753/247`。
+- parser/bytecode/vm 新增 rest 参数内部 marker（`$__qjs_rest_param__$<index>`）并在 `execute_closure_call` 参数绑定阶段按 marker 构造真实 rest 数组；函数 `length` 计算同步按“默认参数或 rest 的最早位置”截断。随后修正 `create_array_from_values` 走 `create_array_value`（恢复 `Array` 原型与 `constructor`），`language/rest-parameters` 收敛至 `8/0`，整体 `language` 基线提升至 `4754/246`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -4272,7 +4272,7 @@ impl Vm {
     }
 
     fn create_array_from_values(&mut self, values: Vec<JsValue>) -> Result<JsValue, VmError> {
-        let array = self.create_object_value();
+        let array = self.create_array_value();
         let array_id = match array {
             JsValue::Object(id) => id,
             _ => unreachable!(),
