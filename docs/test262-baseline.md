@@ -57,6 +57,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+36)`: discovered=23882, executed=5000, skipped=18579, passed=4810, failed=190
 - `language max-cases=5000 (latest+37)`: discovered=23882, executed=5000, skipped=18579, passed=4811, failed=189
 - `language max-cases=5000 (latest+38)`: discovered=23882, executed=5000, skipped=18579, passed=4813, failed=187
+- `language max-cases=5000 (latest+39)`: discovered=23882, executed=5000, skipped=18579, passed=4818, failed=182
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -65,7 +66,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/unary-plus (latest)`: discovered=17, executed=16, skipped=1, passed=16, failed=0
 - `language/expressions/delete (latest)`: discovered=69, executed=56, skipped=13, passed=56, failed=0
 - `language/expressions/object (latest)`: discovered=1170, executed=271, skipped=899, passed=271, failed=0
-- `language/expressions/class (latest)`: discovered=4059, executed=47, skipped=4012, passed=29, failed=18
+- `language/expressions/class (latest)`: discovered=4059, executed=47, skipped=4012, passed=32, failed=15
 - `language/rest-parameters (latest)`: discovered=11, executed=8, skipped=3, passed=8, failed=0
 - `language/expressions/arrow-function (latest)`: discovered=343, executed=75, skipped=268, passed=71, failed=4
 - `language/expressions/property-accessors (latest)`: discovered=21, executed=21, skipped=0, passed=21, failed=0
@@ -74,7 +75,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
 - `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
 - `language/statements/class/definition (latest)`: discovered=65, executed=33, skipped=32, passed=33, failed=0
-- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=140, failed=48
+- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=142, failed=46
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -226,4 +227,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/VM 为 `class extends` 派生构造器引入 `this` 初始化状态机：未 `super()` 前访问 `this` 抛 `ReferenceError`、重复 `super()` 保留构造副作用后抛 `ReferenceError`、派生构造器返回值收敛为 object/undefined；同时收紧 `NativeFunction.prototype` 暴露（保留构造器路径与 `Test262Error`）。该轮后 `language/statements/class/definition` 提升至 `32/1`，整体 `language` 基线提升至 `4810/190`。
 - parser/VM 补齐 class constructor 父链可见性（`Object.getPrototypeOf(D) === C`）：在 `extends` 降级链路记录构造器父引用并纳入函数原型读取回退，`language/statements/class/definition` 收敛至 `33/0`，整体 `language` 基线提升至 `4811/189`。
 - VM 将 class constructor 统一纳入 `caller/arguments` 受限函数集合（与 strict/arrow 路径一致），清理 `restricted-properties` 子簇；该轮后 `language/statements/class` 提升至 `140/48`，整体 `language` 基线提升至 `4813/187`。
+- parser 为 class declaration/expression 注入类名内部词法绑定（`const <ClassName> = $__class_ctor_*`），收敛 methods/heritage 中类名解析与不可变语义；该轮后 `language/statements/class` 提升至 `142/46`、`language/expressions/class` 提升至 `32/15`，整体 `language` 基线提升至 `4818/182`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

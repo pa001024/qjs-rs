@@ -1283,7 +1283,7 @@ impl Parser {
     fn parse_class_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let name = Identifier(self.expect_binding_identifier("expected class name")?);
         let class_tail = self.parse_class_tail()?;
-        let initializer = self.lower_class_tail(class_tail);
+        let initializer = self.lower_class_tail(class_tail, Some(name.clone()));
         Ok(Stmt::VariableDeclaration(VariableDeclaration {
             kind: BindingKind::Let,
             name,
@@ -3626,11 +3626,15 @@ impl Parser {
     }
 
     fn parse_class_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
-        if self.check_identifier() && !self.check_keyword("extends") {
-            let _ = self.expect_binding_identifier("expected class name")?;
-        }
+        let class_name = if self.check_identifier() && !self.check_keyword("extends") {
+            Some(Identifier(
+                self.expect_binding_identifier("expected class name")?,
+            ))
+        } else {
+            None
+        };
         let class_tail = self.parse_class_tail()?;
-        Ok(self.lower_class_tail(class_tail))
+        Ok(self.lower_class_tail(class_tail, class_name))
     }
 
     fn parse_class_tail(&mut self) -> Result<ParsedClassTail, ParseError> {
@@ -3754,7 +3758,11 @@ impl Parser {
         }
     }
 
-    fn lower_class_tail(&mut self, class_tail: ParsedClassTail) -> Expr {
+    fn lower_class_tail(
+        &mut self,
+        class_tail: ParsedClassTail,
+        class_name: Option<Identifier>,
+    ) -> Expr {
         let class_temp = self.next_class_temp_name();
         let class_ident = Identifier(class_temp.clone());
         let ParsedClassTail { methods, extends } = class_tail;
@@ -3813,6 +3821,13 @@ impl Parser {
             name: class_ident.clone(),
             initializer: Some(constructor_value),
         })];
+        if let Some(class_name) = class_name {
+            body.push(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Const,
+                name: class_name,
+                initializer: Some(Expr::Identifier(class_ident.clone())),
+            }));
+        }
 
         let prototype_value = if let Some(extends_expr) = extends {
             body.push(Stmt::VariableDeclaration(VariableDeclaration {

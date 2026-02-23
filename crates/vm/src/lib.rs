@@ -10874,6 +10874,35 @@ mod tests {
     }
 
     #[test]
+    fn class_name_binding_is_lexically_scoped_and_immutable() {
+        let script = parse_script(
+            "var probeBefore = function() { return C; };\
+             class C {\
+               probe() { return C; }\
+               modify() { C = null; }\
+             }\
+             var cls = probeBefore();\
+             C = null;\
+             var threw = false;\
+             try { cls.prototype.modify(); } catch (e) { threw = e instanceof TypeError; }\
+             threw && cls.prototype.probe() === cls;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn executes_instanceof_for_matching_constructor() {
         let chunk = empty_chunk(vec![
             Opcode::CreateObject,
