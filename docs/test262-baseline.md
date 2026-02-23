@@ -56,6 +56,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+35)`: discovered=23882, executed=5000, skipped=18579, passed=4786, failed=214
 - `language max-cases=5000 (latest+36)`: discovered=23882, executed=5000, skipped=18579, passed=4810, failed=190
 - `language max-cases=5000 (latest+37)`: discovered=23882, executed=5000, skipped=18579, passed=4811, failed=189
+- `language max-cases=5000 (latest+38)`: discovered=23882, executed=5000, skipped=18579, passed=4813, failed=187
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -73,7 +74,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
 - `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
 - `language/statements/class/definition (latest)`: discovered=65, executed=33, skipped=32, passed=33, failed=0
-- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=139, failed=49
+- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=140, failed=48
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -224,4 +225,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM `Object.defineProperty` 扩展到普通 `HostFunction` 目标（含 accessor 存储/读取、`getOwnPropertyDescriptor`、GC root 可达性），修复 `function(){}.bind()` 的 `prototype` getter 继承语义；该轮后 `language` 基线提升至 `4786/214`。
 - parser/VM 为 `class extends` 派生构造器引入 `this` 初始化状态机：未 `super()` 前访问 `this` 抛 `ReferenceError`、重复 `super()` 保留构造副作用后抛 `ReferenceError`、派生构造器返回值收敛为 object/undefined；同时收紧 `NativeFunction.prototype` 暴露（保留构造器路径与 `Test262Error`）。该轮后 `language/statements/class/definition` 提升至 `32/1`，整体 `language` 基线提升至 `4810/190`。
 - parser/VM 补齐 class constructor 父链可见性（`Object.getPrototypeOf(D) === C`）：在 `extends` 降级链路记录构造器父引用并纳入函数原型读取回退，`language/statements/class/definition` 收敛至 `33/0`，整体 `language` 基线提升至 `4811/189`。
+- VM 将 class constructor 统一纳入 `caller/arguments` 受限函数集合（与 strict/arrow 路径一致），清理 `restricted-properties` 子簇；该轮后 `language/statements/class` 提升至 `140/48`，整体 `language` 基线提升至 `4813/187`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -7788,7 +7788,11 @@ impl Vm {
             .functions
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
-        Ok(closure.strict || self.function_is_arrow(function))
+        Ok(
+            closure.strict
+                || self.function_is_arrow(function)
+                || self.closure_is_class_constructor(closure_id),
+        )
     }
 
     fn is_restricted_function_property(property: &str) -> bool {

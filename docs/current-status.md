@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4811`、`failed=189`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v18.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4813`、`failed=187`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v19.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -101,7 +101,8 @@
   - VM 收紧 `NativeFunction.prototype` 暴露策略（仅构造器路径保留 `prototype`，并保留 `Test262Error` 构造器原型），修复 `class definition/invalid-extends` 语义偏差。
   - parser/VM 为 `class extends` 构造器新增派生标记与 `this` 初始化状态机：未调用 `super()` 前访问 `this` 抛 `ReferenceError`、二次 `super()` 在保持副作用顺序后抛 `ReferenceError`、派生构造器返回值规则收敛（仅允许 object/undefined）。
   - parser/VM 对齐 class constructor `[[Prototype]]` 可见链路：在 `extends` 场景记录构造器父引用并让 `Object.getPrototypeOf(classCtor)`/函数原型读取按该链路回退，修复 `side-effects-in-extends`。
-  - 子集回归（latest+9）：`language/statements/class/definition` 收敛至 `33/0`，`language/statements/class` 提升至 `139/49`，`language` 基线提升至 `4811/189`。
+  - VM 将 class constructor 纳入 `caller/arguments` 受限函数集（与 strict/arrow 一致），补齐 `restricted-properties` 断言路径。
+  - 子集回归（latest+10）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `140/48`，`language/expressions/class` 保持 `29/18`，`language` 基线提升至 `4813/187`。
 
 ## 3. 分阶段状态
 
