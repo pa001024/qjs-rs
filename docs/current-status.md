@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4381`、`failed=619`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4440`、`failed=560`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -24,6 +24,10 @@
   - VM 关系运算中的字符串比较改为按 UTF-16 code unit 顺序（与 JS 规范/QuickJS 行为方向一致）。
   - 数值词法补齐：十六进制字面量 `0x.../0X...`。
   - parser 在 `Expression` 上下文（statement / if-while-do / for 条件更新 / return / throw / switch / with）补齐逗号运算符序列解析，避免把合法 `a, b` 误判为语句分隔错误。
+  - lexer 对齐 QuickJS 风格新增 `is_regexp_allowed` 路径：在允许正则的上下文将 `/.../flags` 作为单 token 扫描，修复 regexp 字面量中的 `\` 词法失败。
+  - lexer/parser 新增 template literal 分段 token 与解析（含 cooked/raw 区分、line-continuation raw 保真、tagged template 最小调用降级）。
+  - tagged template 首参已从“仅 cooked 数组”升级为“cooked 数组 + `raw` 数组属性”，并补齐 `new tag\`...\`` 优先级（tagged template 高于 `new` 构造解析）。
+  - template invalid escape 场景在 tagged template 下不再 parse-fail，改为 cooked `undefined` + raw 保留，收敛 `tagged-template/invalid-escape-sequences.js`。
 
 ## 3. 分阶段状态
 
@@ -43,7 +47,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. class/constructor/super-call 与模板字符串仍是 language 子集主失败簇（当前失败集中在 `statements/class`、`expressions/template-literal`）。
+4. class/constructor/super-call 与函数/eval 环境语义仍是 language 子集主失败簇（当前失败集中在 `statements/class`、`statements/function`、`eval-code/*`；template-literal 主簇已基本清理，仅剩 tagged-template cache/freeze 语义）。
 
 ## 5. 下一步执行
 

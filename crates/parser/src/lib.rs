@@ -3016,6 +3016,10 @@ impl Parser {
                 };
                 continue;
             }
+            if self.check_template_part() {
+                callee = self.parse_tagged_template_call(callee)?;
+                continue;
+            }
             break;
         }
 
@@ -3057,6 +3061,10 @@ impl Parser {
                 };
                 continue;
             }
+            if self.check_template_part() {
+                expr = self.parse_tagged_template_call(expr)?;
+                continue;
+            }
             break;
         }
         Ok(expr)
@@ -3089,6 +3097,10 @@ impl Parser {
                     object: Box::new(expr),
                     property: Box::new(property),
                 };
+                continue;
+            }
+            if self.check_template_part() {
+                expr = self.parse_tagged_template_call(expr)?;
                 continue;
             }
             break;
@@ -3622,6 +3634,7 @@ impl Parser {
                 self.advance();
                 Ok(Expr::String(StringLiteral { value, has_escape }))
             }
+            TokenKind::TemplatePart { .. } => self.parse_template_literal_expression(),
             TokenKind::Identifier(name) => {
                 if self.identifier_token_matches_keyword(&token, "async")
                     && self.check_next_keyword("function")
@@ -3850,6 +3863,143 @@ impl Parser {
         }
 
         Ok(Expr::RegexLiteral { pattern, flags })
+    }
+
+    fn parse_template_literal_expression(&mut self) -> Result<Expr, ParseError> {
+        let (quasis, _raw_quasis, invalid_quasis, expressions) =
+            self.parse_template_literal_parts()?;
+        if quasis.is_empty() {
+            return Ok(Expr::String(StringLiteral {
+                value: String::new(),
+                has_escape: false,
+            }));
+        }
+        if quasis.len() != expressions.len() + 1 {
+            return Err(self.error_current("invalid template literal shape"));
+        }
+        if invalid_quasis.iter().any(|invalid| *invalid) {
+            return Err(self.error_current("invalid escape in template literal"));
+        }
+
+        let mut expr = Expr::String(quasis[0].clone());
+        for (index, substitution) in expressions.into_iter().enumerate() {
+            expr = Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(expr),
+                right: Box::new(substitution),
+            };
+            expr = Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(expr),
+                right: Box::new(Expr::String(quasis[index + 1].clone())),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_tagged_template_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
+        let (quasis, raw_quasis, invalid_quasis, expressions) =
+            self.parse_template_literal_parts()?;
+        if quasis.is_empty() {
+            return Err(self.error_current("invalid tagged template literal"));
+        }
+        if quasis.len() != expressions.len() + 1 {
+            return Err(self.error_current("invalid tagged template literal"));
+        }
+        let mut arguments = Vec::with_capacity(expressions.len() + 1);
+        arguments.push(self.build_tagged_template_object(quasis, raw_quasis, invalid_quasis));
+        arguments.extend(expressions);
+        Ok(Expr::Call {
+            callee: Box::new(callee),
+            arguments,
+        })
+    }
+
+    fn build_tagged_template_object(
+        &self,
+        quasis: Vec<StringLiteral>,
+        raw_quasis: Vec<StringLiteral>,
+        invalid_quasis: Vec<bool>,
+    ) -> Expr {
+        let template_ident = Identifier("$__template_obj".to_string());
+        let cooked_quasis = quasis
+            .into_iter()
+            .zip(invalid_quasis)
+            .map(|(quasi, invalid)| {
+                if invalid {
+                    Expr::Identifier(Identifier("undefined".to_string()))
+                } else {
+                    Expr::String(quasi)
+                }
+            })
+            .collect();
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![template_ident.clone()],
+                body: vec![
+                    Stmt::Expression(Expr::AssignMember {
+                        object: Box::new(Expr::Identifier(template_ident.clone())),
+                        property: "raw".to_string(),
+                        value: Box::new(Expr::ArrayLiteral(
+                            raw_quasis.into_iter().map(Expr::String).collect(),
+                        )),
+                    }),
+                    Stmt::Return(Some(Expr::Identifier(template_ident))),
+                ],
+            }),
+            arguments: vec![Expr::ArrayLiteral(cooked_quasis)],
+        }
+    }
+
+    fn parse_template_literal_parts(
+        &mut self,
+    ) -> Result<(Vec<StringLiteral>, Vec<StringLiteral>, Vec<bool>, Vec<Expr>), ParseError> {
+        let mut quasis = Vec::new();
+        let mut raw_quasis = Vec::new();
+        let mut invalid_quasis = Vec::new();
+        let mut expressions = Vec::new();
+
+        loop {
+            let token = self.current().cloned().ok_or(ParseError {
+                message: "unexpected end of input".to_string(),
+                position: self.last_position(),
+            })?;
+            let (cooked, raw, has_escape, invalid_escape, tail) = match token.kind {
+                TokenKind::TemplatePart {
+                    cooked,
+                    raw,
+                    has_escape,
+                    invalid_escape,
+                    tail,
+                } => (cooked, raw, has_escape, invalid_escape, tail),
+                _ => {
+                    return Err(ParseError {
+                        message: "expected template literal".to_string(),
+                        position: token.span.start,
+                    });
+                }
+            };
+            self.advance();
+            quasis.push(StringLiteral {
+                value: cooked,
+                has_escape,
+            });
+            raw_quasis.push(StringLiteral {
+                value: raw,
+                has_escape,
+            });
+            invalid_quasis.push(invalid_escape);
+            if tail {
+                break;
+            }
+
+            let expr = self.parse_expression_with_commas()?;
+            expressions.push(expr);
+            self.expect(TokenKind::RBrace, "expected '}' after template expression")?;
+        }
+
+        Ok((quasis, raw_quasis, invalid_quasis, expressions))
     }
 
     fn parse_object_literal(&mut self) -> Result<Expr, ParseError> {
@@ -4155,6 +4305,13 @@ impl Parser {
         matches!(
             self.current().map(|token| &token.kind),
             Some(TokenKind::Identifier(_))
+        )
+    }
+
+    fn check_template_part(&self) -> bool {
+        matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::TemplatePart { .. })
         )
     }
 
@@ -4649,6 +4806,96 @@ mod tests {
             flags: "g".to_string(),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_template_literal_without_substitution() {
+        let parsed = parse_expression("`ok`").expect("parser should succeed");
+        assert_eq!(
+            parsed,
+            Expr::String(StringLiteral {
+                value: "ok".to_string(),
+                has_escape: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_template_literal_as_concatenation() {
+        let parsed = parse_expression("`a${b}c`").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::String(StringLiteral {
+                    value: "a".to_string(),
+                    has_escape: false,
+                })),
+                right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+            }),
+            right: Box::new(Expr::String(StringLiteral {
+                value: "c".to_string(),
+                has_escape: false,
+            })),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_tagged_template_as_call() {
+        let parsed = parse_expression("tag`a${b}`").expect("parser should succeed");
+        let Expr::Call { callee, arguments } = parsed else {
+            panic!("expected tagged template to lower into call expression");
+        };
+        assert_eq!(*callee, Expr::Identifier(Identifier("tag".to_string())));
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(arguments[1], Expr::Identifier(Identifier("b".to_string())));
+
+        let Expr::Call {
+            callee: factory,
+            arguments: template_args,
+        } = &arguments[0]
+        else {
+            panic!("expected first tagged template argument to be factory call");
+        };
+        let Expr::Function { params, .. } = factory.as_ref() else {
+            panic!("expected template factory callee to be function expression");
+        };
+        assert_eq!(params, &vec![Identifier("$__template_obj".to_string())]);
+        assert_eq!(template_args.len(), 1);
+        assert_eq!(
+            template_args[0],
+            Expr::ArrayLiteral(vec![
+                Expr::String(StringLiteral {
+                    value: "a".to_string(),
+                    has_escape: false,
+                }),
+                Expr::String(StringLiteral {
+                    value: "".to_string(),
+                    has_escape: false,
+                }),
+            ])
+        );
+    }
+
+    #[test]
+    fn gives_tagged_template_precedence_over_new() {
+        let parsed = parse_expression("new tag`value`").expect("parser should succeed");
+        let Expr::New { callee, arguments } = parsed else {
+            panic!("expected new expression");
+        };
+        assert!(arguments.is_empty(), "new expression should not have call arguments");
+        let Expr::Call {
+            callee: tagged_callee,
+            ..
+        } = *callee
+        else {
+            panic!("expected new callee to be tagged template call");
+        };
+        assert_eq!(
+            *tagged_callee,
+            Expr::Identifier(Identifier("tag".to_string()))
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
 - `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4320, failed=680
+- `language max-cases=5000 (latest)`: discovered=23882, executed=5000, skipped=18579, passed=4440, failed=560
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -126,4 +127,9 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 补齐字符串 `\u{...}` code point 转义与 surrogate `\uD800-\uDFFF` 转义最小可解析路径；VM 关系运算中的字符串比较改为按 UTF-16 code unit 顺序，进一步收敛 `relational` 与 `for-of/string-astral` 相关失败；`language` 基线提升至 `4361/639`。
 - lexer 补齐十六进制数字字面量 `0x.../0X...` 词法路径，清理 `literals/numeric` 与 `literals/regexp` 中一批 `expected ')' after if condition` / `expected ';' after for condition` 解析失败；`language` 基线提升至 `4373/627`。
 - parser 在 `Expression` 语法上下文补齐逗号运算符（sequence expression）解析，而保留参数列表/对象字面量/数组元素中的 `AssignmentExpression` 语义边界，清理 `expressions/comma` 与相关 `for` 语句误判失败；`language` 基线提升至 `4381/619`。
+- lexer 对齐 QuickJS `is_regexp_allowed` 思路：在可出现 regexp literal 的上下文按 `/.../flags` 单 token 扫描，避免 regexp body 中反斜杠触发词法错误；`language` 基线提升至 `4420/580`。
+- lexer 字符串转义补齐 `\0/\b/\f/\v` 基线支持，清理 `unsupported escape sequence '\0'` 失败簇；`language` 基线提升至 `4425/575`。
+- lexer/parser 增加 template literal 分段 token（cooked/raw）与解析链路，tagged template 首参升级为 cooked 数组并附带 `raw` 属性；`language` 基线提升至 `4438/562`。
+- parser 修正 `new tag\`...\`` 解析优先级（tagged template 高于 `new`），修复 `tagged-template/constructor-invocation.js`；`language` 基线提升至 `4439/561`。
+- template invalid escape 在 tagged template 下改为“cooked 为 `undefined` + raw 保留”，不再 parse-fail；`language` 基线提升至 `4440/560`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
