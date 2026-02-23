@@ -2621,6 +2621,22 @@ impl Parser {
         result
     }
 
+    fn parse_expression_with_in(&mut self) -> Result<Expr, ParseError> {
+        let saved_allow_in = self.allow_in;
+        self.allow_in = true;
+        let result = self.parse_expression_inner();
+        self.allow_in = saved_allow_in;
+        result
+    }
+
+    fn number_property_key(number: f64) -> String {
+        if number.is_finite() && number.fract() == 0.0 {
+            format!("{number:.0}")
+        } else {
+            number.to_string()
+        }
+    }
+
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
         if let Some(arrow_function) = self.try_parse_arrow_function()? {
             return Ok(arrow_function);
@@ -3589,16 +3605,12 @@ impl Parser {
             }
             TokenKind::Number(number) => {
                 self.advance();
-                let key = if number.is_finite() && number.fract() == 0.0 {
-                    format!("{number:.0}")
-                } else {
-                    number.to_string()
-                };
+                let key = Self::number_property_key(number);
                 Ok(ClassMethodKey::Static(key))
             }
             TokenKind::LBracket => {
                 self.advance();
-                let key = self.parse_expression_inner()?;
+                let key = self.parse_expression_with_in()?;
                 self.expect(
                     TokenKind::RBracket,
                     "expected ']' after computed method name",
@@ -4507,7 +4519,7 @@ impl Parser {
         };
 
         let accessor_key = if self.matches(&TokenKind::LBracket) {
-            let key_expr = self.parse_expression_inner()?;
+            let key_expr = self.parse_expression_with_in()?;
             self.expect(
                 TokenKind::RBracket,
                 "expected ']' after computed property name",
@@ -4518,11 +4530,20 @@ impl Parser {
                 ObjectPropertyKey::AccessorSetComputed(Box::new(key_expr))
             }
         } else {
-            if !self.check_identifier() || !self.check_next(&TokenKind::LParen) {
+            if !self.check_next(&TokenKind::LParen) {
                 return Ok(None);
             }
-            let accessor_name =
-                self.expect_identifier_name("expected property name in object literal")?;
+            let accessor_name = match self.current().map(|token| token.kind.clone()) {
+                Some(TokenKind::Identifier(name)) | Some(TokenKind::String(name)) => {
+                    self.advance();
+                    name
+                }
+                Some(TokenKind::Number(number)) => {
+                    self.advance();
+                    Self::number_property_key(number)
+                }
+                _ => return Ok(None),
+            };
             if accessor_kind == "get" {
                 ObjectPropertyKey::AccessorGet(accessor_name)
             } else {
@@ -4571,16 +4592,12 @@ impl Parser {
             }
             TokenKind::Number(number) => {
                 self.advance();
-                let key = if number.is_finite() && number.fract() == 0.0 {
-                    format!("{number:.0}")
-                } else {
-                    number.to_string()
-                };
+                let key = Self::number_property_key(number);
                 Ok(ObjectPropertyKey::Static(key))
             }
             TokenKind::LBracket => {
                 self.advance();
-                let expr = self.parse_expression_inner()?;
+                let expr = self.parse_expression_with_in()?;
                 self.expect(
                     TokenKind::RBracket,
                     "expected ']' after computed property name",
@@ -5062,6 +5079,37 @@ mod tests {
             },
         ]);
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_literal_named_getter_and_setter_in_object_literal() {
+        let parsed =
+            parse_expression("({ get 'x'() {}, set 0b101(v) {} })").expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorGet("x".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![],
+                },
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::AccessorSet("5".to_string()),
+                value: Expr::Function {
+                    name: None,
+                    params: vec![Identifier("v".to_string())],
+                    body: vec![],
+                },
+            },
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_computed_object_accessor_with_in_in_for_init() {
+        parse_script("for (obj = { get ['x' in empty]() {} }; ; ) break;")
+            .expect("script parsing should succeed");
     }
 
     #[test]
@@ -5575,6 +5623,12 @@ mod tests {
     #[test]
     fn parses_class_computed_accessors_baseline() {
         parse_script("class C { get ['a']() { return 1; } set ['a'](v) {} }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_class_computed_method_with_in_in_for_init() {
+        parse_script("for (class C { ['x' in empty]() {} }; ; ) break;")
             .expect("script parsing should succeed");
     }
 

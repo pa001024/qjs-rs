@@ -1217,31 +1217,48 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte.is_ascii_digit() {
             let start = pos;
-            if byte == b'0' && pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'x' | b'X') {
-                pos += 2;
-                let digits_start = pos;
-                while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
-                    pos += 1;
-                }
-                if digits_start == pos {
-                    return Err(LexError {
-                        message: format!("invalid number literal '{}'", &source[start..pos]),
-                        position: start,
+            if byte == b'0' && pos + 1 < bytes.len() {
+                let radix = match bytes[pos + 1] {
+                    b'x' | b'X' => 16u32,
+                    b'b' | b'B' => 2u32,
+                    b'o' | b'O' => 8u32,
+                    _ => 0u32,
+                };
+                if radix != 0 {
+                    pos += 2;
+                    let digits_start = pos;
+                    while pos < bytes.len() {
+                        let is_digit = match radix {
+                            16 => bytes[pos].is_ascii_hexdigit(),
+                            2 => matches!(bytes[pos], b'0' | b'1'),
+                            8 => matches!(bytes[pos], b'0'..=b'7'),
+                            _ => false,
+                        };
+                        if !is_digit {
+                            break;
+                        }
+                        pos += 1;
+                    }
+                    if digits_start == pos {
+                        return Err(LexError {
+                            message: format!("invalid number literal '{}'", &source[start..pos]),
+                            position: start,
+                        });
+                    }
+                    let raw = &source[start..pos];
+                    let digits = &raw[2..];
+                    let value = u64::from_str_radix(digits, radix)
+                        .map(|number| number as f64)
+                        .map_err(|_| LexError {
+                            message: format!("invalid number literal '{raw}'"),
+                            position: start,
+                        })?;
+                    tokens.push(Token {
+                        kind: TokenKind::Number(value),
+                        span: Span { start, end: pos },
                     });
+                    continue;
                 }
-                let raw = &source[start..pos];
-                let hex = &raw[2..];
-                let value = u64::from_str_radix(hex, 16)
-                    .map(|number| number as f64)
-                    .map_err(|_| LexError {
-                        message: format!("invalid number literal '{raw}'"),
-                        position: start,
-                    })?;
-                tokens.push(Token {
-                    kind: TokenKind::Number(value),
-                    span: Span { start, end: pos },
-                });
-                continue;
             }
             let mut has_dot = false;
             while pos < bytes.len() {
@@ -1577,9 +1594,28 @@ mod tests {
     }
 
     #[test]
+    fn lexes_binary_and_octal_numbers() {
+        let tokens = lex("0b10 + 0B11 + 0o10 + 0O7").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(8.0));
+        assert_eq!(tokens[5].kind, TokenKind::Plus);
+        assert_eq!(tokens[6].kind, TokenKind::Number(7.0));
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn rejects_hex_without_digits() {
         let err = lex("0x").expect_err("tokenization should fail");
         assert!(err.message.starts_with("invalid number literal"));
+    }
+
+    #[test]
+    fn rejects_binary_and_octal_without_digits() {
+        assert!(lex("0b").is_err());
+        assert!(lex("0o").is_err());
     }
 
     #[test]

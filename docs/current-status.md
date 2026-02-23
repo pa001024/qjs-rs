@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4725`、`failed=275`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4732`、`failed=268`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -75,6 +75,10 @@
   - bytecode 将 unary plus 降级改为 `ToNumber` 语义（`expr - 0`），并在 VM 数值转换路径收紧 `Infinity` 大小写匹配，`language/expressions/unary-plus` 收敛至 `16/0`。
   - VM 补齐 delete 关键语义：`null/undefined` base 抛 TypeError、`delete super[...]` 抛 ReferenceError（且不触发 `ToPropertyKey`）、全局常量属性（`NaN/Infinity/undefined`）不可配置、全局 `var` 与 `globalThis` 属性联动。
   - VM 新增 `JSON` 最小对象（`stringify/parse`）与 `Array.isArray`，`language/expressions/delete` 收敛至 `56/0`。
+  - parser 对齐 QuickJS `js_parse_property_name` 行为：对象/class 的 computed key 在 `no_in` 外层环境下强制允许 `in`，修复 `accessor-name-computed-in.js` 等解析失败。
+  - parser 对象访问器 key 补齐 `IdentifierName/StringLiteral/NumericLiteral/[AssignmentExpression]`，不再仅限标识符。
+  - lexer 补齐 `0b/0B` 与 `0o/0O` 数字字面量；清理 object accessor 数字 key 的 parse fail。
+  - 子集回归：`language/expressions/object` 从 `259/12` 提升到 `262/9`；`language/expressions/class` 从 `27/20` 提升到 `29/18`。
 
 ## 3. 分阶段状态
 
