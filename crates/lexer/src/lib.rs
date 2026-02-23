@@ -774,6 +774,32 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte.is_ascii_digit() {
             let start = pos;
+            if byte == b'0' && pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'x' | b'X') {
+                pos += 2;
+                let digits_start = pos;
+                while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
+                    pos += 1;
+                }
+                if digits_start == pos {
+                    return Err(LexError {
+                        message: format!("invalid number literal '{}'", &source[start..pos]),
+                        position: start,
+                    });
+                }
+                let raw = &source[start..pos];
+                let hex = &raw[2..];
+                let value = u64::from_str_radix(hex, 16)
+                    .map(|number| number as f64)
+                    .map_err(|_| LexError {
+                        message: format!("invalid number literal '{raw}'"),
+                        position: start,
+                    })?;
+                tokens.push(Token {
+                    kind: TokenKind::Number(value),
+                    span: Span { start, end: pos },
+                });
+                continue;
+            }
             let mut has_dot = false;
             while pos < bytes.len() {
                 let current = bytes[pos];
@@ -1078,6 +1104,23 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Plus);
         assert_eq!(tokens[2].kind, TokenKind::Number(2.5));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_hex_numbers() {
+        let tokens = lex("0x0 + 0x1F + 0X10").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(0.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(31.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(16.0));
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_hex_without_digits() {
+        let err = lex("0x").expect_err("tokenization should fail");
+        assert!(err.message.starts_with("invalid number literal"));
     }
 
     #[test]
