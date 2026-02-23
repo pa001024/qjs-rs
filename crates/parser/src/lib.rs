@@ -1105,6 +1105,19 @@ impl Parser {
         body
     }
 
+    fn parse_function_body_with_super_policy(
+        &mut self,
+        start_error: &str,
+        end_error: &str,
+        allow_super_reference: bool,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        let saved_allow_super_reference = self.allow_super_reference;
+        self.allow_super_reference = allow_super_reference;
+        let body = self.parse_function_body(start_error, end_error);
+        self.allow_super_reference = saved_allow_super_reference;
+        body
+    }
+
     fn prepend_marker(&self, body: &mut Vec<Stmt>, marker: &str) {
         body.insert(
             0,
@@ -1159,9 +1172,10 @@ impl Parser {
         let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body(
+        let mut body = self.parse_function_body_with_super_policy(
             "expected '{' before function body",
             "expected '}' after function body",
+            false,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
@@ -2105,7 +2119,9 @@ impl Parser {
             }
             Some(ForInitializer::VariableDeclarations(declarations)) => declarations
                 .iter()
-                .filter(|declaration| matches!(declaration.kind, BindingKind::Let | BindingKind::Const))
+                .filter(|declaration| {
+                    matches!(declaration.kind, BindingKind::Let | BindingKind::Const)
+                })
                 .map(|declaration| declaration.name.clone())
                 .collect(),
             _ => Vec::new(),
@@ -3214,9 +3230,10 @@ impl Parser {
         let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body(
+        let mut body = self.parse_function_body_with_super_policy(
             "expected '{' before function body",
             "expected '}' after function body",
+            false,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
@@ -3227,7 +3244,7 @@ impl Parser {
     }
 
     fn parse_class_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
-        if self.check_identifier() {
+        if self.check_identifier() && !self.check_keyword("extends") {
             let _ = self.expect_binding_identifier("expected class name")?;
         }
         let class_tail = self.parse_class_tail()?;
@@ -3291,13 +3308,11 @@ impl Parser {
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
             let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
-            let saved_allow_super_reference = self.allow_super_reference;
-            self.allow_super_reference = is_static;
-            let body = self.parse_function_body(
+            let body = self.parse_function_body_with_super_policy(
                 "expected '{' before method body",
                 "expected '}' after method body",
+                true,
             );
-            self.allow_super_reference = saved_allow_super_reference;
             let mut body = body?;
             if matches!(kind, ClassElementKind::Getter) && !params.is_empty() {
                 return Err(self.error_current("getter must not have parameters"));
@@ -3936,9 +3951,10 @@ impl Parser {
         let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body(
+        let mut body = self.parse_function_body_with_super_policy(
             "expected '{' before function body",
             "expected '}' after function body",
+            true,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
@@ -3999,9 +4015,10 @@ impl Parser {
         let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body(
+        let mut body = self.parse_function_body_with_super_policy(
             "expected '{' before method body",
             "expected '}' after method body",
+            true,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers);
         if !simple_parameters {
@@ -4874,6 +4891,34 @@ mod tests {
             }) => {}
             _ => panic!("expected lowered class initializer call expression"),
         }
+    }
+
+    #[test]
+    fn parses_class_instance_super_member_reference_baseline() {
+        parse_script("class C { m() { super.x; } }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_object_method_super_member_reference_baseline() {
+        parse_script("({ m() { super.x; } });").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_object_accessor_super_member_reference_baseline() {
+        parse_script("({ get x() { return super.x; }, set x(v) { super.x = v; } });")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_anonymous_class_expression_with_extends_baseline() {
+        parse_script("let C = class extends null {};")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn rejects_top_level_super_member_reference_baseline() {
+        let err = parse_script("super.x;").expect_err("parser should fail");
+        assert_eq!(err.message, "reserved word cannot be identifier reference");
     }
 
     #[test]

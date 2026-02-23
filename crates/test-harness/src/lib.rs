@@ -768,8 +768,11 @@ mod tests {
 
     #[test]
     fn array_reduce_without_initial_value_on_empty_array_throws() {
-        let err = run_script("[].reduce(function(acc, value) { return acc + value; });", &[])
-            .expect_err("empty array reduce without initial value should throw");
+        let err = run_script(
+            "[].reduce(function(acc, value) { return acc + value; });",
+            &[],
+        )
+        .expect_err("empty array reduce without initial value should throw");
         assert!(err.contains("TypeError"));
     }
 

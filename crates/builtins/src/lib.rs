@@ -43,6 +43,18 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::SymbolConstructor),
     );
     realm.define_global("isNaN", JsValue::NativeFunction(NativeFunction::IsNaN));
+    realm.define_global(
+        "isFinite",
+        JsValue::NativeFunction(NativeFunction::IsFinite),
+    );
+    realm.define_global(
+        "parseInt",
+        JsValue::NativeFunction(NativeFunction::ParseInt),
+    );
+    realm.define_global(
+        "parseFloat",
+        JsValue::NativeFunction(NativeFunction::ParseFloat),
+    );
     realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
     realm.define_global(
         "Test262Error",
@@ -64,4 +76,40 @@ pub fn install_baseline(realm: &mut Realm) {
         "SyntaxError",
         JsValue::NativeFunction(NativeFunction::Test262Error),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_baseline;
+    use runtime::{JsValue, NativeFunction, Realm};
+
+    #[test]
+    fn installs_parse_int_global() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("parseInt"),
+            Some(&JsValue::NativeFunction(NativeFunction::ParseInt))
+        );
+    }
+
+    #[test]
+    fn installs_parse_float_global() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("parseFloat"),
+            Some(&JsValue::NativeFunction(NativeFunction::ParseFloat))
+        );
+    }
+
+    #[test]
+    fn installs_is_finite_global() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("isFinite"),
+            Some(&JsValue::NativeFunction(NativeFunction::IsFinite))
+        );
+    }
 }

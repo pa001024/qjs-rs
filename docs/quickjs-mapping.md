@@ -1,16 +1,34 @@
 # QuickJS to qjs-rs Mapping
 
-| QuickJS area | qjs-rs crate | Status | Notes |
-| --- | --- | --- | --- |
-| Tokenization | `crates/lexer` | In Progress | Arithmetic/unary/comparison, `===/!==`, `&&/||`, delimiters, block/call/member/bracket syntax tokens, line/block comment skipping, and basic string literal lexing landed; control-flow keywords are handled as identifiers in parser stage. |
-| Parser / AST | `crates/parser`, `crates/ast` | In Progress | Script/block/function statements, `let/const/var`（含逗号声明）, `return`, `if/while/do-while/for/switch`, `break/continue`, `throw`, `try/catch/finally`, label/empty statement, unary/comparison (`===/!==`), logical ops (`&&/||`), call/assignment expressions, object/array literals, member access/update（含 `obj[key]`）, and `true/false/null/string` literals landed. |
-| Bytecode compiler | `crates/bytecode` | In Progress | Script compilation, function table, call/return ops, scope ops, literal load ops (`bool/null/string`), object/array lowering（数组按对象+`length` 基线实现）, object create/get/set ops（含按值 key 访问）, logical short-circuit lowering, jump ops (`JumpIfFalse`/`Jump`), loop/switch control patching (`break/continue`), exception-handler ops (`throw`/`try`), and finally-aware abrupt completion emission landed. |
-| VM execution | `crates/vm` | In Progress | Scope stack, lexical shadowing, hoisted function calls, jump-based control flow (`if/while/for/switch`), object property read/write（含 computed key）, `arguments` object baseline (`length` / indexed / `callee`), basic numeric coercion for arithmetic/comparison, string concatenation via `+`, exception unwinding (`throw`/`try`), realm fallback, and reference-based captures landed. |
-| Value/object model | `crates/runtime` | In Progress | `JSValue::Object` landed with VM-side object storage; global identifier lookup via `Realm` and lexical env in VM scopes remain baseline. |
-| Builtins | `crates/builtins` | Planned | Add core globals first, then advanced builtins. |
-| Compatibility harness | `crates/test-harness` | In Progress | End-to-end expression/function/control-flow smoke tests, frontmatter-aware `test262-lite` runner, real test262 frontmatter extraction（支持版权头）, suite CLI (`test262-run`) with failure-sample output (`--show-failures`) landed; harness-global-dependent cases are temporarily skipped. |
+基线日期：2026-02-23  
+状态口径：`Done` / `In Progress` / `Planned`
 
-## Immediate Next Slice
-- Add array literals and more unary/control syntax (`delete`/`typeof`) to reduce parse failures in language/asi and arguments-object groups.
-- Add strict mode + harness include plumbing, then wire minimal `assert`/`Test262Error` host side behavior.
-- Extend object model with `this` baseline and property delete/enumeration basics.
+| QuickJS area | qjs-rs crate | 状态 | 已落地能力（当前基线） | 下一步缺口 |
+| --- | --- | --- | --- | --- |
+| Tokenization | `crates/lexer` | In Progress | 覆盖常见运算符、关键标点、注释、字符串、Unicode 标识符与部分转义路径。 | 继续补齐边界词法与和 parser 联动的语义错误上下文。 |
+| Parser / AST | `crates/parser`, `crates/ast` | In Progress | 支持脚本主路径、函数、控制流、异常、对象/数组字面量、class/arrow 等基线形状。 | 模块语义、早期错误覆盖深度与复杂语法边角仍需收敛。 |
+| Bytecode compiler | `crates/bytecode` | In Progress | 已形成 AST 到指令集的主降级路径，包含函数/作用域/跳转/异常处理相关 opcode。 | 继续稳定 completion record 与复杂控制流的编译约束。 |
+| VM execution | `crates/vm` | In Progress | 可执行脚本链路，支持作用域栈、调用、异常传播、对象读写、部分内建交互；已新增 `CallMethod*` 与 `CallIdentifier*` 路径以对齐 receiver/base-object `this` 绑定语义。 | `this`、严格模式细节、descriptor 细节与 corner cases 仍需对齐。 |
+| Value/object model | `crates/runtime` | In Progress | 提供 `JsValue`、`Realm` 与对象存储基线，支撑当前执行路径；已提供 `Realm.globals_values()` 供 GC root 收集。 | 对象属性描述符细节、宿主对象生命周期与跨 realm 行为仍需收敛。 |
+| Builtins | `crates/builtins` | In Progress | 已注入一批 baseline 全局对象与函数（含 `parseInt`/`parseFloat`/`isFinite` 与 test harness 运行所需最小集）。 | 仍需系统化补齐 `JSON`、`Error` 族细节、`Promise` 等高阶内建。 |
+| Compatibility harness | `crates/test-harness` | In Progress | 已有 `test262-lite` 跑批与 CLI，支持 frontmatter 驱动与失败样本导出。 | 真实 test262 覆盖、host hooks、严格模式 include 机制仍待扩展。 |
+| GC / Memory model | `crates/vm`, `crates/runtime` | In Progress | 已完成 root 盘点、策略、GC 设计、测试计划与最小 mark-sweep PoC；已实现 `ObjectId(slot+generation)` 句柄防护。 | 继续强化运行中触发策略、压力回归覆盖与性能观测。 |
+| Module / Job queue | `crates/parser`, `crates/runtime`, `crates/vm` | Planned | 尚无完整 ES Module 与微任务执行链路。 | Phase 6 需补齐解析、实例化、执行与 Promise job queue。 |
+
+## Phase 对齐快照（2026-02-23）
+
+| Phase | 状态 | 说明 |
+| --- | --- | --- |
+| Phase 0 | Done | workspace、基础文档、CI 已具备。 |
+| Phase 1 | In Progress | lexer/parser/ast 主路径可运行，仍在补齐语义边界。 |
+| Phase 2 | In Progress | bytecode 指令与编译主链路已建立，持续修正控制流与异常语义。 |
+| Phase 3 | In Progress | VM/runtime/builtins 可跑大量用例，核心对象模型仍未闭环。 |
+| Phase 4 | In Progress | GC/root 文档、PoC 与评审已完成，下一轮进入集成强化。 |
+| Phase 5 | In Progress | 部分内建可用，仍需扩面与规范细节。 |
+| Phase 6 | Planned | 模块系统与微任务队列尚未落地。 |
+| Phase 7 | In Progress | 已有 test262 基线与回归机制，但通过率和覆盖仍需持续推进。 |
+
+## 当前推进重点
+1. 以 Phase 4 为主线推进 GC 从“正确性闭环”到“压力验证+策略细化”（详见 `docs/long-horizon-task-phase4.md`）。
+2. 在不牺牲语义正确性的前提下，继续压降 `test262` 失败簇。
+3. 统一文档状态口径，避免“阶段计划”和“真实实现”脱节。

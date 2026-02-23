@@ -119,4 +119,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - bytecode 修复 `try { ... } finally { ... }` 的 completion value 保留：`finally` 正常完成时不再无条件覆盖为 `undefined`，并补充 `try/finally` 完成值与异常传播回归测试。该轮后 `language` 基线由 `4309/691` 进一步提升至 `4310/690`。
 - VM/runtime 新增 `Array.prototype.reduce` 基线路径并补充描述符稳定性回归测试（覆盖 test262 `8.12.5-3-b_1.js`），`language/expressions/assignment` 子集由 `86/6` 提升至 `87/5`，`language` 基线进一步提升至 `4311/689`。
 - VM/runtime 扩展内建表面：补齐 `Array.prototype.join/reverse/sort`、数组在 `+` 下的 `join(',')` 字符串化路径、`Math` 常见函数簇、`Date.parse/UTC` 与 `Date.prototype` 方法占位，并为原生构造器补齐 `toString/valueOf/constructor` 属性链路；在修复 `array.toString` 函数身份回归后，`language` 基线由 `4311/689` 提升至 `4320/680`。
+- parser/bytecode/vm/runtime/builtins 对齐 QuickJS 补齐本轮主链路：`super` 方法上下文放行、`===/!==` 独立 opcode、`++/--` 显式 `ToNumber`、`Number.MIN_VALUE=5e-324`、全局 `parseInt/parseFloat`；`language` 基线由 `4320/680` 提升至 `4324/676`。
+- bytecode/vm 新增 `CallMethod*`，在 `obj.m()` / `obj[k]()` 场景保留 receiver `this`；配合 `__proto__` 字面量处理与 `super` 运行时回退，`language` 基线进一步提升至 `4337/663`。
+- bytecode/vm 新增 `CallIdentifier*`（reference-aware 标识符调用），修复 `with (obj) { method(); }` 的 base object `this` 绑定，并在 strict 回归用例下收敛 `this` 选择；同时 parser 补齐 `class extends` 匿名类表达式吞吐、builtins/vm 补齐 `isFinite`。当前 `language` 基线：`4338/662`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -1,11 +1,17 @@
 # qjs-rs AGENTS.md
 
+## 0. 状态注记（2026-02-23）
+- 当前仓库已不再停留在“仅 Phase 0 脚手架”：
+  - workspace、CI、核心 crates 均已存在并可通过 `cargo test`。
+  - `parser -> bytecode -> vm -> runtime -> builtins -> test-harness` 链路可执行。
+- 阶段路线与验收标准仍按本文继续推进；当前真实进度请以 `docs/current-status.md` 为准。
+
 ## 1. 目标
 - 构建一个**纯 Rust** 的 JavaScript 运行时库，语义上优先对齐 QuickJS。
 - 参考实现：
   - QuickJS 源码：`D:\dev\QuickJS`
   - Boa（纯 Rust JS 引擎）：`D:\dev\boa`
-- 当前阶段只做方案与架构落地，待你确认后再进入代码实现。
+- 当前仓库已具备可运行实现；后续迭代默认先完成方案/架构评审，再推进对应代码改动。
 
 ## 2. 约束与边界
 - Runtime 核心禁止依赖 C FFI（工具链/脚本可用 Rust 生态工具）。
@@ -107,4 +113,3 @@
 - 按 Phase 0 创建 workspace 与文档骨架。
 - 先完成 `JSValue` 表示方案评审（`enum` vs NaN-boxing）并确定首版。
 - 落地最小 parser + REPL 执行链路（可运行 `1 + 2` 与函数调用）。
-

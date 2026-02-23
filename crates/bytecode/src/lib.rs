@@ -67,8 +67,11 @@ pub enum Opcode {
     BitNot,
     Typeof,
     TypeofIdentifier(String),
+    ToNumber,
     Eq,
     Ne,
+    StrictEq,
+    StrictNe,
     Lt,
     Le,
     Gt,
@@ -87,6 +90,13 @@ pub enum Opcode {
     Throw,
     Call(usize),
     CallWithSpread(Vec<bool>),
+    CallIdentifier { name: String, arg_count: usize },
+    CallIdentifierWithSpread {
+        name: String,
+        spread_flags: Vec<bool>,
+    },
+    CallMethod(usize),
+    CallMethodWithSpread(Vec<bool>),
     Construct(usize),
     ConstructWithSpread(Vec<bool>),
     MarkStrict,
@@ -1485,24 +1495,90 @@ impl Compiler {
                 self.compile_expr(property, code);
                 code.push(Opcode::GetPropertyByValue);
             }
-            Expr::Call { callee, arguments } => {
-                self.compile_expr(callee, code);
-                let mut spread_flags = Vec::with_capacity(arguments.len());
-                for argument in arguments {
-                    if let Expr::SpreadArgument(inner) = argument {
-                        self.compile_expr(inner, code);
-                        spread_flags.push(true);
+            Expr::Call { callee, arguments } => match callee.as_ref() {
+                Expr::Identifier(Identifier(name)) => {
+                    let mut spread_flags = Vec::with_capacity(arguments.len());
+                    for argument in arguments {
+                        if let Expr::SpreadArgument(inner) = argument {
+                            self.compile_expr(inner, code);
+                            spread_flags.push(true);
+                        } else {
+                            self.compile_expr(argument, code);
+                            spread_flags.push(false);
+                        }
+                    }
+                    if spread_flags.iter().any(|is_spread| *is_spread) {
+                        code.push(Opcode::CallIdentifierWithSpread {
+                            name: name.clone(),
+                            spread_flags,
+                        });
                     } else {
-                        self.compile_expr(argument, code);
-                        spread_flags.push(false);
+                        code.push(Opcode::CallIdentifier {
+                            name: name.clone(),
+                            arg_count: arguments.len(),
+                        });
                     }
                 }
-                if spread_flags.iter().any(|is_spread| *is_spread) {
-                    code.push(Opcode::CallWithSpread(spread_flags));
-                } else {
-                    code.push(Opcode::Call(arguments.len()));
+                Expr::Member { object, property } => {
+                    self.compile_expr(object, code);
+                    code.push(Opcode::Dup);
+                    code.push(Opcode::GetProperty(property.clone()));
+                    let mut spread_flags = Vec::with_capacity(arguments.len());
+                    for argument in arguments {
+                        if let Expr::SpreadArgument(inner) = argument {
+                            self.compile_expr(inner, code);
+                            spread_flags.push(true);
+                        } else {
+                            self.compile_expr(argument, code);
+                            spread_flags.push(false);
+                        }
+                    }
+                    if spread_flags.iter().any(|is_spread| *is_spread) {
+                        code.push(Opcode::CallMethodWithSpread(spread_flags));
+                    } else {
+                        code.push(Opcode::CallMethod(arguments.len()));
+                    }
                 }
-            }
+                Expr::MemberComputed { object, property } => {
+                    self.compile_expr(object, code);
+                    code.push(Opcode::Dup);
+                    self.compile_expr(property, code);
+                    code.push(Opcode::GetPropertyByValue);
+                    let mut spread_flags = Vec::with_capacity(arguments.len());
+                    for argument in arguments {
+                        if let Expr::SpreadArgument(inner) = argument {
+                            self.compile_expr(inner, code);
+                            spread_flags.push(true);
+                        } else {
+                            self.compile_expr(argument, code);
+                            spread_flags.push(false);
+                        }
+                    }
+                    if spread_flags.iter().any(|is_spread| *is_spread) {
+                        code.push(Opcode::CallMethodWithSpread(spread_flags));
+                    } else {
+                        code.push(Opcode::CallMethod(arguments.len()));
+                    }
+                }
+                _ => {
+                    self.compile_expr(callee, code);
+                    let mut spread_flags = Vec::with_capacity(arguments.len());
+                    for argument in arguments {
+                        if let Expr::SpreadArgument(inner) = argument {
+                            self.compile_expr(inner, code);
+                            spread_flags.push(true);
+                        } else {
+                            self.compile_expr(argument, code);
+                            spread_flags.push(false);
+                        }
+                    }
+                    if spread_flags.iter().any(|is_spread| *is_spread) {
+                        code.push(Opcode::CallWithSpread(spread_flags));
+                    } else {
+                        code.push(Opcode::Call(arguments.len()));
+                    }
+                }
+            },
             Expr::New { callee, arguments } => {
                 self.compile_expr(callee, code);
                 let mut spread_flags = Vec::with_capacity(arguments.len());
@@ -1570,6 +1646,7 @@ impl Compiler {
             UpdateTarget::Identifier(Identifier(name)) => {
                 code.push(Opcode::ResolveIdentifierReference(name.clone()));
                 code.push(Opcode::LoadReferenceValue);
+                code.push(Opcode::ToNumber);
                 if !prefix {
                     code.push(Opcode::Dup);
                 }
@@ -1584,6 +1661,7 @@ impl Compiler {
                 self.compile_expr(object, code);
                 code.push(Opcode::Dup);
                 code.push(Opcode::GetProperty(property.clone()));
+                code.push(Opcode::ToNumber);
                 if prefix {
                     code.push(Opcode::LoadNumber(1.0));
                     code.push(if increment { Opcode::Add } else { Opcode::Sub });
@@ -1603,6 +1681,7 @@ impl Compiler {
                 self.compile_expr(property, code);
                 code.push(Opcode::Dup2);
                 code.push(Opcode::GetPropertyByValue);
+                code.push(Opcode::ToNumber);
                 if prefix {
                     code.push(Opcode::LoadNumber(1.0));
                     code.push(if increment { Opcode::Add } else { Opcode::Sub });
@@ -1708,8 +1787,8 @@ impl Compiler {
             BinaryOp::BitXor => Opcode::BitXor,
             BinaryOp::Equal => Opcode::Eq,
             BinaryOp::NotEqual => Opcode::Ne,
-            BinaryOp::StrictEqual => Opcode::Eq,
-            BinaryOp::StrictNotEqual => Opcode::Ne,
+            BinaryOp::StrictEqual => Opcode::StrictEq,
+            BinaryOp::StrictNotEqual => Opcode::StrictNe,
             BinaryOp::Less => Opcode::Lt,
             BinaryOp::LessEqual => Opcode::Le,
             BinaryOp::Greater => Opcode::Gt,
@@ -1723,7 +1802,7 @@ impl Compiler {
 
 #[cfg(test)]
 mod tests {
-    use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+    use super::{compile_expression, compile_script, Chunk, CompiledFunction, Opcode};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
@@ -2074,6 +2153,7 @@ mod tests {
             code: vec![
                 Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadReferenceValue,
+                Opcode::ToNumber,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
                 Opcode::StoreReferenceValue,
@@ -2101,6 +2181,7 @@ mod tests {
                 Opcode::LoadIdentifier("key".to_string()),
                 Opcode::Dup2,
                 Opcode::GetPropertyByValue,
+                Opcode::ToNumber,
                 Opcode::Dup,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
@@ -2259,10 +2340,12 @@ mod tests {
                     function_id: 0,
                 },
                 Opcode::Nop,
-                Opcode::LoadIdentifier("add".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::LoadNumber(2.0),
-                Opcode::Call(2),
+                Opcode::CallIdentifier {
+                    name: "add".to_string(),
+                    arg_count: 2,
+                },
                 Opcode::Halt,
             ],
             functions: vec![CompiledFunction {
@@ -2307,9 +2390,11 @@ mod tests {
                     name: "id".to_string(),
                     function_id: 0,
                 },
-                Opcode::LoadIdentifier("id".to_string()),
                 Opcode::LoadNumber(42.0),
-                Opcode::Call(1),
+                Opcode::CallIdentifier {
+                    name: "id".to_string(),
+                    arg_count: 1,
+                },
                 Opcode::Nop,
                 Opcode::Halt,
             ],
@@ -2323,6 +2408,34 @@ mod tests {
                     Opcode::Return,
                 ],
             }],
+        };
+
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_member_call_with_receiver_binding() {
+        let script = Script {
+            statements: vec![Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("obj".to_string()))),
+                    property: "m".to_string(),
+                }),
+                arguments: vec![Expr::Number(1.0)],
+            })],
+        };
+
+        let chunk = compile_script(&script);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadIdentifier("obj".to_string()),
+                Opcode::Dup,
+                Opcode::GetProperty("m".to_string()),
+                Opcode::LoadNumber(1.0),
+                Opcode::CallMethod(1),
+                Opcode::Halt,
+            ],
+            functions: vec![],
         };
 
         assert_eq!(chunk, expected);
@@ -2965,9 +3078,9 @@ mod tests {
             code: vec![
                 Opcode::LoadNumber(1.0),
                 Opcode::LoadNumber(1.0),
-                Opcode::Eq,
+                Opcode::StrictEq,
                 Opcode::LoadNumber(0.0),
-                Opcode::Ne,
+                Opcode::StrictNe,
                 Opcode::Halt,
             ],
             functions: vec![],

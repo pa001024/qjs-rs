@@ -47,6 +47,9 @@ pub enum NativeFunction {
     StringFromCharCode,
     SymbolConstructor,
     IsNaN,
+    IsFinite,
+    ParseInt,
+    ParseFloat,
     Assert,
     Test262Error,
 }
@@ -81,6 +84,10 @@ impl Realm {
 
     pub fn resolve_identifier(&self, name: &str) -> Option<JsValue> {
         self.globals.get(name).cloned()
+    }
+
+    pub fn globals_values(&self) -> impl Iterator<Item = &JsValue> {
+        self.globals.values()
     }
 }
 

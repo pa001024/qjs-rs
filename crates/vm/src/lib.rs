@@ -1,19 +1,22 @@
 #![forbid(unsafe_code)]
 
 use ast::{BindingKind, ForInitializer, Identifier, Script, Stmt, VariableDeclaration};
-use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+use bytecode::{compile_expression, compile_script, Chunk, CompiledFunction, Opcode};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
+const OBJECT_ID_SLOT_BITS: u64 = 32;
+const OBJECT_ID_SLOT_MASK: u64 = (1u64 << OBJECT_ID_SLOT_BITS) - 1;
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -128,6 +131,7 @@ enum IdentifierReference {
         base: JsValue,
         property: String,
         strict_on_missing: bool,
+        with_base_object: bool,
     },
     Unresolvable {
         name: String,
@@ -174,6 +178,29 @@ struct EvalContext {
     has_arguments_param: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcStats {
+    pub roots: usize,
+    pub objects_before: usize,
+    pub marked_objects: usize,
+    pub reclaimed_objects: usize,
+    pub remaining_objects: usize,
+    pub peak_objects: usize,
+    pub mark_duration_ns: u128,
+    pub sweep_duration_ns: u128,
+    pub collections_total: usize,
+    pub boundary_collections: usize,
+    pub runtime_collections: usize,
+}
+
+#[derive(Debug, Default)]
+struct GcShadowRoots {
+    stack: Vec<JsValue>,
+    scopes: Vec<ScopeRef>,
+    pending_exception: Option<JsValue>,
+    identifier_references: Vec<IdentifierReference>,
+}
+
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -181,12 +208,15 @@ pub struct Vm {
     bindings: BTreeMap<BindingId, Binding>,
     next_binding_id: BindingId,
     objects: BTreeMap<ObjectId, JsObject>,
-    next_object_id: ObjectId,
+    next_object_slot: u32,
+    object_generations: Vec<u32>,
     closures: BTreeMap<u64, Closure>,
     closure_objects: BTreeMap<u64, JsObject>,
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     next_host_function_id: u64,
+    host_pins: BTreeMap<u64, JsValue>,
+    next_host_pin_id: u64,
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
@@ -199,6 +229,20 @@ pub struct Vm {
     pending_exception: Option<JsValue>,
     eval_contexts: Vec<EvalContext>,
     var_scope_stack: Vec<usize>,
+    gc_mark_stack: Vec<JsValue>,
+    gc_shadow_roots: Vec<GcShadowRoots>,
+    gc_last_stats: GcStats,
+    free_object_slots: Vec<u32>,
+    gc_peak_objects: usize,
+    auto_gc_enabled: bool,
+    auto_gc_object_threshold: usize,
+    runtime_gc_enabled: bool,
+    runtime_gc_check_interval: usize,
+    runtime_gc_tick: usize,
+    gc_collections_total: usize,
+    gc_boundary_collections: usize,
+    gc_runtime_collections: usize,
+    gc_reclaimed_objects_total: usize,
 }
 
 impl Vm {
@@ -214,12 +258,15 @@ impl Vm {
         self.bindings.clear();
         self.next_binding_id = 0;
         self.objects.clear();
-        self.next_object_id = 0;
+        self.next_object_slot = 0;
+        self.object_generations.clear();
         self.closures.clear();
         self.closure_objects.clear();
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.next_host_function_id = 0;
+        self.host_pins.clear();
+        self.next_host_pin_id = 0;
         self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
@@ -232,6 +279,16 @@ impl Vm {
         self.pending_exception = None;
         self.eval_contexts.clear();
         self.var_scope_stack.clear();
+        self.gc_mark_stack.clear();
+        self.gc_shadow_roots.clear();
+        self.gc_last_stats = GcStats::default();
+        self.free_object_slots.clear();
+        self.gc_peak_objects = 0;
+        self.runtime_gc_tick = 0;
+        self.gc_collections_total = 0;
+        self.gc_boundary_collections = 0;
+        self.gc_runtime_collections = 0;
+        self.gc_reclaimed_objects_total = 0;
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -247,10 +304,325 @@ impl Vm {
         self.var_scope_stack.push(0);
         let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
         let _ = self.var_scope_stack.pop();
+        if signal.is_ok() {
+            self.collect_garbage_if_needed(realm, false);
+        }
         match signal? {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
+    }
+
+    pub fn enable_auto_gc(&mut self, enabled: bool) {
+        self.auto_gc_enabled = enabled;
+    }
+
+    pub fn set_auto_gc_object_threshold(&mut self, threshold: usize) {
+        self.auto_gc_object_threshold = threshold;
+    }
+
+    pub fn enable_runtime_gc(&mut self, enabled: bool) {
+        self.runtime_gc_enabled = enabled;
+    }
+
+    pub fn set_runtime_gc_check_interval(&mut self, interval: usize) {
+        self.runtime_gc_check_interval = interval.max(1);
+    }
+
+    pub fn pin_host_value(&mut self, value: JsValue) -> u64 {
+        let handle = self.next_host_pin_id;
+        self.next_host_pin_id += 1;
+        self.host_pins.insert(handle, value);
+        handle
+    }
+
+    pub fn unpin_host_value(&mut self, handle: u64) -> Option<JsValue> {
+        self.host_pins.remove(&handle)
+    }
+
+    pub fn collect_garbage(&mut self, realm: &Realm) -> GcStats {
+        self.gc_collections_total += 1;
+        let objects_before = self.objects.len();
+        let roots = self.collect_roots(realm);
+        let mark_started = Instant::now();
+        let marked_objects = self.mark_from_roots(&roots);
+        let mark_duration_ns = mark_started.elapsed().as_nanos();
+        let sweep_started = Instant::now();
+        let reclaimed = self.sweep_unreachable(&marked_objects);
+        let sweep_duration_ns = sweep_started.elapsed().as_nanos();
+        self.gc_reclaimed_objects_total = self
+            .gc_reclaimed_objects_total
+            .checked_add(reclaimed)
+            .expect("gc reclaimed counter overflow");
+        let stats = GcStats {
+            roots: roots.len(),
+            objects_before,
+            marked_objects: marked_objects.len(),
+            reclaimed_objects: self.gc_reclaimed_objects_total,
+            remaining_objects: self.objects.len(),
+            peak_objects: self.gc_peak_objects,
+            mark_duration_ns,
+            sweep_duration_ns,
+            collections_total: self.gc_collections_total,
+            boundary_collections: self.gc_boundary_collections,
+            runtime_collections: self.gc_runtime_collections,
+        };
+        self.gc_last_stats = stats;
+        stats
+    }
+
+    pub fn gc_stats(&self) -> GcStats {
+        self.gc_last_stats
+    }
+
+    fn collect_garbage_if_needed(&mut self, realm: &Realm, runtime: bool) -> Option<GcStats> {
+        if self.should_trigger_gc() {
+            if runtime {
+                self.gc_runtime_collections += 1;
+            } else {
+                self.gc_boundary_collections += 1;
+            }
+            Some(self.collect_garbage(realm))
+        } else {
+            None
+        }
+    }
+
+    fn should_trigger_gc(&self) -> bool {
+        self.auto_gc_enabled
+            && self.auto_gc_object_threshold > 0
+            && self.objects.len() >= self.auto_gc_object_threshold
+    }
+
+    fn object_id_slot(object_id: ObjectId) -> u32 {
+        (object_id & OBJECT_ID_SLOT_MASK) as u32
+    }
+
+    #[cfg(test)]
+    fn object_id_generation(object_id: ObjectId) -> u32 {
+        (object_id >> OBJECT_ID_SLOT_BITS) as u32
+    }
+
+    fn make_object_id(slot: u32, generation: u32) -> ObjectId {
+        ((generation as u64) << OBJECT_ID_SLOT_BITS) | (slot as u64)
+    }
+
+    fn allocate_object_id(&mut self) -> ObjectId {
+        if let Some(slot) = self.free_object_slots.pop() {
+            let index = slot as usize;
+            let generation = self.object_generations[index]
+                .checked_add(1)
+                .expect("object generation overflow");
+            self.object_generations[index] = generation;
+            Self::make_object_id(slot, generation)
+        } else {
+            let slot = self.next_object_slot;
+            self.next_object_slot = self
+                .next_object_slot
+                .checked_add(1)
+                .expect("object slot overflow");
+            self.object_generations.push(0);
+            Self::make_object_id(slot, 0)
+        }
+    }
+
+    fn collect_roots(&self, realm: &Realm) -> Vec<JsValue> {
+        let mut roots = Vec::new();
+        roots.extend(self.stack.iter().cloned());
+        if let Some(exception) = &self.pending_exception {
+            roots.push(exception.clone());
+        }
+        self.collect_roots_from_scopes(&self.scopes, &mut roots);
+        for frame in &self.with_objects {
+            roots.push(frame.object.clone());
+        }
+        Self::collect_roots_from_identifier_references(&self.identifier_references, &mut roots);
+        for shadow in &self.gc_shadow_roots {
+            roots.extend(shadow.stack.iter().cloned());
+            if let Some(exception) = &shadow.pending_exception {
+                roots.push(exception.clone());
+            }
+            self.collect_roots_from_scopes(&shadow.scopes, &mut roots);
+            Self::collect_roots_from_identifier_references(
+                &shadow.identifier_references,
+                &mut roots,
+            );
+        }
+        if let Some(global_id) = self.global_object_id {
+            roots.push(JsValue::Object(global_id));
+        }
+        for proto_id in [
+            self.object_prototype_id,
+            self.function_prototype_id,
+            self.array_prototype_id,
+            self.date_prototype_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            roots.push(JsValue::Object(proto_id));
+        }
+        roots.extend(realm.globals_values().cloned());
+        roots.extend(self.closures.keys().copied().map(JsValue::Function));
+        roots.extend(
+            self.host_functions
+                .keys()
+                .copied()
+                .map(JsValue::HostFunction),
+        );
+        roots.extend(self.host_pins.values().cloned());
+        roots
+    }
+
+    fn collect_roots_from_scopes(&self, scopes: &[ScopeRef], roots: &mut Vec<JsValue>) {
+        for scope_ref in scopes {
+            for binding_id in scope_ref.borrow().values() {
+                if let Some(binding) = self.bindings.get(binding_id) {
+                    roots.push(binding.value.clone());
+                }
+            }
+        }
+    }
+
+    fn collect_roots_from_identifier_references(
+        identifier_references: &[IdentifierReference],
+        roots: &mut Vec<JsValue>,
+    ) {
+        for reference in identifier_references {
+            if let IdentifierReference::Property { base, .. } = reference {
+                roots.push(base.clone());
+            }
+        }
+    }
+
+    fn mark_from_roots(&mut self, roots: &[JsValue]) -> BTreeSet<ObjectId> {
+        let mut marked_objects = BTreeSet::new();
+        let mut marked_closures = BTreeSet::new();
+        let mut marked_hosts = BTreeSet::new();
+        self.gc_mark_stack.clear();
+        self.gc_mark_stack.extend(roots.iter().cloned());
+        while let Some(value) = self.gc_mark_stack.pop() {
+            self.mark_value(
+                value,
+                &mut marked_objects,
+                &mut marked_closures,
+                &mut marked_hosts,
+            );
+        }
+        marked_objects
+    }
+
+    fn mark_value(
+        &mut self,
+        value: JsValue,
+        marked_objects: &mut BTreeSet<ObjectId>,
+        marked_closures: &mut BTreeSet<u64>,
+        marked_hosts: &mut BTreeSet<u64>,
+    ) {
+        match value {
+            JsValue::Object(object_id) => {
+                self.mark_object_edges(object_id, marked_objects);
+            }
+            JsValue::Function(closure_id) => {
+                if !marked_closures.insert(closure_id) {
+                    return;
+                }
+                if let Some(closure_object) = self.closure_objects.get(&closure_id).cloned() {
+                    self.enqueue_object_values(closure_object);
+                }
+                if let Some(closure) = self.closures.get(&closure_id).cloned() {
+                    for scope_ref in closure.captured_scopes {
+                        let binding_ids: Vec<_> = scope_ref.borrow().values().copied().collect();
+                        for binding_id in binding_ids {
+                            if let Some(binding) = self.bindings.get(&binding_id) {
+                                self.gc_mark_stack.push(binding.value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            JsValue::HostFunction(host_id) => {
+                if !marked_hosts.insert(host_id) {
+                    return;
+                }
+                if let Some(host) = self.host_functions.get(&host_id).cloned() {
+                    self.enqueue_host_function_values(host);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_object_edges(&mut self, object_id: ObjectId, marked_objects: &mut BTreeSet<ObjectId>) {
+        if !marked_objects.insert(object_id) {
+            return;
+        }
+        if let Some(object) = self.objects.get(&object_id).cloned() {
+            self.enqueue_object_values(object);
+        }
+    }
+
+    fn enqueue_object_values(&mut self, object: JsObject) {
+        self.gc_mark_stack.extend(object.properties.into_values());
+        self.gc_mark_stack.extend(object.getters.into_values());
+        self.gc_mark_stack.extend(object.setters.into_values());
+        if let Some(proto_id) = object.prototype {
+            self.gc_mark_stack.push(JsValue::Object(proto_id));
+        }
+    }
+
+    fn enqueue_host_function_values(&mut self, host: HostFunction) {
+        match host {
+            HostFunction::BoundMethod { target, .. } => {
+                self.gc_mark_stack.push(target);
+            }
+            HostFunction::BoundCall {
+                target,
+                this_arg,
+                bound_args,
+            } => {
+                self.gc_mark_stack.push(target);
+                self.gc_mark_stack.push(this_arg);
+                self.gc_mark_stack.extend(bound_args);
+            }
+            HostFunction::ArrayPush(object_id)
+            | HostFunction::ArrayForEach(object_id)
+            | HostFunction::ArrayReduce(object_id)
+            | HostFunction::ArrayJoin(object_id)
+            | HostFunction::ArrayReverse(object_id)
+            | HostFunction::ArraySort(object_id)
+            | HostFunction::DateToString(object_id)
+            | HostFunction::DateValueOf(object_id) => {
+                self.gc_mark_stack.push(JsValue::Object(object_id));
+            }
+            HostFunction::HasOwnProperty { target }
+            | HostFunction::FunctionToString { target }
+            | HostFunction::FunctionValueOf { target } => {
+                self.gc_mark_stack.push(target);
+            }
+            HostFunction::StringReplace { .. }
+            | HostFunction::StringIndexOf { .. }
+            | HostFunction::ObjectToString
+            | HostFunction::AssertSameValue
+            | HostFunction::AssertNotSameValue
+            | HostFunction::AssertThrows
+            | HostFunction::AssertCompareArray => {}
+        }
+    }
+
+    fn sweep_unreachable(&mut self, marked_objects: &BTreeSet<ObjectId>) -> usize {
+        let unreached: Vec<_> = self
+            .objects
+            .keys()
+            .copied()
+            .filter(|id| !marked_objects.contains(id))
+            .collect();
+        let reclaimed = unreached.len();
+        for id in unreached {
+            self.objects.remove(&id);
+            self.free_object_slots.push(Self::object_id_slot(id));
+        }
+        reclaimed
     }
 
     fn execute_code(
@@ -262,7 +634,14 @@ impl Vm {
         strict: bool,
     ) -> Result<ExecutionSignal, VmError> {
         let mut pc = 0usize;
+        let check_interval = self.runtime_gc_check_interval.max(1);
         while pc < code.len() {
+            if self.runtime_gc_enabled && self.auto_gc_enabled {
+                self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
+                if self.runtime_gc_tick % check_interval == 0 {
+                    self.collect_garbage_if_needed(realm, true);
+                }
+            }
             match &code[pc] {
                 Opcode::LoadNumber(value) => self.stack.push(JsValue::Number(*value)),
                 Opcode::LoadBool(value) => self.stack.push(JsValue::Bool(*value)),
@@ -296,6 +675,12 @@ impl Vm {
                         Ok(self.global_this_value())
                     } else if name == "Math" {
                         self.math_object_value()
+                    } else if name == "super" {
+                        if let Some(base) = self.resolve_super_base_value() {
+                            Ok(base)
+                        } else {
+                            Err(VmError::UnknownIdentifier(name.clone()))
+                        }
                     } else if name == "this" {
                         Ok(realm
                             .resolve_identifier(name)
@@ -494,11 +879,23 @@ impl Vm {
                         .objects
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
-                    object.properties.insert(name.clone(), value);
-                    object
-                        .property_attributes
-                        .entry(name.clone())
-                        .or_insert_with(PropertyAttributes::default);
+                    if name == "__proto__" {
+                        match value {
+                            JsValue::Object(proto_id) => {
+                                object.prototype = Some(proto_id);
+                            }
+                            JsValue::Null => {
+                                object.prototype = None;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        object.properties.insert(name.clone(), value);
+                        object
+                            .property_attributes
+                            .entry(name.clone())
+                            .or_insert_with(PropertyAttributes::default);
+                    }
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineArrayLength => {
@@ -999,6 +1396,21 @@ impl Vm {
                     self.stack
                         .push(JsValue::String(self.typeof_value(&value).to_string()));
                 }
+                Opcode::ToNumber => {
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let number = self.coerce_number_runtime(value, realm, strict)?;
+                        Ok(JsValue::Number(number))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
                 Opcode::Eq => {
                     let result = (|| -> Result<JsValue, VmError> {
                         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -1030,6 +1442,18 @@ impl Vm {
                             continue;
                         }
                     }
+                }
+                Opcode::StrictEq => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let equal = self.strict_equality_compare(&left, &right);
+                    self.stack.push(JsValue::Bool(equal));
+                }
+                Opcode::StrictNe => {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let equal = self.strict_equality_compare(&left, &right);
+                    self.stack.push(JsValue::Bool(!equal));
                 }
                 Opcode::Lt => match self.eval_relational_operator(realm, strict, Opcode::Lt) {
                     Ok(result) => self.stack.push(JsValue::Bool(result)),
@@ -1148,6 +1572,47 @@ impl Vm {
                         }
                     }
                 }
+                Opcode::CallIdentifier { name, arg_count } => {
+                    match self.execute_identifier_call(name, *arg_count, realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::CallIdentifierWithSpread { name, spread_flags } => {
+                    match self.execute_identifier_call_with_spread(name, spread_flags, realm, strict)
+                    {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::CallMethod(arg_count) => {
+                    match self.execute_method_call(*arg_count, realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::CallMethodWithSpread(spread_flags) => {
+                    match self.execute_method_call_with_spread(spread_flags, realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
                 Opcode::Construct(arg_count) => {
                     match self.execute_construct(*arg_count, realm, strict) {
                         Ok(result) => self.stack.push(result),
@@ -1238,6 +1703,74 @@ impl Vm {
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         self.execute_callable(callee, None, args, realm, caller_strict)
+    }
+
+    fn execute_identifier_call(
+        &mut self,
+        name: &str,
+        arg_count: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let args = self.pop_call_arguments(arg_count)?;
+        let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
+        let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        let this_arg = match reference {
+            IdentifierReference::Property {
+                base,
+                with_base_object: true,
+                ..
+            } => Some(base),
+            _ => None,
+        };
+        self.execute_callable(callee, this_arg, args, realm, caller_strict)
+    }
+
+    fn execute_identifier_call_with_spread(
+        &mut self,
+        name: &str,
+        spread_flags: &[bool],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let raw_args = self.pop_call_arguments(spread_flags.len())?;
+        let args = self.expand_spread_arguments(raw_args, spread_flags)?;
+        let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
+        let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        let this_arg = match reference {
+            IdentifierReference::Property {
+                base,
+                with_base_object: true,
+                ..
+            } => Some(base),
+            _ => None,
+        };
+        self.execute_callable(callee, this_arg, args, realm, caller_strict)
+    }
+
+    fn execute_method_call(
+        &mut self,
+        arg_count: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let args = self.pop_call_arguments(arg_count)?;
+        let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let this_arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        self.execute_callable(callee, Some(this_arg), args, realm, caller_strict)
+    }
+
+    fn execute_method_call_with_spread(
+        &mut self,
+        spread_flags: &[bool],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let raw_args = self.pop_call_arguments(spread_flags.len())?;
+        let args = self.expand_spread_arguments(raw_args, spread_flags)?;
+        let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        let this_arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        self.execute_callable(callee, Some(this_arg), args, realm, caller_strict)
     }
 
     fn execute_construct(
@@ -1632,6 +2165,12 @@ impl Vm {
         let saved_pending_exception = self.pending_exception.take();
         let saved_identifier_references = std::mem::take(&mut self.identifier_references);
         let saved_var_scope_stack = std::mem::take(&mut self.var_scope_stack);
+        self.gc_shadow_roots.push(GcShadowRoots {
+            stack: saved_stack,
+            scopes: saved_scopes,
+            pending_exception: saved_pending_exception,
+            identifier_references: saved_identifier_references,
+        });
 
         self.scopes = closure.captured_scopes;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
@@ -1658,23 +2197,30 @@ impl Vm {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
             Err(err) => {
-                self.stack = saved_stack;
-                self.scopes = saved_scopes;
-                self.exception_handlers = saved_handlers;
-                self.pending_exception = saved_pending_exception;
-                self.identifier_references = saved_identifier_references;
-                self.var_scope_stack = saved_var_scope_stack;
+                self.restore_caller_state(saved_handlers, saved_var_scope_stack);
                 return Err(err);
             }
         };
 
-        self.stack = saved_stack;
-        self.scopes = saved_scopes;
-        self.exception_handlers = saved_handlers;
-        self.pending_exception = saved_pending_exception;
-        self.identifier_references = saved_identifier_references;
-        self.var_scope_stack = saved_var_scope_stack;
+        self.restore_caller_state(saved_handlers, saved_var_scope_stack);
         Ok(value)
+    }
+
+    fn restore_caller_state(
+        &mut self,
+        saved_handlers: Vec<ExceptionHandler>,
+        saved_var_scope_stack: Vec<usize>,
+    ) {
+        let saved = self
+            .gc_shadow_roots
+            .pop()
+            .expect("caller state shadow roots should be present");
+        self.stack = saved.stack;
+        self.scopes = saved.scopes;
+        self.exception_handlers = saved_handlers;
+        self.pending_exception = saved.pending_exception;
+        self.identifier_references = saved.identifier_references;
+        self.var_scope_stack = saved_var_scope_stack;
     }
 
     fn execute_host_function_call(
@@ -2118,11 +2664,7 @@ impl Vm {
             NativeFunction::DateParse => {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let text = self.coerce_to_string(&value);
-                let parsed = text
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .unwrap_or(f64::NAN);
+                let parsed = text.trim().parse::<f64>().ok().unwrap_or(f64::NAN);
                 Ok(JsValue::Number(parsed))
             }
             NativeFunction::DateUtc => {
@@ -2149,7 +2691,9 @@ impl Vm {
             NativeFunction::MathAtan2 => {
                 let y = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 let x = args.get(1).cloned().unwrap_or(JsValue::Number(f64::NAN));
-                Ok(JsValue::Number(self.to_number(&y).atan2(self.to_number(&x))))
+                Ok(JsValue::Number(
+                    self.to_number(&y).atan2(self.to_number(&x)),
+                ))
             }
             NativeFunction::MathCeil => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -2263,6 +2807,12 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Bool(self.to_number(&value).is_nan()))
             }
+            NativeFunction::IsFinite => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Bool(self.to_number(&value).is_finite()))
+            }
+            NativeFunction::ParseInt => Ok(JsValue::Number(self.parse_int_baseline(&args))),
+            NativeFunction::ParseFloat => Ok(JsValue::Number(self.parse_float_baseline(&args))),
             NativeFunction::Assert => {
                 let condition = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if self.is_truthy(&condition) {
@@ -3374,8 +3924,7 @@ impl Vm {
     }
 
     fn create_object_value(&mut self) -> JsValue {
-        let id = self.next_object_id;
-        self.next_object_id += 1;
+        let id = self.allocate_object_id();
         self.objects.insert(
             id,
             JsObject {
@@ -3383,6 +3932,7 @@ impl Vm {
                 ..JsObject::default()
             },
         );
+        self.gc_peak_objects = self.gc_peak_objects.max(self.objects.len());
         JsValue::Object(id)
     }
 
@@ -3659,6 +4209,7 @@ impl Vm {
                     base,
                     property: name.to_string(),
                     strict_on_missing: true,
+                    with_base_object: true,
                 }));
             }
             let scope_ref = self
@@ -3678,6 +4229,7 @@ impl Vm {
                 base,
                 property: name.to_string(),
                 strict_on_missing: true,
+                with_base_object: true,
             }));
         }
         Ok(None)
@@ -3699,6 +4251,7 @@ impl Vm {
                     base,
                     property: name.to_string(),
                     strict_on_missing: true,
+                    with_base_object: false,
                 });
             }
             if let Some(value) = realm.resolve_identifier(name) {
@@ -3708,6 +4261,7 @@ impl Vm {
                     base,
                     property: name.to_string(),
                     strict_on_missing: false,
+                    with_base_object: false,
                 });
             }
         }
@@ -3737,6 +4291,11 @@ impl Vm {
                 self.get_property_from_receiver(base.clone(), property, realm)
             }
             IdentifierReference::Unresolvable { name } => {
+                if name == "super" {
+                    if let Some(base) = self.resolve_super_base_value() {
+                        return Ok(base);
+                    }
+                }
                 if name == "undefined" {
                     return Ok(JsValue::Undefined);
                 }
@@ -3777,6 +4336,7 @@ impl Vm {
                 base,
                 property,
                 strict_on_missing,
+                ..
             } => {
                 let still_exists = self.has_property_on_receiver(&base, &property, realm)?;
                 if strict && strict_on_missing && !still_exists {
@@ -4101,7 +4661,8 @@ impl Vm {
                     return Ok(boxed);
                 }
                 if self.objects.get(&object_id).is_some_and(|object| {
-                    object.properties.contains_key("length") && object.prototype == self.array_prototype_id
+                    object.properties.contains_key("length")
+                        && object.prototype == self.array_prototype_id
                 }) {
                     return self.execute_array_join(object_id, ",");
                 }
@@ -5207,7 +5768,7 @@ impl Vm {
                 JsValue::Number(f64::NEG_INFINITY)
             }
             (NativeFunction::NumberConstructor, "MAX_VALUE") => JsValue::Number(f64::MAX),
-            (NativeFunction::NumberConstructor, "MIN_VALUE") => JsValue::Number(f64::MIN_POSITIVE),
+            (NativeFunction::NumberConstructor, "MIN_VALUE") => JsValue::Number(f64::from_bits(1)),
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
             }
@@ -5632,6 +6193,147 @@ impl Vm {
         self.coerce_to_string(value)
     }
 
+    fn parse_int_baseline(&self, args: &[JsValue]) -> f64 {
+        let input = args.first().map_or_else(
+            || "undefined".to_string(),
+            |value| self.coerce_to_string(value),
+        );
+        let mut source = input.trim_start();
+
+        let mut sign = 1.0;
+        if let Some(rest) = source.strip_prefix('-') {
+            sign = -1.0;
+            source = rest;
+        } else if let Some(rest) = source.strip_prefix('+') {
+            source = rest;
+        }
+
+        let mut radix = match args.get(1) {
+            None | Some(JsValue::Undefined) => 0,
+            Some(value) => {
+                let number = self.to_number(value);
+                if number == 0.0 || !number.is_finite() {
+                    0
+                } else {
+                    Self::to_int32_number(number)
+                }
+            }
+        };
+
+        let mut allow_hex_prefix = true;
+        if radix != 0 {
+            if !(2..=36).contains(&radix) {
+                return f64::NAN;
+            }
+            allow_hex_prefix = radix == 16;
+        }
+
+        if allow_hex_prefix {
+            if let Some(rest) = source
+                .strip_prefix("0x")
+                .or_else(|| source.strip_prefix("0X"))
+            {
+                source = rest;
+                if radix == 0 {
+                    radix = 16;
+                }
+            }
+        }
+
+        if radix == 0 {
+            radix = 10;
+        }
+
+        let mut value = 0.0;
+        let mut found_digit = false;
+        for ch in source.chars() {
+            let Some(digit) = Self::parse_int_digit(ch) else {
+                break;
+            };
+            if digit >= radix as u32 {
+                break;
+            }
+            found_digit = true;
+            value = value * (radix as f64) + (digit as f64);
+        }
+
+        if !found_digit {
+            f64::NAN
+        } else {
+            sign * value
+        }
+    }
+
+    fn parse_float_baseline(&self, args: &[JsValue]) -> f64 {
+        let input = args.first().map_or_else(
+            || "undefined".to_string(),
+            |value| self.coerce_to_string(value),
+        );
+        let source = input.trim_start();
+        if source.is_empty() {
+            return f64::NAN;
+        }
+
+        if let Some(rest) = source.strip_prefix('+') {
+            if rest.starts_with("Infinity") {
+                return f64::INFINITY;
+            }
+        } else if let Some(rest) = source.strip_prefix('-') {
+            if rest.starts_with("Infinity") {
+                return f64::NEG_INFINITY;
+            }
+        } else if source.starts_with("Infinity") {
+            return f64::INFINITY;
+        }
+
+        let mut candidate = String::new();
+        for ch in source.chars() {
+            if matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E') {
+                candidate.push(ch);
+            } else {
+                break;
+            }
+        }
+
+        if candidate.is_empty() {
+            return f64::NAN;
+        }
+
+        let mut best: Option<(usize, f64)> = None;
+        for end in 1..=candidate.len() {
+            if !candidate.is_char_boundary(end) {
+                continue;
+            }
+            let prefix = &candidate[..end];
+            if let Ok(value) = prefix.parse::<f64>() {
+                best = Some((end, value));
+            }
+        }
+
+        best.map(|(_, value)| value).unwrap_or(f64::NAN)
+    }
+
+    fn parse_int_digit(ch: char) -> Option<u32> {
+        match ch {
+            '0'..='9' => Some((ch as u32) - ('0' as u32)),
+            'a'..='z' => Some((ch as u32) - ('a' as u32) + 10),
+            'A'..='Z' => Some((ch as u32) - ('A' as u32) + 10),
+            _ => None,
+        }
+    }
+
+    fn resolve_super_base_value(&self) -> Option<JsValue> {
+        let binding_id = self.resolve_binding_id("this")?;
+        let this_value = self.bindings.get(&binding_id)?.value.clone();
+        match this_value {
+            JsValue::Object(object_id) => {
+                let prototype = self.objects.get(&object_id)?.prototype;
+                Some(prototype.map(JsValue::Object).unwrap_or(JsValue::Null))
+            }
+            _ => None,
+        }
+    }
+
     fn to_number(&self, value: &JsValue) -> f64 {
         match value {
             JsValue::Number(number) => *number,
@@ -5795,8 +6497,9 @@ impl Vm {
 
 #[cfg(test)]
 mod tests {
-    use super::{Vm, VmError};
-    use bytecode::{Chunk, CompiledFunction, Opcode};
+    use super::{GcStats, Vm, VmError};
+    use bytecode::{compile_script, Chunk, CompiledFunction, Opcode};
+    use parser::parse_script;
     use runtime::{JsValue, NativeFunction, Realm};
 
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
@@ -6321,6 +7024,27 @@ mod tests {
     }
 
     #[test]
+    fn member_call_binds_this_to_receiver() {
+        let script =
+            parse_script("let obj = { x: 5, m() { return this.x; } }; obj.m();")
+                .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(5.0)));
+    }
+
+    #[test]
+    fn with_identifier_call_uses_with_base_object_as_this() {
+        let script = parse_script(
+            "var viaCall; var obj = { method: function() { viaCall = this; } }; with (obj) { method(); } viaCall === obj;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn function_call_exposes_arguments_object() {
         let chunk = Chunk {
             code: vec![
@@ -6414,6 +7138,43 @@ mod tests {
     }
 
     #[test]
+    fn executes_strict_equality_opcodes() {
+        let strict_eq = empty_chunk(vec![
+            Opcode::LoadString("1".to_string()),
+            Opcode::LoadNumber(1.0),
+            Opcode::StrictEq,
+            Opcode::Halt,
+        ]);
+        let strict_ne = empty_chunk(vec![
+            Opcode::LoadString("1".to_string()),
+            Opcode::LoadNumber(1.0),
+            Opcode::StrictNe,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&strict_eq), Ok(JsValue::Bool(false)));
+        assert_eq!(vm.execute(&strict_ne), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn update_expression_coerces_with_to_number() {
+        let script =
+            parse_script("let x = \"1\"; let old = x++; old + x;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
+    }
+
+    #[test]
+    fn null_post_increment_returns_numeric_old_value() {
+        let script = parse_script("let x = null; let old = x++; old === 0 && x === 1;")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn executes_typeof_opcode_variants() {
         let chunk = empty_chunk(vec![
             Opcode::LoadNumber(1.0),
@@ -6482,6 +7243,160 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn number_min_value_is_smallest_subnormal() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadIdentifier("Number".to_string()),
+            Opcode::GetProperty("MIN_VALUE".to_string()),
+            Opcode::Halt,
+        ]);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        let mut vm = Vm::default();
+        let value = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("execution should succeed");
+        match value {
+            JsValue::Number(number) => assert_eq!(number.to_bits(), f64::from_bits(1).to_bits()),
+            other => panic!("expected numeric result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_finite_baseline_coerces_and_checks_finiteness() {
+        let mut realm = Realm::default();
+        realm.define_global(
+            "isFinite",
+            JsValue::NativeFunction(NativeFunction::IsFinite),
+        );
+        let mut vm = Vm::default();
+
+        let numeric_string = empty_chunk(vec![
+            Opcode::LoadIdentifier("isFinite".to_string()),
+            Opcode::LoadString("42".to_string()),
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&numeric_string, &realm),
+            Ok(JsValue::Bool(true))
+        );
+
+        let infinity = empty_chunk(vec![
+            Opcode::LoadIdentifier("isFinite".to_string()),
+            Opcode::LoadNumber(f64::INFINITY),
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&infinity, &realm),
+            Ok(JsValue::Bool(false))
+        );
+
+        let undefined = empty_chunk(vec![
+            Opcode::LoadIdentifier("isFinite".to_string()),
+            Opcode::LoadUndefined,
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&undefined, &realm),
+            Ok(JsValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn parse_int_baseline_handles_sign_radix_and_nan() {
+        let mut realm = Realm::default();
+        realm.define_global(
+            "parseInt",
+            JsValue::NativeFunction(NativeFunction::ParseInt),
+        );
+        let mut vm = Vm::default();
+
+        let signed_hex = empty_chunk(vec![
+            Opcode::LoadIdentifier("parseInt".to_string()),
+            Opcode::LoadString("  -0x10".to_string()),
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&signed_hex, &realm),
+            Ok(JsValue::Number(-16.0))
+        );
+
+        let explicit_radix = empty_chunk(vec![
+            Opcode::LoadIdentifier("parseInt".to_string()),
+            Opcode::LoadString("11".to_string()),
+            Opcode::LoadNumber(2.0),
+            Opcode::Call(2),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&explicit_radix, &realm),
+            Ok(JsValue::Number(3.0))
+        );
+
+        let invalid = empty_chunk(vec![
+            Opcode::LoadIdentifier("parseInt".to_string()),
+            Opcode::LoadString("xyz".to_string()),
+            Opcode::LoadNumber(10.0),
+            Opcode::Call(2),
+            Opcode::Halt,
+        ]);
+        let value = vm
+            .execute_in_realm(&invalid, &realm)
+            .expect("execution should succeed");
+        match value {
+            JsValue::Number(number) => assert!(number.is_nan()),
+            other => panic!("expected NaN result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_float_baseline_handles_prefix_and_infinity() {
+        let mut realm = Realm::default();
+        realm.define_global(
+            "parseFloat",
+            JsValue::NativeFunction(NativeFunction::ParseFloat),
+        );
+        let mut vm = Vm::default();
+
+        let prefixed = empty_chunk(vec![
+            Opcode::LoadIdentifier("parseFloat".to_string()),
+            Opcode::LoadString("  -1.25e2xyz".to_string()),
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&prefixed, &realm),
+            Ok(JsValue::Number(-125.0))
+        );
+
+        let infinity = empty_chunk(vec![
+            Opcode::LoadIdentifier("parseFloat".to_string()),
+            Opcode::LoadString("Infinity".to_string()),
+            Opcode::Call(1),
+            Opcode::Halt,
+        ]);
+        assert_eq!(
+            vm.execute_in_realm(&infinity, &realm),
+            Ok(JsValue::Number(f64::INFINITY))
+        );
+    }
+
+    #[test]
+    fn object_method_super_property_read_uses_this_prototype() {
+        let script = parse_script("let proto = { x: 7 }; let obj = { __proto__: proto, m() { return super.x; } }; obj.m();")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(7.0)));
     }
 
     #[test]
@@ -6645,5 +7560,242 @@ mod tests {
             vm.execute(&chunk),
             Err(VmError::TypeError("property access expects object"))
         );
+    }
+
+    #[test]
+    fn gc_reclaims_unreachable_objects() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object else {
+            panic!("expected object value");
+        };
+
+        assert!(vm.objects.contains_key(&object_id));
+        let stats = vm.collect_garbage(&realm);
+        assert_eq!(stats.reclaimed_objects, 1);
+        assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn gc_stats_track_cumulative_reclaimed_objects() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let _ = vm.create_object_value();
+        let first = vm.collect_garbage(&realm);
+        assert_eq!(first.reclaimed_objects, 1);
+
+        let _ = vm.create_object_value();
+        let second = vm.collect_garbage(&realm);
+        assert_eq!(second.reclaimed_objects, 2);
+    }
+
+    #[test]
+    fn gc_reuses_slot_with_bumped_generation_and_rejects_stale_handle() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let stale = vm.create_object_value();
+        let JsValue::Object(stale_id) = stale else {
+            panic!("expected object value");
+        };
+
+        let first_stats = vm.collect_garbage(&realm);
+        assert_eq!(first_stats.reclaimed_objects, 1);
+
+        let fresh = vm.create_object_value();
+        let JsValue::Object(fresh_id) = fresh else {
+            panic!("expected object value");
+        };
+
+        assert_eq!(Vm::object_id_slot(stale_id), Vm::object_id_slot(fresh_id));
+        assert_ne!(stale_id, fresh_id);
+        assert!(Vm::object_id_generation(fresh_id) > Vm::object_id_generation(stale_id));
+
+        assert!(matches!(
+            vm.get_object_property(stale_id, "x", &realm),
+            Err(VmError::UnknownObject(id)) if id == stale_id
+        ));
+
+        assert_eq!(
+            vm.set_object_property(fresh_id, "x".to_string(), JsValue::Number(7.0), &realm),
+            Ok(JsValue::Number(7.0))
+        );
+        assert_eq!(
+            vm.get_object_property(fresh_id, "x", &realm),
+            Ok(JsValue::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn gc_keeps_objects_reachable_from_realm_globals() {
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object.clone() else {
+            panic!("expected object value");
+        };
+        realm.define_global("root", object);
+
+        let stats = vm.collect_garbage(&realm);
+        assert_eq!(stats.reclaimed_objects, 0);
+        assert!(vm.objects.contains_key(&object_id));
+        assert!(stats.marked_objects >= 1);
+        assert_eq!(vm.gc_stats(), stats);
+    }
+
+    #[test]
+    fn auto_gc_is_disabled_by_default() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+        assert_eq!(vm.gc_stats(), GcStats::default());
+    }
+
+    #[test]
+    fn auto_gc_runs_at_execution_boundary_when_enabled() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(1);
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+
+        let stats = vm.gc_stats();
+        assert!(stats.roots > 0);
+        assert!(stats.marked_objects > 0);
+        assert!(stats.reclaimed_objects >= 1);
+        assert!(stats.collections_total >= 1);
+        assert_eq!(stats.boundary_collections, stats.collections_total);
+        assert_eq!(stats.runtime_collections, 0);
+    }
+
+    #[test]
+    fn auto_gc_respects_threshold() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(usize::MAX);
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+        assert_eq!(vm.gc_stats(), GcStats::default());
+    }
+
+    #[test]
+    fn runtime_gc_triggers_during_execution_when_enabled() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(1);
+        vm.enable_runtime_gc(true);
+        vm.set_runtime_gc_check_interval(1);
+
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+        let stats = vm.gc_stats();
+        assert!(stats.runtime_collections > 0);
+        assert_eq!(
+            stats.collections_total,
+            stats.runtime_collections + stats.boundary_collections
+        );
+    }
+
+    #[test]
+    fn runtime_gc_keeps_caller_stack_roots_across_nested_calls() {
+        let source = r#"
+function makeChunk(seed) {
+  let arr = [];
+  for (let i = 0; i < 6; i = i + 1) {
+    arr.push({ value: seed + i });
+  }
+  return arr;
+}
+let slots = [makeChunk(1), makeChunk(10), makeChunk(20)];
+for (let round = 0; round < 18; round = round + 1) {
+  slots[round % 3] = makeChunk(round * 3);
+}
+slots[1][2].value + slots[2][0].value;
+"#;
+        let script = parse_script(source).expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(1);
+        vm.enable_runtime_gc(true);
+        vm.set_runtime_gc_check_interval(1);
+
+        assert!(vm.execute(&chunk).is_ok());
+        let stats = vm.gc_stats();
+        assert!(stats.runtime_collections > 0);
+        assert_eq!(
+            stats.collections_total,
+            stats.runtime_collections + stats.boundary_collections
+        );
+    }
+
+    #[test]
+    fn runtime_gc_disabled_keeps_runtime_collection_count_zero() {
+        let chunk = empty_chunk(vec![
+            Opcode::CreateObject,
+            Opcode::Pop,
+            Opcode::LoadUndefined,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(1);
+        vm.enable_runtime_gc(false);
+
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+        let stats = vm.gc_stats();
+        assert_eq!(stats.runtime_collections, 0);
+        assert!(stats.boundary_collections >= 1);
+        assert_eq!(stats.collections_total, stats.boundary_collections);
+    }
+
+    #[test]
+    fn host_pin_keeps_object_alive_until_unpinned() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object.clone() else {
+            panic!("expected object value");
+        };
+
+        let handle = vm.pin_host_value(object);
+        let stats_while_pinned = vm.collect_garbage(&realm);
+        assert_eq!(stats_while_pinned.reclaimed_objects, 0);
+        assert!(vm.objects.contains_key(&object_id));
+
+        assert!(vm.unpin_host_value(handle).is_some());
+        let stats_after_unpin = vm.collect_garbage(&realm);
+        assert!(stats_after_unpin.reclaimed_objects >= 1);
+        assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn unpin_unknown_handle_returns_none() {
+        let mut vm = Vm::default();
+        assert!(vm.unpin_host_value(999).is_none());
     }
 }

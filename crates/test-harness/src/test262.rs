@@ -7,7 +7,7 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::Realm;
-use vm::Vm;
+use vm::{GcStats, Vm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativePhase {
@@ -50,6 +50,10 @@ pub struct SuiteOptions {
     pub max_cases: Option<usize>,
     pub fail_fast: bool,
     pub failure_details_limit: usize,
+    pub auto_gc: bool,
+    pub auto_gc_threshold: Option<usize>,
+    pub runtime_gc: bool,
+    pub runtime_gc_check_interval: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +71,17 @@ pub struct SuiteSummary {
     pub passed: usize,
     pub failed: usize,
     pub failures: Vec<FailureDetail>,
+    pub gc: SuiteGcSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SuiteGcSummary {
+    pub collections_total: usize,
+    pub boundary_collections: usize,
+    pub runtime_collections: usize,
+    pub reclaimed_objects: usize,
+    pub mark_duration_ns: u128,
+    pub sweep_duration_ns: u128,
 }
 
 pub fn parse_test262_case(source: &str) -> Result<Test262Case<'_>, String> {
@@ -146,20 +161,69 @@ fn is_fixture_file(path: &Path) -> bool {
 }
 
 pub fn execute_case(source: &str) -> ExecutionOutcome {
+    execute_case_with_options(source, false, None, false, None)
+}
+
+pub fn execute_case_with_options(
+    source: &str,
+    auto_gc: bool,
+    auto_gc_threshold: Option<usize>,
+    runtime_gc: bool,
+    runtime_gc_check_interval: Option<usize>,
+) -> ExecutionOutcome {
+    execute_case_with_options_and_stats(
+        source,
+        auto_gc,
+        auto_gc_threshold,
+        runtime_gc,
+        runtime_gc_check_interval,
+    )
+    .0
+}
+
+fn execute_case_with_options_and_stats(
+    source: &str,
+    auto_gc: bool,
+    auto_gc_threshold: Option<usize>,
+    runtime_gc: bool,
+    runtime_gc_check_interval: Option<usize>,
+) -> (ExecutionOutcome, GcStats) {
     let source_owned = source.to_string();
     let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
-    match builder.spawn(move || execute_case_inner(&source_owned)) {
+    match builder.spawn(move || {
+        execute_case_inner(
+            &source_owned,
+            auto_gc,
+            auto_gc_threshold,
+            runtime_gc,
+            runtime_gc_check_interval,
+        )
+    }) {
         Ok(handle) => match handle.join() {
-            Ok(outcome) => outcome,
-            Err(_) => ExecutionOutcome::RuntimeFail("case execution panicked".to_string()),
+            Ok(result) => result,
+            Err(_) => (
+                ExecutionOutcome::RuntimeFail("case execution panicked".to_string()),
+                GcStats::default(),
+            ),
         },
         Err(err) => {
-            ExecutionOutcome::RuntimeFail(format!("failed to spawn case execution thread: {err}"))
+            (
+                ExecutionOutcome::RuntimeFail(format!(
+                    "failed to spawn case execution thread: {err}"
+                )),
+                GcStats::default(),
+            )
         }
     }
 }
 
-fn execute_case_inner(source: &str) -> ExecutionOutcome {
+fn execute_case_inner(
+    source: &str,
+    auto_gc: bool,
+    auto_gc_threshold: Option<usize>,
+    runtime_gc: bool,
+    runtime_gc_check_interval: Option<usize>,
+) -> (ExecutionOutcome, GcStats) {
     let trace_stages = std::env::var("QJS_TRACE_STAGES")
         .ok()
         .map(|value| !value.is_empty() && value != "0")
@@ -169,7 +233,7 @@ fn execute_case_inner(source: &str) -> ExecutionOutcome {
     }
     let parsed = match parse_script(source) {
         Ok(script) => script,
-        Err(err) => return ExecutionOutcome::ParseFail(err.message),
+        Err(err) => return (ExecutionOutcome::ParseFail(err.message), GcStats::default()),
     };
 
     if trace_stages {
@@ -180,12 +244,21 @@ fn execute_case_inner(source: &str) -> ExecutionOutcome {
         println!("  stage: execute");
     }
     let mut vm = Vm::default();
+    if auto_gc {
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(auto_gc_threshold.unwrap_or(1));
+        vm.enable_runtime_gc(runtime_gc);
+        if let Some(interval) = runtime_gc_check_interval {
+            vm.set_runtime_gc_check_interval(interval);
+        }
+    }
     let mut realm = Realm::default();
     install_baseline(&mut realm);
-    match vm.execute_in_realm(&chunk, &realm) {
+    let outcome = match vm.execute_in_realm(&chunk, &realm) {
         Ok(_) => ExecutionOutcome::Pass,
         Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
-    }
+    };
+    (outcome, vm.gc_stats())
 }
 
 pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
@@ -230,7 +303,19 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             );
         }
         summary.executed += 1;
-        let actual = execute_case(case.body);
+        let (actual, gc_stats) = execute_case_with_options_and_stats(
+            case.body,
+            options.auto_gc,
+            options.auto_gc_threshold,
+            options.runtime_gc,
+            options.runtime_gc_check_interval,
+        );
+        summary.gc.collections_total += gc_stats.collections_total;
+        summary.gc.boundary_collections += gc_stats.boundary_collections;
+        summary.gc.runtime_collections += gc_stats.runtime_collections;
+        summary.gc.reclaimed_objects += gc_stats.reclaimed_objects;
+        summary.gc.mark_duration_ns += gc_stats.mark_duration_ns;
+        summary.gc.sweep_duration_ns += gc_stats.sweep_duration_ns;
 
         let matched = matches!(
             (&expected, &actual),
@@ -559,5 +644,8 @@ import "x";
         assert!(summary.discovered > 0);
         assert!(summary.executed > 0);
         assert_eq!(summary.failed, 0);
+        assert_eq!(summary.gc.collections_total, 0);
+        assert_eq!(summary.gc.runtime_collections, 0);
+        assert_eq!(summary.gc.boundary_collections, 0);
     }
 }
