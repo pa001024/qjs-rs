@@ -48,6 +48,7 @@ struct JsObject {
     property_attributes: BTreeMap<String, PropertyAttributes>,
     argument_mappings: BTreeMap<String, BindingId>,
     prototype: Option<ObjectId>,
+    prototype_overridden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,7 +837,7 @@ impl Vm {
                             self.get_object_property(object_id, name, realm)?
                         }
                         JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, name)?
+                            self.get_function_property(closure_id, name, realm)?
                         }
                         JsValue::NativeFunction(native) => {
                             self.get_native_function_property(native, name)
@@ -858,7 +859,7 @@ impl Vm {
                             self.get_object_property(object_id, &key, realm)?
                         }
                         JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, &key)?
+                            self.get_function_property(closure_id, &key, realm)?
                         }
                         JsValue::NativeFunction(native) => {
                             self.get_native_function_property(native, &key)
@@ -1050,7 +1051,8 @@ impl Vm {
                                     "restricted function property access",
                                 ));
                             }
-                            let result = self.set_closure_property(closure_id, name.clone(), value);
+                            let result =
+                                self.set_function_property(closure_id, name.clone(), value, realm)?;
                             self.stack.push(result);
                         }
                         JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
@@ -1078,7 +1080,8 @@ impl Vm {
                                     "restricted function property access",
                                 ));
                             }
-                            let result = self.set_closure_property(closure_id, key, value);
+                            let result =
+                                self.set_function_property(closure_id, key, value, realm)?;
                             self.stack.push(result);
                         }
                         JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
@@ -1494,7 +1497,7 @@ impl Vm {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&left);
-                    let result = self.evaluate_in_operator(key, right)?;
+                    let result = self.evaluate_in_operator(key, right, realm)?;
                     self.stack.push(JsValue::Bool(result));
                 }
                 Opcode::InstanceOf => {
@@ -1799,7 +1802,6 @@ impl Vm {
                         instance.prototype = Some(prototype_id);
                     }
                 }
-                self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
                 if matches!(result, JsValue::Object(_)) {
@@ -1876,7 +1878,6 @@ impl Vm {
                         instance.prototype = Some(prototype_id);
                     }
                 }
-                self.install_constructor_property(&constructed, JsValue::Function(closure_id));
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
                 if matches!(result, JsValue::Object(_)) {
@@ -2064,6 +2065,11 @@ impl Vm {
                 self.execute_host_function_call(host_id, args, realm, caller_strict)
             }
             JsValue::Function(closure_id) => {
+                if self.closure_is_class_constructor(closure_id) {
+                    return Err(VmError::TypeError(
+                        "class constructor cannot be invoked without 'new'",
+                    ));
+                }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
             _ => Err(VmError::NotCallable),
@@ -3040,14 +3046,7 @@ impl Vm {
     }
 
     fn execute_object_set_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target_id = match args.first().cloned().unwrap_or(JsValue::Undefined) {
-            JsValue::Object(object_id) => object_id,
-            _ => {
-                return Err(VmError::TypeError(
-                    "Object.setPrototypeOf target must be object",
-                ));
-            }
-        };
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
 
         let prototype = match args.get(1).cloned().unwrap_or(JsValue::Undefined) {
             JsValue::Object(object_id) => Some(object_id),
@@ -3059,12 +3058,25 @@ impl Vm {
             }
         };
 
-        let target = self
-            .objects
-            .get_mut(&target_id)
-            .ok_or(VmError::UnknownObject(target_id))?;
-        target.prototype = prototype;
-        Ok(JsValue::Object(target_id))
+        match target {
+            JsValue::Object(target_id) => {
+                let object = self
+                    .objects
+                    .get_mut(&target_id)
+                    .ok_or(VmError::UnknownObject(target_id))?;
+                object.prototype = prototype;
+                Ok(JsValue::Object(target_id))
+            }
+            JsValue::Function(closure_id) => {
+                let closure_object = self.closure_objects.entry(closure_id).or_default();
+                closure_object.prototype = prototype;
+                closure_object.prototype_overridden = true;
+                Ok(JsValue::Function(closure_id))
+            }
+            _ => Err(VmError::TypeError(
+                "Object.setPrototypeOf target must be object",
+            )),
+        }
     }
 
     fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -3123,8 +3135,19 @@ impl Vm {
         args: &[JsValue],
         _realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target_id = match args.first() {
-            Some(JsValue::Object(id)) => *id,
+        enum DefinePropertyTarget {
+            Object(ObjectId),
+            Function(u64),
+        }
+
+        let target = match args.first() {
+            Some(JsValue::Object(id)) => DefinePropertyTarget::Object(*id),
+            Some(JsValue::Function(closure_id)) => {
+                if !self.closures.contains_key(closure_id) {
+                    return Err(VmError::UnknownClosure(*closure_id));
+                }
+                DefinePropertyTarget::Function(*closure_id)
+            }
             _ => {
                 return Err(VmError::TypeError(
                     "Object.defineProperty target must be object",
@@ -3138,6 +3161,19 @@ impl Vm {
         let descriptor_id = match args.get(2) {
             Some(JsValue::Object(id)) => Some(*id),
             _ => None,
+        };
+
+        let mut target_object = match target {
+            DefinePropertyTarget::Object(target_id) => self
+                .objects
+                .get(&target_id)
+                .cloned()
+                .ok_or(VmError::UnknownObject(target_id))?,
+            DefinePropertyTarget::Function(closure_id) => self
+                .closure_objects
+                .get(&closure_id)
+                .cloned()
+                .unwrap_or_default(),
         };
 
         if let Some(descriptor_id) = descriptor_id {
@@ -3185,16 +3221,12 @@ impl Vm {
                 current_attributes,
                 mapped_binding_id,
             ) = {
-                let object = self
-                    .objects
-                    .get(&target_id)
-                    .ok_or(VmError::UnknownObject(target_id))?;
                 (
-                    object.properties.get(&property).cloned(),
-                    object.getters.get(&property).cloned(),
-                    object.setters.get(&property).cloned(),
-                    object.property_attributes.get(&property).copied(),
-                    object.argument_mappings.get(&property).copied(),
+                    target_object.properties.get(&property).cloned(),
+                    target_object.getters.get(&property).cloned(),
+                    target_object.setters.get(&property).cloned(),
+                    target_object.property_attributes.get(&property).copied(),
+                    target_object.argument_mappings.get(&property).copied(),
                 )
             };
 
@@ -3273,26 +3305,22 @@ impl Vm {
 
             let mut remove_mapping = false;
             if has_get || has_set {
-                let object = self
-                    .objects
-                    .get_mut(&target_id)
-                    .ok_or(VmError::UnknownObject(target_id))?;
-                object.properties.remove(&property);
+                target_object.properties.remove(&property);
                 if has_get {
                     if matches!(desc_get, JsValue::Undefined) {
-                        object.getters.remove(&property);
+                        target_object.getters.remove(&property);
                     } else {
-                        object.getters.insert(property.clone(), desc_get);
+                        target_object.getters.insert(property.clone(), desc_get);
                     }
                 }
                 if has_set {
                     if matches!(desc_set, JsValue::Undefined) {
-                        object.setters.remove(&property);
+                        target_object.setters.remove(&property);
                     } else {
-                        object.setters.insert(property.clone(), desc_set);
+                        target_object.setters.insert(property.clone(), desc_set);
                     }
                 }
-                let attributes = object
+                let attributes = target_object
                     .property_attributes
                     .entry(property.clone())
                     .or_insert(PropertyAttributes {
@@ -3313,24 +3341,20 @@ impl Vm {
                 }
                 remove_mapping = true;
             } else {
-                let object = self
-                    .objects
-                    .get_mut(&target_id)
-                    .ok_or(VmError::UnknownObject(target_id))?;
-                object.getters.remove(&property);
-                object.setters.remove(&property);
+                target_object.getters.remove(&property);
+                target_object.setters.remove(&property);
                 if has_value {
-                    object
+                    target_object
                         .properties
                         .insert(property.clone(), desc_value.clone());
                 } else if !current_is_data && !current_is_accessor {
-                    object
+                    target_object
                         .properties
                         .entry(property.clone())
                         .or_insert(JsValue::Undefined);
                 }
 
-                let attributes = object
+                let attributes = target_object
                     .property_attributes
                     .entry(property.clone())
                     .or_insert(PropertyAttributes {
@@ -3369,25 +3393,30 @@ impl Vm {
                 if !has_get && !has_set && !has_value {
                     if let Some(binding_id) = mapped_binding_id {
                         if let Some(binding) = self.bindings.get(&binding_id) {
-                            let object = self
-                                .objects
-                                .get_mut(&target_id)
-                                .ok_or(VmError::UnknownObject(target_id))?;
-                            object
+                            target_object
                                 .properties
                                 .insert(property.clone(), binding.value.clone());
                         }
                     }
                 }
+                target_object.argument_mappings.remove(&property);
+            }
+        }
+
+        match target {
+            DefinePropertyTarget::Object(target_id) => {
                 let object = self
                     .objects
                     .get_mut(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
-                object.argument_mappings.remove(&property);
+                *object = target_object;
+                Ok(JsValue::Object(target_id))
+            }
+            DefinePropertyTarget::Function(closure_id) => {
+                self.closure_objects.insert(closure_id, target_object);
+                Ok(JsValue::Function(closure_id))
             }
         }
-
-        Ok(JsValue::Object(target_id))
     }
 
     fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -3776,7 +3805,18 @@ impl Vm {
                     .map(JsValue::Object)
                     .unwrap_or(JsValue::Null))
             }
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+            JsValue::Function(closure_id) => {
+                if let Some(closure_object) = self.closure_objects.get(&closure_id) {
+                    if closure_object.prototype_overridden {
+                        return Ok(closure_object
+                            .prototype
+                            .map(JsValue::Object)
+                            .unwrap_or(JsValue::Null));
+                    }
+                }
+                Ok(self.function_prototype_value())
+            }
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                 Ok(self.function_prototype_value())
             }
             _ => Err(VmError::TypeError(
@@ -4079,12 +4119,16 @@ impl Vm {
                     || (property == "reverse" && object.properties.contains_key("length"))
                     || (property == "sort" && object.properties.contains_key("length")))
             }
-            JsValue::Function(closure_id) => Ok(self
-                .closure_has_own_property(*closure_id, property)
-                || matches!(
+            JsValue::Function(closure_id) => {
+                if self.closure_has_own_property(*closure_id, property) {
+                    return Ok(true);
+                }
+                if property == "prototype" {
+                    return Ok(!self.closure_is_arrow(*closure_id)?);
+                }
+                Ok(matches!(
                     property,
                     "length"
-                        | "prototype"
                         | "call"
                         | "apply"
                         | "bind"
@@ -4092,7 +4136,8 @@ impl Vm {
                         | "valueOf"
                         | "hasOwnProperty"
                         | "constructor"
-                )),
+                ))
+            }
             JsValue::NativeFunction(native) => Ok(!matches!(
                 self.get_native_function_property(*native, property),
                 JsValue::Undefined
@@ -4145,7 +4190,9 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match receiver {
             JsValue::Object(object_id) => self.get_object_property(object_id, property, realm),
-            JsValue::Function(closure_id) => self.get_function_property(closure_id, property),
+            JsValue::Function(closure_id) => {
+                self.get_function_property(closure_id, property, realm)
+            }
             JsValue::NativeFunction(native) => {
                 Ok(self.get_native_function_property(native, property))
             }
@@ -4173,7 +4220,7 @@ impl Vm {
                 {
                     return Err(VmError::TypeError("restricted function property access"));
                 }
-                Ok(self.set_closure_property(closure_id, property, value))
+                self.set_function_property(closure_id, property, value, realm)
             }
             JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(value),
             _ => Err(VmError::TypeError("property write expects object")),
@@ -4739,7 +4786,7 @@ impl Vm {
         let mut invoked_callable = false;
 
         for method_name in method_names {
-            let method = self.get_function_property(closure_id, method_name)?;
+            let method = self.get_function_property(closure_id, method_name, realm)?;
             if !Self::is_callable_value(&method) {
                 continue;
             }
@@ -4800,6 +4847,13 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_is_arrow(function))
+    }
+
+    fn closure_is_class_constructor(&self, closure_id: u64) -> bool {
+        self.closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get(CLASS_CONSTRUCTOR_MARKER))
+            .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
     }
 
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
@@ -5198,6 +5252,50 @@ impl Vm {
         value
     }
 
+    fn set_function_property(
+        &mut self,
+        closure_id: u64,
+        property: String,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let (setter, getter_exists, data_writable) = self
+            .closure_objects
+            .get(&closure_id)
+            .map(|object| {
+                (
+                    object.setters.get(&property).cloned(),
+                    object.getters.contains_key(&property),
+                    object.properties.get(&property).map(|_| {
+                        object
+                            .property_attributes
+                            .get(&property)
+                            .is_none_or(|attributes| attributes.writable)
+                    }),
+                )
+            })
+            .unwrap_or((None, false, None));
+
+        if let Some(setter) = setter {
+            let _ = self.execute_callable(
+                setter,
+                Some(JsValue::Function(closure_id)),
+                vec![value.clone()],
+                realm,
+                false,
+            )?;
+            return Ok(value);
+        }
+        if getter_exists {
+            return Ok(value);
+        }
+        if data_writable == Some(false) {
+            return Ok(value);
+        }
+
+        Ok(self.set_closure_property(closure_id, property, value))
+    }
+
     fn get_or_create_function_prototype_property(
         &mut self,
         closure_id: u64,
@@ -5497,20 +5595,21 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn evaluate_in_operator(&mut self, key: String, right: JsValue) -> Result<bool, VmError> {
+    fn evaluate_in_operator(
+        &mut self,
+        key: String,
+        right: JsValue,
+        realm: &Realm,
+    ) -> Result<bool, VmError> {
         match right {
             JsValue::Object(object_id) => self.object_has_property_in_chain(object_id, &key),
             JsValue::Function(closure_id) => {
-                let value = self.get_function_property(closure_id, &key)?;
-                Ok(!matches!(value, JsValue::Undefined))
+                self.has_property_on_receiver(&JsValue::Function(closure_id), &key, realm)
             }
-            JsValue::NativeFunction(native) => {
-                let value = self.get_native_function_property(native, &key);
-                Ok(!matches!(value, JsValue::Undefined))
-            }
+            JsValue::NativeFunction(native) => self
+                .has_property_on_receiver(&JsValue::NativeFunction(native), &key, realm),
             JsValue::HostFunction(host_id) => {
-                let value = self.get_host_function_property(host_id, &key)?;
-                Ok(!matches!(value, JsValue::Undefined))
+                self.has_property_on_receiver(&JsValue::HostFunction(host_id), &key, realm)
             }
             _ => Err(VmError::TypeError("right-hand side of 'in' expects object")),
         }
@@ -5682,12 +5781,34 @@ impl Vm {
         &mut self,
         closure_id: u64,
         property: &str,
+        realm: &Realm,
     ) -> Result<JsValue, VmError> {
         if self.function_rejects_caller_arguments(closure_id)?
             && matches!(property, "caller" | "arguments")
             && !self.closure_has_own_property(closure_id, property)
         {
             return Err(VmError::TypeError("restricted function property access"));
+        }
+        if let Some(getter) = self
+            .closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.getters.get(property))
+            .cloned()
+        {
+            return self.execute_callable(
+                getter,
+                Some(JsValue::Function(closure_id)),
+                Vec::new(),
+                realm,
+                false,
+            );
+        }
+        if self
+            .closure_objects
+            .get(&closure_id)
+            .is_some_and(|object| object.setters.contains_key(property))
+        {
+            return Ok(JsValue::Undefined);
         }
         if let Some(value) = self
             .closure_objects

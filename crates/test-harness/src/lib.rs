@@ -855,6 +855,15 @@ mod tests {
     }
 
     #[test]
+    fn supports_function_set_prototype_of_null_baseline() {
+        let result = run_script(
+            "var f = function() {}; Object.setPrototypeOf(f, null); Object.getPrototypeOf(f) === null;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_function_prototype_property_stability_baseline() {
         let result = run_script(
             "function F() {} var a = F.prototype; var b = F.prototype; a === b && a.constructor === F;",
@@ -993,6 +1002,33 @@ mod tests {
             &[],
         );
         assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn supports_class_computed_constructor_method_baseline() {
+        let result = run_script(
+            "class C { ['constructor']() { return 1; } } C !== C.prototype.constructor && new C().constructor() === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_class_static_computed_constructor_getter_baseline() {
+        let result = run_script(
+            "class C { static get ['constructor']() { return 1; } } C.constructor === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_class_static_computed_constructor_setter_baseline() {
+        let result = run_script(
+            "var observed = 0; class C { static set ['constructor'](v) { observed = v; } } C.constructor = 2; observed === 2;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
     }
 
     #[test]

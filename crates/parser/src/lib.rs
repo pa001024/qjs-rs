@@ -1192,11 +1192,7 @@ impl Parser {
     fn parse_class_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
         let name = Identifier(self.expect_binding_identifier("expected class name")?);
         let class_tail = self.parse_class_tail()?;
-        let initializer = if class_tail.methods.is_empty() {
-            Expr::ObjectLiteral(vec![])
-        } else {
-            self.lower_class_tail(class_tail)
-        };
+        let initializer = self.lower_class_tail(class_tail);
         Ok(Stmt::VariableDeclaration(VariableDeclaration {
             kind: BindingKind::Let,
             name,
@@ -3272,11 +3268,7 @@ impl Parser {
             let _ = self.expect_binding_identifier("expected class name")?;
         }
         let class_tail = self.parse_class_tail()?;
-        if class_tail.methods.is_empty() {
-            Ok(Expr::ObjectLiteral(vec![]))
-        } else {
-            Ok(self.lower_class_tail(class_tail))
-        }
+        Ok(self.lower_class_tail(class_tail))
     }
 
     fn parse_class_tail(&mut self) -> Result<ParsedClassTail, ParseError> {
@@ -3407,12 +3399,29 @@ impl Parser {
     fn lower_class_tail(&mut self, class_tail: ParsedClassTail) -> Expr {
         let class_temp = self.next_class_temp_name();
         let class_ident = Identifier(class_temp.clone());
+        let mut constructor_value = Expr::Function {
+            name: None,
+            params: vec![],
+            body: vec![],
+        };
+        let mut lowered_methods = Vec::new();
+        for method in class_tail.methods {
+            let is_constructor = !method.is_static
+                && matches!(method.kind, ClassElementKind::Method)
+                && matches!(&method.key, ClassMethodKey::Static(name) if name == "constructor");
+            if is_constructor {
+                constructor_value =
+                    self.lower_class_method_with_super_binding(method.value, false, &class_ident);
+                continue;
+            }
+            lowered_methods.push(method);
+        }
 
         let mut body = vec![
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
                 name: class_ident.clone(),
-                initializer: Some(Expr::ObjectLiteral(vec![])),
+                initializer: Some(constructor_value),
             }),
             Stmt::Expression(Expr::AssignMember {
                 object: Box::new(Expr::Identifier(class_ident.clone())),
@@ -3434,7 +3443,7 @@ impl Parser {
             }),
         ];
 
-        for method in class_tail.methods {
+        for method in lowered_methods {
             let ClassMethodDefinition {
                 key,
                 value,
@@ -3461,19 +3470,57 @@ impl Parser {
             };
             match kind {
                 ClassElementKind::Method => {
-                    let assignment = match key {
-                        ClassMethodKey::Static(name) => Expr::AssignMember {
-                            object: Box::new(target),
-                            property: name,
-                            value: Box::new(method_value),
-                        },
-                        ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
-                            object: Box::new(target),
-                            property: Box::new(key),
-                            value: Box::new(method_value),
-                        },
-                    };
-                    body.push(Stmt::Expression(assignment));
+                    if is_static {
+                        let assignment = match key {
+                            ClassMethodKey::Static(name) => Expr::AssignMember {
+                                object: Box::new(target),
+                                property: name,
+                                value: Box::new(method_value),
+                            },
+                            ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
+                                object: Box::new(target),
+                                property: Box::new(key),
+                                value: Box::new(method_value),
+                            },
+                        };
+                        body.push(Stmt::Expression(assignment));
+                    } else {
+                        let key_expr = match key {
+                            ClassMethodKey::Static(name) => Expr::String(StringLiteral {
+                                value: name,
+                                has_escape: false,
+                            }),
+                            ClassMethodKey::Computed(key) => key,
+                        };
+                        body.push(Stmt::Expression(Expr::Call {
+                            callee: Box::new(Expr::Member {
+                                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                                property: "defineProperty".to_string(),
+                            }),
+                            arguments: vec![
+                                target,
+                                key_expr,
+                                Expr::ObjectLiteral(vec![
+                                    ObjectProperty {
+                                        key: ObjectPropertyKey::Static("value".to_string()),
+                                        value: method_value,
+                                    },
+                                    ObjectProperty {
+                                        key: ObjectPropertyKey::Static("writable".to_string()),
+                                        value: Expr::Bool(true),
+                                    },
+                                    ObjectProperty {
+                                        key: ObjectPropertyKey::Static("enumerable".to_string()),
+                                        value: Expr::Bool(false),
+                                    },
+                                    ObjectProperty {
+                                        key: ObjectPropertyKey::Static("configurable".to_string()),
+                                        value: Expr::Bool(true),
+                                    },
+                                ]),
+                            ],
+                        }));
+                    }
                 }
                 ClassElementKind::Getter | ClassElementKind::Setter => {
                     let key_expr = match key {
@@ -3552,17 +3599,23 @@ impl Parser {
                 property: "prototype".to_string(),
             }
         };
-        let mut lowered_body = vec![Stmt::VariableDeclaration(VariableDeclaration {
-            kind: BindingKind::Let,
-            name: Identifier("super".to_string()),
-            initializer: Some(Expr::Call {
-                callee: Box::new(Expr::Member {
-                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                    property: "getPrototypeOf".to_string(),
+        let mut lowered_body = vec![
+            Stmt::Expression(Expr::String(StringLiteral {
+                value: "use strict".to_string(),
+                has_escape: false,
+            })),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier("super".to_string()),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "getPrototypeOf".to_string(),
+                    }),
+                    arguments: vec![super_base],
                 }),
-                arguments: vec![super_base],
             }),
-        })];
+        ];
         lowered_body.extend(body);
         Expr::Function {
             name,
@@ -5114,23 +5167,24 @@ mod tests {
     #[test]
     fn parses_class_declaration_baseline() {
         let parsed = parse_script("class C {} C;").expect("script parsing should succeed");
-        let expected = Script {
-            statements: vec![
-                Stmt::VariableDeclaration(VariableDeclaration {
-                    kind: BindingKind::Let,
-                    name: Identifier("C".to_string()),
-                    initializer: Some(Expr::ObjectLiteral(vec![])),
-                }),
-                Stmt::Expression(Expr::Identifier(Identifier("C".to_string()))),
-            ],
-        };
-        assert_eq!(parsed, expected);
+        match &parsed.statements[0] {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(name),
+                initializer: Some(Expr::Call { .. }),
+            }) if name == "C" => {}
+            _ => panic!("expected lowered class declaration initializer"),
+        }
+        assert_eq!(
+            parsed.statements[1],
+            Stmt::Expression(Expr::Identifier(Identifier("C".to_string())))
+        );
     }
 
     #[test]
     fn parses_class_expression_baseline() {
         let parsed = parse_expression("class await {}").expect("parser should succeed");
-        assert_eq!(parsed, Expr::ObjectLiteral(vec![]));
+        assert!(matches!(parsed, Expr::Call { .. }));
     }
 
     #[test]

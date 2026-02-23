@@ -19,6 +19,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
 - `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4320, failed=680
 - `language max-cases=5000 (latest)`: discovered=23882, executed=5000, skipped=18579, passed=4440, failed=560
+- `language max-cases=5000 (latest+1)`: discovered=23882, executed=5000, skipped=18579, passed=4462, failed=538
+- `language max-cases=5000 (latest+2)`: discovered=23882, executed=5000, skipped=18579, passed=4470, failed=530
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -132,4 +134,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer/parser 增加 template literal 分段 token（cooked/raw）与解析链路，tagged template 首参升级为 cooked 数组并附带 `raw` 属性；`language` 基线提升至 `4438/562`。
 - parser 修正 `new tag\`...\`` 解析优先级（tagged template 高于 `new`），修复 `tagged-template/constructor-invocation.js`；`language` 基线提升至 `4439/561`。
 - template invalid escape 在 tagged template 下改为“cooked 为 `undefined` + raw 保留”，不再 parse-fail；`language` 基线提升至 `4440/560`。
+- VM 增加函数对象 `[[Prototype]]` 显式改写状态（区分“默认 Function.prototype”与“显式设为 null”），修复 class static `super` 赋值在 `Object.setPrototypeOf(C, null)` 下的求值路径；`language` 基线提升至 `4462/538`。
+- parser/class lowering + VM 函数对象描述符路径进一步收敛：`Object.defineProperty` 支持函数目标、函数属性 get/set 支持 accessor、构造路径取消实例自有 `constructor` 强写，修复 `computed-property-names/class/*constructor*` 一批失败；`language` 基线提升至 `4470/530`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
