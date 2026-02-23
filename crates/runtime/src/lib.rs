@@ -15,6 +15,7 @@ pub enum NativeFunction {
     ObjectGetOwnPropertyDescriptor,
     ObjectGetPrototypeOf,
     ObjectIsExtensible,
+    ObjectFreeze,
     ObjectForInKeys,
     ObjectForOfValues,
     ObjectTdzMarker,

@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4635`、`failed=365`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4666`、`failed=334`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -59,6 +59,13 @@
   - `language/expressions/super` 子集从 `9/23` 提升到 `15/17`（executed=32）；`language/statements/class/subclass` 子集从 `17/60` 提升到 `22/55`（executed=77）。
   - lexer 字符串转义补齐 legacy 路径：支持 legacy non-octal（如 `\8`、`\9`、`\A`、`\Ð`）与 legacy octal（如 `\1`/`\\123`）最小吞吐。
   - `language/literals/string` 子集提升到 `59/0`（executed=59）。
+  - parser `new` 表达式对齐 QuickJS 右递归语义：`new NewExpression` 递归解析，修复 `new new Boolean(true)` 等历史 parse-fail。
+  - bytecode/vm 增加 `super` 专用 opcode（`Get/SetSuperProperty*`、`PrepareSuperMethod*`）与 `Dup3/RotRight5` 栈操作，修复 `super.prop`/`super[expr]` 的 `this` 绑定、key 求值顺序与写入路径。
+  - VM 增加 runtime `ToPropertyKey` 调用链（含对象 `toString` 副作用与异常传播），修复 `super[badToString]` 与 `GetSuperBase before ToPropertyKey` 相关失败簇。
+  - direct eval 增加 `parse_script_with_super` 通道：在有 super 语境时放行 `eval('super.x')` 解析。
+  - VM 增加 `Object.freeze` 最小语义（对象 `extensible=false`）与 `String.prototype.toLowerCase`，并修复 `hasOwnProperty.call(...)` 的 this 覆盖语义。
+  - runtime 错误路由改为 Error-like 对象（`constructor/name/message`），`TypeError`/`ReferenceError` 不再仅以字符串抛出。
+  - `language/expressions/super` 子集从 `15/17` 提升至 `32/0`（executed=32）。
 
 ## 3. 分阶段状态
 

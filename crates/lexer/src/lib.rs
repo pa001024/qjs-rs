@@ -194,7 +194,8 @@ fn read_unicode_escape_char(source: &str, escape_start: usize) -> Option<(char, 
         let hex = std::str::from_utf8(&bytes[escape_start + 2..escape_start + 6]).ok()?;
         if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
             let code_unit = u32::from_str_radix(hex, 16).ok()?;
-            let ch = surrogate_escape_placeholder(code_unit).or_else(|| char::from_u32(code_unit))?;
+            let ch =
+                surrogate_escape_placeholder(code_unit).or_else(|| char::from_u32(code_unit))?;
             return Some((ch, 6));
         }
     }
@@ -1324,11 +1325,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             b'f' => ('\u{000c}', 1usize),
                             b'v' => ('\u{000b}', 1usize),
                             b'0' => {
-                                if pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'0'..=b'7')
-                                {
+                                if pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'0'..=b'7') {
                                     let (code_point, len) = parse_legacy_octal_escape(bytes, pos);
-                                    let ch =
-                                        char::from_u32(code_point).unwrap_or(char::REPLACEMENT_CHARACTER);
+                                    let ch = char::from_u32(code_point)
+                                        .unwrap_or(char::REPLACEMENT_CHARACTER);
                                     (ch, len)
                                 } else {
                                     ('\0', 1usize)
@@ -1342,20 +1342,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             }
                             b'u' => {
                                 if pos + 4 < bytes.len() {
-                                    let hex =
-                                        std::str::from_utf8(&bytes[pos + 1..pos + 5]).map_err(
-                                            |_| LexError {
-                                                message: "invalid unicode escape".to_string(),
-                                                position: pos.saturating_sub(1),
-                                            },
-                                        )?;
-                                    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                                        let code_unit = u32::from_str_radix(hex, 16).map_err(|_| {
-                                            LexError {
-                                                message: "invalid unicode escape".to_string(),
-                                                position: pos.saturating_sub(1),
-                                            }
+                                    let hex = std::str::from_utf8(&bytes[pos + 1..pos + 5])
+                                        .map_err(|_| LexError {
+                                            message: "invalid unicode escape".to_string(),
+                                            position: pos.saturating_sub(1),
                                         })?;
+                                    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                                        let code_unit =
+                                            u32::from_str_radix(hex, 16).map_err(|_| LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            })?;
                                         let ch = surrogate_escape_placeholder(code_unit)
                                             .or_else(|| char::from_u32(code_unit))
                                             .ok_or(LexError {

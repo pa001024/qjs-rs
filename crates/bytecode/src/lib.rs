@@ -33,6 +33,10 @@ pub enum Opcode {
     StoreVariable(String),
     GetProperty(String),
     GetPropertyByValue,
+    GetSuperProperty(String),
+    GetSuperPropertyByValue,
+    PrepareSuperMethod(String),
+    PrepareSuperMethodByValue,
     DefineProperty(String),
     DefineArrayLength,
     ArrayAppend,
@@ -44,6 +48,8 @@ pub enum Opcode {
     DefineSetterByValue,
     SetProperty(String),
     SetPropertyByValue,
+    SetSuperProperty(String),
+    SetSuperPropertyByValue,
     DeleteIdentifier(String),
     DeleteProperty(String),
     DeletePropertyByValue,
@@ -93,7 +99,10 @@ pub enum Opcode {
     Throw,
     Call(usize),
     CallWithSpread(Vec<bool>),
-    CallIdentifier { name: String, arg_count: usize },
+    CallIdentifier {
+        name: String,
+        arg_count: usize,
+    },
     CallIdentifierWithSpread {
         name: String,
         spread_flags: Vec<bool>,
@@ -106,8 +115,10 @@ pub enum Opcode {
     Return,
     Dup,
     Dup2,
+    Dup3,
     Swap,
     RotRight4,
+    RotRight5,
     Pop,
     Nop,
     Halt,
@@ -240,23 +251,19 @@ impl Compiler {
             })
             .collect();
         let last_value_candidate = if preserve_value {
-            statements
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(idx, stmt)| {
-                    if matches!(
-                        stmt,
-                        Stmt::FunctionDeclaration(_)
-                            | Stmt::VariableDeclaration(_)
-                            | Stmt::VariableDeclarations(_)
-                            | Stmt::Empty
-                    ) {
-                        None
-                    } else {
-                        Some(idx)
-                    }
-                })
+            statements.iter().enumerate().rev().find_map(|(idx, stmt)| {
+                if matches!(
+                    stmt,
+                    Stmt::FunctionDeclaration(_)
+                        | Stmt::VariableDeclaration(_)
+                        | Stmt::VariableDeclarations(_)
+                        | Stmt::Empty
+                ) {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
         } else {
             None
         };
@@ -1605,19 +1612,35 @@ impl Compiler {
                 property,
                 value,
             } => {
+                let is_super_member = Self::is_super_identifier(object);
                 if let Some((op, right)) =
                     Self::match_member_compound_value(object, property, value)
                 {
                     self.compile_expr(object, code);
-                    code.push(Opcode::Dup);
-                    code.push(Opcode::GetProperty(property.clone()));
-                    self.compile_expr(right, code);
-                    code.push(Self::binary_opcode(op));
-                    code.push(Opcode::SetProperty(property.clone()));
+                    if is_super_member {
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        code.push(Opcode::Dup2);
+                        code.push(Opcode::GetSuperProperty(property.clone()));
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                        code.push(Opcode::SetSuperProperty(property.clone()));
+                    } else {
+                        code.push(Opcode::Dup);
+                        code.push(Opcode::GetProperty(property.clone()));
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                        code.push(Opcode::SetProperty(property.clone()));
+                    }
                 } else {
                     self.compile_expr(object, code);
-                    self.compile_expr(value, code);
-                    code.push(Opcode::SetProperty(property.clone()));
+                    if is_super_member {
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        self.compile_expr(value, code);
+                        code.push(Opcode::SetSuperProperty(property.clone()));
+                    } else {
+                        self.compile_expr(value, code);
+                        code.push(Opcode::SetProperty(property.clone()));
+                    }
                 }
             }
             Expr::AssignMemberComputed {
@@ -1625,21 +1648,39 @@ impl Compiler {
                 property,
                 value,
             } => {
+                let is_super_member = Self::is_super_identifier(object);
                 if let Some((op, right)) =
                     Self::match_member_computed_compound_value(object, property, value)
                 {
                     self.compile_expr(object, code);
-                    self.compile_expr(property, code);
-                    code.push(Opcode::Dup2);
-                    code.push(Opcode::GetPropertyByValue);
-                    self.compile_expr(right, code);
-                    code.push(Self::binary_opcode(op));
-                    code.push(Opcode::SetPropertyByValue);
+                    if is_super_member {
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        self.compile_expr(property, code);
+                        code.push(Opcode::Dup3);
+                        code.push(Opcode::GetSuperPropertyByValue);
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                        code.push(Opcode::SetSuperPropertyByValue);
+                    } else {
+                        self.compile_expr(property, code);
+                        code.push(Opcode::Dup2);
+                        code.push(Opcode::GetPropertyByValue);
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                        code.push(Opcode::SetPropertyByValue);
+                    }
                 } else {
                     self.compile_expr(object, code);
-                    self.compile_expr(property, code);
-                    self.compile_expr(value, code);
-                    code.push(Opcode::SetPropertyByValue);
+                    if is_super_member {
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        self.compile_expr(property, code);
+                        self.compile_expr(value, code);
+                        code.push(Opcode::SetSuperPropertyByValue);
+                    } else {
+                        self.compile_expr(property, code);
+                        self.compile_expr(value, code);
+                        code.push(Opcode::SetPropertyByValue);
+                    }
                 }
             }
             Expr::Update {
@@ -1650,12 +1691,23 @@ impl Compiler {
             Expr::Identifier(Identifier(name)) => code.push(Opcode::LoadIdentifier(name.clone())),
             Expr::Member { object, property } => {
                 self.compile_expr(object, code);
-                code.push(Opcode::GetProperty(property.clone()));
+                if Self::is_super_identifier(object) {
+                    code.push(Opcode::LoadIdentifier("this".to_string()));
+                    code.push(Opcode::GetSuperProperty(property.clone()));
+                } else {
+                    code.push(Opcode::GetProperty(property.clone()));
+                }
             }
             Expr::MemberComputed { object, property } => {
                 self.compile_expr(object, code);
-                self.compile_expr(property, code);
-                code.push(Opcode::GetPropertyByValue);
+                if Self::is_super_identifier(object) {
+                    code.push(Opcode::LoadIdentifier("this".to_string()));
+                    self.compile_expr(property, code);
+                    code.push(Opcode::GetSuperPropertyByValue);
+                } else {
+                    self.compile_expr(property, code);
+                    code.push(Opcode::GetPropertyByValue);
+                }
             }
             Expr::Call { callee, arguments } => match callee.as_ref() {
                 Expr::Identifier(Identifier(name)) => {
@@ -1682,13 +1734,11 @@ impl Compiler {
                     }
                 }
                 Expr::Member { object, property } => {
-                    let is_super_member =
-                        matches!(object.as_ref(), Expr::Identifier(Identifier(name)) if name == "super");
+                    let is_super_member = Self::is_super_identifier(object);
                     self.compile_expr(object, code);
                     if is_super_member {
-                        code.push(Opcode::GetProperty(property.clone()));
                         code.push(Opcode::LoadIdentifier("this".to_string()));
-                        code.push(Opcode::Swap);
+                        code.push(Opcode::PrepareSuperMethod(property.clone()));
                     } else {
                         code.push(Opcode::Dup);
                         code.push(Opcode::GetProperty(property.clone()));
@@ -1710,14 +1760,12 @@ impl Compiler {
                     }
                 }
                 Expr::MemberComputed { object, property } => {
-                    let is_super_member =
-                        matches!(object.as_ref(), Expr::Identifier(Identifier(name)) if name == "super");
+                    let is_super_member = Self::is_super_identifier(object);
                     self.compile_expr(object, code);
                     if is_super_member {
-                        self.compile_expr(property, code);
-                        code.push(Opcode::GetPropertyByValue);
                         code.push(Opcode::LoadIdentifier("this".to_string()));
-                        code.push(Opcode::Swap);
+                        self.compile_expr(property, code);
+                        code.push(Opcode::PrepareSuperMethodByValue);
                     } else {
                         code.push(Opcode::Dup);
                         self.compile_expr(property, code);
@@ -1838,41 +1886,82 @@ impl Compiler {
             }
             UpdateTarget::Member { object, property } => {
                 self.compile_expr(object, code);
-                code.push(Opcode::Dup);
-                code.push(Opcode::GetProperty(property.clone()));
-                code.push(Opcode::ToNumber);
-                if prefix {
-                    code.push(Opcode::LoadNumber(1.0));
-                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                    code.push(Opcode::SetProperty(property.clone()));
-                } else {
+                if Self::is_super_identifier(object) {
+                    code.push(Opcode::LoadIdentifier("this".to_string()));
                     code.push(Opcode::Dup2);
-                    code.push(Opcode::LoadNumber(1.0));
-                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                    code.push(Opcode::SetProperty(property.clone()));
-                    code.push(Opcode::Pop);
-                    code.push(Opcode::Swap);
-                    code.push(Opcode::Pop);
+                    code.push(Opcode::GetSuperProperty(property.clone()));
+                    code.push(Opcode::ToNumber);
+                    if prefix {
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::SetSuperProperty(property.clone()));
+                    } else {
+                        code.push(Opcode::Dup);
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::Swap);
+                        code.push(Opcode::RotRight4);
+                        code.push(Opcode::SetSuperProperty(property.clone()));
+                        code.push(Opcode::Pop);
+                    }
+                } else {
+                    code.push(Opcode::Dup);
+                    code.push(Opcode::GetProperty(property.clone()));
+                    code.push(Opcode::ToNumber);
+                    if prefix {
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::SetProperty(property.clone()));
+                    } else {
+                        code.push(Opcode::Dup2);
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::SetProperty(property.clone()));
+                        code.push(Opcode::Pop);
+                        code.push(Opcode::Swap);
+                        code.push(Opcode::Pop);
+                    }
                 }
             }
             UpdateTarget::MemberComputed { object, property } => {
                 self.compile_expr(object, code);
-                self.compile_expr(property, code);
-                code.push(Opcode::Dup2);
-                code.push(Opcode::GetPropertyByValue);
-                code.push(Opcode::ToNumber);
-                if prefix {
-                    code.push(Opcode::LoadNumber(1.0));
-                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                    code.push(Opcode::SetPropertyByValue);
+                if Self::is_super_identifier(object) {
+                    code.push(Opcode::LoadIdentifier("this".to_string()));
+                    self.compile_expr(property, code);
+                    code.push(Opcode::Dup3);
+                    code.push(Opcode::GetSuperPropertyByValue);
+                    code.push(Opcode::ToNumber);
+                    if prefix {
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::SetSuperPropertyByValue);
+                    } else {
+                        code.push(Opcode::Dup);
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::Swap);
+                        code.push(Opcode::RotRight5);
+                        code.push(Opcode::SetSuperPropertyByValue);
+                        code.push(Opcode::Pop);
+                    }
                 } else {
-                    code.push(Opcode::Dup);
-                    code.push(Opcode::LoadNumber(1.0));
-                    code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                    code.push(Opcode::Swap);
-                    code.push(Opcode::RotRight4);
-                    code.push(Opcode::SetPropertyByValue);
-                    code.push(Opcode::Pop);
+                    self.compile_expr(property, code);
+                    code.push(Opcode::Dup2);
+                    code.push(Opcode::GetPropertyByValue);
+                    code.push(Opcode::ToNumber);
+                    if prefix {
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::SetPropertyByValue);
+                    } else {
+                        code.push(Opcode::Dup);
+                        code.push(Opcode::LoadNumber(1.0));
+                        code.push(if increment { Opcode::Add } else { Opcode::Sub });
+                        code.push(Opcode::Swap);
+                        code.push(Opcode::RotRight4);
+                        code.push(Opcode::SetPropertyByValue);
+                        code.push(Opcode::Pop);
+                    }
                 }
             }
         }
@@ -1951,6 +2040,10 @@ impl Compiler {
         }
     }
 
+    fn is_super_identifier(expr: &Expr) -> bool {
+        matches!(expr, Expr::Identifier(Identifier(name)) if name == "super")
+    }
+
     fn binary_opcode(op: BinaryOp) -> Opcode {
         match op {
             BinaryOp::Add => Opcode::Add,
@@ -1981,7 +2074,7 @@ impl Compiler {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_expression, compile_script, Chunk, CompiledFunction, Opcode};
+    use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,

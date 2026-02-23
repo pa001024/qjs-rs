@@ -35,11 +35,19 @@ pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
 }
 
 pub fn parse_script(source: &str) -> Result<Script, ParseError> {
+    parse_script_with_super(source, false)
+}
+
+pub fn parse_script_with_super(
+    source: &str,
+    allow_super_reference: bool,
+) -> Result<Script, ParseError> {
     let tokens = lex(source).map_err(|err| ParseError {
         message: err.message,
         position: err.position,
     })?;
     let mut parser = Parser::new(tokens, source);
+    parser.allow_super_reference = allow_super_reference;
     let statements = parser.parse_statement_list(None)?;
     validate_early_errors(&statements)?;
     validate_statement_list_strict_mode(&statements, false)?;
@@ -3043,7 +3051,13 @@ impl Parser {
     }
 
     fn parse_new_expression(&mut self) -> Result<Expr, ParseError> {
-        let mut callee = self.parse_primary()?;
+        // NewExpression is right-recursive: `new NewExpression`.
+        // Match QuickJS behavior where `new` recurses into postfix/new parsing.
+        let mut callee = if self.matches_keyword("new") {
+            self.parse_new_expression()?
+        } else {
+            self.parse_primary()?
+        };
         loop {
             if self.matches(&TokenKind::Dot) {
                 let property = self.expect_identifier_name("expected property name after '.'")?;
@@ -5138,7 +5152,10 @@ mod tests {
         let Expr::New { callee, arguments } = parsed else {
             panic!("expected new expression");
         };
-        assert!(arguments.is_empty(), "new expression should not have call arguments");
+        assert!(
+            arguments.is_empty(),
+            "new expression should not have call arguments"
+        );
         let Expr::Call {
             callee: tagged_callee,
             ..
@@ -5425,8 +5442,7 @@ mod tests {
 
     #[test]
     fn parses_anonymous_class_expression_with_extends_baseline() {
-        parse_script("let C = class extends null {};")
-            .expect("script parsing should succeed");
+        parse_script("let C = class extends null {};").expect("script parsing should succeed");
     }
 
     #[test]
@@ -6023,7 +6039,8 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_parameters_in_strict_mode() {
-        let err = parse_script("'use strict'; function f(a, a) {}").expect_err("parser should fail");
+        let err =
+            parse_script("'use strict'; function f(a, a) {}").expect_err("parser should fail");
         assert_eq!(err.message, "duplicate parameter name in strict mode");
     }
 

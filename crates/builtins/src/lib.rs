@@ -131,15 +131,21 @@ mod tests {
         install_baseline(&mut realm);
         assert_eq!(
             realm.get_global("EvalError"),
-            Some(&JsValue::NativeFunction(NativeFunction::EvalErrorConstructor))
+            Some(&JsValue::NativeFunction(
+                NativeFunction::EvalErrorConstructor
+            ))
         );
         assert_eq!(
             realm.get_global("RangeError"),
-            Some(&JsValue::NativeFunction(NativeFunction::RangeErrorConstructor))
+            Some(&JsValue::NativeFunction(
+                NativeFunction::RangeErrorConstructor
+            ))
         );
         assert_eq!(
             realm.get_global("URIError"),
-            Some(&JsValue::NativeFunction(NativeFunction::URIErrorConstructor))
+            Some(&JsValue::NativeFunction(
+                NativeFunction::URIErrorConstructor
+            ))
         );
     }
 }

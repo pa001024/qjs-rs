@@ -206,14 +206,10 @@ fn execute_case_with_options_and_stats(
                 GcStats::default(),
             ),
         },
-        Err(err) => {
-            (
-                ExecutionOutcome::RuntimeFail(format!(
-                    "failed to spawn case execution thread: {err}"
-                )),
-                GcStats::default(),
-            )
-        }
+        Err(err) => (
+            ExecutionOutcome::RuntimeFail(format!("failed to spawn case execution thread: {err}")),
+            GcStats::default(),
+        ),
     }
 }
 

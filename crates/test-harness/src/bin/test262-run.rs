@@ -13,12 +13,16 @@ struct GcExpectations {
 
 fn merge_gc_expectations(base: GcExpectations, overrides: GcExpectations) -> GcExpectations {
     GcExpectations {
-        collections_total_min: overrides.collections_total_min.or(base.collections_total_min),
+        collections_total_min: overrides
+            .collections_total_min
+            .or(base.collections_total_min),
         runtime_collections_min: overrides
             .runtime_collections_min
             .or(base.runtime_collections_min),
         runtime_ratio_min: overrides.runtime_ratio_min.or(base.runtime_ratio_min),
-        reclaimed_objects_min: overrides.reclaimed_objects_min.or(base.reclaimed_objects_min),
+        reclaimed_objects_min: overrides
+            .reclaimed_objects_min
+            .or(base.reclaimed_objects_min),
     }
 }
 
@@ -252,43 +256,40 @@ fn main() {
                 let value = args.get(i).unwrap_or_else(|| {
                     panic!("--expect-collections-total-min requires an integer argument");
                 });
-                gc_expectation_overrides.collections_total_min = Some(
-                    value.parse::<usize>().unwrap_or_else(|_| {
+                gc_expectation_overrides.collections_total_min =
+                    Some(value.parse::<usize>().unwrap_or_else(|_| {
                         panic!("invalid --expect-collections-total-min value: {value}")
-                    }),
-                );
+                    }));
             }
             "--expect-runtime-collections-min" => {
                 i += 1;
                 let value = args.get(i).unwrap_or_else(|| {
                     panic!("--expect-runtime-collections-min requires an integer argument");
                 });
-                gc_expectation_overrides.runtime_collections_min = Some(
-                    value.parse::<usize>().unwrap_or_else(|_| {
+                gc_expectation_overrides.runtime_collections_min =
+                    Some(value.parse::<usize>().unwrap_or_else(|_| {
                         panic!("invalid --expect-runtime-collections-min value: {value}")
-                    }),
-                );
+                    }));
             }
             "--expect-runtime-ratio-min" => {
                 i += 1;
                 let value = args.get(i).unwrap_or_else(|| {
                     panic!("--expect-runtime-ratio-min requires a float argument");
                 });
-                gc_expectation_overrides.runtime_ratio_min =
-                    Some(parse_runtime_ratio(value, "--expect-runtime-ratio-min").unwrap_or_else(
-                        |err| panic!("{err}"),
-                    ));
+                gc_expectation_overrides.runtime_ratio_min = Some(
+                    parse_runtime_ratio(value, "--expect-runtime-ratio-min")
+                        .unwrap_or_else(|err| panic!("{err}")),
+                );
             }
             "--expect-reclaimed-objects-min" => {
                 i += 1;
                 let value = args.get(i).unwrap_or_else(|| {
                     panic!("--expect-reclaimed-objects-min requires an integer argument");
                 });
-                gc_expectation_overrides.reclaimed_objects_min = Some(
-                    value.parse::<usize>().unwrap_or_else(|_| {
+                gc_expectation_overrides.reclaimed_objects_min =
+                    Some(value.parse::<usize>().unwrap_or_else(|_| {
                         panic!("invalid --expect-reclaimed-objects-min value: {value}")
-                    }),
-                );
+                    }));
             }
             "--expect-gc-baseline" => {
                 i += 1;
@@ -376,7 +377,10 @@ fn print_summary(summary: &SuiteSummary, show_gc: bool) {
     if show_gc {
         println!("gc summary:");
         println!("  collections_total: {}", summary.gc.collections_total);
-        println!("  boundary_collections: {}", summary.gc.boundary_collections);
+        println!(
+            "  boundary_collections: {}",
+            summary.gc.boundary_collections
+        );
         println!("  runtime_collections: {}", summary.gc.runtime_collections);
         println!("  reclaimed_objects: {}", summary.gc.reclaimed_objects);
         println!("  mark_duration_ns: {}", summary.gc.mark_duration_ns);
