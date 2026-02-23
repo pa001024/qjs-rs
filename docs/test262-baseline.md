@@ -27,6 +27,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+6)`: discovered=23882, executed=5000, skipped=18579, passed=4528, failed=472
 - `language max-cases=5000 (latest+7)`: discovered=23882, executed=5000, skipped=18579, passed=4531, failed=469
 - `language max-cases=5000 (latest+8)`: discovered=23882, executed=5000, skipped=18579, passed=4536, failed=464
+- `language max-cases=5000 (latest+9)`: discovered=23882, executed=5000, skipped=18579, passed=4560, failed=440
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -148,4 +149,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 新增可选 `catch` 绑定（`catch { ... }`）语法支持；bytecode 修复 `switch` 与 `try/catch` completion value 聚合（避免统一降级为 `undefined`），本轮清理 `statements/(switch|try)/cptn-*` 主簇，`language` 基线提升至 `4528/472`。
 - parser/class lowering 对齐 class descriptor：`prototype` 属性改为 `{ writable:false, enumerable:false, configurable:false }`，static method 统一走 `Object.defineProperty` 且 `enumerable:false`；VM 对内部 class 临时绑定名关闭推断覆盖，修复 `class/definition/{basics,methods,prototype-property}`，`language` 基线提升至 `4531/469`。
 - bytecode 调整 statement-list “最后取值语句”选择：跳过 `var/let/const/function/empty` 这类空完成值语句；并修复 `var` 初始化指令栈残留（`StoreReferenceValue` 后补 `Pop`），清理 `statements/{class,const,empty,let,variable}/cptn-*`，`language` 基线提升至 `4536/464`。
+- runtime/builtins 新增独立 `Error/TypeError/ReferenceError/SyntaxError/EvalError/RangeError/URIError` 构造器映射，VM `instanceof` 对错误类型改为按构造器名精确匹配；并补齐 RHS `prototype` 非对象时 TypeError。
+- VM 将 `in`/`instanceof` 的运行时错误纳入异常处理器路由，`try/catch` 可捕获相关 TypeError；同时字符串 baseline 新增 `String.prototype.split` 最小可运行路径。
+- VM 标识符 `Unresolvable` 回退补齐 `globalThis`/`Math`/`this`/realm globals/global object 属性读取，`DefineVariable` 对 `undefined` 的重声明写回仅保留内部临时名，避免破坏用户绑定。
+- 本轮 `language max-cases=5000` 基线提升至 `4560/440`，失败簇继续集中在 `eval-code/direct`、`statements/class`、`statements/function`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

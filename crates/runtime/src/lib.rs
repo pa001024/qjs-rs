@@ -52,6 +52,13 @@ pub enum NativeFunction {
     ParseFloat,
     Assert,
     Test262Error,
+    ErrorConstructor,
+    TypeErrorConstructor,
+    ReferenceErrorConstructor,
+    SyntaxErrorConstructor,
+    EvalErrorConstructor,
+    RangeErrorConstructor,
+    URIErrorConstructor,
 }
 
 #[derive(Debug, Clone, PartialEq)]

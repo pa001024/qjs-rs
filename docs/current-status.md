@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4536`、`failed=464`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4560`、`failed=440`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -40,6 +40,12 @@
   - bytecode 修复 `switch` 与 `try/catch` completion value 传播（保留分支最后求值结果，不再统一丢成 `undefined`），清理一批 `statements/(switch|try)/cptn-*` 失败。
   - class lowering 对齐 descriptor 细节：`C.prototype` 改为不可写/不可配/不可枚举，static method 统一经 `Object.defineProperty(enumerable:false)` 定义；同时 VM 跳过内部 class 临时名推断，修复 `class/definition` 中 `basics/methods/prototype-property` 失败。
   - bytecode 的 statement-list 最后取值目标改为跳过 `var/let/const/function/empty` 空完成值语句，并修复 `var` 初始化的栈残留（`StoreReferenceValue` 后补 `Pop`），进一步清理 `statements/{class,const,empty,let,variable}/cptn-*` 失败簇。
+  - runtime/builtins 将 `Error/TypeError/ReferenceError/SyntaxError/EvalError/RangeError/URIError` 拆分为独立 Native constructor，避免全部错误落成 `Test262Error` 字符串前缀。
+  - VM `instanceof` 收敛：错误构造器匹配从“泛 Error”改为按构造器名精确匹配；同时补齐 RHS `prototype` 非对象时的 TypeError 与对象左值原型链匹配。
+  - VM `in`/`instanceof` 运行时异常已统一接入 handler 路由，可被 `try/catch` 捕获（不再直接顶层失败）。
+  - String baseline 补齐 `String.prototype.split(separator, limit)` 最小可运行路径，并在字符串属性可见性里暴露 `split`。
+  - `DefineVariable` 重声明写回策略收敛：`undefined` 仅对内部临时名（`$__loop_completion_`/`$__switch_tmp_`/`$__class_ctor_`）回写，避免污染用户 `var/function` 绑定。
+  - 标识符引用回退路径补齐：`globalThis`/`Math`/`this`/realm globals/global object 属性可在 `Unresolvable` 路径读取，降低 `UnknownIdentifier` 噪声。
 
 ## 3. 分阶段状态
 
@@ -59,7 +65,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`）。
+4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`），其中 `eval-code/direct` 的 arguments/var 环境交互仍需重点收敛。
 
 ## 5. 下一步执行
 

@@ -103,6 +103,9 @@ enum HostFunction {
     StringIndexOf {
         receiver: String,
     },
+    StringSplit {
+        receiver: String,
+    },
     ArrayPush(ObjectId),
     ArrayForEach(ObjectId),
     ArrayReduce(ObjectId),
@@ -610,6 +613,7 @@ impl Vm {
             }
             HostFunction::StringReplace { .. }
             | HostFunction::StringIndexOf { .. }
+            | HostFunction::StringSplit { .. }
             | HostFunction::ObjectToString
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
@@ -754,8 +758,10 @@ impl Vm {
                         if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                        // Treat `var`-style redeclaration without initializer as a no-op.
-                        if value != JsValue::Undefined {
+                        let should_reset_undefined = name.starts_with("$__loop_completion_")
+                            || name.starts_with("$__switch_tmp_")
+                            || name.starts_with("$__class_ctor_");
+                        if value != JsValue::Undefined || should_reset_undefined {
                             existing_binding.value = value;
                         }
                     } else {
@@ -1503,14 +1509,26 @@ impl Vm {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&left);
-                    let result = self.evaluate_in_operator(key, right, realm)?;
-                    self.stack.push(JsValue::Bool(result));
+                    match self.evaluate_in_operator(key, right, realm) {
+                        Ok(result) => self.stack.push(JsValue::Bool(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::InstanceOf => {
                     let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = self.evaluate_instanceof_operator(left, right, realm)?;
-                    self.stack.push(JsValue::Bool(result));
+                    match self.evaluate_instanceof_operator(left, right, realm) {
+                        Ok(result) => self.stack.push(JsValue::Bool(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::JumpIfFalse(target) => {
                     let condition = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -2341,6 +2359,39 @@ impl Vm {
                 }
                 Ok(JsValue::Number(-1.0))
             }
+            HostFunction::StringSplit { receiver } => {
+                let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let limit = args
+                    .get(1)
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(f64::INFINITY);
+                if limit <= 0.0 {
+                    return self.create_array_from_values(Vec::new());
+                }
+                let mut parts: Vec<JsValue> = if matches!(separator, JsValue::Undefined) {
+                    vec![JsValue::String(receiver)]
+                } else {
+                    let sep = self.coerce_to_string(&separator);
+                    if sep.is_empty() {
+                        receiver
+                            .chars()
+                            .map(|ch| JsValue::String(ch.to_string()))
+                            .collect()
+                    } else {
+                        receiver
+                            .split(&sep)
+                            .map(|part| JsValue::String(part.to_string()))
+                            .collect()
+                    }
+                };
+                if limit.is_finite() {
+                    let cap = limit.max(0.0) as usize;
+                    if parts.len() > cap {
+                        parts.truncate(cap);
+                    }
+                }
+                self.create_array_from_values(parts)
+            }
             HostFunction::ArrayPush(object_id) => {
                 let mut length = self
                     .objects
@@ -2853,11 +2904,29 @@ impl Vm {
                 }
             }
             NativeFunction::Test262Error => {
-                let message = args.first().map_or("Test262Error".to_string(), |value| {
-                    self.coerce_to_string(value)
-                });
-                Ok(JsValue::String(format!("Test262Error: {message}")))
+                Ok(JsValue::String(self.format_error_constructor_result("Test262Error", &args)))
             }
+            NativeFunction::ErrorConstructor => {
+                Ok(JsValue::String(self.format_error_constructor_result("Error", &args)))
+            }
+            NativeFunction::TypeErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("TypeError", &args),
+            )),
+            NativeFunction::ReferenceErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("ReferenceError", &args),
+            )),
+            NativeFunction::SyntaxErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("SyntaxError", &args),
+            )),
+            NativeFunction::EvalErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("EvalError", &args),
+            )),
+            NativeFunction::RangeErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("RangeError", &args),
+            )),
+            NativeFunction::URIErrorConstructor => Ok(JsValue::String(
+                self.format_error_constructor_result("URIError", &args),
+            )),
             NativeFunction::RegExpConstructor => {
                 let pattern = args
                     .first()
@@ -2867,6 +2936,13 @@ impl Vm {
                     .map_or(String::new(), |value| self.coerce_to_string(value));
                 self.create_regexp_value(pattern, flags)
             }
+        }
+    }
+
+    fn format_error_constructor_result(&self, name: &str, args: &[JsValue]) -> String {
+        match args.first() {
+            Some(value) => format!("{name}: {}", self.coerce_to_string(value)),
+            None => name.to_string(),
         }
     }
 
@@ -4249,7 +4325,10 @@ impl Vm {
                 if property.parse::<usize>().is_ok() {
                     return Ok(true);
                 }
-                Ok(matches!(property, "replace" | "toString" | "valueOf"))
+                Ok(matches!(
+                    property,
+                    "replace" | "split" | "toString" | "valueOf"
+                ))
             }
             JsValue::Undefined
             | JsValue::Uninitialized
@@ -4450,6 +4529,26 @@ impl Vm {
                 }
                 if name == "Infinity" {
                     return Ok(JsValue::Number(f64::INFINITY));
+                }
+                if name == "globalThis" {
+                    return Ok(self.global_this_value());
+                }
+                if name == "Math" {
+                    return self.math_object_value();
+                }
+                if name == "this" {
+                    return Ok(realm
+                        .resolve_identifier(name)
+                        .unwrap_or_else(|| self.global_this_value()));
+                }
+                if let Some(value) = realm.resolve_identifier(name) {
+                    return Ok(value);
+                }
+                if let Some(global_object_id) = self.global_object_id {
+                    let receiver = JsValue::Object(global_object_id);
+                    if self.has_property_on_receiver(&receiver, name, realm)? {
+                        return self.get_property_from_receiver(receiver, name, realm);
+                    }
                 }
                 Err(VmError::UnknownIdentifier(name.clone()))
             }
@@ -5781,27 +5880,58 @@ impl Vm {
         }
 
         match left {
-            JsValue::String(message) => Ok(matches!(
-                right,
-                JsValue::NativeFunction(NativeFunction::Test262Error)
-            ) && Self::is_error_string(&message)),
-            JsValue::Object(object_id) => {
-                let constructor = self.get_object_property(object_id, "constructor", realm)?;
-                if constructor == right {
-                    return Ok(true);
+            JsValue::String(message) => match right {
+                JsValue::NativeFunction(NativeFunction::Test262Error) => {
+                    Ok(Self::error_message_matches(&message, "Test262Error"))
                 }
-                Ok(matches!(
-                    right,
-                    JsValue::NativeFunction(NativeFunction::ObjectConstructor)
-                ))
+                JsValue::NativeFunction(NativeFunction::ErrorConstructor) => {
+                    Ok(Self::is_error_string(&message))
+                }
+                JsValue::NativeFunction(NativeFunction::TypeErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "TypeError"))
+                }
+                JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "ReferenceError"))
+                }
+                JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "SyntaxError"))
+                }
+                JsValue::NativeFunction(NativeFunction::EvalErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "EvalError"))
+                }
+                JsValue::NativeFunction(NativeFunction::RangeErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "RangeError"))
+                }
+                JsValue::NativeFunction(NativeFunction::URIErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "URIError"))
+                }
+                _ => Ok(false),
+            },
+            _ => {
+                if !Self::is_object_like_value(&left) {
+                    return Ok(false);
+                }
+                let prototype = self.get_property_from_receiver(right.clone(), "prototype", realm)?;
+                if !Self::is_object_like_value(&prototype) {
+                    return Err(VmError::TypeError(
+                        "Function has non-object prototype in instanceof",
+                    ));
+                }
+                if let JsValue::Object(object_id) = left {
+                    let constructor = self.get_object_property(object_id, "constructor", realm)?;
+                    if self.same_value(&constructor, &right) {
+                        return Ok(true);
+                    }
+                }
+                let mut current = self.get_prototype_of_value(&left)?;
+                while let JsValue::Object(_) = current {
+                    if self.same_value(&current, &prototype) {
+                        return Ok(true);
+                    }
+                    current = self.get_prototype_of_value(&current)?;
+                }
+                Ok(false)
             }
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                Ok(matches!(
-                    right,
-                    JsValue::NativeFunction(NativeFunction::FunctionConstructor)
-                ))
-            }
-            _ => Ok(false),
         }
     }
 
@@ -5812,12 +5942,57 @@ impl Vm {
         )
     }
 
+    fn is_object_like_value(value: &JsValue) -> bool {
+        matches!(
+            value,
+            JsValue::Object(_)
+                | JsValue::Function(_)
+                | JsValue::NativeFunction(_)
+                | JsValue::HostFunction(_)
+        )
+    }
+
+    fn get_prototype_of_value(&mut self, value: &JsValue) -> Result<JsValue, VmError> {
+        match value {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get(object_id)
+                    .ok_or(VmError::UnknownObject(*object_id))?;
+                Ok(object
+                    .prototype
+                    .map(JsValue::Object)
+                    .unwrap_or(JsValue::Null))
+            }
+            JsValue::Function(closure_id) => {
+                if let Some(closure_object) = self.closure_objects.get(closure_id) {
+                    if closure_object.prototype_overridden {
+                        return Ok(closure_object
+                            .prototype
+                            .map(JsValue::Object)
+                            .unwrap_or(JsValue::Null));
+                    }
+                }
+                Ok(self.function_prototype_value())
+            }
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(self.function_prototype_value()),
+            _ => Ok(JsValue::Null),
+        }
+    }
+
     fn is_error_string(message: &str) -> bool {
-        message.starts_with("TypeError:")
-            || message.starts_with("ReferenceError:")
-            || message.starts_with("SyntaxError:")
-            || message.starts_with("Test262Error:")
-            || message.starts_with("Error:")
+        Self::error_message_matches(message, "TypeError")
+            || Self::error_message_matches(message, "ReferenceError")
+            || Self::error_message_matches(message, "SyntaxError")
+            || Self::error_message_matches(message, "Test262Error")
+            || Self::error_message_matches(message, "EvalError")
+            || Self::error_message_matches(message, "RangeError")
+            || Self::error_message_matches(message, "URIError")
+            || Self::error_message_matches(message, "Error")
+    }
+
+    fn error_message_matches(message: &str, name: &str) -> bool {
+        message == name || message.starts_with(&format!("{name}:"))
     }
 
     fn delete_property(&mut self, receiver: JsValue, property: String) -> Result<bool, VmError> {
@@ -5917,6 +6092,9 @@ impl Vm {
                 receiver: receiver.to_string(),
             }),
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOf {
+                receiver: receiver.to_string(),
+            }),
+            "split" => self.create_host_function_value(HostFunction::StringSplit {
                 receiver: receiver.to_string(),
             }),
             _ => match property.parse::<usize>() {
@@ -7838,7 +8016,7 @@ mod tests {
         let mut realm = Realm::default();
         realm.define_global(
             "ErrorCtor",
-            JsValue::NativeFunction(NativeFunction::Test262Error),
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));

@@ -62,31 +62,31 @@ pub fn install_baseline(realm: &mut Realm) {
     );
     realm.define_global(
         "Error",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::ErrorConstructor),
     );
     realm.define_global(
         "TypeError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
     );
     realm.define_global(
         "ReferenceError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
     );
     realm.define_global(
         "SyntaxError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
     );
     realm.define_global(
         "EvalError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::EvalErrorConstructor),
     );
     realm.define_global(
         "RangeError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::RangeErrorConstructor),
     );
     realm.define_global(
         "URIError",
-        JsValue::NativeFunction(NativeFunction::Test262Error),
+        JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
     );
 }
 
@@ -131,15 +131,15 @@ mod tests {
         install_baseline(&mut realm);
         assert_eq!(
             realm.get_global("EvalError"),
-            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
+            Some(&JsValue::NativeFunction(NativeFunction::EvalErrorConstructor))
         );
         assert_eq!(
             realm.get_global("RangeError"),
-            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
+            Some(&JsValue::NativeFunction(NativeFunction::RangeErrorConstructor))
         );
         assert_eq!(
             realm.get_global("URIError"),
-            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
+            Some(&JsValue::NativeFunction(NativeFunction::URIErrorConstructor))
         );
     }
 }
