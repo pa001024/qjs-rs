@@ -13,6 +13,7 @@ use std::time::Instant;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
@@ -2485,11 +2486,21 @@ impl Vm {
         let non_simple_params = self.function_has_non_simple_params(&function);
         let has_arguments_param = function.params.iter().any(|name| name == "arguments");
         let mapped_arguments_enabled = !closure.strict && !is_arrow_function && !non_simple_params;
+        let rest_param_index = self.function_rest_param_index(&function);
 
         let mut frame_scope: Scope = BTreeMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
         for (index, param_name) in function.params.iter().enumerate() {
-            let value = args.get(index).cloned().unwrap_or(JsValue::Undefined);
+            let value = if rest_param_index == Some(index) {
+                let rest_values = if index < args.len() {
+                    args[index..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                self.create_array_from_values(rest_values)?
+            } else {
+                args.get(index).cloned().unwrap_or(JsValue::Undefined)
+            };
             let binding_id = self.create_binding(value, true);
             frame_scope.insert(param_name.clone(), binding_id);
             param_binding_ids.push(binding_id);
@@ -6229,6 +6240,24 @@ impl Vm {
         self.code_has_marker(&function.code, NON_SIMPLE_PARAMS_MARKER)
     }
 
+    fn function_rest_param_index(&self, function: &CompiledFunction) -> Option<usize> {
+        let mut cursor = 0usize;
+        while cursor + 1 < function.code.len() {
+            match (&function.code[cursor], &function.code[cursor + 1]) {
+                (Opcode::LoadString(value), Opcode::Pop) => {
+                    if let Some(raw_index) = value.strip_prefix(REST_PARAM_MARKER_PREFIX) {
+                        if let Ok(index) = raw_index.parse::<usize>() {
+                            return Some(index);
+                        }
+                    }
+                    cursor += 2;
+                }
+                _ => cursor += 1,
+            }
+        }
+        None
+    }
+
     fn closure_is_arrow(&self, closure_id: u64) -> Result<bool, VmError> {
         let closure = self
             .closures
@@ -8938,6 +8967,35 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn function_rest_parameter_collects_remaining_args() {
+        let script = parse_script(
+            "(function(a, ...args) { return args.length === 3 && args[0] === 2 && args[2] === 4; })(1, 2, 3, 4);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn function_length_ignores_rest_parameter() {
+        let script =
+            parse_script("(function(a, ...args) {}).length;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn arrow_rest_parameter_collects_remaining_args() {
+        let script =
+            parse_script("((...args) => args.length)(1, 2, 3);").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
     }
 
     #[test]

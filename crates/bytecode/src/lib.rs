@@ -11,6 +11,7 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
 const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
+const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1258,6 +1259,7 @@ impl Compiler {
         if params.is_empty() {
             return 0;
         }
+        let rest_index = Self::extract_rest_parameter_index(body);
         let mut defaulted = BTreeSet::new();
         for stmt in body {
             if Self::is_function_parameter_prelude(stmt) {
@@ -1269,10 +1271,11 @@ impl Compiler {
             defaulted.insert(name);
         }
 
-        params
+        let default_index = params
             .iter()
             .position(|param| defaulted.contains(&param.0))
-            .unwrap_or(params.len())
+            .unwrap_or(params.len());
+        rest_index.map_or(default_index, |index| default_index.min(index))
     }
 
     fn is_function_parameter_prelude(stmt: &Stmt) -> bool {
@@ -1282,6 +1285,7 @@ impl Compiler {
                     || value == ARROW_FUNCTION_MARKER
                     || value == PARAM_INIT_SCOPE_START_MARKER
                     || value == PARAM_INIT_SCOPE_END_MARKER
+                    || value.starts_with(REST_PARAM_MARKER_PREFIX)
                     || value == CLASS_METHOD_NO_PROTOTYPE_MARKER
                     || value == "use strict"
             }
@@ -1292,6 +1296,21 @@ impl Compiler {
             }) => name == "super",
             _ => false,
         }
+    }
+
+    fn extract_rest_parameter_index(body: &[Stmt]) -> Option<usize> {
+        for stmt in body {
+            let Stmt::Expression(Expr::String(StringLiteral { value, .. })) = stmt else {
+                continue;
+            };
+            let Some(raw_index) = value.strip_prefix(REST_PARAM_MARKER_PREFIX) else {
+                continue;
+            };
+            if let Ok(index) = raw_index.parse::<usize>() {
+                return Some(index);
+            }
+        }
+        None
     }
 
     fn extract_default_initializer_param(stmt: &Stmt) -> Option<String> {

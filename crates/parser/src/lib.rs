@@ -13,6 +13,7 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
 const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
+const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
@@ -3286,6 +3287,7 @@ impl Parser {
             if is_rest {
                 simple_parameters = false;
             }
+            let param_index = params.len();
             let name = if self.check_identifier() {
                 Identifier(self.expect_binding_identifier("expected parameter name")?)
             } else {
@@ -3304,6 +3306,12 @@ impl Parser {
                 pattern_effects.extend(effects);
                 generated_identifier
             };
+            if is_rest {
+                pattern_effects.push(Stmt::Expression(Expr::String(StringLiteral {
+                    value: format!("{REST_PARAM_MARKER_PREFIX}{param_index}"),
+                    has_escape: false,
+                })));
+            }
             if self.matches(&TokenKind::Equal) {
                 simple_parameters = false;
                 let initializer = self.parse_expression_inner()?;
