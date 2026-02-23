@@ -1371,6 +1371,21 @@ mod tests {
     }
 
     #[test]
+    fn try_finally_preserves_try_completion_value() {
+        let result = run_script("try { 1; } finally { 2; }", &[]);
+        assert_eq!(result, Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
+    fn try_finally_preserves_throw_without_override() {
+        let result = run_script(
+            "let ok = false; try { try { throw 1; } finally { 2; } } catch (e) { ok = e == 1; } ok;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn return_runs_finally_and_preserves_value_without_override() {
         let result = run_script(
             "function f() { try { return 1; } finally { let x = 0; x = x + 1; } } f();",

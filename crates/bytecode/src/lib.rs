@@ -980,6 +980,17 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         keep_value: bool,
     ) -> bool {
+        let completion_name = if keep_value {
+            let name = self.next_loop_completion_temp_name();
+            code.push(Opcode::LoadUndefined);
+            code.push(Opcode::DefineVariable {
+                name: name.clone(),
+                mutable: true,
+            });
+            Some(name)
+        } else {
+            None
+        };
         let handler_pos = code.len();
         code.push(Opcode::PushExceptionHandler {
             catch_target: None,
@@ -991,7 +1002,21 @@ impl Compiler {
             action: FinallyAction::Statements(finally_block.to_vec()),
         });
 
-        self.compile_scoped_statement_list(try_block, code);
+        code.push(Opcode::EnterScope);
+        self.scope_depth += 1;
+        let try_value = self.compile_statement_list(try_block, code, keep_value);
+        if let Some(name) = &completion_name {
+            if try_value {
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            } else {
+                code.push(Opcode::LoadUndefined);
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            }
+        }
+        code.push(Opcode::ExitScope);
+        self.scope_depth = self.scope_depth.saturating_sub(1);
         self.finally_contexts.pop();
         code.push(Opcode::PopExceptionHandler);
         self.handler_depth = self.handler_depth.saturating_sub(1);
@@ -1008,8 +1033,8 @@ impl Compiler {
         self.compile_scoped_statement_list(finally_block, code);
         code.push(Opcode::RethrowIfException);
 
-        if keep_value {
-            code.push(Opcode::LoadUndefined);
+        if let Some(name) = completion_name {
+            code.push(Opcode::LoadIdentifier(name));
             true
         } else {
             false
@@ -2740,22 +2765,28 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_0".to_string(),
+                    mutable: true,
+                },
                 Opcode::PushExceptionHandler {
                     catch_target: None,
-                    finally_target: Some(7),
+                    finally_target: Some(10),
                 },
                 Opcode::EnterScope,
                 Opcode::LoadNumber(1.0),
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::ExitScope,
                 Opcode::PopExceptionHandler,
-                Opcode::Jump(7),
+                Opcode::Jump(10),
                 Opcode::EnterScope,
                 Opcode::LoadNumber(2.0),
                 Opcode::Pop,
                 Opcode::ExitScope,
                 Opcode::RethrowIfException,
-                Opcode::LoadUndefined,
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],
