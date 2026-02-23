@@ -3430,10 +3430,36 @@ impl Parser {
                 property: CLASS_CONSTRUCTOR_MARKER.to_string(),
                 value: Box::new(Expr::Bool(true)),
             }),
-            Stmt::Expression(Expr::AssignMember {
-                object: Box::new(Expr::Identifier(class_ident.clone())),
-                property: "prototype".to_string(),
-                value: Box::new(Expr::ObjectLiteral(vec![])),
+            Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "defineProperty".to_string(),
+                }),
+                arguments: vec![
+                    Expr::Identifier(class_ident.clone()),
+                    Expr::String(StringLiteral {
+                        value: "prototype".to_string(),
+                        has_escape: false,
+                    }),
+                    Expr::ObjectLiteral(vec![
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("value".to_string()),
+                            value: Expr::ObjectLiteral(vec![]),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("writable".to_string()),
+                            value: Expr::Bool(false),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("enumerable".to_string()),
+                            value: Expr::Bool(false),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("configurable".to_string()),
+                            value: Expr::Bool(false),
+                        },
+                    ]),
+                ],
             }),
             Stmt::Expression(Expr::Call {
                 callee: Box::new(Expr::Member {
@@ -3499,57 +3525,41 @@ impl Parser {
             };
             match kind {
                 ClassElementKind::Method => {
-                    if is_static {
-                        let assignment = match key {
-                            ClassMethodKey::Static(name) => Expr::AssignMember {
-                                object: Box::new(target),
-                                property: name,
-                                value: Box::new(method_value),
-                            },
-                            ClassMethodKey::Computed(key) => Expr::AssignMemberComputed {
-                                object: Box::new(target),
-                                property: Box::new(key),
-                                value: Box::new(method_value),
-                            },
-                        };
-                        body.push(Stmt::Expression(assignment));
-                    } else {
-                        let key_expr = match key {
-                            ClassMethodKey::Static(name) => Expr::String(StringLiteral {
-                                value: name,
-                                has_escape: false,
-                            }),
-                            ClassMethodKey::Computed(key) => key,
-                        };
-                        body.push(Stmt::Expression(Expr::Call {
-                            callee: Box::new(Expr::Member {
-                                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                                property: "defineProperty".to_string(),
-                            }),
-                            arguments: vec![
-                                target,
-                                key_expr,
-                                Expr::ObjectLiteral(vec![
-                                    ObjectProperty {
-                                        key: ObjectPropertyKey::Static("value".to_string()),
-                                        value: method_value,
-                                    },
-                                    ObjectProperty {
-                                        key: ObjectPropertyKey::Static("writable".to_string()),
-                                        value: Expr::Bool(true),
-                                    },
-                                    ObjectProperty {
-                                        key: ObjectPropertyKey::Static("enumerable".to_string()),
-                                        value: Expr::Bool(false),
-                                    },
-                                    ObjectProperty {
-                                        key: ObjectPropertyKey::Static("configurable".to_string()),
-                                        value: Expr::Bool(true),
-                                    },
-                                ]),
-                            ],
-                        }));
-                    }
+                    let key_expr = match key {
+                        ClassMethodKey::Static(name) => Expr::String(StringLiteral {
+                            value: name,
+                            has_escape: false,
+                        }),
+                        ClassMethodKey::Computed(key) => key,
+                    };
+                    body.push(Stmt::Expression(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "defineProperty".to_string(),
+                        }),
+                        arguments: vec![
+                            target,
+                            key_expr,
+                            Expr::ObjectLiteral(vec![
+                                ObjectProperty {
+                                    key: ObjectPropertyKey::Static("value".to_string()),
+                                    value: method_value,
+                                },
+                                ObjectProperty {
+                                    key: ObjectPropertyKey::Static("writable".to_string()),
+                                    value: Expr::Bool(true),
+                                },
+                                ObjectProperty {
+                                    key: ObjectPropertyKey::Static("enumerable".to_string()),
+                                    value: Expr::Bool(false),
+                                },
+                                ObjectProperty {
+                                    key: ObjectPropertyKey::Static("configurable".to_string()),
+                                    value: Expr::Bool(true),
+                                },
+                            ]),
+                        ],
+                    }));
                 }
                 ClassElementKind::Getter | ClassElementKind::Setter => {
                     let key_expr = match key {

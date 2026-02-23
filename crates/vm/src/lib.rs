@@ -5366,12 +5366,21 @@ impl Vm {
         let JsValue::Function(closure_id) = value else {
             return;
         };
-        let has_name = self
+        if binding_name.starts_with("$__class_ctor_") {
+            return;
+        }
+        let existing_name = self
             .closure_objects
             .get(closure_id)
-            .and_then(|object| object.properties.get("name"))
-            .is_some();
-        if has_name {
+            .and_then(|object| object.properties.get("name"));
+        let should_keep_existing_name = match existing_name {
+            Some(JsValue::String(name)) => {
+                !name.is_empty() && name != "<anonymous>" && !name.starts_with("$__class_ctor_")
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if should_keep_existing_name {
             return;
         }
         let inferred = self
