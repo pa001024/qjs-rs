@@ -142,6 +142,7 @@ enum HostFunction {
     ArrayReverse(ObjectId),
     ArraySort(ObjectId),
     RegExpTest(ObjectId),
+    RegExpExec(ObjectId),
     HasOwnProperty {
         target: JsValue,
     },
@@ -359,6 +360,7 @@ impl Vm {
         self.seed_global_realm_properties(realm)?;
         let _ = self.math_object_value()?;
         let _ = self.json_object_value()?;
+        let _ = self.reflect_object_value()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
             let value_of = self.create_host_function_value(HostFunction::ObjectValueOf);
@@ -695,6 +697,7 @@ impl Vm {
             | HostFunction::ArrayReverse(object_id)
             | HostFunction::ArraySort(object_id)
             | HostFunction::RegExpTest(object_id)
+            | HostFunction::RegExpExec(object_id)
             | HostFunction::DateToString(object_id)
             | HostFunction::DateValueOf(object_id) => {
                 self.gc_mark_stack.push(JsValue::Object(object_id));
@@ -800,6 +803,8 @@ impl Vm {
                         self.math_object_value()
                     } else if name == "JSON" {
                         self.json_object_value()
+                    } else if name == "Reflect" {
+                        self.reflect_object_value()
                     } else if name == "super" {
                         if let Some(base) = self.resolve_super_base_value() {
                             Ok(base)
@@ -1683,8 +1688,19 @@ impl Vm {
                         self.global_this_value()
                     } else if name == "Math" {
                         self.math_object_value()?
+                    } else if name == "Reflect" {
+                        self.reflect_object_value()?
+                    } else if let Some(value) = realm.resolve_identifier(name) {
+                        value
+                    } else if let Some(global_object_id) = self.global_object_id {
+                        let receiver = JsValue::Object(global_object_id);
+                        if self.has_property_on_receiver(&receiver, name, realm)? {
+                            self.get_property_from_receiver(receiver, name, realm)?
+                        } else {
+                            JsValue::Undefined
+                        }
                     } else {
-                        realm.resolve_identifier(name).unwrap_or(JsValue::Undefined)
+                        JsValue::Undefined
                     };
                     self.stack
                         .push(JsValue::String(self.typeof_value(&value).to_string()));
@@ -3210,6 +3226,17 @@ impl Vm {
                 let matched = self.execute_regexp_test(object_id, &input)?;
                 Ok(JsValue::Bool(matched))
             }
+            HostFunction::RegExpExec(object_id) => {
+                let input = args.first().map_or_else(
+                    || "undefined".to_string(),
+                    |value| self.coerce_to_string(value),
+                );
+                let matched = self.execute_regexp_test(object_id, &input)?;
+                if !matched {
+                    return Ok(JsValue::Null);
+                }
+                self.create_array_from_values(vec![JsValue::String(input)])
+            }
             HostFunction::HasOwnProperty { target } => {
                 let target = this_arg.unwrap_or(target);
                 let key = args
@@ -3387,6 +3414,9 @@ impl Vm {
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
+            }
+            NativeFunction::ObjectDefineProperties => {
+                self.execute_object_define_properties(&args, realm)
             }
             NativeFunction::ObjectGetOwnPropertyDescriptor => {
                 self.execute_object_get_own_property_descriptor(&args)
@@ -3582,26 +3612,40 @@ impl Vm {
             NativeFunction::Test262Error => Ok(JsValue::String(
                 self.format_error_constructor_result("Test262Error", &args),
             )),
-            NativeFunction::ErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("Error", &args),
+            NativeFunction::ErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::ErrorConstructor,
+                "Error",
+                &args,
             )),
-            NativeFunction::TypeErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("TypeError", &args),
+            NativeFunction::TypeErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::TypeErrorConstructor,
+                "TypeError",
+                &args,
             )),
-            NativeFunction::ReferenceErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("ReferenceError", &args),
+            NativeFunction::ReferenceErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::ReferenceErrorConstructor,
+                "ReferenceError",
+                &args,
             )),
-            NativeFunction::SyntaxErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("SyntaxError", &args),
+            NativeFunction::SyntaxErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                &args,
             )),
-            NativeFunction::EvalErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("EvalError", &args),
+            NativeFunction::EvalErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::EvalErrorConstructor,
+                "EvalError",
+                &args,
             )),
-            NativeFunction::RangeErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("RangeError", &args),
+            NativeFunction::RangeErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::RangeErrorConstructor,
+                "RangeError",
+                &args,
             )),
-            NativeFunction::URIErrorConstructor => Ok(JsValue::String(
-                self.format_error_constructor_result("URIError", &args),
+            NativeFunction::URIErrorConstructor => Ok(self.execute_error_constructor(
+                NativeFunction::URIErrorConstructor,
+                "URIError",
+                &args,
             )),
             NativeFunction::RegExpConstructor => {
                 let pattern = args
@@ -3622,6 +3666,19 @@ impl Vm {
         }
     }
 
+    fn execute_error_constructor(
+        &mut self,
+        constructor: NativeFunction,
+        name: &str,
+        args: &[JsValue],
+    ) -> JsValue {
+        let message = args
+            .first()
+            .map(|value| self.coerce_to_string(value))
+            .unwrap_or_default();
+        self.create_error_exception(constructor, name, message)
+    }
+
     fn create_regexp_value(&mut self, pattern: String, flags: String) -> Result<JsValue, VmError> {
         let object = self.create_object_value();
         let object_id = match object {
@@ -3629,6 +3686,7 @@ impl Vm {
             _ => unreachable!(),
         };
         let test_method = self.create_host_function_value(HostFunction::RegExpTest(object_id));
+        let exec_method = self.create_host_function_value(HostFunction::RegExpExec(object_id));
         let global = flags.contains('g');
         let ignore_case = flags.contains('i');
         let multiline = flags.contains('m');
@@ -3672,6 +3730,7 @@ impl Vm {
             JsValue::NativeFunction(NativeFunction::RegExpConstructor),
         );
         target.properties.insert("test".to_string(), test_method);
+        target.properties.insert("exec".to_string(), exec_method);
         Ok(JsValue::Object(object_id))
     }
 
@@ -4436,6 +4495,44 @@ impl Vm {
             }
         }
         self.create_array_from_string_keys(keys)
+    }
+
+    fn execute_object_define_properties(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(target, JsValue::Object(_) | JsValue::Function(_)) {
+            return Err(VmError::TypeError(
+                "Object.defineProperties target must be object",
+            ));
+        }
+        let descriptors_id = match args.get(1) {
+            Some(JsValue::Object(id)) => *id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object.defineProperties descriptors must be object",
+                ));
+            }
+        };
+        let descriptor_entries = self
+            .objects
+            .get(&descriptors_id)
+            .ok_or(VmError::UnknownObject(descriptors_id))?
+            .properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        for (property_name, descriptor) in descriptor_entries {
+            let define_args = [
+                target.clone(),
+                JsValue::String(property_name),
+                descriptor,
+            ];
+            let _ = self.execute_object_define_property(&define_args, realm)?;
+        }
+        Ok(target)
     }
 
     fn execute_object_for_in_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -5765,6 +5862,9 @@ impl Vm {
                 if name == "JSON" {
                     return self.json_object_value();
                 }
+                if name == "Reflect" {
+                    return self.reflect_object_value();
+                }
                 if name == "this" {
                     return Ok(realm
                         .resolve_identifier(name)
@@ -6152,6 +6252,40 @@ impl Vm {
             },
         );
         Ok(JsValue::Object(json_id))
+    }
+
+    fn reflect_object_value(&mut self) -> Result<JsValue, VmError> {
+        let global_object_id = self.global_object_id.ok_or(VmError::ScopeUnderflow)?;
+        if let Some(existing) = self
+            .objects
+            .get(&global_object_id)
+            .and_then(|object| object.properties.get("Reflect"))
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let reflect = self.create_object_value();
+        let reflect_id = match reflect {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let global_object = self
+            .objects
+            .get_mut(&global_object_id)
+            .ok_or(VmError::UnknownObject(global_object_id))?;
+        global_object
+            .properties
+            .insert("Reflect".to_string(), JsValue::Object(reflect_id));
+        global_object.property_attributes.insert(
+            "Reflect".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(reflect_id))
     }
 
     fn object_prototype_value(&self) -> JsValue {
@@ -7406,6 +7540,7 @@ impl Vm {
         matches!(
             (native, property),
             (NativeFunction::ObjectConstructor, "defineProperty")
+                | (NativeFunction::ObjectConstructor, "defineProperties")
                 | (NativeFunction::ObjectConstructor, "keys")
                 | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
                 | (NativeFunction::ObjectConstructor, "create")
@@ -8015,6 +8150,9 @@ impl Vm {
             (NativeFunction::NumberConstructor, "MIN_VALUE") => JsValue::Number(f64::from_bits(1)),
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
+            }
+            (NativeFunction::ObjectConstructor, "defineProperties") => {
+                JsValue::NativeFunction(NativeFunction::ObjectDefineProperties)
             }
             (NativeFunction::ArrayConstructor, "isArray") => {
                 JsValue::NativeFunction(NativeFunction::ArrayIsArray)
@@ -9967,6 +10105,30 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_define_properties_baseline_applies_descriptors() {
+        let script = parse_script(
+            "var count = 0; Object.defineProperties(this, { x: { value: 1 }, y: { get() { count++; return 1; } } }); (typeof x === 'number') && (typeof y === 'number') && (count === 1);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn typeof_reflect_is_object_baseline() {
+        let script = parse_script("typeof Reflect === 'object';").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]

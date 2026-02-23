@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4763`、`failed=237`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v8.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4773`、`failed=227`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v10.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -92,7 +92,8 @@
   - VM/runtime 补齐 primitive 原型链与方法基线（`String/Number/Boolean` 的 `prototype` 稳定对象、`toString/valueOf`、`String.prototype.charAt/charCodeAt/indexOf/lastIndexOf/split/substring/toLowerCase/toUpperCase`、`Number.prototype.toFixed`），并将 realm 全局属性同步到全局对象（覆盖 `this.parseInt/parseFloat/isNaN/isFinite`）。
   - `Function.prototype` 对齐为可调用值（`typeof Function.prototype === "function"`），并补齐 host function 上的 `toString/valueOf/constructor` 属性。
   - parser 修复相等运算与关系运算优先级（`===/!==` 高于 `in/instanceof/<...`），并在 `Object.prototype` 补齐 `valueOf`，`language/expressions/in` 子集提升至 `15/1`（仅剩 generator `yield` 场景）。
-  - 子集回归（latest+4）：`language/expressions/property-accessors` 保持 `21/0`，`language/expressions/in` 提升至 `15/1`，`language/rest-parameters` 保持 `8/0`，`language/expressions/arrow-function` 保持 `71/4`，`language` 基线提升至 `4763/237`。
+  - VM/runtime 补齐 `Reflect` 最小对象、`Object.defineProperties` 基线路径、`RegExp.prototype.exec` 最小可调用路径，并将 Error 系列构造器改为对象返回；同时 `typeof identifier` 路径补齐全局对象属性回退（含 getter 求值）。
+  - 子集回归（latest+5）：`language/expressions/property-accessors` 保持 `21/0`，`language/expressions/in` 保持 `15/1`，`language/expressions/typeof` 提升至 `13/0`，`language/rest-parameters` 保持 `8/0`，`language/expressions/arrow-function` 保持 `71/4`，`language` 基线提升至 `4773/227`。
 
 ## 3. 分阶段状态
 

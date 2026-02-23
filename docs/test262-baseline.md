@@ -49,6 +49,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+28)`: discovered=23882, executed=5000, skipped=18579, passed=4754, failed=246
 - `language max-cases=5000 (latest+29)`: discovered=23882, executed=5000, skipped=18579, passed=4760, failed=240
 - `language max-cases=5000 (latest+30)`: discovered=23882, executed=5000, skipped=18579, passed=4763, failed=237
+- `language max-cases=5000 (latest+31)`: discovered=23882, executed=5000, skipped=18579, passed=4773, failed=227
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -62,6 +63,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/arrow-function (latest)`: discovered=343, executed=75, skipped=268, passed=71, failed=4
 - `language/expressions/property-accessors (latest)`: discovered=21, executed=21, skipped=0, passed=21, failed=0
 - `language/expressions/in (latest)`: discovered=36, executed=16, skipped=20, passed=15, failed=1
+- `language/expressions/typeof (latest)`: discovered=16, executed=13, skipped=3, passed=13, failed=0
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -205,4 +207,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/bytecode/vm 新增 rest 参数内部 marker（`$__qjs_rest_param__$<index>`）并在 `execute_closure_call` 参数绑定阶段按 marker 构造真实 rest 数组；函数 `length` 计算同步按“默认参数或 rest 的最早位置”截断。随后修正 `create_array_from_values` 走 `create_array_value`（恢复 `Array` 原型与 `constructor`），`language/rest-parameters` 收敛至 `8/0`，整体 `language` 基线提升至 `4754/246`。
 - VM/runtime 补齐 primitive/property-accessors 失败簇：`String/Number/Boolean` 原型对象稳定化、`toString/valueOf` 与 `Number.prototype.toFixed`、`String.prototype.charAt/charCodeAt/indexOf/lastIndexOf/split/substring/toLowerCase/toUpperCase`，并将 realm globals 同步到全局对象（覆盖 `this.parseInt` 等路径）；同时将 `Function.prototype` 对齐为可调用值。该轮后 `language/expressions/property-accessors` 收敛至 `21/0`，整体 `language` 基线提升至 `4760/240`。
 - parser 将相等运算与关系运算拆分为独立优先级层级（修复 `true in obj !== "true" in obj` 解析偏差），VM 在 `Object.prototype` 补齐 `valueOf`。该轮后 `language/expressions/in` 提升至 `15/1`，整体 `language` 基线提升至 `4763/237`。
+- VM/runtime 继续补齐 `typeof` 相关缺口：新增 `Reflect` 最小对象、`Object.defineProperties`、`RegExp.prototype.exec` 最小可调用路径，并将 Error 系列构造器统一为对象返回；同时 `typeof identifier` 读取路径补齐全局对象 fallback。该轮后 `language/expressions/typeof` 收敛至 `13/0`，整体 `language` 基线提升至 `4773/227`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

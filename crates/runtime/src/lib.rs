@@ -14,6 +14,7 @@ pub enum NativeFunction {
     ObjectCreate,
     ObjectSetPrototypeOf,
     ObjectDefineProperty,
+    ObjectDefineProperties,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetPrototypeOf,
     ObjectIsExtensible,
