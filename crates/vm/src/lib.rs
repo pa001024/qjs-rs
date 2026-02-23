@@ -3177,6 +3177,14 @@ impl Vm {
         }
         let chunk = compile_script(&script);
         let eval_strict = self.code_is_strict(&chunk.code);
+        if !eval_strict
+            && Self::script_declares_restricted_global_function(&script)
+            && self.eval_targets_global_var_scope(call_kind)
+        {
+            return Err(VmError::TypeError(
+                "cannot declare global function in eval",
+            ));
+        }
         let saved_scopes = self.scopes.clone();
         let saved_var_scope_stack = self.var_scope_stack.clone();
         let saved_with_objects = self.with_objects.clone();
@@ -3210,6 +3218,13 @@ impl Vm {
         self.var_scope_stack = saved_var_scope_stack;
         self.with_objects = saved_with_objects;
         result
+    }
+
+    fn eval_targets_global_var_scope(&self, call_kind: EvalCallKind) -> bool {
+        match call_kind {
+            EvalCallKind::Indirect => true,
+            EvalCallKind::Direct => self.var_scope_stack.last().copied() == Some(0),
+        }
     }
 
     fn execute_function_constructor(
@@ -5358,6 +5373,18 @@ impl Vm {
             | Stmt::Continue
             | Stmt::ContinueLabel(_) => false,
         }
+    }
+
+    fn script_declares_restricted_global_function(script: &Script) -> bool {
+        script.statements.iter().any(|statement| {
+            let Stmt::FunctionDeclaration(declaration) = statement else {
+                return false;
+            };
+            matches!(
+                declaration.name.0.as_str(),
+                "NaN" | "Infinity" | "undefined"
+            )
+        })
     }
 
     fn create_host_function_value(&mut self, host: HostFunction) -> JsValue {
