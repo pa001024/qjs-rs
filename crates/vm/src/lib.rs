@@ -1545,8 +1545,10 @@ impl Vm {
                     let result = (|| -> Result<JsValue, VmError> {
                         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        // Align with QuickJS/ECMAScript: coerce left operand before right operand.
+                        let lhs = self.coerce_int32_runtime(left, realm, strict)?;
                         let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
-                        let result = self.coerce_int32_runtime(left, realm, strict)? << shift;
+                        let result = lhs << shift;
                         Ok(JsValue::Number(result as f64))
                     })();
                     match result {
@@ -1562,8 +1564,10 @@ impl Vm {
                     let result = (|| -> Result<JsValue, VmError> {
                         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        // Align with QuickJS/ECMAScript: coerce left operand before right operand.
+                        let lhs = self.coerce_int32_runtime(left, realm, strict)?;
                         let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
-                        let result = self.coerce_int32_runtime(left, realm, strict)? >> shift;
+                        let result = lhs >> shift;
                         Ok(JsValue::Number(result as f64))
                     })();
                     match result {
@@ -1579,8 +1583,10 @@ impl Vm {
                     let result = (|| -> Result<JsValue, VmError> {
                         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        // Align with QuickJS/ECMAScript: coerce left operand before right operand.
+                        let lhs = self.coerce_uint32_runtime(left, realm, strict)?;
                         let shift = self.coerce_uint32_runtime(right, realm, strict)? & 0x1F;
-                        let result = self.coerce_uint32_runtime(left, realm, strict)? >> shift;
+                        let result = lhs >> shift;
                         Ok(JsValue::Number(result as f64))
                     })();
                     match result {
@@ -10454,6 +10460,28 @@ mod tests {
             vm.execute(&chunk),
             Err(VmError::TypeError("right-hand side of 'in' expects object"))
         );
+    }
+
+    #[test]
+    fn shift_operators_coerce_left_operand_before_right_operand() {
+        let script = parse_script(
+            "var log1 = '';\
+             var leftThrow = { valueOf: function() { log1 += 'L'; throw 'left'; } };\
+             var rightSkip = { valueOf: function() { log1 += 'R'; return 1; } };\
+             try { leftThrow << rightSkip; } catch (e) {}\
+             var first = (log1 === 'L');\
+             var log2 = '';\
+             var left = { valueOf: function() { log2 += 'L'; return 8; } };\
+             var right = { valueOf: function() { log2 += 'R'; throw 'right'; } };\
+             try { left << right; } catch (e) {}\
+             try { left >> right; } catch (e) {}\
+             try { left >>> right; } catch (e) {}\
+             first && (log2 === 'LRLRLR');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]
