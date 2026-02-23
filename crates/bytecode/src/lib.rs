@@ -379,8 +379,9 @@ impl Compiler {
                 }
                 if *kind == BindingKind::Var {
                     if let Some(expr) = initializer {
+                        code.push(Opcode::ResolveIdentifierReference(binding_name.clone()));
                         self.compile_expr(expr, code);
-                        code.push(Opcode::StoreVariable(binding_name.clone()));
+                        code.push(Opcode::StoreReferenceValue);
                     } else {
                         code.push(Opcode::Nop);
                     }
