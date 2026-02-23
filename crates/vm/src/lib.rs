@@ -115,18 +115,23 @@ enum HostFunction {
         this_arg: JsValue,
         bound_args: Vec<JsValue>,
     },
-    StringReplace {
-        receiver: String,
-    },
-    StringIndexOf {
-        receiver: String,
-    },
-    StringSplit {
-        receiver: String,
-    },
-    StringToLowerCase {
-        receiver: String,
-    },
+    StringReplaceThis,
+    StringIndexOfThis,
+    StringSplitThis,
+    StringToLowerCaseThis,
+    StringToUpperCase,
+    StringToString,
+    StringValueOf,
+    StringCharAt,
+    StringCharCodeAt,
+    StringLastIndexOf,
+    StringSubstring,
+    NumberToString,
+    NumberValueOf,
+    NumberToFixed,
+    BooleanToString,
+    BooleanValueOf,
+    FunctionPrototype,
     JsonStringify,
     JsonParse,
     ArrayPush(ObjectId),
@@ -260,8 +265,11 @@ pub struct Vm {
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
-    function_prototype_id: Option<ObjectId>,
+    function_prototype_host_id: Option<u64>,
     array_prototype_id: Option<ObjectId>,
+    string_prototype_id: Option<ObjectId>,
+    number_prototype_id: Option<ObjectId>,
+    boolean_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
@@ -312,8 +320,11 @@ impl Vm {
         self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
-        self.function_prototype_id = None;
+        self.function_prototype_host_id = None;
         self.array_prototype_id = None;
+        self.string_prototype_id = None;
+        self.number_prototype_id = None;
+        self.boolean_prototype_id = None;
         self.date_prototype_id = None;
         self.with_objects.clear();
         self.identifier_references.clear();
@@ -344,6 +355,9 @@ impl Vm {
             self.global_object_id = Some(id);
         }
         self.seed_global_constant_properties()?;
+        self.seed_global_realm_properties(realm)?;
+        let _ = self.math_object_value()?;
+        let _ = self.json_object_value()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
@@ -526,14 +540,19 @@ impl Vm {
         }
         for proto_id in [
             self.object_prototype_id,
-            self.function_prototype_id,
             self.array_prototype_id,
+            self.string_prototype_id,
+            self.number_prototype_id,
+            self.boolean_prototype_id,
             self.date_prototype_id,
         ]
         .into_iter()
         .flatten()
         {
             roots.push(JsValue::Object(proto_id));
+        }
+        if let Some(host_id) = self.function_prototype_host_id {
+            roots.push(JsValue::HostFunction(host_id));
         }
         roots.extend(realm.globals_values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
@@ -674,10 +693,23 @@ impl Vm {
             | HostFunction::FunctionValueOf { target } => {
                 self.gc_mark_stack.push(target);
             }
-            HostFunction::StringReplace { .. }
-            | HostFunction::StringIndexOf { .. }
-            | HostFunction::StringSplit { .. }
-            | HostFunction::StringToLowerCase { .. }
+            HostFunction::StringReplaceThis
+            | HostFunction::StringIndexOfThis
+            | HostFunction::StringSplitThis
+            | HostFunction::StringToLowerCaseThis
+            | HostFunction::StringToUpperCase
+            | HostFunction::StringToString
+            | HostFunction::StringValueOf
+            | HostFunction::StringCharAt
+            | HostFunction::StringCharCodeAt
+            | HostFunction::StringLastIndexOf
+            | HostFunction::StringSubstring
+            | HostFunction::NumberToString
+            | HostFunction::NumberValueOf
+            | HostFunction::NumberToFixed
+            | HostFunction::BooleanToString
+            | HostFunction::BooleanValueOf
+            | HostFunction::FunctionPrototype
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
             | HostFunction::ObjectToString
@@ -2646,6 +2678,159 @@ impl Vm {
         self.param_init_body_scopes = saved_param_init_body_scopes;
     }
 
+    fn strict_this_string(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::String(value) => Ok(value),
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::String(value)) => Ok(value),
+                _ => Err(VmError::TypeError("String.prototype method called on incompatible")),
+            },
+            _ => Err(VmError::TypeError("String.prototype method called on incompatible")),
+        }
+    }
+
+    fn coerce_this_string(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("String method called on null or undefined"))
+            }
+            JsValue::String(value) => Ok(value),
+            JsValue::Object(object_id) => {
+                if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
+                    Ok(value)
+                } else {
+                    Ok(self.coerce_to_string(&JsValue::Object(object_id)))
+                }
+            }
+            other => Ok(self.coerce_to_string(&other)),
+        }
+    }
+
+    fn strict_this_number(&self, this_arg: Option<JsValue>) -> Result<f64, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::Number(value) => Ok(value),
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::Number(value)) => Ok(value),
+                _ => Err(VmError::TypeError("Number.prototype method called on incompatible")),
+            },
+            _ => Err(VmError::TypeError("Number.prototype method called on incompatible")),
+        }
+    }
+
+    fn strict_this_boolean(&self, this_arg: Option<JsValue>) -> Result<bool, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::Bool(value) => Ok(value),
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::Bool(value)) => Ok(value),
+                _ => Err(VmError::TypeError("Boolean.prototype method called on incompatible")),
+            },
+            _ => Err(VmError::TypeError("Boolean.prototype method called on incompatible")),
+        }
+    }
+
+    fn execute_string_replace(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let search_value = args
+            .first()
+            .map_or(String::new(), |value| self.coerce_to_string(value));
+        let replacement = match args.get(1) {
+            Some(JsValue::Function(_))
+            | Some(JsValue::NativeFunction(_))
+            | Some(JsValue::HostFunction(_)) => {
+                let callback = args[1].clone();
+                let callback_result = self.execute_callable(
+                    callback,
+                    Some(JsValue::Undefined),
+                    vec![JsValue::String(search_value.clone())],
+                    realm,
+                    caller_strict,
+                )?;
+                self.coerce_to_string(&callback_result)
+            }
+            Some(value) => self.coerce_to_string(value),
+            None => "undefined".to_string(),
+        };
+        if let Some(index) = receiver.find(&search_value) {
+            let mut output = String::new();
+            output.push_str(&receiver[..index]);
+            output.push_str(&replacement);
+            output.push_str(&receiver[index + search_value.len()..]);
+            Ok(JsValue::String(output))
+        } else {
+            Ok(JsValue::String(receiver))
+        }
+    }
+
+    fn execute_string_index_of(&self, receiver: String, args: &[JsValue]) -> JsValue {
+        let search_value = args.first().map_or_else(
+            || "undefined".to_string(),
+            |value| self.coerce_to_string(value),
+        );
+        let start_index = args
+            .get(1)
+            .map(|value| self.to_number(value))
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map_or(0usize, |value| value as usize);
+        let receiver_chars: Vec<char> = receiver.chars().collect();
+        let search_chars: Vec<char> = search_value.chars().collect();
+        let bounded_start = start_index.min(receiver_chars.len());
+        if search_chars.is_empty() {
+            return JsValue::Number(bounded_start as f64);
+        }
+        if search_chars.len() > receiver_chars.len().saturating_sub(bounded_start) {
+            return JsValue::Number(-1.0);
+        }
+        for index in bounded_start..=receiver_chars.len() - search_chars.len() {
+            if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
+                return JsValue::Number(index as f64);
+            }
+        }
+        JsValue::Number(-1.0)
+    }
+
+    fn execute_string_split(&mut self, receiver: String, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let limit = args
+            .get(1)
+            .map(|value| self.to_number(value))
+            .unwrap_or(f64::INFINITY);
+        if limit <= 0.0 {
+            return self.create_array_from_values(Vec::new());
+        }
+        let mut parts: Vec<JsValue> = if matches!(separator, JsValue::Undefined) {
+            vec![JsValue::String(receiver)]
+        } else {
+            let sep = self.coerce_to_string(&separator);
+            if sep.is_empty() {
+                receiver
+                    .chars()
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .collect()
+            } else {
+                receiver
+                    .split(&sep)
+                    .map(|part| JsValue::String(part.to_string()))
+                    .collect()
+            }
+        };
+        if limit.is_finite() {
+            let cap = limit.max(0.0) as usize;
+            if parts.len() > cap {
+                parts.truncate(cap);
+            }
+        }
+        self.create_array_from_values(parts)
+    }
+
     fn execute_host_function_call(
         &mut self,
         host_id: u64,
@@ -2689,99 +2874,152 @@ impl Vm {
                 bound_args.extend(args);
                 self.execute_callable(target, Some(this_arg), bound_args, realm, caller_strict)
             }
-            HostFunction::StringReplace { receiver } => {
-                let search_value = args
-                    .first()
-                    .map_or(String::new(), |value| self.coerce_to_string(value));
-                let replacement = match args.get(1) {
-                    Some(JsValue::Function(_))
-                    | Some(JsValue::NativeFunction(_))
-                    | Some(JsValue::HostFunction(_)) => {
-                        let callback = args[1].clone();
-                        let callback_result = self.execute_callable(
-                            callback,
-                            Some(JsValue::Undefined),
-                            vec![JsValue::String(search_value.clone())],
-                            realm,
-                            caller_strict,
-                        )?;
-                        self.coerce_to_string(&callback_result)
-                    }
-                    Some(value) => self.coerce_to_string(value),
-                    None => "undefined".to_string(),
-                };
-                if let Some(index) = receiver.find(&search_value) {
-                    let mut output = String::new();
-                    output.push_str(&receiver[..index]);
-                    output.push_str(&replacement);
-                    output.push_str(&receiver[index + search_value.len()..]);
-                    Ok(JsValue::String(output))
-                } else {
-                    Ok(JsValue::String(receiver))
-                }
+            HostFunction::StringReplaceThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                self.execute_string_replace(receiver, &args, realm, caller_strict)
             }
-            HostFunction::StringIndexOf { receiver } => {
+            HostFunction::StringIndexOfThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(self.execute_string_index_of(receiver, &args))
+            }
+            HostFunction::StringSplitThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                self.execute_string_split(receiver, &args)
+            }
+            HostFunction::StringToLowerCaseThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(JsValue::String(receiver.to_lowercase()))
+            }
+            HostFunction::StringToUpperCase => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(JsValue::String(receiver.to_uppercase()))
+            }
+            HostFunction::StringToString | HostFunction::StringValueOf => {
+                let receiver = self.strict_this_string(this_arg)?;
+                Ok(JsValue::String(receiver))
+            }
+            HostFunction::StringCharAt => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver_chars: Vec<char> = receiver.chars().collect();
+                let index = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
+                let index = if index.is_finite() && index >= 0.0 {
+                    index as usize
+                } else {
+                    0
+                };
+                Ok(receiver_chars
+                    .get(index)
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .unwrap_or_else(|| JsValue::String(String::new())))
+            }
+            HostFunction::StringCharCodeAt => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver_chars: Vec<char> = receiver.chars().collect();
+                let index = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
+                let index = if index.is_finite() && index >= 0.0 {
+                    index as usize
+                } else {
+                    0
+                };
+                Ok(receiver_chars
+                    .get(index)
+                    .map(|ch| JsValue::Number((*ch as u32) as f64))
+                    .unwrap_or(JsValue::Number(f64::NAN)))
+            }
+            HostFunction::StringLastIndexOf => {
+                let receiver = self.coerce_this_string(this_arg)?;
                 let search_value = args.first().map_or_else(
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
+                if search_value.is_empty() {
+                    return Ok(JsValue::Number(receiver.chars().count() as f64));
+                }
                 let start_index = args
                     .get(1)
                     .map(|value| self.to_number(value))
-                    .filter(|value| value.is_finite() && *value > 0.0)
-                    .map_or(0usize, |value| value as usize);
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value as usize)
+                    .unwrap_or_else(|| receiver.chars().count());
                 let receiver_chars: Vec<char> = receiver.chars().collect();
                 let search_chars: Vec<char> = search_value.chars().collect();
-                let bounded_start = start_index.min(receiver_chars.len());
-                if search_chars.is_empty() {
-                    return Ok(JsValue::Number(bounded_start as f64));
-                }
-                if search_chars.len() > receiver_chars.len().saturating_sub(bounded_start) {
+                if search_chars.len() > receiver_chars.len() {
                     return Ok(JsValue::Number(-1.0));
                 }
-                for index in bounded_start..=receiver_chars.len() - search_chars.len() {
+                let start = start_index
+                    .min(receiver_chars.len().saturating_sub(search_chars.len()));
+                for index in (0..=start).rev() {
                     if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
                         return Ok(JsValue::Number(index as f64));
                     }
                 }
                 Ok(JsValue::Number(-1.0))
             }
-            HostFunction::StringSplit { receiver } => {
-                let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let limit = args
+            HostFunction::StringSubstring => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let chars: Vec<char> = receiver.chars().collect();
+                let len = chars.len();
+                let start = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    .max(0.0)
+                    .min(len as f64) as usize;
+                let end = args
                     .get(1)
                     .map(|value| self.to_number(value))
-                    .unwrap_or(f64::INFINITY);
-                if limit <= 0.0 {
-                    return self.create_array_from_values(Vec::new());
-                }
-                let mut parts: Vec<JsValue> = if matches!(separator, JsValue::Undefined) {
-                    vec![JsValue::String(receiver)]
+                    .unwrap_or(len as f64)
+                    .max(0.0)
+                    .min(len as f64) as usize;
+                let (from, to) = if start <= end { (start, end) } else { (end, start) };
+                Ok(JsValue::String(chars[from..to].iter().collect()))
+            }
+            HostFunction::NumberToString => {
+                let number = self.strict_this_number(this_arg)?;
+                Ok(JsValue::String(Self::coerce_number_to_string(number)))
+            }
+            HostFunction::NumberValueOf => {
+                let number = self.strict_this_number(this_arg)?;
+                Ok(JsValue::Number(number))
+            }
+            HostFunction::NumberToFixed => {
+                let number = self.strict_this_number(this_arg)?;
+                let digits = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+                let digits = if digits.is_finite() && digits >= 0.0 {
+                    (digits as usize).min(100)
                 } else {
-                    let sep = self.coerce_to_string(&separator);
-                    if sep.is_empty() {
-                        receiver
-                            .chars()
-                            .map(|ch| JsValue::String(ch.to_string()))
-                            .collect()
-                    } else {
-                        receiver
-                            .split(&sep)
-                            .map(|part| JsValue::String(part.to_string()))
-                            .collect()
-                    }
+                    0
                 };
-                if limit.is_finite() {
-                    let cap = limit.max(0.0) as usize;
-                    if parts.len() > cap {
-                        parts.truncate(cap);
-                    }
+                if number.is_nan() {
+                    return Ok(JsValue::String("NaN".to_string()));
                 }
-                self.create_array_from_values(parts)
+                if number.is_infinite() {
+                    return Ok(JsValue::String(if number.is_sign_negative() {
+                        "-Infinity".to_string()
+                    } else {
+                        "Infinity".to_string()
+                    }));
+                }
+                Ok(JsValue::String(format!(
+                    "{number:.precision$}",
+                    precision = digits
+                )))
             }
-            HostFunction::StringToLowerCase { receiver } => {
-                Ok(JsValue::String(receiver.to_lowercase()))
+            HostFunction::BooleanToString => {
+                let value = self.strict_this_boolean(this_arg)?;
+                Ok(JsValue::String(if value { "true" } else { "false" }.to_string()))
             }
+            HostFunction::BooleanValueOf => {
+                let value = self.strict_this_boolean(this_arg)?;
+                Ok(JsValue::Bool(value))
+            }
+            HostFunction::FunctionPrototype => Ok(JsValue::Undefined),
             HostFunction::JsonStringify => Ok(self.execute_json_stringify(args.first())),
             HostFunction::JsonParse => Ok(self.execute_json_parse(args.first())),
             HostFunction::ArrayPush(object_id) => {
@@ -3467,10 +3705,26 @@ impl Vm {
             JsValue::Object(id) => *id,
             _ => unreachable!(),
         };
+        let prototype_id = match native {
+            NativeFunction::NumberConstructor => match self.number_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::BooleanConstructor => match self.boolean_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::StringConstructor => match self.string_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
         let target = self
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = prototype_id;
         target
             .properties
             .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
@@ -4986,7 +5240,17 @@ impl Vm {
                 }
                 Ok(matches!(
                     property,
-                    "replace" | "split" | "toLowerCase" | "toString" | "valueOf"
+                    "replace"
+                        | "split"
+                        | "indexOf"
+                        | "lastIndexOf"
+                        | "substring"
+                        | "toLowerCase"
+                        | "toUpperCase"
+                        | "toString"
+                        | "valueOf"
+                        | "charAt"
+                        | "charCodeAt"
                 ))
             }
             JsValue::Undefined
@@ -5145,6 +5409,18 @@ impl Vm {
                     target: JsValue::Object(object_id),
                 }),
             );
+        }
+        if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
+            if property == "length" {
+                return Ok(JsValue::Number(value.chars().count() as f64));
+            }
+            if let Ok(index) = property.parse::<usize>() {
+                return Ok(value
+                    .chars()
+                    .nth(index)
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .unwrap_or(JsValue::Undefined));
+            }
         }
         if property == "push"
             && self
@@ -5583,6 +5859,38 @@ impl Vm {
         Ok(())
     }
 
+    fn seed_global_realm_properties(&mut self, realm: &Realm) -> Result<(), VmError> {
+        let Some(global_object_id) = self.global_object_id else {
+            return Ok(());
+        };
+        for (name, value) in realm.globals_entries() {
+            if matches!(name, "NaN" | "Infinity" | "undefined") {
+                continue;
+            }
+            self.define_global_property_with_attributes(
+                global_object_id,
+                name,
+                value.clone(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )?;
+        }
+        self.define_global_property_with_attributes(
+            global_object_id,
+            "globalThis",
+            JsValue::Object(global_object_id),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        )?;
+        Ok(())
+    }
+
     fn define_global_property_with_attributes(
         &mut self,
         object_id: ObjectId,
@@ -5840,14 +6148,14 @@ impl Vm {
     }
 
     fn function_prototype_value(&mut self) -> JsValue {
-        if let Some(id) = self.function_prototype_id {
-            return JsValue::Object(id);
+        if let Some(id) = self.function_prototype_host_id {
+            return JsValue::HostFunction(id);
         }
-        let prototype = self.create_object_value();
-        if let JsValue::Object(id) = prototype {
-            self.function_prototype_id = Some(id);
-        }
-        prototype
+        let id = self.next_host_function_id;
+        self.next_host_function_id += 1;
+        self.host_functions.insert(id, HostFunction::FunctionPrototype);
+        self.function_prototype_host_id = Some(id);
+        JsValue::HostFunction(id)
     }
 
     fn array_prototype_value(&mut self) -> JsValue {
@@ -5932,6 +6240,157 @@ impl Vm {
                 );
             }
             self.array_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn string_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.string_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let to_string = self.create_host_function_value(HostFunction::StringToString);
+            let value_of = self.create_host_function_value(HostFunction::StringValueOf);
+            let char_at = self.create_host_function_value(HostFunction::StringCharAt);
+            let char_code_at = self.create_host_function_value(HostFunction::StringCharCodeAt);
+            let index_of = self.create_host_function_value(HostFunction::StringIndexOfThis);
+            let last_index_of = self.create_host_function_value(HostFunction::StringLastIndexOf);
+            let split = self.create_host_function_value(HostFunction::StringSplitThis);
+            let substring = self.create_host_function_value(HostFunction::StringSubstring);
+            let to_lower_case = self.create_host_function_value(HostFunction::StringToLowerCaseThis);
+            let to_upper_case = self.create_host_function_value(HostFunction::StringToUpperCase);
+            let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::StringConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("length".to_string(), JsValue::Number(0.0));
+                object.property_attributes.insert(
+                    "length".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+                for (name, value) in [
+                    ("toString", to_string),
+                    ("valueOf", value_of),
+                    ("charAt", char_at),
+                    ("charCodeAt", char_code_at),
+                    ("indexOf", index_of),
+                    ("lastIndexOf", last_index_of),
+                    ("split", split),
+                    ("substring", substring),
+                    ("toLowerCase", to_lower_case),
+                    ("toUpperCase", to_upper_case),
+                    ("replace", replace),
+                ] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.string_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn number_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.number_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let to_string = self.create_host_function_value(HostFunction::NumberToString);
+            let value_of = self.create_host_function_value(HostFunction::NumberValueOf);
+            let to_fixed = self.create_host_function_value(HostFunction::NumberToFixed);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::NumberConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for (name, value) in [
+                    ("toString", to_string),
+                    ("valueOf", value_of),
+                    ("toFixed", to_fixed),
+                ] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.number_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn boolean_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.boolean_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let to_string = self.create_host_function_value(HostFunction::BooleanToString);
+            let value_of = self.create_host_function_value(HostFunction::BooleanValueOf);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::BooleanConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for (name, value) in [("toString", to_string), ("valueOf", value_of)] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.boolean_prototype_id = Some(id);
         }
         prototype
     }
@@ -6192,13 +6651,32 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
-        let constructor = match primitive {
-            JsValue::Number(_) => Some(NativeFunction::NumberConstructor),
-            JsValue::Bool(_) => Some(NativeFunction::BooleanConstructor),
-            JsValue::String(_) => Some(NativeFunction::StringConstructor),
-            _ => None,
+        let (constructor, prototype_id) = match primitive {
+            JsValue::Number(_) => (
+                Some(NativeFunction::NumberConstructor),
+                match self.number_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                },
+            ),
+            JsValue::Bool(_) => (
+                Some(NativeFunction::BooleanConstructor),
+                match self.boolean_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                },
+            ),
+            JsValue::String(_) => (
+                Some(NativeFunction::StringConstructor),
+                match self.string_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                },
+            ),
+            _ => (None, None),
         };
         if let Some(object) = self.objects.get_mut(&object_id) {
+            object.prototype = prototype_id;
             object
                 .properties
                 .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
@@ -6494,6 +6972,18 @@ impl Vm {
                     target: JsValue::Object(object_id),
                 }),
             );
+        }
+        if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
+            if property == "length" {
+                return Ok(JsValue::Number(value.chars().count() as f64));
+            }
+            if let Ok(index) = property.parse::<usize>() {
+                return Ok(value
+                    .chars()
+                    .nth(index)
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .unwrap_or(JsValue::Undefined));
+            }
         }
         if property == "push"
             && self
@@ -7238,7 +7728,12 @@ impl Vm {
                 Ok(self.function_prototype_value())
             }
             JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                Ok(self.function_prototype_value())
+                if matches!(value, JsValue::HostFunction(host_id) if Some(*host_id) == self.function_prototype_host_id)
+                {
+                    Ok(self.object_prototype_value())
+                } else {
+                    Ok(self.function_prototype_value())
+                }
             }
             _ => Ok(JsValue::Null),
         }
@@ -7348,6 +7843,17 @@ impl Vm {
                 method: FunctionMethod::Bind,
             })),
             "length" => Ok(JsValue::Number(0.0)),
+            "toString" => Ok(
+                self.create_host_function_value(HostFunction::FunctionToString {
+                    target: JsValue::HostFunction(host_id),
+                }),
+            ),
+            "valueOf" => Ok(
+                self.create_host_function_value(HostFunction::FunctionValueOf {
+                    target: JsValue::HostFunction(host_id),
+                }),
+            ),
+            "constructor" => Ok(JsValue::NativeFunction(NativeFunction::FunctionConstructor)),
             _ => Ok(JsValue::Undefined),
         }
     }
@@ -7355,18 +7861,17 @@ impl Vm {
     fn get_string_property(&mut self, receiver: &str, property: &str) -> JsValue {
         match property {
             "length" => JsValue::Number(receiver.chars().count() as f64),
-            "replace" => self.create_host_function_value(HostFunction::StringReplace {
-                receiver: receiver.to_string(),
-            }),
-            "indexOf" => self.create_host_function_value(HostFunction::StringIndexOf {
-                receiver: receiver.to_string(),
-            }),
-            "split" => self.create_host_function_value(HostFunction::StringSplit {
-                receiver: receiver.to_string(),
-            }),
-            "toLowerCase" => self.create_host_function_value(HostFunction::StringToLowerCase {
-                receiver: receiver.to_string(),
-            }),
+            "replace" => self.create_host_function_value(HostFunction::StringReplaceThis),
+            "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
+            "split" => self.create_host_function_value(HostFunction::StringSplitThis),
+            "toLowerCase" => self.create_host_function_value(HostFunction::StringToLowerCaseThis),
+            "toUpperCase" => self.create_host_function_value(HostFunction::StringToUpperCase),
+            "toString" => self.create_host_function_value(HostFunction::StringToString),
+            "valueOf" => self.create_host_function_value(HostFunction::StringValueOf),
+            "charAt" => self.create_host_function_value(HostFunction::StringCharAt),
+            "charCodeAt" => self.create_host_function_value(HostFunction::StringCharCodeAt),
+            "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
+            "substring" => self.create_host_function_value(HostFunction::StringSubstring),
             _ => match property.parse::<usize>() {
                 Ok(index) => receiver
                     .chars()
@@ -7547,6 +8052,9 @@ impl Vm {
             (NativeFunction::FunctionConstructor, "prototype") => self.function_prototype_value(),
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
             (NativeFunction::ArrayConstructor, "prototype") => self.array_prototype_value(),
+            (NativeFunction::StringConstructor, "prototype") => self.string_prototype_value(),
+            (NativeFunction::NumberConstructor, "prototype") => self.number_prototype_value(),
+            (NativeFunction::BooleanConstructor, "prototype") => self.boolean_prototype_value(),
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
@@ -9370,6 +9878,82 @@ mod tests {
             vm.execute_in_realm(&infinity, &realm),
             Ok(JsValue::Number(f64::INFINITY))
         );
+    }
+
+    #[test]
+    fn primitive_property_accessor_baseline_methods_work() {
+        let script = parse_script(
+            "true.toString() === 'true' && 1..toString() === '1' && 1.1.toFixed(5) === '1.10000' && 'abc123'.charAt(5) === '3';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn function_prototype_is_callable_function_value() {
+        let script = parse_script(
+            "typeof Function.prototype === 'function' && typeof Function.prototype.toString === 'function' && Function.prototype() === undefined;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn realm_globals_are_visible_on_global_object_properties() {
+        let script = parse_script(
+            "typeof this.parseInt !== 'undefined' && typeof this.parseFloat !== 'undefined' && typeof this.isNaN !== 'undefined' && typeof this.isFinite !== 'undefined';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "parseInt",
+            JsValue::NativeFunction(NativeFunction::ParseInt),
+        );
+        realm.define_global(
+            "parseFloat",
+            JsValue::NativeFunction(NativeFunction::ParseFloat),
+        );
+        realm.define_global("isNaN", JsValue::NativeFunction(NativeFunction::IsNaN));
+        realm.define_global(
+            "isFinite",
+            JsValue::NativeFunction(NativeFunction::IsFinite),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn primitive_constructor_prototypes_expose_baseline_methods() {
+        let script = parse_script(
+            "typeof String.prototype.valueOf === 'function' && typeof String.prototype.charAt === 'function' && typeof Number.prototype.valueOf === 'function' && typeof Number.prototype.toFixed === 'function' && typeof Boolean.prototype.valueOf === 'function';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        realm.define_global(
+            "Boolean",
+            JsValue::NativeFunction(NativeFunction::BooleanConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
