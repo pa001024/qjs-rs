@@ -42,6 +42,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+21)`: discovered=23882, executed=5000, skipped=18579, passed=4700, failed=300
 - `language max-cases=5000 (latest+22)`: discovered=23882, executed=5000, skipped=18579, passed=4725, failed=275
 - `language max-cases=5000 (latest+23)`: discovered=23882, executed=5000, skipped=18579, passed=4732, failed=268
+- `language max-cases=5000 (latest+24)`: discovered=23882, executed=5000, skipped=18579, passed=4734, failed=266
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -49,7 +50,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/function-code (latest)`: discovered=217, executed=173, skipped=44, passed=173, failed=0
 - `language/expressions/unary-plus (latest)`: discovered=17, executed=16, skipped=1, passed=16, failed=0
 - `language/expressions/delete (latest)`: discovered=69, executed=56, skipped=13, passed=56, failed=0
-- `language/expressions/object (latest)`: discovered=1170, executed=271, skipped=899, passed=262, failed=9
+- `language/expressions/object (latest)`: discovered=1170, executed=271, skipped=899, passed=265, failed=6
 - `language/expressions/class (latest)`: discovered=4059, executed=47, skipped=4012, passed=29, failed=18
 
 备注：
@@ -188,4 +189,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 为对象参数模式增加最小副作用降级（computed key 与属性默认值 initializer），补齐 `eval-param-env-with-*` 两条 case，`language/function-code` 收敛至 `173/0`，整体 `language` 基线提升至 `4700/300`。
 - bytecode 将 unary plus 降级改为 `ToNumber`（`expr - 0`），VM 收紧字符串到数值的 `Infinity` 大小写处理；同时补齐 delete 关键路径（`null/undefined` base TypeError、`delete super` ReferenceError、全局常量不可配置、全局 var 属性联动）并新增 `JSON` 最小对象与 `Array.isArray`。该轮后 `unary-plus` 与 `delete` 子集均收敛至 `0` 失败，整体 `language` 基线提升至 `4725/275`。
 - parser 对齐 QuickJS `js_parse_property_name` 语义：computed property key 在 `for` initializer 的 `no_in` 外层上下文中仍允许 `in`，并补齐 object accessor 的 string/number key 解析；lexer 同步新增 `0b/0B` 与 `0o/0O` 数字字面量。该轮后 `language/expressions/object` 提升至 `262/9`、`language/expressions/class` 提升至 `29/18`，整体 `language` 基线提升至 `4732/268`。
+- bytecode/vm 新增 `ToPropertyKey` opcode 并前移到 object literal computed key/accessor 的 value 求值之前；VM 同步收敛对象 `ToPrimitive`（`toString/valueOf`）与函数 `prototype` own-property 判定。并将 `Object.prototype.toString` / `Array.prototype.toString` 落到真实原型链上，移除对象属性读取里的隐式 `toString` fallback。该轮后 `language/expressions/object` 进一步提升至 `265/6`，整体 `language` 基线提升至 `4734/266`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -1187,6 +1187,23 @@ impl Parser {
         );
     }
 
+    fn insert_no_prototype_marker(&self, body: &mut Vec<Stmt>) {
+        let marker = Stmt::Expression(Expr::String(StringLiteral {
+            value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+            has_escape: false,
+        }));
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, marker);
+    }
+
     fn prepend_non_simple_params_marker(&self, body: &mut Vec<Stmt>) {
         self.prepend_marker(body, NON_SIMPLE_PARAMS_MARKER);
     }
@@ -4565,6 +4582,7 @@ impl Parser {
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
+        self.insert_no_prototype_marker(&mut body);
 
         Ok(Some((
             accessor_key,
@@ -4626,6 +4644,7 @@ impl Parser {
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
+        self.insert_no_prototype_marker(&mut body);
 
         Ok(Expr::Function {
             name: None,
@@ -4899,7 +4918,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_expression, parse_script};
+    use super::{CLASS_METHOD_NO_PROTOTYPE_MARKER, parse_expression, parse_script};
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
@@ -4987,7 +5006,13 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                    body: vec![
+                        Stmt::Expression(Expr::String(StringLiteral {
+                            value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Return(Some(Expr::Number(1.0))),
+                    ],
                 },
             },
         ]);
@@ -5004,7 +5029,13 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![Stmt::Return(Some(Expr::Number(1.0)))],
+                    body: vec![
+                        Stmt::Expression(Expr::String(StringLiteral {
+                            value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Return(Some(Expr::Number(1.0))),
+                    ],
                 },
             },
             ObjectProperty {
@@ -5014,7 +5045,13 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![Stmt::Return(Some(Expr::Number(2.0)))],
+                    body: vec![
+                        Stmt::Expression(Expr::String(StringLiteral {
+                            value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Return(Some(Expr::Number(2.0))),
+                    ],
                 },
             },
         ]);
@@ -5037,7 +5074,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
             ObjectProperty {
@@ -5045,7 +5085,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![Identifier("v".to_string())],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
         ]);
@@ -5064,7 +5107,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
             ObjectProperty {
@@ -5074,7 +5120,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![Identifier("v".to_string())],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
         ]);
@@ -5091,7 +5140,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
             ObjectProperty {
@@ -5099,7 +5151,10 @@ mod tests {
                 value: Expr::Function {
                     name: None,
                     params: vec![Identifier("v".to_string())],
-                    body: vec![],
+                    body: vec![Stmt::Expression(Expr::String(StringLiteral {
+                        value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
+                        has_escape: false,
+                    }))],
                 },
             },
         ]);

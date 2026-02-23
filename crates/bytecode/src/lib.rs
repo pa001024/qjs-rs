@@ -82,6 +82,7 @@ pub enum Opcode {
     Typeof,
     TypeofIdentifier(String),
     ToNumber,
+    ToPropertyKey,
     Eq,
     Ne,
     StrictEq,
@@ -1494,6 +1495,7 @@ impl Compiler {
                         ObjectPropertyKey::Computed(key_expr) => {
                             code.push(Opcode::Dup);
                             self.compile_expr(key_expr, code);
+                            code.push(Opcode::ToPropertyKey);
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::SetPropertyByValue);
                             code.push(Opcode::Pop);
@@ -1501,6 +1503,7 @@ impl Compiler {
                         ObjectPropertyKey::AccessorGetComputed(key_expr) => {
                             code.push(Opcode::Dup);
                             self.compile_expr(key_expr, code);
+                            code.push(Opcode::ToPropertyKey);
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::DefineGetterByValue);
                             code.push(Opcode::Pop);
@@ -1508,6 +1511,7 @@ impl Compiler {
                         ObjectPropertyKey::AccessorSetComputed(key_expr) => {
                             code.push(Opcode::Dup);
                             self.compile_expr(key_expr, code);
+                            code.push(Opcode::ToPropertyKey);
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::DefineSetterByValue);
                             code.push(Opcode::Pop);
@@ -2240,6 +2244,7 @@ mod tests {
                 Opcode::CreateObject,
                 Opcode::Dup,
                 Opcode::LoadIdentifier("k".to_string()),
+                Opcode::ToPropertyKey,
                 Opcode::LoadNumber(1.0),
                 Opcode::SetPropertyByValue,
                 Opcode::Pop,
@@ -2281,11 +2286,13 @@ mod tests {
                 Opcode::CreateObject,
                 Opcode::Dup,
                 Opcode::LoadIdentifier("k".to_string()),
+                Opcode::ToPropertyKey,
                 Opcode::LoadFunction(0),
                 Opcode::DefineGetterByValue,
                 Opcode::Pop,
                 Opcode::Dup,
                 Opcode::LoadIdentifier("k".to_string()),
+                Opcode::ToPropertyKey,
                 Opcode::LoadFunction(1),
                 Opcode::DefineSetterByValue,
                 Opcode::Pop,

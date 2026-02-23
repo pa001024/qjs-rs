@@ -343,6 +343,7 @@ impl Vm {
         }
         self.seed_global_constant_properties()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
+            let to_string = self.shared_object_to_string_function();
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
                     "constructor".to_string(),
@@ -350,6 +351,17 @@ impl Vm {
                 );
                 object_prototype.property_attributes.insert(
                     "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("toString".to_string(), to_string);
+                object_prototype.property_attributes.insert(
+                    "toString".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -1625,6 +1637,21 @@ impl Vm {
                         let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                         let number = self.coerce_number_runtime(value, realm, strict)?;
                         Ok(JsValue::Number(number))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::ToPropertyKey => {
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        let key = self.coerce_to_property_key_runtime(value, realm, strict)?;
+                        Ok(JsValue::String(key))
                     })();
                     match result {
                         Ok(value) => self.stack.push(value),
@@ -4838,7 +4865,7 @@ impl Vm {
                     .objects
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
-                Ok(matches!(property, "hasOwnProperty" | "toString")
+                Ok(matches!(property, "hasOwnProperty")
                     || (property == "push" && object.properties.contains_key("length"))
                     || (property == "forEach" && object.properties.contains_key("length"))
                     || (property == "reduce" && object.properties.contains_key("length"))
@@ -5123,9 +5150,6 @@ impl Vm {
                 return Ok(value);
             }
             current_id = next;
-        }
-        if property == "toString" {
-            return Ok(self.shared_object_to_string_function());
         }
         Ok(JsValue::Undefined)
     }
@@ -5784,9 +5808,18 @@ impl Vm {
                         configurable: false,
                     },
                 );
-                object.properties.insert("join".to_string(), join);
+                object.properties.insert("join".to_string(), join.clone());
                 object.property_attributes.insert(
                     "join".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("toString".to_string(), join);
+                object.property_attributes.insert(
+                    "toString".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -5988,6 +6021,37 @@ impl Vm {
         Ok(JsValue::String("[object Object]".to_string()))
     }
 
+    fn ordinary_to_primitive_for_property_key(
+        &mut self,
+        object_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        for method_name in ["toString", "valueOf"] {
+            let method = self.get_object_property(object_id, method_name, realm)?;
+            if !Self::is_callable_value(&method) {
+                continue;
+            }
+            let result = self.execute_callable(
+                method,
+                Some(JsValue::Object(object_id)),
+                Vec::new(),
+                realm,
+                caller_strict,
+            )?;
+            if !matches!(
+                result,
+                JsValue::Object(_)
+                    | JsValue::Function(_)
+                    | JsValue::NativeFunction(_)
+                    | JsValue::HostFunction(_)
+            ) {
+                return Ok(result);
+            }
+        }
+        Err(VmError::TypeError("cannot convert object to property key"))
+    }
+
     fn ordinary_to_primitive_for_function(
         &mut self,
         closure_id: u64,
@@ -6119,10 +6183,21 @@ impl Vm {
     }
 
     fn closure_has_no_prototype(&self, closure_id: u64) -> bool {
-        self.closure_objects
+        if self
+            .closure_objects
             .get(&closure_id)
             .and_then(|object| object.properties.get(CLASS_METHOD_NO_PROTOTYPE_MARKER))
             .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
+        {
+            return true;
+        }
+        let Some(closure) = self.closures.get(&closure_id) else {
+            return false;
+        };
+        let Some(function) = closure.functions.get(closure.function_id) else {
+            return false;
+        };
+        self.code_has_marker(&function.code, CLASS_METHOD_NO_PROTOTYPE_MARKER)
     }
 
     fn code_is_strict(&self, code: &[Opcode]) -> bool {
@@ -6405,9 +6480,6 @@ impl Vm {
                 return Ok(value);
             }
             current_id = next;
-        }
-        if property == "toString" {
-            return Ok(self.shared_object_to_string_function());
         }
         Ok(JsValue::Undefined)
     }
@@ -6714,7 +6786,8 @@ impl Vm {
                     return Ok(true);
                 }
                 if property == "prototype" {
-                    return Ok(!self.closure_is_arrow(*closure_id)?);
+                    return Ok(!self.closure_is_arrow(*closure_id)?
+                        && !self.closure_has_no_prototype(*closure_id));
                 }
                 Ok(false)
             }
@@ -7771,21 +7844,9 @@ impl Vm {
         caller_strict: bool,
     ) -> Result<String, VmError> {
         match value {
-            JsValue::Object(object_id) => {
-                let to_string = self.get_object_property(object_id, "toString", realm)?;
-                if Self::is_callable_value(&to_string) {
-                    let primitive = self.execute_callable(
-                        to_string,
-                        Some(JsValue::Object(object_id)),
-                        Vec::new(),
-                        realm,
-                        caller_strict,
-                    )?;
-                    Ok(self.coerce_to_string(&primitive))
-                } else {
-                    Ok(self.coerce_to_string(&JsValue::Object(object_id)))
-                }
-            }
+            JsValue::Object(object_id) => self
+                .ordinary_to_primitive_for_property_key(object_id, realm, caller_strict)
+                .map(|primitive| self.coerce_to_string(&primitive)),
             JsValue::Function(closure_id) => {
                 let to_string = self.get_function_property(closure_id, "toString", realm)?;
                 if Self::is_callable_value(&to_string) {
