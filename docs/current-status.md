@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4698`、`failed=302`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4700`、`failed=300`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -70,7 +70,8 @@
   - `language/eval-code/direct` 子集提升至 `143/0`（executed=143）。
   - VM `code_has_marker` 改为全字节码扫描，修复 class method 注入 `use strict/let super` 前导后 marker 丢失导致的 non-simple 参数误判。
   - VM 新增 primitive boxing 路径（非严格函数 `this` + `GetProperty` on number/bool），并补齐函数值 `constructor` 回退属性，修复 `function-code` 的 `10.4.3` / `S10.2.1` 失败簇。
-  - `language/function-code` 子集提升至 `171/2`（executed=173）。
+  - parser 为对象参数模式增加最小副作用降级（computed key 与属性默认值 initializer），修复 `eval-param-env-with-*` 两条 function-code 剩余失败。
+  - `language/function-code` 子集提升至 `173/0`（executed=173）。
 
 ## 3. 分阶段状态
 
@@ -90,7 +91,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `function-code/eval-param-env-*`、`statements/class/*`、`literals/regexp/*`）；`eval-code/direct` 当前子集已收敛到 `143/0`。
+4. class 继承链与 regexp 语义仍是 language 子集主失败簇（当前失败集中在 `statements/class/*`、`literals/regexp/*`、`template/*`）；`eval-code/direct` 与 `function-code` 当前子集分别收敛到 `143/0`、`173/0`。
 
 ## 5. 下一步执行
 

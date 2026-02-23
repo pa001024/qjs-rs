@@ -1199,11 +1199,12 @@ impl Parser {
         &self,
         body: &mut Vec<Stmt>,
         initializers: &[DefaultParameterInitializer],
+        pattern_effects: &[Stmt],
     ) {
-        if initializers.is_empty() {
+        if initializers.is_empty() && pattern_effects.is_empty() {
             return;
         }
-        let mut prefix = Vec::with_capacity(initializers.len() + 2);
+        let mut prefix = Vec::with_capacity(initializers.len() + pattern_effects.len() + 2);
         prefix.push(Stmt::Expression(Expr::String(StringLiteral {
             value: PARAM_INIT_SCOPE_START_MARKER.to_string(),
             has_escape: false,
@@ -1224,6 +1225,7 @@ impl Parser {
                 alternate: None,
             });
         }
+        prefix.extend(pattern_effects.iter().cloned());
         prefix.push(Stmt::Expression(Expr::String(StringLiteral {
             value: PARAM_INIT_SCOPE_END_MARKER.to_string(),
             has_escape: false,
@@ -1236,7 +1238,8 @@ impl Parser {
         let _is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
-        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers, pattern_effects) =
+            self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body_with_super_policy(
@@ -1244,7 +1247,7 @@ impl Parser {
             "expected '}' after function body",
             false,
         )?;
-        self.prepend_parameter_initializers(&mut body, &default_initializers);
+        self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -2726,34 +2729,35 @@ impl Parser {
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
         let saved_pos = self.pos;
 
-        let (params, simple_parameters, default_initializers) = if self.matches(&TokenKind::LParen)
-        {
-            let params = match self.parse_parameter_list() {
-                Ok(parsed) => parsed,
-                Err(_) => {
+        let (params, simple_parameters, default_initializers, pattern_effects) =
+            if self.matches(&TokenKind::LParen) {
+                let params = match self.parse_parameter_list() {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        self.pos = saved_pos;
+                        return Ok(None);
+                    }
+                };
+                if !self.matches(&TokenKind::RParen) {
                     self.pos = saved_pos;
                     return Ok(None);
                 }
-            };
-            if !self.matches(&TokenKind::RParen) {
-                self.pos = saved_pos;
+                params
+            } else if self.check_identifier()
+                && self.check_next(&TokenKind::Equal)
+                && self.check_nth(2, &TokenKind::Greater)
+            {
+                (
+                    vec![Identifier(
+                        self.expect_binding_identifier("expected parameter name")?,
+                    )],
+                    true,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            } else {
                 return Ok(None);
-            }
-            params
-        } else if self.check_identifier()
-            && self.check_next(&TokenKind::Equal)
-            && self.check_nth(2, &TokenKind::Greater)
-        {
-            (
-                vec![Identifier(
-                    self.expect_binding_identifier("expected parameter name")?,
-                )],
-                true,
-                Vec::new(),
-            )
-        } else {
-            return Ok(None);
-        };
+            };
 
         if !self.matches(&TokenKind::Equal) || !self.matches(&TokenKind::Greater) {
             self.pos = saved_pos;
@@ -2774,7 +2778,7 @@ impl Parser {
         } else {
             vec![Stmt::Return(Some(self.parse_assignment()?))]
         };
-        self.prepend_parameter_initializers(&mut body, &default_initializers);
+        self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -3221,13 +3225,27 @@ impl Parser {
 
     fn parse_parameter_list(
         &mut self,
-    ) -> Result<(Vec<Identifier>, bool, Vec<DefaultParameterInitializer>), ParseError> {
+    ) -> Result<
+        (
+            Vec<Identifier>,
+            bool,
+            Vec<DefaultParameterInitializer>,
+            Vec<Stmt>,
+        ),
+        ParseError,
+    > {
         let mut params = Vec::new();
         let mut synthetic_index = 0usize;
         let mut simple_parameters = true;
         let mut default_initializers = Vec::new();
+        let mut pattern_effects = Vec::new();
         if self.check(&TokenKind::RParen) {
-            return Ok((params, simple_parameters, default_initializers));
+            return Ok((
+                params,
+                simple_parameters,
+                default_initializers,
+                pattern_effects,
+            ));
         }
         loop {
             let is_rest = self.matches(&TokenKind::Ellipsis);
@@ -3238,10 +3256,17 @@ impl Parser {
                 Identifier(self.expect_binding_identifier("expected parameter name")?)
             } else {
                 simple_parameters = false;
-                self.consume_parameter_pattern("expected parameter name")?;
                 let generated = format!("$param_{synthetic_index}");
                 synthetic_index += 1;
-                Identifier(generated)
+                let generated_identifier = Identifier(generated);
+                let effects = if self.check(&TokenKind::LBrace) {
+                    self.parse_object_parameter_pattern_effects(&generated_identifier)?
+                } else {
+                    self.consume_parameter_pattern("expected parameter name")?;
+                    Vec::new()
+                };
+                pattern_effects.extend(effects);
+                generated_identifier
             };
             if self.matches(&TokenKind::Equal) {
                 simple_parameters = false;
@@ -3260,7 +3285,120 @@ impl Parser {
             }
             break;
         }
-        Ok((params, simple_parameters, default_initializers))
+        Ok((
+            params,
+            simple_parameters,
+            default_initializers,
+            pattern_effects,
+        ))
+    }
+
+    fn parse_object_parameter_pattern_effects(
+        &mut self,
+        synthetic_param: &Identifier,
+    ) -> Result<Vec<Stmt>, ParseError> {
+        self.expect(
+            TokenKind::LBrace,
+            "expected '{' in object parameter pattern",
+        )?;
+        let mut effects = Vec::new();
+        if self.check(&TokenKind::RBrace) {
+            self.advance();
+            return Ok(effects);
+        }
+        loop {
+            if self.matches(&TokenKind::Ellipsis) {
+                self.consume_parameter_pattern("expected rest parameter pattern")?;
+                break;
+            }
+            if self.matches(&TokenKind::LBracket) {
+                let key_expr = self.parse_expression_inner()?;
+                self.expect(
+                    TokenKind::RBracket,
+                    "expected ']' after computed property key",
+                )?;
+                effects.push(Stmt::Expression(key_expr));
+
+                if self.matches(&TokenKind::Colon) {
+                    if self.check_identifier() {
+                        let _ = self.expect_binding_identifier("expected parameter name")?;
+                    } else {
+                        self.consume_parameter_pattern("expected parameter name")?;
+                    }
+                }
+                if self.matches(&TokenKind::Equal) {
+                    let initializer = self.parse_expression_inner()?;
+                    effects.push(Stmt::Expression(initializer));
+                }
+            } else {
+                let property_name = if self.check_identifier() {
+                    self.expect_identifier_name("expected property name in parameter pattern")?
+                } else if let Some(Token {
+                    kind: TokenKind::String(name),
+                    ..
+                }) = self.current()
+                {
+                    let key = name.clone();
+                    self.advance();
+                    key
+                } else if let Some(Token {
+                    kind: TokenKind::Number(number),
+                    ..
+                }) = self.current()
+                {
+                    let key = if number.is_finite() && number.fract() == 0.0 {
+                        format!("{number:.0}")
+                    } else {
+                        number.to_string()
+                    };
+                    self.advance();
+                    key
+                } else {
+                    self.consume_parameter_pattern("expected parameter name")?;
+                    String::new()
+                };
+
+                if self.matches(&TokenKind::Colon) {
+                    if self.check_identifier() {
+                        let _ = self.expect_binding_identifier("expected parameter name")?;
+                    } else {
+                        self.consume_parameter_pattern("expected parameter name")?;
+                    }
+                }
+                if self.matches(&TokenKind::Equal) {
+                    let initializer = self.parse_expression_inner()?;
+                    if !property_name.is_empty() {
+                        let condition = Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(Expr::Member {
+                                object: Box::new(Expr::Identifier(synthetic_param.clone())),
+                                property: property_name,
+                            }),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        };
+                        effects.push(Stmt::If {
+                            condition,
+                            consequent: Box::new(Stmt::Expression(initializer)),
+                            alternate: None,
+                        });
+                    } else {
+                        effects.push(Stmt::Expression(initializer));
+                    }
+                }
+            }
+            if self.matches(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(
+            TokenKind::RBrace,
+            "expected '}' after object parameter pattern",
+        )?;
+        Ok(effects)
     }
 
     fn consume_parameter_pattern(&mut self, error_message: &str) -> Result<(), ParseError> {
@@ -3324,7 +3462,8 @@ impl Parser {
             None
         };
         self.expect(TokenKind::LParen, "expected '(' after 'function'")?;
-        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers, pattern_effects) =
+            self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body_with_super_policy(
@@ -3332,7 +3471,7 @@ impl Parser {
             "expected '}' after function body",
             false,
         )?;
-        self.prepend_parameter_initializers(&mut body, &default_initializers);
+        self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -3398,7 +3537,8 @@ impl Parser {
 
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
-            let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
+            let (params, simple_parameters, default_initializers, pattern_effects) =
+                self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
             let body = self.parse_function_body_with_super_policy(
                 "expected '{' before method body",
@@ -3412,7 +3552,7 @@ impl Parser {
             if matches!(kind, ClassElementKind::Setter) && params.len() != 1 {
                 return Err(self.error_current("setter must have exactly one parameter"));
             }
-            self.prepend_parameter_initializers(&mut body, &default_initializers);
+            self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
             }
@@ -4391,7 +4531,8 @@ impl Parser {
         };
 
         self.expect(TokenKind::LParen, "expected '(' after accessor name")?;
-        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers, pattern_effects) =
+            self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body_with_super_policy(
@@ -4399,7 +4540,7 @@ impl Parser {
             "expected '}' after function body",
             true,
         )?;
-        self.prepend_parameter_initializers(&mut body, &default_initializers);
+        self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
@@ -4455,7 +4596,8 @@ impl Parser {
 
     fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
-        let (params, simple_parameters, default_initializers) = self.parse_parameter_list()?;
+        let (params, simple_parameters, default_initializers, pattern_effects) =
+            self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
         let mut body = self.parse_function_body_with_super_policy(
@@ -4463,7 +4605,7 @@ impl Parser {
             "expected '}' after method body",
             true,
         )?;
-        self.prepend_parameter_initializers(&mut body, &default_initializers);
+        self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }

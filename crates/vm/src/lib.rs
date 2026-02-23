@@ -8568,18 +8568,23 @@ mod tests {
         .expect("script should parse");
         let chunk = compile_script(&script);
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("function".to_string())));
+        assert_eq!(
+            vm.execute(&chunk),
+            Ok(JsValue::String("function".to_string()))
+        );
     }
 
     #[test]
     fn function_declaration_hoists_over_parameter_binding() {
-        let script = parse_script(
-            "function f(x) { return typeof x; function x() { return 7; } } f();",
-        )
-        .expect("script should parse");
+        let script =
+            parse_script("function f(x) { return typeof x; function x() { return 7; } } f();")
+                .expect("script should parse");
         let chunk = compile_script(&script);
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("function".to_string())));
+        assert_eq!(
+            vm.execute(&chunk),
+            Ok(JsValue::String("function".to_string()))
+        );
     }
 
     #[test]
