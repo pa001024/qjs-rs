@@ -30,6 +30,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+9)`: discovered=23882, executed=5000, skipped=18579, passed=4560, failed=440
 - `language max-cases=5000 (latest+10)`: discovered=23882, executed=5000, skipped=18579, passed=4581, failed=419
 - `language max-cases=5000 (latest+11)`: discovered=23882, executed=5000, skipped=18579, passed=4584, failed=416
+- `language max-cases=5000 (latest+12)`: discovered=23882, executed=5000, skipped=18579, passed=4588, failed=412
+- `language max-cases=5000 (latest+13)`: discovered=23882, executed=5000, skipped=18579, passed=4594, failed=406
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -157,4 +159,6 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 本轮 `language max-cases=5000` 基线提升至 `4560/440`，失败簇继续集中在 `eval-code/direct`、`statements/class`、`statements/function`。
 - parser strict 校验补齐 `eval/arguments` 规则：strict 下禁止作为绑定名与赋值目标，并增加 strict 函数重复形参早期错误；`language` 基线提升至 `4581/419`。
 - VM 将函数值的 `caller/arguments` 限制扩展到 host/native function（覆盖 `bind` 结果），并将 `GetProperty/GetPropertyByValue/SetProperty/SetPropertyByValue` 运行时错误统一路由到异常处理器，进一步提升到 `4584/416`。
+- VM 为 `eval` 引入 direct/indirect 调用区分：identifier direct `eval` 继承 caller strict 语义，间接调用路径统一按 indirect eval（全局上下文）执行；首轮提升到 `4588/412`。
+- VM 调整 eval 环境策略：strict eval 使用隔离变量环境，indirect non-strict 恢复全局可见函数声明；`eval-code` 子集由 `162/18` 收敛到 `166/14`，`language` 基线进一步提升至 `4594/406`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

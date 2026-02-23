@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4584`、`failed=416`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4594`、`failed=406`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -49,6 +49,9 @@
   - parser strict 校验对齐 QuickJS：`eval/arguments` 作为 strict 绑定名或赋值目标时抛 SyntaxError，并补齐 strict 函数重复形参早期错误（`13.1-23/25/27/29/31/33-s`）。
   - VM 对函数值 `caller/arguments` 限制扩展到 host/native function（含 `bind()` 产物），并将 `Get/SetProperty*` 的运行时错误纳入异常处理器路由，允许 `try/catch` 捕获属性访问 TypeError。
   - `language/statements/function` 子集从 `175/32` 提升到 `182/25`（executed=207）。
+  - VM `eval` 调用链路拆分为 direct/indirect 两类语义路径：仅 direct `eval(...)` 继承 caller strict 语境，普通调用路径（如 `(0, eval)(...)`）按 indirect 规则执行。
+  - `eval` 作用域策略对齐推进：strict eval 使用隔离变量环境；indirect eval 切换到全局执行上下文（清理 caller with 环境影响），non-strict 维持函数声明对 caller/global 的可见性。
+  - `language/eval-code` 子集从 `162/18` 提升到 `166/14`（executed=180）。
 
 ## 3. 分阶段状态
 
@@ -68,7 +71,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`），其中 `eval-code/direct` 的 arguments/var 环境交互仍需重点收敛。
+4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`），其中 `eval-code/direct` 的 arguments/annex-b function 声明交互仍需重点收敛。
 
 ## 5. 下一步执行
 

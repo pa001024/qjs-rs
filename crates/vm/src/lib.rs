@@ -188,6 +188,12 @@ struct EvalContext {
     has_arguments_param: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalCallKind {
+    Direct,
+    Indirect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GcStats {
     pub roots: usize,
@@ -1790,6 +1796,14 @@ impl Vm {
         let args = self.pop_call_arguments(arg_count)?;
         let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
+            return self.execute_eval_argument(
+                args.first(),
+                realm,
+                caller_strict,
+                EvalCallKind::Direct,
+            );
+        }
         let this_arg = match reference {
             IdentifierReference::Property {
                 base,
@@ -1812,6 +1826,14 @@ impl Vm {
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
+            return self.execute_eval_argument(
+                args.first(),
+                realm,
+                caller_strict,
+                EvalCallKind::Direct,
+            );
+        }
         let this_arg = match reference {
             IdentifierReference::Property {
                 base,
@@ -2744,11 +2766,12 @@ impl Vm {
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         match native {
-            NativeFunction::Eval => match args.first() {
-                Some(JsValue::String(source)) => self.execute_eval(source, realm, caller_strict),
-                Some(value) => Ok(value.clone()),
-                None => Ok(JsValue::Undefined),
-            },
+            NativeFunction::Eval => self.execute_eval_argument(
+                args.first(),
+                realm,
+                caller_strict,
+                EvalCallKind::Indirect,
+            ),
             NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => Ok(self.execute_array_constructor(&args)),
@@ -3112,12 +3135,30 @@ impl Vm {
         Ok(object)
     }
 
+    fn execute_eval_argument(
+        &mut self,
+        arg: Option<&JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+        call_kind: EvalCallKind,
+    ) -> Result<JsValue, VmError> {
+        match arg {
+            Some(JsValue::String(source)) => {
+                self.execute_eval(source, realm, caller_strict, call_kind)
+            }
+            Some(value) => Ok(value.clone()),
+            None => Ok(JsValue::Undefined),
+        }
+    }
+
     fn execute_eval(
         &mut self,
         source: &str,
         realm: &Realm,
-        force_strict: bool,
+        caller_strict: bool,
+        call_kind: EvalCallKind,
     ) -> Result<JsValue, VmError> {
+        let force_strict = matches!(call_kind, EvalCallKind::Direct) && caller_strict;
         let parse_source: Cow<'_, str> = if force_strict {
             Cow::Owned(format!("\"use strict\";\n{source}"))
         } else {
@@ -3126,7 +3167,8 @@ impl Vm {
         let script = parse_script(parse_source.as_ref()).map_err(|err| {
             VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
         })?;
-        if self.current_eval_context_rejects_arguments_declaration()
+        if matches!(call_kind, EvalCallKind::Direct)
+            && self.current_eval_context_rejects_arguments_declaration()
             && Self::script_declares_arguments_binding(&script)
         {
             return Err(VmError::UncaughtException(JsValue::String(
@@ -3134,7 +3176,40 @@ impl Vm {
             )));
         }
         let chunk = compile_script(&script);
-        self.execute_inline_chunk(&chunk, realm, force_strict)
+        let eval_strict = self.code_is_strict(&chunk.code);
+        let saved_scopes = self.scopes.clone();
+        let saved_var_scope_stack = self.var_scope_stack.clone();
+        let saved_with_objects = self.with_objects.clone();
+
+        match call_kind {
+            EvalCallKind::Direct => {
+                if eval_strict {
+                    self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+                    self.var_scope_stack.push(self.scopes.len().saturating_sub(1));
+                }
+            }
+            EvalCallKind::Indirect => {
+                let global_scope = self
+                    .scopes
+                    .first()
+                    .cloned()
+                    .ok_or(VmError::ScopeUnderflow)?;
+                if eval_strict {
+                    self.scopes = vec![global_scope, Rc::new(RefCell::new(BTreeMap::new()))];
+                    self.var_scope_stack = vec![1];
+                } else {
+                    self.scopes = vec![global_scope];
+                    self.var_scope_stack = vec![0];
+                }
+                self.with_objects.clear();
+            }
+        }
+
+        let result = self.execute_inline_chunk(&chunk, realm, false);
+        self.scopes = saved_scopes;
+        self.var_scope_stack = saved_var_scope_stack;
+        self.with_objects = saved_with_objects;
+        result
     }
 
     fn execute_function_constructor(
