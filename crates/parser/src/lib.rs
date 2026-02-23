@@ -2267,11 +2267,12 @@ impl Parser {
         let mut catch_param = None;
         let mut catch_block = None;
         if self.matches_keyword("catch") {
-            self.expect(TokenKind::LParen, "expected '(' after 'catch'")?;
-            catch_param = Some(Identifier(
-                self.expect_binding_identifier("expected catch binding identifier")?,
-            ));
-            self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
+            if self.matches(&TokenKind::LParen) {
+                catch_param = Some(Identifier(
+                    self.expect_binding_identifier("expected catch binding identifier")?,
+                ));
+                self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
+            }
             catch_block = Some(self.parse_block_body(
                 "expected '{' before catch block",
                 "expected '}' after catch block",
@@ -3434,13 +3435,39 @@ impl Parser {
                 property: "prototype".to_string(),
                 value: Box::new(Expr::ObjectLiteral(vec![])),
             }),
-            Stmt::Expression(Expr::AssignMember {
-                object: Box::new(Expr::Member {
-                    object: Box::new(Expr::Identifier(class_ident.clone())),
-                    property: "prototype".to_string(),
+            Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "defineProperty".to_string(),
                 }),
-                property: "constructor".to_string(),
-                value: Box::new(Expr::Identifier(class_ident.clone())),
+                arguments: vec![
+                    Expr::Member {
+                        object: Box::new(Expr::Identifier(class_ident.clone())),
+                        property: "prototype".to_string(),
+                    },
+                    Expr::String(StringLiteral {
+                        value: "constructor".to_string(),
+                        has_escape: false,
+                    }),
+                    Expr::ObjectLiteral(vec![
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("value".to_string()),
+                            value: Expr::Identifier(class_ident.clone()),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("writable".to_string()),
+                            value: Expr::Bool(true),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("enumerable".to_string()),
+                            value: Expr::Bool(false),
+                        },
+                        ObjectProperty {
+                            key: ObjectPropertyKey::Static("configurable".to_string()),
+                            value: Expr::Bool(true),
+                        },
+                    ]),
+                ],
             }),
         ];
 

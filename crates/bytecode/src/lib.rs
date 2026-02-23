@@ -701,6 +701,17 @@ impl Compiler {
                 cases,
             } => {
                 let temp_name = self.next_switch_temp_name();
+                let completion_name = if keep_value {
+                    let name = self.next_loop_completion_temp_name();
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::DefineVariable {
+                        name: name.clone(),
+                        mutable: true,
+                    });
+                    Some(name)
+                } else {
+                    None
+                };
                 code.push(Opcode::EnterScope);
                 self.scope_depth += 1;
 
@@ -740,9 +751,17 @@ impl Compiler {
                     handler_depth: self.handler_depth,
                     break_jumps: Vec::new(),
                 });
+                if let Some(name) = &completion_name {
+                    self.loop_completion_targets.push(name.clone());
+                }
                 for (index, SwitchCase { consequent, .. }) in cases.iter().enumerate() {
                     case_start_positions[index] = code.len();
                     self.compile_statement_list(consequent, code, false);
+                }
+                if completion_name.is_some() {
+                    self.loop_completion_targets
+                        .pop()
+                        .expect("switch completion target should exist");
                 }
 
                 let switch_end = code.len();
@@ -762,15 +781,13 @@ impl Compiler {
                     .unwrap_or(switch_end);
                 code[jump_no_match_pos] = Opcode::Jump(no_match_target);
 
+                if let Some(name) = completion_name {
+                    code.push(Opcode::LoadIdentifier(name));
+                }
                 code.push(Opcode::ExitScope);
                 self.scope_depth = self.scope_depth.saturating_sub(1);
 
-                if keep_value {
-                    code.push(Opcode::LoadUndefined);
-                    true
-                } else {
-                    false
-                }
+                keep_value
             }
             Stmt::Throw(expr) => {
                 self.compile_expr(expr, code);
@@ -939,6 +956,17 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         keep_value: bool,
     ) -> bool {
+        let completion_name = if keep_value {
+            let name = self.next_loop_completion_temp_name();
+            code.push(Opcode::LoadUndefined);
+            code.push(Opcode::DefineVariable {
+                name: name.clone(),
+                mutable: true,
+            });
+            Some(name)
+        } else {
+            None
+        };
         let handler_pos = code.len();
         code.push(Opcode::PushExceptionHandler {
             catch_target: None,
@@ -946,7 +974,21 @@ impl Compiler {
         });
         self.handler_depth += 1;
 
-        self.compile_scoped_statement_list(try_block, code);
+        code.push(Opcode::EnterScope);
+        self.scope_depth += 1;
+        let try_value = self.compile_statement_list(try_block, code, keep_value);
+        if let Some(name) = &completion_name {
+            if try_value {
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            } else {
+                code.push(Opcode::LoadUndefined);
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            }
+        }
+        code.push(Opcode::ExitScope);
+        self.scope_depth = self.scope_depth.saturating_sub(1);
         code.push(Opcode::PopExceptionHandler);
         self.handler_depth = self.handler_depth.saturating_sub(1);
 
@@ -974,14 +1016,24 @@ impl Compiler {
             }
         }
 
-        self.compile_statement_list(catch_block, code, false);
+        let catch_value = self.compile_statement_list(catch_block, code, keep_value);
+        if let Some(name) = &completion_name {
+            if catch_value {
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            } else {
+                code.push(Opcode::LoadUndefined);
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            }
+        }
         code.push(Opcode::ExitScope);
         self.scope_depth = self.scope_depth.saturating_sub(1);
         let end = code.len();
         code[jump_after_catch_pos] = Opcode::Jump(end);
 
-        if keep_value {
-            code.push(Opcode::LoadUndefined);
+        if let Some(name) = completion_name {
+            code.push(Opcode::LoadIdentifier(name));
             true
         } else {
             false
@@ -2834,6 +2886,11 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_1".to_string(),
+                    mutable: true,
+                },
                 Opcode::EnterScope,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::DefineVariable {
@@ -2843,20 +2900,22 @@ mod tests {
                 Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Eq,
-                Opcode::JumpIfFalse(8),
-                Opcode::Jump(9),
-                Opcode::Jump(14),
+                Opcode::JumpIfFalse(10),
+                Opcode::Jump(11),
+                Opcode::Jump(17),
                 Opcode::ResolveIdentifierReference("y".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
-                Opcode::Jump(18),
+                Opcode::Jump(22),
                 Opcode::ResolveIdentifierReference("y".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
+                Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
                 Opcode::ExitScope,
-                Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -2880,6 +2939,11 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_1".to_string(),
+                    mutable: true,
+                },
                 Opcode::EnterScope,
                 Opcode::LoadNumber(1.0),
                 Opcode::DefineVariable {
@@ -2889,15 +2953,15 @@ mod tests {
                 Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Eq,
-                Opcode::JumpIfFalse(8),
-                Opcode::Jump(9),
-                Opcode::Jump(13),
+                Opcode::JumpIfFalse(10),
+                Opcode::Jump(11),
+                Opcode::Jump(15),
                 Opcode::EnterScope,
                 Opcode::ExitScope,
-                Opcode::Jump(13),
+                Opcode::Jump(15),
                 Opcode::ExitScope,
+                Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
                 Opcode::ExitScope,
-                Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -2922,16 +2986,23 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_0".to_string(),
+                    mutable: true,
+                },
                 Opcode::PushExceptionHandler {
-                    catch_target: Some(7),
+                    catch_target: Some(11),
                     finally_target: None,
                 },
                 Opcode::EnterScope,
                 Opcode::LoadNumber(1.0),
                 Opcode::Throw,
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::Pop,
                 Opcode::ExitScope,
                 Opcode::PopExceptionHandler,
-                Opcode::Jump(13),
+                Opcode::Jump(18),
                 Opcode::EnterScope,
                 Opcode::LoadException,
                 Opcode::DefineVariable {
@@ -2939,9 +3010,10 @@ mod tests {
                     mutable: true,
                 },
                 Opcode::LoadIdentifier("e".to_string()),
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::ExitScope,
-                Opcode::LoadUndefined,
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],

@@ -35,5 +35,6 @@
 
 ## QuickJS 对照锚点（本轮）
 - `D:\dev\QuickJS\quickjs.c:7276` `JS_SetPrototypeInternal`：对象原型可显式设为 `null`，用于对齐 `Object.setPrototypeOf(fn, null)` 行为。
+- `D:\dev\QuickJS\quickjs.c:16519-16529` class heritage 校验：`extends` 目标需是 constructor，且其 `prototype` 必须为 object/null（支持 getter 取值路径）。
 - `D:\dev\QuickJS\quickjs.c:16566` class 构造注释：`constructor` 属性先定义，但可被 computed property names 覆盖。
 - `D:\dev\QuickJS\quickjs.c:38645` `js_object_defineProperty`：对所有 `JS_TAG_OBJECT` 生效（函数同属对象），用于对齐“函数目标上的 defineProperty/accessor”语义。

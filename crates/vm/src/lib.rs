@@ -741,6 +741,7 @@ impl Vm {
                 }
                 Opcode::DefineVariable { name, mutable } => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.maybe_set_inferred_function_name(&value, name);
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
@@ -799,6 +800,7 @@ impl Vm {
                 }
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    self.maybe_set_inferred_function_name(&value, name);
                     if let Some(binding_id) = self.resolve_binding_id(name) {
                         let binding = self
                             .bindings
@@ -4463,16 +4465,23 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match reference {
             IdentifierReference::Binding { name, binding_id } => {
+                {
+                    let binding = self
+                        .bindings
+                        .get(&binding_id)
+                        .ok_or(VmError::ScopeUnderflow)?;
+                    if matches!(binding.value, JsValue::Uninitialized) {
+                        return Err(VmError::UnknownIdentifier(name));
+                    }
+                    if !binding.mutable {
+                        return Err(VmError::ImmutableBinding(name));
+                    }
+                }
+                self.maybe_set_inferred_function_name(&value, &name);
                 let binding = self
                     .bindings
                     .get_mut(&binding_id)
                     .ok_or(VmError::ScopeUnderflow)?;
-                if matches!(binding.value, JsValue::Uninitialized) {
-                    return Err(VmError::UnknownIdentifier(name));
-                }
-                if !binding.mutable {
-                    return Err(VmError::ImmutableBinding(name));
-                }
                 binding.value = value.clone();
                 Ok(value)
             }
@@ -5351,6 +5360,40 @@ impl Vm {
         object.properties.insert(property.clone(), value.clone());
         object.property_attributes.entry(property).or_default();
         value
+    }
+
+    fn maybe_set_inferred_function_name(&mut self, value: &JsValue, binding_name: &str) {
+        let JsValue::Function(closure_id) = value else {
+            return;
+        };
+        let has_name = self
+            .closure_objects
+            .get(closure_id)
+            .and_then(|object| object.properties.get("name"))
+            .is_some();
+        if has_name {
+            return;
+        }
+        let inferred = self
+            .closures
+            .get(closure_id)
+            .and_then(|closure| closure.functions.get(closure.function_id))
+            .map(|function| function.name.as_str())
+            .filter(|name| !name.is_empty() && *name != "<anonymous>")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| binding_name.to_string());
+        let object = self.closure_objects.entry(*closure_id).or_default();
+        object
+            .properties
+            .insert("name".to_string(), JsValue::String(inferred));
+        object.property_attributes.insert(
+            "name".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
     }
 
     fn set_function_property(
