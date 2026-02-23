@@ -15,7 +15,9 @@ const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
+const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
@@ -261,6 +263,7 @@ pub struct Vm {
     closure_objects: BTreeMap<u64, JsObject>,
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
+    host_function_objects: BTreeMap<u64, JsObject>,
     next_host_function_id: u64,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
@@ -319,6 +322,7 @@ impl Vm {
         self.closure_objects.clear();
         self.next_closure_id = 0;
         self.host_functions.clear();
+        self.host_function_objects.clear();
         self.next_host_function_id = 0;
         self.host_pins.clear();
         self.next_host_pin_id = 0;
@@ -660,6 +664,9 @@ impl Vm {
             JsValue::HostFunction(host_id) => {
                 if !marked_hosts.insert(host_id) {
                     return;
+                }
+                if let Some(host_object) = self.host_function_objects.get(&host_id).cloned() {
+                    self.enqueue_object_values(host_object);
                 }
                 if let Some(host) = self.host_functions.get(&host_id).cloned() {
                     self.enqueue_host_function_values(host);
@@ -2338,48 +2345,59 @@ impl Vm {
             .get(&this_binding_id)
             .map(|binding| binding.value.clone())
             .ok_or(VmError::ScopeUnderflow)?;
+        let already_initialized = !matches!(this_value, JsValue::Uninitialized);
 
-        match callee {
+        let pending_this = self
+            .resolve_binding_id(DERIVED_THIS_BINDING)
+            .and_then(|binding_id| self.bindings.get(&binding_id).map(|binding| binding.value.clone()))
+            .unwrap_or(JsValue::Undefined);
+        let super_this = if already_initialized {
+            this_value.clone()
+        } else {
+            pending_this.clone()
+        };
+
+        let initialized_this = match callee {
             JsValue::Function(closure_id) => {
                 if self.closure_is_arrow(closure_id)? || self.closure_has_no_prototype(closure_id) {
                     return Err(VmError::NotCallable);
                 }
                 let result =
-                    self.execute_closure_call(closure_id, args, Some(this_value.clone()), realm)?;
+                    self.execute_closure_call(closure_id, args, Some(super_this.clone()), realm)?;
                 if matches!(result, JsValue::Object(_)) {
-                    Ok(result)
+                    result
                 } else {
-                    Ok(this_value)
+                    super_this.clone()
                 }
             }
             JsValue::Object(object_id) => {
                 if self.is_class_constructor_object(object_id) {
-                    self.construct_from_class_object(object_id, realm)
+                    self.construct_from_class_object(object_id, realm)?
                 } else {
-                    Err(VmError::NotCallable)
+                    return Err(VmError::NotCallable);
                 }
             }
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
-                if matches!(native, NativeFunction::DateConstructor) {
-                    return self.execute_date_constructor(&args);
-                }
-                if matches!(
+                let result = if matches!(native, NativeFunction::DateConstructor) {
+                    self.execute_date_constructor(&args)?
+                } else if matches!(
                     native,
                     NativeFunction::NumberConstructor
                         | NativeFunction::BooleanConstructor
                         | NativeFunction::StringConstructor
                 ) {
-                    return self.execute_boxed_primitive_constructor(
-                        native,
-                        args,
-                        realm,
-                        caller_strict,
-                    );
+                    self.execute_boxed_primitive_constructor(native, args, realm, caller_strict)?
+                } else {
+                    self.execute_native_call(native, args, realm, caller_strict)?
+                };
+                if matches!(result, JsValue::Object(_)) {
+                    result
+                } else {
+                    super_this.clone()
                 }
-                self.execute_native_call(native, args, realm, caller_strict)
             }
             JsValue::HostFunction(host_id) => {
                 let constructed = self.create_object_value();
@@ -2387,13 +2405,30 @@ impl Vm {
                 let result =
                     self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
                 if matches!(result, JsValue::Object(_)) {
-                    Ok(result)
+                    result
                 } else {
-                    Ok(constructed)
+                    constructed
                 }
             }
-            _ => Err(VmError::NotCallable),
+            _ => return Err(VmError::NotCallable),
+        };
+
+        if already_initialized {
+            return Err(VmError::UnknownIdentifier("this".to_string()));
         }
+
+        if !matches!(initialized_this, JsValue::Object(_)) {
+            return Err(VmError::TypeError(
+                "super constructor did not initialize this",
+            ));
+        }
+
+        let this_binding = self
+            .bindings
+            .get_mut(&this_binding_id)
+            .ok_or(VmError::ScopeUnderflow)?;
+        this_binding.value = initialized_this.clone();
+        Ok(initialized_this)
     }
 
     fn pop_call_arguments(&mut self, arg_count: usize) -> Result<Vec<JsValue>, VmError> {
@@ -2560,6 +2595,7 @@ impl Vm {
             .cloned()
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         let is_arrow_function = self.function_is_arrow(&function);
+        let is_derived_class_constructor = self.closure_is_derived_class_constructor(closure_id);
         let non_simple_params = self.function_has_non_simple_params(&function);
         let has_arguments_param = function.params.iter().any(|name| name == "arguments");
         let mapped_arguments_enabled = !closure.strict && !is_arrow_function && !non_simple_params;
@@ -2583,13 +2619,21 @@ impl Vm {
             param_binding_ids.push(binding_id);
         }
         if !is_arrow_function {
-            let this_value = if closure.strict {
-                this_arg.unwrap_or(JsValue::Undefined)
+            if is_derived_class_constructor {
+                let derived_this_value = this_arg.unwrap_or(JsValue::Undefined);
+                let derived_this_binding_id = self.create_binding(derived_this_value, true);
+                frame_scope.insert(DERIVED_THIS_BINDING.to_string(), derived_this_binding_id);
+                let this_binding_id = self.create_binding(JsValue::Uninitialized, true);
+                frame_scope.insert("this".to_string(), this_binding_id);
             } else {
-                self.coerce_this_for_sloppy(this_arg)
-            };
-            let this_binding_id = self.create_binding(this_value, true);
-            frame_scope.insert("this".to_string(), this_binding_id);
+                let this_value = if closure.strict {
+                    this_arg.unwrap_or(JsValue::Undefined)
+                } else {
+                    self.coerce_this_for_sloppy(this_arg)
+                };
+                let this_binding_id = self.create_binding(this_value, true);
+                frame_scope.insert("this".to_string(), this_binding_id);
+            }
             let arguments_value = self.create_object_value();
             let arguments_id = match arguments_value {
                 JsValue::Object(id) => id,
@@ -2683,7 +2727,7 @@ impl Vm {
             closure.strict,
         );
         let _ = self.eval_contexts.pop();
-        let value = match signal {
+        let mut value = match signal {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
             Err(err) => {
@@ -2695,6 +2739,51 @@ impl Vm {
                 return Err(err);
             }
         };
+
+        if is_derived_class_constructor {
+            let this_binding_id = match self.resolve_binding_id("this") {
+                Some(binding_id) => binding_id,
+                None => {
+                    self.restore_caller_state(
+                        saved_handlers,
+                        saved_var_scope_stack,
+                        saved_param_init_body_scopes,
+                    );
+                    return Err(VmError::UnknownIdentifier("this".to_string()));
+                }
+            };
+            let this_value = match self.bindings.get(&this_binding_id) {
+                Some(binding) => binding.value.clone(),
+                None => {
+                    self.restore_caller_state(
+                        saved_handlers,
+                        saved_var_scope_stack,
+                        saved_param_init_body_scopes,
+                    );
+                    return Err(VmError::ScopeUnderflow);
+                }
+            };
+            if matches!(this_value, JsValue::Uninitialized) {
+                self.restore_caller_state(
+                    saved_handlers,
+                    saved_var_scope_stack,
+                    saved_param_init_body_scopes,
+                );
+                return Err(VmError::UnknownIdentifier("this".to_string()));
+            }
+            if matches!(value, JsValue::Undefined) {
+                value = this_value;
+            } else if !matches!(value, JsValue::Object(_)) {
+                self.restore_caller_state(
+                    saved_handlers,
+                    saved_var_scope_stack,
+                    saved_param_init_body_scopes,
+                );
+                return Err(VmError::TypeError(
+                    "derived class constructor must return object or undefined",
+                ));
+            }
+        }
 
         self.restore_caller_state(
             saved_handlers,
@@ -4200,6 +4289,7 @@ impl Vm {
         enum DefinePropertyTarget {
             Object(ObjectId),
             Function(u64),
+            HostFunction(u64),
         }
 
         let target = match args.first() {
@@ -4209,6 +4299,12 @@ impl Vm {
                     return Err(VmError::UnknownClosure(*closure_id));
                 }
                 DefinePropertyTarget::Function(*closure_id)
+            }
+            Some(JsValue::HostFunction(host_id)) => {
+                if !self.host_functions.contains_key(host_id) {
+                    return Err(VmError::UnknownHostFunction(*host_id));
+                }
+                DefinePropertyTarget::HostFunction(*host_id)
             }
             _ => {
                 return Err(VmError::TypeError(
@@ -4234,6 +4330,11 @@ impl Vm {
             DefinePropertyTarget::Function(closure_id) => self
                 .closure_objects
                 .get(&closure_id)
+                .cloned()
+                .unwrap_or_default(),
+            DefinePropertyTarget::HostFunction(host_id) => self
+                .host_function_objects
+                .get(&host_id)
                 .cloned()
                 .unwrap_or_default(),
         };
@@ -4477,6 +4578,10 @@ impl Vm {
             DefinePropertyTarget::Function(closure_id) => {
                 self.closure_objects.insert(closure_id, target_object);
                 Ok(JsValue::Function(closure_id))
+            }
+            DefinePropertyTarget::HostFunction(host_id) => {
+                self.host_function_objects.insert(host_id, target_object);
+                Ok(JsValue::HostFunction(host_id))
             }
         }
     }
@@ -4919,11 +5024,51 @@ impl Vm {
         if !self.host_functions.contains_key(&host_id) {
             return Err(VmError::UnknownHostFunction(host_id));
         }
-        if property != "length" {
+
+        let (data_value, getter_value, setter_value, attributes) = self
+            .host_function_objects
+            .get(&host_id)
+            .map(|object| {
+                (
+                    object.properties.get(property).cloned(),
+                    object.getters.get(property).cloned(),
+                    object.setters.get(property).cloned(),
+                    object.property_attributes.get(property).copied(),
+                )
+            })
+            .unwrap_or((None, None, None, None));
+
+        if let Some(value) = data_value {
+            let attributes = attributes.unwrap_or(PropertyAttributes::default());
+            return Ok(self.create_descriptor_object(vec![
+                ("value", value),
+                ("writable", JsValue::Bool(attributes.writable)),
+                ("enumerable", JsValue::Bool(attributes.enumerable)),
+                ("configurable", JsValue::Bool(attributes.configurable)),
+            ]));
+        }
+        if getter_value.is_some() || setter_value.is_some() {
+            let attributes = attributes.unwrap_or(PropertyAttributes {
+                writable: false,
+                enumerable: true,
+                configurable: true,
+            });
+            return Ok(self.create_descriptor_object(vec![
+                ("get", getter_value.unwrap_or(JsValue::Undefined)),
+                ("set", setter_value.unwrap_or(JsValue::Undefined)),
+                ("enumerable", JsValue::Bool(attributes.enumerable)),
+                ("configurable", JsValue::Bool(attributes.configurable)),
+            ]));
+        }
+
+        if !Self::host_function_has_default_property(property) {
             return Ok(JsValue::Undefined);
         }
+
+        let empty_realm = Realm::default();
+        let value = self.get_host_function_property(host_id, property, &empty_realm)?;
         Ok(self.create_descriptor_object(vec![
-            ("value", JsValue::Number(0.0)),
+            ("value", value),
             ("writable", JsValue::Bool(true)),
             ("enumerable", JsValue::Bool(false)),
             ("configurable", JsValue::Bool(true)),
@@ -5409,10 +5554,19 @@ impl Vm {
                 self.get_native_function_property(*native, property),
                 JsValue::Undefined
             )),
-            JsValue::HostFunction(host_id) => Ok(!matches!(
-                self.get_host_function_property(*host_id, property)?,
-                JsValue::Undefined
-            )),
+            JsValue::HostFunction(host_id) => {
+                if !self.host_functions.contains_key(host_id) {
+                    return Err(VmError::UnknownHostFunction(*host_id));
+                }
+                if self.host_function_objects.get(host_id).is_some_and(|object| {
+                    object.properties.contains_key(property)
+                        || object.getters.contains_key(property)
+                        || object.setters.contains_key(property)
+                }) {
+                    return Ok(true);
+                }
+                Ok(Self::host_function_has_default_property(property))
+            }
             JsValue::String(_receiver) => {
                 if property == "length" {
                     return Ok(true);
@@ -5483,7 +5637,7 @@ impl Vm {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
                 }
-                self.get_host_function_property(host_id, property)
+                self.get_host_function_property(host_id, property, realm)
             }
             JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
             primitive @ (JsValue::Number(_) | JsValue::Bool(_)) => {
@@ -5551,7 +5705,7 @@ impl Vm {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
                 }
-                self.get_host_function_property(host_id, property)
+                self.get_host_function_property(host_id, property, realm)
             }
             JsValue::String(base_string) => Ok(self.get_string_property(&base_string, property)),
             _ => Err(VmError::TypeError("property access expects object")),
@@ -7029,6 +7183,13 @@ impl Vm {
             .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
     }
 
+    fn closure_is_derived_class_constructor(&self, closure_id: u64) -> bool {
+        self.closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get(CLASS_DERIVED_CONSTRUCTOR_MARKER))
+            .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
+    }
+
     fn closure_has_no_prototype(&self, closure_id: u64) -> bool {
         if self
             .closure_objects
@@ -7657,10 +7818,24 @@ impl Vm {
                 if !self.host_functions.contains_key(host_id) {
                     return Err(VmError::UnknownHostFunction(*host_id));
                 }
-                Ok(property == "length")
+                if self.host_function_objects.get(host_id).is_some_and(|object| {
+                    object.properties.contains_key(property)
+                        || object.getters.contains_key(property)
+                        || object.setters.contains_key(property)
+                }) {
+                    return Ok(true);
+                }
+                Ok(Self::host_function_has_default_property(property))
             }
             _ => Ok(false),
         }
+    }
+
+    fn host_function_has_default_property(property: &str) -> bool {
+        matches!(
+            property,
+            "length" | "call" | "apply" | "bind" | "toString" | "valueOf" | "hasOwnProperty" | "constructor"
+        )
     }
 
     fn native_function_has_own_property(&self, native: NativeFunction, property: &str) -> bool {
@@ -7709,9 +7884,25 @@ impl Vm {
                 | (NativeFunction::Assert, "notSameValue")
                 | (NativeFunction::Assert, "throws")
                 | (NativeFunction::Assert, "compareArray")
+                | (NativeFunction::FunctionConstructor, "prototype")
+                | (NativeFunction::Test262Error, "prototype")
+                | (NativeFunction::ObjectConstructor, "prototype")
+                | (NativeFunction::ArrayConstructor, "prototype")
+                | (NativeFunction::StringConstructor, "prototype")
+                | (NativeFunction::NumberConstructor, "prototype")
+                | (NativeFunction::BooleanConstructor, "prototype")
+                | (NativeFunction::ErrorConstructor, "prototype")
+                | (NativeFunction::TypeErrorConstructor, "prototype")
+                | (NativeFunction::ReferenceErrorConstructor, "prototype")
+                | (NativeFunction::SyntaxErrorConstructor, "prototype")
+                | (NativeFunction::EvalErrorConstructor, "prototype")
+                | (NativeFunction::RangeErrorConstructor, "prototype")
+                | (NativeFunction::URIErrorConstructor, "prototype")
+                | (NativeFunction::DateConstructor, "prototype")
+                | (NativeFunction::RegExpConstructor, "prototype")
+                | (NativeFunction::SymbolConstructor, "prototype")
                 | (_, "length")
                 | (_, "constructor")
-                | (_, "prototype")
         )
     }
 
@@ -8060,7 +8251,10 @@ impl Vm {
             JsValue::Function(closure_id) => {
                 Ok(self.delete_closure_property(closure_id, &property))
             }
-            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(true),
+            JsValue::HostFunction(host_id) => {
+                Ok(self.delete_host_function_property(host_id, &property))
+            }
+            JsValue::NativeFunction(_) => Ok(true),
             JsValue::Null | JsValue::Undefined | JsValue::Uninitialized => {
                 Err(VmError::TypeError("property access expects object"))
             }
@@ -8116,14 +8310,66 @@ impl Vm {
         true
     }
 
+    fn delete_host_function_property(&mut self, host_id: u64, property: &str) -> bool {
+        if !self.host_functions.contains_key(&host_id) {
+            return false;
+        }
+        let Some(object) = self.host_function_objects.get_mut(&host_id) else {
+            return true;
+        };
+        let is_configurable = object
+            .property_attributes
+            .get(property)
+            .map(|attributes| attributes.configurable)
+            .unwrap_or(true);
+        if !is_configurable {
+            return false;
+        }
+        object.properties.remove(property);
+        object.getters.remove(property);
+        object.setters.remove(property);
+        object.property_attributes.remove(property);
+        object.argument_mappings.remove(property);
+        true
+    }
+
     fn get_host_function_property(
         &mut self,
         host_id: u64,
         property: &str,
+        realm: &Realm,
     ) -> Result<JsValue, VmError> {
         if !self.host_functions.contains_key(&host_id) {
             return Err(VmError::UnknownHostFunction(host_id));
         }
+
+        let (data_value, getter_value, has_setter) = self
+            .host_function_objects
+            .get(&host_id)
+            .map(|object| {
+                (
+                    object.properties.get(property).cloned(),
+                    object.getters.get(property).cloned(),
+                    object.setters.contains_key(property),
+                )
+            })
+            .unwrap_or((None, None, false));
+        if let Some(getter) = getter_value {
+            return self.execute_callable(
+                getter,
+                Some(JsValue::HostFunction(host_id)),
+                Vec::new(),
+                realm,
+                false,
+            );
+        }
+        if has_setter {
+            return Ok(JsValue::Undefined);
+        }
+        if let Some(value) = data_value {
+            return Ok(value);
+        }
+
         match property {
             "hasOwnProperty" => Ok(
                 self.create_host_function_value(HostFunction::HasOwnProperty {
@@ -8362,7 +8608,15 @@ impl Vm {
             (NativeFunction::TypeErrorConstructor, "prototype") => {
                 self.type_error_prototype_value()
             }
+            (NativeFunction::Test262Error, "prototype") => self.error_prototype_value(),
+            (NativeFunction::ReferenceErrorConstructor, "prototype")
+            | (NativeFunction::SyntaxErrorConstructor, "prototype")
+            | (NativeFunction::EvalErrorConstructor, "prototype")
+            | (NativeFunction::RangeErrorConstructor, "prototype")
+            | (NativeFunction::URIErrorConstructor, "prototype") => self.error_prototype_value(),
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
+            (NativeFunction::RegExpConstructor, "prototype")
+            | (NativeFunction::SymbolConstructor, "prototype") => self.create_object_value(),
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
             }
@@ -8448,7 +8702,6 @@ impl Vm {
                 method: FunctionMethod::Bind,
             }),
             (_, "length") => JsValue::Number(1.0),
-            (_, "prototype") => self.create_object_value(),
             _ => JsValue::Undefined,
         }
     }
@@ -8803,7 +9056,7 @@ impl Vm {
                 }
             }
             JsValue::HostFunction(host_id) => {
-                let to_string = self.get_host_function_property(host_id, "toString")?;
+                let to_string = self.get_host_function_property(host_id, "toString", realm)?;
                 if Self::is_callable_value(&to_string) {
                     let primitive = self.execute_callable(
                         to_string,
@@ -10482,6 +10735,123 @@ mod tests {
         let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn class_extends_observes_host_function_prototype_getter() {
+        let script = parse_script(
+            "var calls = 0;\
+             var Base = function() {}.bind();\
+             Object.defineProperty(Base, 'prototype', {\
+               get: function() { calls++; return null; },\
+               configurable: true\
+             });\
+             class C extends Base {}\
+             Object.defineProperty(Base, 'prototype', {\
+               get: function() { calls++; return 42; },\
+               configurable: true\
+             });\
+             var threw = false;\
+             try { class D extends Base {} } catch (e) { threw = (e instanceof TypeError); }\
+             threw && calls === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn derived_constructor_accessing_this_before_super_throws_reference_error() {
+        let script = parse_script(
+            "class Base {}\
+             var threw = false;\
+             class Sub extends Base {\
+               constructor() {\
+                 try { this.x = 1; } catch (e) { threw = e instanceof ReferenceError; }\
+                 super();\
+               }\
+             }\
+             new Sub();\
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn derived_constructor_second_super_throws_after_side_effects() {
+        let script = parse_script(
+            "var called = 0;\
+             class Base { constructor() { called++; } }\
+             class Sub extends Base {\
+               constructor() {\
+                 super();\
+                 var threw = false;\
+                 try { super(); } catch (e) { threw = e instanceof ReferenceError; }\
+                 this.ok = threw;\
+               }\
+             }\
+             var r = new Sub();\
+             r.ok && called === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn derived_constructor_without_super_throws_reference_error() {
+        let script = parse_script(
+            "class Base {}\
+             class Bad extends Base { constructor() {} }\
+             var threw = false;\
+             try { new Bad(); } catch (e) { threw = e instanceof ReferenceError; }\
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]

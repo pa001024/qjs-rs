@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4781`、`failed=219`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v12.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4810`、`failed=190`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260223-v17.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -96,6 +96,11 @@
   - parser 修复 conditional `?:` 的 consequent 分支在 `no_in` 上下文中的 `in` 解析（按规范强制 `+In`），`language/expressions/conditional` 子集收敛至 `18/0`。
   - VM `instanceof` 语义补齐：原型链遍历扩展到 function-like 原型值、`Error/TypeError` 原型链稳定化，并支持在 `Object.defineProperty(Function.prototype, "prototype", { get() {} })` 场景下按需触发 getter（primitive LHS 保持不触发）。
   - 子集回归（latest+7）：`language/expressions/property-accessors` 保持 `21/0`，`language/expressions/in` 保持 `15/1`，`language/expressions/typeof` 保持 `13/0`，`language/expressions/conditional` 保持 `18/0`，`language/expressions/instanceof` 提升至 `39/0`，`language/rest-parameters` 保持 `8/0`，`language/expressions/arrow-function` 保持 `71/4`，`language` 基线提升至 `4781/219`。
+  - VM `<< >> >>>` 对齐 QuickJS/ECMAScript 左操作数先 `ToInt32/ToUint32` 的求值顺序，并补齐移位 coercion 顺序回归测试。
+  - VM `Object.defineProperty` 新增 `HostFunction` 目标支持（含 descriptor/访问器存储、读取、`getOwnPropertyDescriptor` 与 GC 可达性），修复 `function(){}.bind()` 上定义 `prototype` 访问器的 class 继承路径。
+  - VM 收紧 `NativeFunction.prototype` 暴露策略（仅构造器路径保留 `prototype`，并保留 `Test262Error` 构造器原型），修复 `class definition/invalid-extends` 语义偏差。
+  - parser/VM 为 `class extends` 构造器新增派生标记与 `this` 初始化状态机：未调用 `super()` 前访问 `this` 抛 `ReferenceError`、二次 `super()` 在保持副作用顺序后抛 `ReferenceError`、派生构造器返回值规则收敛（仅允许 object/undefined）。
+  - 子集回归（latest+8）：`language/statements/class/definition` 提升至 `32/1`（仅剩 `side-effects-in-extends`），`language/statements/class` 提升至 `138/50`，`language` 基线提升至 `4810/190`。
 
 ## 3. 分阶段状态
 
