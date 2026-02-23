@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4531`、`failed=469`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4536`、`failed=464`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -39,6 +39,7 @@
   - parser 新增可选 `catch` 绑定语法（`catch { ... }`），修复 `scope-catch-param-*` parse 失败簇。
   - bytecode 修复 `switch` 与 `try/catch` completion value 传播（保留分支最后求值结果，不再统一丢成 `undefined`），清理一批 `statements/(switch|try)/cptn-*` 失败。
   - class lowering 对齐 descriptor 细节：`C.prototype` 改为不可写/不可配/不可枚举，static method 统一经 `Object.defineProperty(enumerable:false)` 定义；同时 VM 跳过内部 class 临时名推断，修复 `class/definition` 中 `basics/methods/prototype-property` 失败。
+  - bytecode 的 statement-list 最后取值目标改为跳过 `var/let/const/function/empty` 空完成值语句，并修复 `var` 初始化的栈残留（`StoreReferenceValue` 后补 `Pop`），进一步清理 `statements/{class,const,empty,let,variable}/cptn-*` 失败簇。
 
 ## 3. 分阶段状态
 

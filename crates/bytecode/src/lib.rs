@@ -239,16 +239,44 @@ impl Compiler {
                 }
             })
             .collect();
+        let last_value_candidate = if preserve_value {
+            statements
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, stmt)| {
+                    if matches!(
+                        stmt,
+                        Stmt::FunctionDeclaration(_)
+                            | Stmt::VariableDeclaration(_)
+                            | Stmt::VariableDeclarations(_)
+                            | Stmt::Empty
+                    ) {
+                        None
+                    } else {
+                        Some(idx)
+                    }
+                })
+        } else {
+            None
+        };
 
         let mut produced_value = false;
-        let last_executable = executable_indexes.last().copied();
+        let last_executable = if preserve_value {
+            last_value_candidate.or(executable_indexes.last().copied())
+        } else {
+            executable_indexes.last().copied()
+        };
         for (index, stmt) in statements.iter().enumerate() {
             if matches!(stmt, Stmt::FunctionDeclaration(_)) {
                 code.push(Opcode::Nop);
                 continue;
             }
             let keep_value = preserve_value && Some(index) == last_executable;
-            produced_value = self.compile_stmt(stmt, code, keep_value);
+            let statement_produced = self.compile_stmt(stmt, code, keep_value);
+            if keep_value || !preserve_value {
+                produced_value = statement_produced;
+            }
         }
 
         produced_value
@@ -386,6 +414,7 @@ impl Compiler {
                         code.push(Opcode::ResolveIdentifierReference(binding_name.clone()));
                         self.compile_expr(expr, code);
                         code.push(Opcode::StoreReferenceValue);
+                        code.push(Opcode::Pop);
                     } else {
                         code.push(Opcode::Nop);
                     }
