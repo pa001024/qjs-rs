@@ -96,6 +96,7 @@ enum HostFunction {
     },
     ArrayPush(ObjectId),
     ArrayForEach(ObjectId),
+    ArrayReduce(ObjectId),
     HasOwnProperty {
         target: JsValue,
     },
@@ -1851,6 +1852,69 @@ impl Vm {
                 }
                 Ok(JsValue::Undefined)
             }
+            HostFunction::ArrayReduce(object_id) => {
+                let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_callable_value(&callback) {
+                    return Err(VmError::NotCallable);
+                }
+                let length = self
+                    .objects
+                    .get(&object_id)
+                    .map(|object| {
+                        object
+                            .properties
+                            .get("length")
+                            .map(|value| self.to_number(value))
+                            .unwrap_or(0.0)
+                            .max(0.0) as usize
+                    })
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                let mut index = 0usize;
+                let mut accumulator = if args.len() >= 2 {
+                    args[1].clone()
+                } else {
+                    let mut initial = None;
+                    while index < length {
+                        let key = index.to_string();
+                        let value = self
+                            .objects
+                            .get(&object_id)
+                            .and_then(|object| object.properties.get(&key).cloned());
+                        if let Some(value) = value {
+                            initial = Some(value);
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    initial.ok_or(VmError::TypeError(
+                        "Array.prototype.reduce of empty array with no initial value",
+                    ))?
+                };
+                while index < length {
+                    let key = index.to_string();
+                    if let Some(value) = self
+                        .objects
+                        .get(&object_id)
+                        .and_then(|object| object.properties.get(&key).cloned())
+                    {
+                        accumulator = self.execute_callable(
+                            callback.clone(),
+                            Some(JsValue::Undefined),
+                            vec![
+                                accumulator,
+                                value,
+                                JsValue::Number(index as f64),
+                                JsValue::Object(object_id),
+                            ],
+                            realm,
+                            caller_strict,
+                        )?;
+                    }
+                    index += 1;
+                }
+                Ok(accumulator)
+            }
             HostFunction::HasOwnProperty { target } => {
                 let key = args
                     .first()
@@ -3324,7 +3388,8 @@ impl Vm {
                     .ok_or(VmError::UnknownObject(*object_id))?;
                 Ok(matches!(property, "hasOwnProperty" | "toString")
                     || (property == "push" && object.properties.contains_key("length"))
-                    || (property == "forEach" && object.properties.contains_key("length")))
+                    || (property == "forEach" && object.properties.contains_key("length"))
+                    || (property == "reduce" && object.properties.contains_key("length")))
             }
             JsValue::Function(closure_id) => Ok(self
                 .closure_has_own_property(*closure_id, property)
@@ -3697,6 +3762,7 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
+            let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -3719,6 +3785,15 @@ impl Vm {
                         writable: true,
                         enumerable: false,
                         configurable: false,
+                    },
+                );
+                object.properties.insert("reduce".to_string(), reduce);
+                object.property_attributes.insert(
+                    "reduce".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
                     },
                 );
             }
@@ -4093,6 +4168,14 @@ impl Vm {
                 .is_some_and(|object| object.properties.contains_key("length"))
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
+        }
+        if property == "reduce"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
         let mapped_binding = self
             .objects

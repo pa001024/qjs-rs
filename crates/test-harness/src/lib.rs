@@ -694,6 +694,46 @@ mod tests {
     }
 
     #[test]
+    fn supports_array_reduce_baseline() {
+        assert_eq!(
+            run_script(
+                "var sum = [1, 2, 3].reduce(function(acc, value) { return acc + value; }, 0); sum === 6;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var sum = [1, 2, 3].reduce(function(acc, value) { return acc + value; }); sum === 6;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_reduce_without_initial_value_on_empty_array_throws() {
+        let err = run_script("[].reduce(function(acc, value) { return acc + value; });", &[])
+            .expect_err("empty array reduce without initial value should throw");
+        assert!(err.contains("TypeError"));
+    }
+
+    #[test]
+    fn array_prototype_reduce_descriptor_stability_baseline() {
+        let result = run_script(
+            "var origDesc = Object.getOwnPropertyDescriptor(Array.prototype, 'reduce'); \
+             Array.prototype.reduce = function() {}; \
+             var newDesc = Object.getOwnPropertyDescriptor(Array.prototype, 'reduce'); \
+             origDesc.value !== newDesc.value \
+               && origDesc.writable === newDesc.writable \
+               && origDesc.enumerable === newDesc.enumerable \
+               && origDesc.configurable === newDesc.configurable;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn supports_object_keys_baseline() {
         assert_eq!(
             run_script(
