@@ -97,6 +97,9 @@ enum HostFunction {
     ArrayPush(ObjectId),
     ArrayForEach(ObjectId),
     ArrayReduce(ObjectId),
+    ArrayJoin(ObjectId),
+    ArrayReverse(ObjectId),
+    ArraySort(ObjectId),
     HasOwnProperty {
         target: JsValue,
     },
@@ -189,6 +192,7 @@ pub struct Vm {
     object_prototype_id: Option<ObjectId>,
     function_prototype_id: Option<ObjectId>,
     array_prototype_id: Option<ObjectId>,
+    date_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
     exception_handlers: Vec<ExceptionHandler>,
@@ -221,6 +225,7 @@ impl Vm {
         self.object_prototype_id = None;
         self.function_prototype_id = None;
         self.array_prototype_id = None;
+        self.date_prototype_id = None;
         self.with_objects.clear();
         self.identifier_references.clear();
         self.exception_handlers.clear();
@@ -1915,6 +1920,15 @@ impl Vm {
                 }
                 Ok(accumulator)
             }
+            HostFunction::ArrayJoin(object_id) => {
+                let separator = match args.first() {
+                    None | Some(JsValue::Undefined) => ",".to_string(),
+                    Some(value) => self.coerce_to_string(value),
+                };
+                self.execute_array_join(object_id, &separator)
+            }
+            HostFunction::ArrayReverse(object_id) => self.execute_array_reverse(object_id),
+            HostFunction::ArraySort(object_id) => self.execute_array_sort(object_id),
             HostFunction::HasOwnProperty { target } => {
                 let key = args
                     .first()
@@ -2100,6 +2114,120 @@ impl Vm {
                     "Date({})",
                     Self::coerce_number_to_string(timestamp)
                 )))
+            }
+            NativeFunction::DateParse => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let text = self.coerce_to_string(&value);
+                let parsed = text
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .unwrap_or(f64::NAN);
+                Ok(JsValue::Number(parsed))
+            }
+            NativeFunction::DateUtc => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                Ok(JsValue::Number(self.to_number(&value)))
+            }
+            NativeFunction::DatePrototypeMethod => Ok(JsValue::Number(f64::NAN)),
+            NativeFunction::MathAbs => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).abs()))
+            }
+            NativeFunction::MathAcos => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).acos()))
+            }
+            NativeFunction::MathAsin => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).asin()))
+            }
+            NativeFunction::MathAtan => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).atan()))
+            }
+            NativeFunction::MathAtan2 => {
+                let y = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                let x = args.get(1).cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&y).atan2(self.to_number(&x))))
+            }
+            NativeFunction::MathCeil => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).ceil()))
+            }
+            NativeFunction::MathCos => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).cos()))
+            }
+            NativeFunction::MathExp => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).exp()))
+            }
+            NativeFunction::MathFloor => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).floor()))
+            }
+            NativeFunction::MathLog => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).ln()))
+            }
+            NativeFunction::MathMax => {
+                if args.is_empty() {
+                    return Ok(JsValue::Number(f64::NEG_INFINITY));
+                }
+                let mut result = f64::NEG_INFINITY;
+                for value in args {
+                    let number = self.to_number(&value);
+                    if number.is_nan() {
+                        return Ok(JsValue::Number(f64::NAN));
+                    }
+                    result = result.max(number);
+                }
+                Ok(JsValue::Number(result))
+            }
+            NativeFunction::MathMin => {
+                if args.is_empty() {
+                    return Ok(JsValue::Number(f64::INFINITY));
+                }
+                let mut result = f64::INFINITY;
+                for value in args {
+                    let number = self.to_number(&value);
+                    if number.is_nan() {
+                        return Ok(JsValue::Number(f64::NAN));
+                    }
+                    result = result.min(number);
+                }
+                Ok(JsValue::Number(result))
+            }
+            NativeFunction::MathPow => {
+                let base = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                let exponent = args.get(1).cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(
+                    self.to_number(&base).powf(self.to_number(&exponent)),
+                ))
+            }
+            NativeFunction::MathRandom => {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.subsec_nanos())
+                    .unwrap_or(0);
+                Ok(JsValue::Number((nanos as f64) / 1_000_000_000.0))
+            }
+            NativeFunction::MathRound => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).round()))
+            }
+            NativeFunction::MathSin => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).sin()))
+            }
+            NativeFunction::MathSqrt => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).sqrt()))
+            }
+            NativeFunction::MathTan => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).tan()))
             }
             NativeFunction::StringConstructor => {
                 let value = args
@@ -2398,10 +2526,14 @@ impl Vm {
         };
         let to_string = self.create_host_function_value(HostFunction::DateToString(object_id));
         let value_of = self.create_host_function_value(HostFunction::DateValueOf(object_id));
+        if self.date_prototype_id.is_none() {
+            let _ = self.date_prototype_value();
+        }
         let target = self
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.date_prototype_id;
         target
             .properties
             .insert(DATE_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -3389,7 +3521,10 @@ impl Vm {
                 Ok(matches!(property, "hasOwnProperty" | "toString")
                     || (property == "push" && object.properties.contains_key("length"))
                     || (property == "forEach" && object.properties.contains_key("length"))
-                    || (property == "reduce" && object.properties.contains_key("length")))
+                    || (property == "reduce" && object.properties.contains_key("length"))
+                    || (property == "join" && object.properties.contains_key("length"))
+                    || (property == "reverse" && object.properties.contains_key("length"))
+                    || (property == "sort" && object.properties.contains_key("length")))
             }
             JsValue::Function(closure_id) => Ok(self
                 .closure_has_own_property(*closure_id, property)
@@ -3719,6 +3854,38 @@ impl Vm {
                     },
                 );
             }
+            for (name, native) in [
+                ("abs", NativeFunction::MathAbs),
+                ("acos", NativeFunction::MathAcos),
+                ("asin", NativeFunction::MathAsin),
+                ("atan", NativeFunction::MathAtan),
+                ("atan2", NativeFunction::MathAtan2),
+                ("ceil", NativeFunction::MathCeil),
+                ("cos", NativeFunction::MathCos),
+                ("exp", NativeFunction::MathExp),
+                ("floor", NativeFunction::MathFloor),
+                ("log", NativeFunction::MathLog),
+                ("max", NativeFunction::MathMax),
+                ("min", NativeFunction::MathMin),
+                ("pow", NativeFunction::MathPow),
+                ("random", NativeFunction::MathRandom),
+                ("round", NativeFunction::MathRound),
+                ("sin", NativeFunction::MathSin),
+                ("sqrt", NativeFunction::MathSqrt),
+                ("tan", NativeFunction::MathTan),
+            ] {
+                math_object
+                    .properties
+                    .insert(name.to_string(), JsValue::NativeFunction(native));
+                math_object.property_attributes.insert(
+                    name.to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
         }
 
         let global_object = self
@@ -3762,6 +3929,9 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
+            let join = self.create_host_function_value(HostFunction::ArrayJoin(id));
+            let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
+            let sort = self.create_host_function_value(HostFunction::ArraySort(id));
             let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -3787,6 +3957,33 @@ impl Vm {
                         configurable: false,
                     },
                 );
+                object.properties.insert("join".to_string(), join);
+                object.property_attributes.insert(
+                    "join".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("reverse".to_string(), reverse);
+                object.property_attributes.insert(
+                    "reverse".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("sort".to_string(), sort);
+                object.property_attributes.insert(
+                    "sort".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
                 object.properties.insert("reduce".to_string(), reduce);
                 object.property_attributes.insert(
                     "reduce".to_string(),
@@ -3798,6 +3995,82 @@ impl Vm {
                 );
             }
             self.array_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn date_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.date_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::DateConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for method in [
+                    "toString",
+                    "valueOf",
+                    "getTime",
+                    "getFullYear",
+                    "getUTCFullYear",
+                    "getMonth",
+                    "getUTCMonth",
+                    "getDate",
+                    "getUTCDate",
+                    "getDay",
+                    "getUTCDay",
+                    "getHours",
+                    "getUTCHours",
+                    "getMinutes",
+                    "getUTCMinutes",
+                    "getSeconds",
+                    "getUTCSeconds",
+                    "getMilliseconds",
+                    "getUTCMilliseconds",
+                    "setTime",
+                    "setMilliseconds",
+                    "setUTCMilliseconds",
+                    "setSeconds",
+                    "setUTCSeconds",
+                    "setMinutes",
+                    "setUTCMinutes",
+                    "setHours",
+                    "setUTCHours",
+                    "setDate",
+                    "setUTCDate",
+                    "setMonth",
+                    "setUTCMonth",
+                    "setFullYear",
+                    "setUTCFullYear",
+                    "toLocaleString",
+                    "toUTCString",
+                ] {
+                    object.properties.insert(
+                        method.to_string(),
+                        JsValue::NativeFunction(NativeFunction::DatePrototypeMethod),
+                    );
+                    object.property_attributes.insert(
+                        method.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.date_prototype_id = Some(id);
         }
         prototype
     }
@@ -3826,6 +4099,11 @@ impl Vm {
             JsValue::Object(object_id) => {
                 if let Some(boxed) = self.boxed_primitive_value(object_id) {
                     return Ok(boxed);
+                }
+                if self.objects.get(&object_id).is_some_and(|object| {
+                    object.properties.contains_key("length") && object.prototype == self.array_prototype_id
+                }) {
+                    return self.execute_array_join(object_id, ",");
                 }
                 self.ordinary_to_primitive_for_add(
                     object_id,
@@ -4177,6 +4455,30 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
+        if property == "join"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayJoin(object_id)));
+        }
+        if property == "reverse"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayReverse(object_id)));
+        }
+        if property == "sort"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
+        }
         let mapped_binding = self
             .objects
             .get(&object_id)
@@ -4452,6 +4754,10 @@ impl Vm {
                 )
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
+                | (NativeFunction::ObjectConstructor, "toString")
+                | (NativeFunction::ObjectConstructor, "valueOf")
+                | (NativeFunction::DateConstructor, "parse")
+                | (NativeFunction::DateConstructor, "UTC")
                 | (NativeFunction::StringConstructor, "fromCharCode")
                 | (NativeFunction::NumberConstructor, "NaN")
                 | (NativeFunction::NumberConstructor, "POSITIVE_INFINITY")
@@ -4476,6 +4782,7 @@ impl Vm {
                 | (NativeFunction::Assert, "throws")
                 | (NativeFunction::Assert, "compareArray")
                 | (_, "length")
+                | (_, "constructor")
                 | (_, "prototype")
         )
     }
@@ -4530,6 +4837,100 @@ impl Vm {
             .unwrap_or(0.0)
             .max(0.0);
         Ok(length as usize)
+    }
+
+    fn execute_array_join(
+        &mut self,
+        object_id: ObjectId,
+        separator: &str,
+    ) -> Result<JsValue, VmError> {
+        let length = self.array_length(object_id)?;
+        let mut parts = Vec::with_capacity(length);
+        for index in 0..length {
+            let key = index.to_string();
+            let value = self
+                .objects
+                .get(&object_id)
+                .and_then(|object| object.properties.get(&key).cloned());
+            let part = match value {
+                None | Some(JsValue::Undefined) | Some(JsValue::Null) => String::new(),
+                Some(value) => self.coerce_to_string(&value),
+            };
+            parts.push(part);
+        }
+        Ok(JsValue::String(parts.join(separator)))
+    }
+
+    fn execute_array_reverse(&mut self, object_id: ObjectId) -> Result<JsValue, VmError> {
+        let length = self.array_length(object_id)?;
+        let mut values = Vec::with_capacity(length);
+        {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            for index in 0..length {
+                values.push(object.properties.get(&index.to_string()).cloned());
+            }
+        }
+
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        for index in 0..length {
+            let key = index.to_string();
+            object.properties.remove(&key);
+            object.property_attributes.remove(&key);
+        }
+        for (index, value) in values.into_iter().rev().enumerate() {
+            let Some(value) = value else {
+                continue;
+            };
+            let key = index.to_string();
+            object.properties.insert(key.clone(), value);
+            object
+                .property_attributes
+                .entry(key)
+                .or_insert_with(PropertyAttributes::default);
+        }
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_array_sort(&mut self, object_id: ObjectId) -> Result<JsValue, VmError> {
+        let length = self.array_length(object_id)?;
+        let mut values = Vec::new();
+        {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            for index in 0..length {
+                if let Some(value) = object.properties.get(&index.to_string()).cloned() {
+                    values.push(value);
+                }
+            }
+        }
+        values.sort_by_key(|value| self.coerce_to_string(value));
+
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        for index in 0..length {
+            let key = index.to_string();
+            object.properties.remove(&key);
+            object.property_attributes.remove(&key);
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            let key = index.to_string();
+            object.properties.insert(key.clone(), value);
+            object
+                .property_attributes
+                .entry(key)
+                .or_insert_with(PropertyAttributes::default);
+        }
+        Ok(JsValue::Object(object_id))
     }
 
     fn evaluate_in_operator(&mut self, key: String, right: JsValue) -> Result<bool, VmError> {
@@ -4837,9 +5238,26 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "isExtensible") => {
                 JsValue::NativeFunction(NativeFunction::ObjectIsExtensible)
             }
+            (NativeFunction::ObjectConstructor, "toString") => {
+                self.create_host_function_value(HostFunction::FunctionToString {
+                    target: JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+                })
+            }
+            (NativeFunction::ObjectConstructor, "valueOf") => {
+                self.create_host_function_value(HostFunction::FunctionValueOf {
+                    target: JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+                })
+            }
             (NativeFunction::FunctionConstructor, "prototype") => self.function_prototype_value(),
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
             (NativeFunction::ArrayConstructor, "prototype") => self.array_prototype_value(),
+            (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
+            (NativeFunction::DateConstructor, "parse") => {
+                JsValue::NativeFunction(NativeFunction::DateParse)
+            }
+            (NativeFunction::DateConstructor, "UTC") => {
+                JsValue::NativeFunction(NativeFunction::DateUtc)
+            }
             (NativeFunction::SymbolConstructor, "iterator") => {
                 JsValue::String("Symbol.iterator".to_string())
             }
@@ -4894,6 +5312,13 @@ impl Vm {
             (NativeFunction::StringConstructor, "fromCharCode") => {
                 JsValue::NativeFunction(NativeFunction::StringFromCharCode)
             }
+            (_, "toString") => self.create_host_function_value(HostFunction::FunctionToString {
+                target: JsValue::NativeFunction(native),
+            }),
+            (_, "valueOf") => self.create_host_function_value(HostFunction::FunctionValueOf {
+                target: JsValue::NativeFunction(native),
+            }),
+            (_, "constructor") => JsValue::NativeFunction(NativeFunction::FunctionConstructor),
             (_, "hasOwnProperty") => {
                 self.create_host_function_value(HostFunction::HasOwnProperty {
                     target: JsValue::NativeFunction(native),

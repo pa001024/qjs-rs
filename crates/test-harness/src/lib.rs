@@ -165,6 +165,20 @@ mod tests {
     }
 
     #[test]
+    fn supports_math_function_surface_baseline() {
+        let result = run_script(
+            "typeof Math.abs === 'function' \
+             && typeof Math.max === 'function' \
+             && typeof Math.min === 'function' \
+             && Math.abs(-2) === 2 \
+             && Math.max(1, 3, 2) === 3 \
+             && Math.min(1, 3, 2) === 1;",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn evaluates_eval_string_source() {
         assert_eq!(run_script("eval('1 + 2');", &[]), Ok(JsValue::Number(3.0)));
     }
@@ -313,6 +327,17 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_constructor_function_surface_baseline() {
+        let result = run_script(
+            "typeof Object.toString === 'function' \
+             && typeof Object.valueOf === 'function' \
+             && typeof Object.constructor === 'function';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn catches_addition_to_primitive_throw_with_try_catch() {
         let result = run_script(
             "var caught = false; try { 1 + { valueOf: function() { throw 'x'; } }; } catch (e) { caught = e === 'x'; } caught;",
@@ -325,6 +350,18 @@ mod tests {
     fn supports_date_addition_prefers_string_baseline() {
         let result = run_script(
             "var date = new Date(0); date + 0 === date.toString() + '0';",
+            &[],
+        );
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_date_constructor_surface_baseline() {
+        let result = run_script(
+            "typeof Date.parse === 'function' \
+             && typeof Date.UTC === 'function' \
+             && typeof Date.prototype.getTime === 'function' \
+             && typeof Date.prototype.toUTCString === 'function';",
             &[],
         );
         assert_eq!(result, Ok(JsValue::Bool(true)));
@@ -705,6 +742,24 @@ mod tests {
         assert_eq!(
             run_script(
                 "var sum = [1, 2, 3].reduce(function(acc, value) { return acc + value; }); sum === 6;",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn supports_array_join_to_string_reverse_sort_baseline() {
+        assert_eq!(
+            run_script(
+                "var a = [2, 4, 8, 16, 32]; (a + '') === '2,4,8,16,32' && a.join('-') === '2-4-8-16-32';",
+                &[]
+            ),
+            Ok(JsValue::Bool(true))
+        );
+        assert_eq!(
+            run_script(
+                "var b = [3, 1, 2]; b.reverse(); var rev = (b[0] === 2 && b[2] === 3); b.sort(); rev && b[0] === 1 && b[2] === 3;",
                 &[]
             ),
             Ok(JsValue::Bool(true))

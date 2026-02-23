@@ -17,7 +17,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 结果：
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
-- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4311, failed=689
+- `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4320, failed=680
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -118,4 +118,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 本轮新增 `DefineVar` 指令并在 VM 引入 `var_scope_stack`，修复 direct eval 中 `var` 绑定被错误落到当前词法块的问题；同时为 `for-in/for-of` 的 `let/const` 头部降级注入 `Object.__tdzMarker`（内部 `Uninitialized` 标记），使头部 RHS 对同名绑定访问按 `ReferenceError` 处理。该轮后 `for-in` 子集提升至 `61/0`，`language` 基线由 `4303/697` 提升至 `4309/691`。
 - bytecode 修复 `try { ... } finally { ... }` 的 completion value 保留：`finally` 正常完成时不再无条件覆盖为 `undefined`，并补充 `try/finally` 完成值与异常传播回归测试。该轮后 `language` 基线由 `4309/691` 进一步提升至 `4310/690`。
 - VM/runtime 新增 `Array.prototype.reduce` 基线路径并补充描述符稳定性回归测试（覆盖 test262 `8.12.5-3-b_1.js`），`language/expressions/assignment` 子集由 `86/6` 提升至 `87/5`，`language` 基线进一步提升至 `4311/689`。
+- VM/runtime 扩展内建表面：补齐 `Array.prototype.join/reverse/sort`、数组在 `+` 下的 `join(',')` 字符串化路径、`Math` 常见函数簇、`Date.parse/UTC` 与 `Date.prototype` 方法占位，并为原生构造器补齐 `toString/valueOf/constructor` 属性链路；在修复 `array.toString` 函数身份回归后，`language` 基线由 `4311/689` 提升至 `4320/680`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
