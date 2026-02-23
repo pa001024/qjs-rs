@@ -7781,7 +7781,14 @@ impl Vm {
                             .unwrap_or(f64::NAN)
                     }
                 } else {
-                    trimmed.parse::<f64>().unwrap_or(f64::NAN)
+                    let parsed = trimmed.parse::<f64>().unwrap_or(f64::NAN);
+                    if parsed.is_infinite()
+                        && !matches!(trimmed, "Infinity" | "+Infinity" | "-Infinity")
+                    {
+                        f64::NAN
+                    } else {
+                        parsed
+                    }
                 }
             }
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
@@ -8603,6 +8610,14 @@ mod tests {
             Opcode::Eq,
             Opcode::Halt,
         ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn unary_plus_rejects_non_canonical_infinity_spelling() {
+        let script = parse_script("let x = +\"INFINITY\"; x !== x;").expect("script should parse");
+        let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }

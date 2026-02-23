@@ -1571,7 +1571,11 @@ impl Compiler {
                 }
                 self.compile_expr(expr, code);
                 let opcode = match op {
-                    UnaryOp::Plus => return,
+                    UnaryOp::Plus => {
+                        code.push(Opcode::LoadNumber(0.0));
+                        code.push(Opcode::Sub);
+                        return;
+                    }
                     UnaryOp::Minus => Opcode::Neg,
                     UnaryOp::Not => Opcode::Not,
                     UnaryOp::BitNot => Opcode::BitNot,
@@ -3241,6 +3245,8 @@ mod tests {
                 Opcode::LoadNumber(2.0),
                 Opcode::Neg,
                 Opcode::LoadNumber(-2.0),
+                Opcode::LoadNumber(0.0),
+                Opcode::Sub,
                 Opcode::Ge,
                 Opcode::Halt,
             ],
