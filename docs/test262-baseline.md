@@ -35,6 +35,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+14)`: discovered=23882, executed=5000, skipped=18579, passed=4596, failed=404
 - `language max-cases=5000 (latest+15)`: discovered=23882, executed=5000, skipped=18579, passed=4606, failed=394
 - `language max-cases=5000 (latest+16)`: discovered=23882, executed=5000, skipped=18579, passed=4624, failed=376
+- `language max-cases=5000 (latest+17)`: discovered=23882, executed=5000, skipped=18579, passed=4635, failed=365
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -167,4 +168,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 在 eval 入口新增全局函数可声明性守卫：全局 var 环境下对受限函数名（`NaN/Infinity/undefined`）声明返回 TypeError，`eval-code` 子集进一步收敛到 `168/12`，`language` 基线提升至 `4596/404`。
 - parser class lowering 补齐 `extends` 语义（保留 extends 表达式、派生默认构造器注入 `super(...arguments)`、super 绑定按 extends 路径分流），`language` 基线提升至 `4606/394`。
 - VM 增加 `super(...)` 的构造调用专用路径，避免把父类构造器当普通 call；bytecode 同步修正 `super.method(...)` this 绑定路径，`language` 基线提升至 `4624/376`。
+- lexer 补齐 legacy string escape 吞吐（identity escape + legacy octal 最小支持），`language/literals/string` 子集收敛至 `59/0`，整体基线提升至 `4635/365`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4624`、`failed=376`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4635`、`failed=365`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -57,6 +57,8 @@
   - VM 新增 `super(...)` 专用构造调用路径（不再走普通 Call），修复 derived constructor 调父类构造器时的 `class constructor cannot be invoked without 'new'` 误报。
   - bytecode 对 `super.method(...)` 与 `super[expr](...)` 调整 receiver 绑定，调用路径改为以当前 `this` 作为 thisArg。
   - `language/expressions/super` 子集从 `9/23` 提升到 `15/17`（executed=32）；`language/statements/class/subclass` 子集从 `17/60` 提升到 `22/55`（executed=77）。
+  - lexer 字符串转义补齐 legacy 路径：支持 legacy non-octal（如 `\8`、`\9`、`\A`、`\Ð`）与 legacy octal（如 `\1`/`\\123`）最小吞吐。
+  - `language/literals/string` 子集提升到 `59/0`（executed=59）。
 
 ## 3. 分阶段状态
 

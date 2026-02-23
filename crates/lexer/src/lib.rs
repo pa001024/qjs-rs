@@ -167,6 +167,21 @@ fn decode_char(source: &str, pos: usize) -> Option<(char, usize)> {
     Some((ch, ch.len_utf8()))
 }
 
+fn parse_legacy_octal_escape(bytes: &[u8], pos: usize) -> (u32, usize) {
+    let first = (bytes[pos] - b'0') as u32;
+    let mut value = first;
+    let mut consumed = 1usize;
+    if pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'0'..=b'7') {
+        value = value * 8 + (bytes[pos + 1] - b'0') as u32;
+        consumed = 2;
+        if first <= 3 && pos + 2 < bytes.len() && matches!(bytes[pos + 2], b'0'..=b'7') {
+            value = value * 8 + (bytes[pos + 2] - b'0') as u32;
+            consumed = 3;
+        }
+    }
+    (value, consumed)
+}
+
 fn read_unicode_escape_char(source: &str, escape_start: usize) -> Option<(char, usize)> {
     let bytes = source.as_bytes();
     if escape_start + 2 > bytes.len()
@@ -1309,13 +1324,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             b'f' => ('\u{000c}', 1usize),
                             b'v' => ('\u{000b}', 1usize),
                             b'0' => {
-                                if pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit() {
-                                    return Err(LexError {
-                                        message: "unsupported escape sequence '\\0'".to_string(),
-                                        position: pos.saturating_sub(1),
-                                    });
+                                if pos + 1 < bytes.len() && matches!(bytes[pos + 1], b'0'..=b'7')
+                                {
+                                    let (code_point, len) = parse_legacy_octal_escape(bytes, pos);
+                                    let ch =
+                                        char::from_u32(code_point).unwrap_or(char::REPLACEMENT_CHARACTER);
+                                    (ch, len)
+                                } else {
+                                    ('\0', 1usize)
                                 }
-                                ('\0', 1usize)
+                            }
+                            b'1'..=b'7' => {
+                                let (code_point, len) = parse_legacy_octal_escape(bytes, pos);
+                                let ch = char::from_u32(code_point)
+                                    .unwrap_or(char::REPLACEMENT_CHARACTER);
+                                (ch, len)
                             }
                             b'u' => {
                                 if pos + 4 < bytes.len() {
@@ -1402,13 +1425,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                                 (ch, 3usize)
                             }
                             _ => {
-                                return Err(LexError {
-                                    message: format!(
-                                        "unsupported escape sequence '\\{}'",
-                                        escaped as char
-                                    ),
-                                    position: pos.saturating_sub(1),
-                                });
+                                let Some((ch, len)) = decode_char(source, pos) else {
+                                    return Err(LexError {
+                                        message: "unterminated string literal".to_string(),
+                                        position: start,
+                                    });
+                                };
+                                (ch, len)
                             }
                         };
                     value.push(ch);
