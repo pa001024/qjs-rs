@@ -844,45 +844,75 @@ impl Vm {
                 }
                 Opcode::GetProperty(name) => {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let value = match receiver {
+                    let result = match receiver {
                         JsValue::Object(object_id) => {
-                            self.get_object_property(object_id, name, realm)?
+                            self.get_object_property(object_id, name, realm)
                         }
                         JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, name, realm)?
+                            self.get_function_property(closure_id, name, realm)
                         }
                         JsValue::NativeFunction(native) => {
-                            self.get_native_function_property(native, name)
+                            if Self::is_restricted_function_property(name) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                Ok(self.get_native_function_property(native, name))
+                            }
                         }
                         JsValue::HostFunction(host_id) => {
-                            self.get_host_function_property(host_id, name)?
+                            if Self::is_restricted_function_property(name) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                self.get_host_function_property(host_id, name)
+                            }
                         }
-                        JsValue::String(receiver) => self.get_string_property(&receiver, name),
-                        _ => return Err(VmError::TypeError("property access expects object")),
+                        JsValue::String(receiver) => Ok(self.get_string_property(&receiver, name)),
+                        _ => Err(VmError::TypeError("property access expects object")),
                     };
-                    self.stack.push(value);
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::GetPropertyByValue => {
                     let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let value = match receiver {
+                    let result = match receiver {
                         JsValue::Object(object_id) => {
-                            self.get_object_property(object_id, &key, realm)?
+                            self.get_object_property(object_id, &key, realm)
                         }
                         JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, &key, realm)?
+                            self.get_function_property(closure_id, &key, realm)
                         }
                         JsValue::NativeFunction(native) => {
-                            self.get_native_function_property(native, &key)
+                            if Self::is_restricted_function_property(&key) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                Ok(self.get_native_function_property(native, &key))
+                            }
                         }
                         JsValue::HostFunction(host_id) => {
-                            self.get_host_function_property(host_id, &key)?
+                            if Self::is_restricted_function_property(&key) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                self.get_host_function_property(host_id, &key)
+                            }
                         }
-                        JsValue::String(receiver) => self.get_string_property(&receiver, &key),
-                        _ => return Err(VmError::TypeError("property access expects object")),
+                        JsValue::String(receiver) => Ok(self.get_string_property(&receiver, &key)),
+                        _ => Err(VmError::TypeError("property access expects object")),
                     };
-                    self.stack.push(value);
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::DefineProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -1048,29 +1078,36 @@ impl Vm {
                 Opcode::SetProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match receiver {
+                    let result = match receiver {
                         JsValue::Object(object_id) => {
-                            let result =
-                                self.set_object_property(object_id, name.clone(), value, realm)?;
-                            self.stack.push(result);
+                            self.set_object_property(object_id, name.clone(), value, realm)
                         }
                         JsValue::Function(closure_id) => {
                             if self.function_rejects_caller_arguments(closure_id)?
                                 && matches!(name.as_str(), "caller" | "arguments")
                                 && !self.closure_has_own_property(closure_id, name)
                             {
-                                return Err(VmError::TypeError(
-                                    "restricted function property access",
-                                ));
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                self.set_function_property(closure_id, name.clone(), value, realm)
                             }
-                            let result =
-                                self.set_function_property(closure_id, name.clone(), value, realm)?;
-                            self.stack.push(result);
                         }
                         JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                            self.stack.push(value);
+                            if Self::is_restricted_function_property(name) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                Ok(value)
+                            }
                         }
-                        _ => return Err(VmError::TypeError("property write expects object")),
+                        _ => Err(VmError::TypeError("property write expects object")),
+                    };
+                    match result {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
                     }
                 }
                 Opcode::SetPropertyByValue => {
@@ -1078,28 +1115,36 @@ impl Vm {
                     let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    match receiver {
+                    let result = match receiver {
                         JsValue::Object(object_id) => {
-                            let result = self.set_object_property(object_id, key, value, realm)?;
-                            self.stack.push(result);
+                            self.set_object_property(object_id, key, value, realm)
                         }
                         JsValue::Function(closure_id) => {
                             if self.function_rejects_caller_arguments(closure_id)?
                                 && matches!(key.as_str(), "caller" | "arguments")
                                 && !self.closure_has_own_property(closure_id, &key)
                             {
-                                return Err(VmError::TypeError(
-                                    "restricted function property access",
-                                ));
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                self.set_function_property(closure_id, key, value, realm)
                             }
-                            let result =
-                                self.set_function_property(closure_id, key, value, realm)?;
-                            self.stack.push(result);
                         }
                         JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                            self.stack.push(value);
+                            if Self::is_restricted_function_property(&key) {
+                                Err(VmError::TypeError("restricted function property access"))
+                            } else {
+                                Ok(value)
+                            }
                         }
-                        _ => return Err(VmError::TypeError("property write expects object")),
+                        _ => Err(VmError::TypeError("property write expects object")),
+                    };
+                    match result {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
                     }
                 }
                 Opcode::DeleteIdentifier(name) => {
@@ -4369,9 +4414,17 @@ impl Vm {
                 self.get_function_property(closure_id, property, realm)
             }
             JsValue::NativeFunction(native) => {
+                if Self::is_restricted_function_property(property) {
+                    return Err(VmError::TypeError("restricted function property access"));
+                }
                 Ok(self.get_native_function_property(native, property))
             }
-            JsValue::HostFunction(host_id) => self.get_host_function_property(host_id, property),
+            JsValue::HostFunction(host_id) => {
+                if Self::is_restricted_function_property(property) {
+                    return Err(VmError::TypeError("restricted function property access"));
+                }
+                self.get_host_function_property(host_id, property)
+            }
             JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
             _ => Err(VmError::TypeError("property access expects object")),
         }
@@ -4397,7 +4450,12 @@ impl Vm {
                 }
                 self.set_function_property(closure_id, property, value, realm)
             }
-            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => Ok(value),
+            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                if Self::is_restricted_function_property(&property) {
+                    return Err(VmError::TypeError("restricted function property access"));
+                }
+                Ok(value)
+            }
             _ => Err(VmError::TypeError("property write expects object")),
         }
     }
@@ -5615,6 +5673,10 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(closure.strict || self.function_is_arrow(function))
+    }
+
+    fn is_restricted_function_property(property: &str) -> bool {
+        matches!(property, "caller" | "arguments")
     }
 
     fn has_own_property(&self, target: &JsValue, property: &str) -> Result<bool, VmError> {
@@ -7558,6 +7620,23 @@ mod tests {
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
+    }
+
+    #[test]
+    fn bound_function_rejects_caller_property_access() {
+        let script = parse_script(
+            "function target() {} \
+             var bound = target.bind({}); \
+             var readThrows = false; \
+             var writeThrows = false; \
+             try { bound.caller; } catch (e) { readThrows = true; } \
+             try { bound.caller = {}; } catch (e) { writeThrows = true; } \
+             readThrows && writeThrows;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]

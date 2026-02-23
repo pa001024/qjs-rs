@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4560`、`failed=440`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4584`、`failed=416`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -46,6 +46,9 @@
   - String baseline 补齐 `String.prototype.split(separator, limit)` 最小可运行路径，并在字符串属性可见性里暴露 `split`。
   - `DefineVariable` 重声明写回策略收敛：`undefined` 仅对内部临时名（`$__loop_completion_`/`$__switch_tmp_`/`$__class_ctor_`）回写，避免污染用户 `var/function` 绑定。
   - 标识符引用回退路径补齐：`globalThis`/`Math`/`this`/realm globals/global object 属性可在 `Unresolvable` 路径读取，降低 `UnknownIdentifier` 噪声。
+  - parser strict 校验对齐 QuickJS：`eval/arguments` 作为 strict 绑定名或赋值目标时抛 SyntaxError，并补齐 strict 函数重复形参早期错误（`13.1-23/25/27/29/31/33-s`）。
+  - VM 对函数值 `caller/arguments` 限制扩展到 host/native function（含 `bind()` 产物），并将 `Get/SetProperty*` 的运行时错误纳入异常处理器路由，允许 `try/catch` 捕获属性访问 TypeError。
+  - `language/statements/function` 子集从 `175/32` 提升到 `182/25`（executed=207）。
 
 ## 3. 分阶段状态
 

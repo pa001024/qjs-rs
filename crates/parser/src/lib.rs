@@ -104,6 +104,7 @@ fn validate_statement_strict_mode(statement: &Stmt, strict: bool) -> Result<(), 
         Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
             let function_strict = strict || statement_list_has_use_strict_directive(body);
             validate_binding_identifier_strict_mode(&name.0, function_strict)?;
+            validate_unique_parameter_names_strict_mode(params, function_strict)?;
             for param in params {
                 validate_binding_identifier_strict_mode(&param.0, function_strict)?;
             }
@@ -235,6 +236,7 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
             if let Some(name) = name {
                 validate_binding_identifier_strict_mode(&name.0, function_strict)?;
             }
+            validate_unique_parameter_names_strict_mode(params, function_strict)?;
             for param in params {
                 validate_binding_identifier_strict_mode(&param.0, function_strict)?;
             }
@@ -299,6 +301,7 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
             value,
         } => {
             validate_identifier_reference_strict_mode(name, strict)?;
+            validate_assignment_target_identifier_strict_mode(name, strict)?;
             validate_expression_strict_mode(value, strict)
         }
         Expr::AssignMember { object, value, .. } => {
@@ -316,7 +319,8 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
         }
         Expr::Update { target, .. } => match target {
             UpdateTarget::Identifier(Identifier(name)) => {
-                validate_identifier_reference_strict_mode(name, strict)
+                validate_identifier_reference_strict_mode(name, strict)?;
+                validate_assignment_target_identifier_strict_mode(name, strict)
             }
             UpdateTarget::Member { object, .. } => validate_expression_strict_mode(object, strict),
             UpdateTarget::MemberComputed { object, property } => {
@@ -329,7 +333,13 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
 }
 
 fn validate_binding_identifier_strict_mode(name: &str, strict: bool) -> Result<(), ParseError> {
-    if strict && is_strict_mode_reserved_word(name) {
+    if strict && is_strict_mode_restricted_binding_name(name) {
+        return Err(ParseError {
+            message: "invalid binding identifier in strict mode".to_string(),
+            position: 0,
+        });
+    }
+    if strict && is_strict_mode_future_reserved_word(name) {
         return Err(ParseError {
             message: "reserved word cannot be binding identifier".to_string(),
             position: 0,
@@ -339,7 +349,7 @@ fn validate_binding_identifier_strict_mode(name: &str, strict: bool) -> Result<(
 }
 
 fn validate_identifier_reference_strict_mode(name: &str, strict: bool) -> Result<(), ParseError> {
-    if strict && is_strict_mode_reserved_word(name) {
+    if strict && is_strict_mode_future_reserved_word(name) {
         return Err(ParseError {
             message: "reserved word cannot be identifier reference".to_string(),
             position: 0,
@@ -348,7 +358,44 @@ fn validate_identifier_reference_strict_mode(name: &str, strict: bool) -> Result
     Ok(())
 }
 
-fn is_strict_mode_reserved_word(name: &str) -> bool {
+fn validate_assignment_target_identifier_strict_mode(
+    name: &str,
+    strict: bool,
+) -> Result<(), ParseError> {
+    if strict && is_strict_mode_restricted_binding_name(name) {
+        return Err(ParseError {
+            message: "invalid lvalue in strict mode".to_string(),
+            position: 0,
+        });
+    }
+    Ok(())
+}
+
+fn validate_unique_parameter_names_strict_mode(
+    params: &[Identifier],
+    strict: bool,
+) -> Result<(), ParseError> {
+    if !strict {
+        return Ok(());
+    }
+    let mut seen = BTreeSet::new();
+    for param in params {
+        let name = param.0.as_str();
+        if !seen.insert(name) {
+            return Err(ParseError {
+                message: "duplicate parameter name in strict mode".to_string(),
+                position: 0,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_strict_mode_restricted_binding_name(name: &str) -> bool {
+    matches!(name, "eval" | "arguments")
+}
+
+fn is_strict_mode_future_reserved_word(name: &str) -> bool {
     matches!(
         name,
         "implements" | "interface" | "package" | "private" | "protected" | "public" | "static"
@@ -5848,10 +5895,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_eval_binding_in_strict_mode() {
+        let err = parse_script("'use strict'; var eval = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid binding identifier in strict mode");
+    }
+
+    #[test]
+    fn rejects_arguments_parameter_in_strict_mode() {
+        let err =
+            parse_script("'use strict'; function f(arguments) {}").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid binding identifier in strict mode");
+    }
+
+    #[test]
     fn rejects_future_reserved_reference_in_strict_mode() {
         let err = parse_script("function f() { 'use strict'; public = 1; }")
             .expect_err("parser should fail");
         assert_eq!(err.message, "reserved word cannot be identifier reference");
+    }
+
+    #[test]
+    fn rejects_eval_assignment_target_in_strict_mode() {
+        let err = parse_script("'use strict'; eval = 1;").expect_err("parser should fail");
+        assert_eq!(err.message, "invalid lvalue in strict mode");
+    }
+
+    #[test]
+    fn allows_eval_identifier_reference_in_strict_mode() {
+        parse_script("'use strict'; eval;").expect("parser should succeed");
+    }
+
+    #[test]
+    fn rejects_duplicate_parameters_in_strict_mode() {
+        let err = parse_script("'use strict'; function f(a, a) {}").expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate parameter name in strict mode");
     }
 
     #[test]
