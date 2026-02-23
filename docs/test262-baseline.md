@@ -38,10 +38,12 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+17)`: discovered=23882, executed=5000, skipped=18579, passed=4635, failed=365
 - `language max-cases=5000 (latest+18)`: discovered=23882, executed=5000, skipped=18579, passed=4666, failed=334
 - `language max-cases=5000 (latest+19)`: discovered=23882, executed=5000, skipped=18579, passed=4667, failed=333
+- `language max-cases=5000 (latest+20)`: discovered=23882, executed=5000, skipped=18579, passed=4698, failed=302
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
 - `language/eval-code/direct (latest)`: discovered=286, executed=143, skipped=143, passed=143, failed=0
+- `language/function-code (latest)`: discovered=217, executed=173, skipped=44, passed=171, failed=2
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -175,4 +177,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 补齐 legacy string escape 吞吐（identity escape + legacy octal 最小支持），`language/literals/string` 子集收敛至 `59/0`，整体基线提升至 `4635/365`。
 - parser `new` 递归对齐（`new NewExpression`），bytecode/vm 增加 `super` 专用读写/调用 opcode 与 `ToPropertyKey` 运行时路径，direct eval 增加 super 语境解析；同时补齐 `Object.freeze`（最小）/`String.prototype.toLowerCase`/`hasOwnProperty.call` this 语义与 runtime Error-like 异常对象。该轮后 `expressions/super` 子集收敛到 `32/0`，`language` 基线提升至 `4666/334`。
 - parser 修复箭头函数默认参数路径未注入 `NON_SIMPLE_PARAMS` marker 的回归（与 VM `EnterParamInitScope/ExitParamInitScope` 对齐），清理 `eval-code/direct` 的 `UnknownIdentifier("p")` 失败簇；`language/eval-code/direct` 收敛至 `143/0`，`language` 基线提升至 `4667/333`。
+- VM `code_has_marker` 改为全字节码扫描，修复 class method 在 super lowering 前导语句后 marker 失效的问题；同时补齐 primitive receiver boxing（非严格 `this`、number/bool 属性读取）和函数 `constructor` 属性回退。该轮后 `language/function-code` 提升至 `171/2`，整体 `language` 基线提升至 `4698/302`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

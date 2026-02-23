@@ -899,30 +899,7 @@ impl Vm {
                 }
                 Opcode::GetProperty(name) => {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = match receiver {
-                        JsValue::Object(object_id) => {
-                            self.get_object_property(object_id, name, realm)
-                        }
-                        JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, name, realm)
-                        }
-                        JsValue::NativeFunction(native) => {
-                            if Self::is_restricted_function_property(name) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                Ok(self.get_native_function_property(native, name))
-                            }
-                        }
-                        JsValue::HostFunction(host_id) => {
-                            if Self::is_restricted_function_property(name) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                self.get_host_function_property(host_id, name)
-                            }
-                        }
-                        JsValue::String(receiver) => Ok(self.get_string_property(&receiver, name)),
-                        _ => Err(VmError::TypeError("property access expects object")),
-                    };
+                    let result = self.get_property_from_receiver(receiver, name, realm);
                     match result {
                         Ok(value) => self.stack.push(value),
                         Err(err) => {
@@ -936,30 +913,7 @@ impl Vm {
                     let key = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let key = self.coerce_to_property_key(&key);
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-                    let result = match receiver {
-                        JsValue::Object(object_id) => {
-                            self.get_object_property(object_id, &key, realm)
-                        }
-                        JsValue::Function(closure_id) => {
-                            self.get_function_property(closure_id, &key, realm)
-                        }
-                        JsValue::NativeFunction(native) => {
-                            if Self::is_restricted_function_property(&key) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                Ok(self.get_native_function_property(native, &key))
-                            }
-                        }
-                        JsValue::HostFunction(host_id) => {
-                            if Self::is_restricted_function_property(&key) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                self.get_host_function_property(host_id, &key)
-                            }
-                        }
-                        JsValue::String(receiver) => Ok(self.get_string_property(&receiver, &key)),
-                        _ => Err(VmError::TypeError("property access expects object")),
-                    };
+                    let result = self.get_property_from_receiver(receiver, &key, realm);
                     match result {
                         Ok(value) => self.stack.push(value),
                         Err(err) => {
@@ -4950,6 +4904,13 @@ impl Vm {
                 self.get_host_function_property(host_id, property)
             }
             JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
+            primitive @ (JsValue::Number(_) | JsValue::Bool(_)) => {
+                let boxed_receiver = self.box_primitive_receiver(primitive);
+                let JsValue::Object(object_id) = boxed_receiver.clone() else {
+                    unreachable!();
+                };
+                self.get_object_property_with_receiver(object_id, property, boxed_receiver, realm)
+            }
             _ => Err(VmError::TypeError("property access expects object")),
         }
     }
@@ -5863,11 +5824,56 @@ impl Vm {
         Ok(JsValue::String("[function]".to_string()))
     }
 
-    fn coerce_this_for_sloppy(&self, this_arg: Option<JsValue>) -> JsValue {
+    fn coerce_this_for_sloppy(&mut self, this_arg: Option<JsValue>) -> JsValue {
         match this_arg {
             None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.global_this_value(),
+            Some(primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_))) => {
+                self.box_primitive_receiver(primitive)
+            }
             Some(value) => value,
         }
+    }
+
+    fn box_primitive_receiver(&mut self, primitive: JsValue) -> JsValue {
+        let receiver = self.create_object_value();
+        let object_id = match receiver {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let constructor = match primitive {
+            JsValue::Number(_) => Some(NativeFunction::NumberConstructor),
+            JsValue::Bool(_) => Some(NativeFunction::BooleanConstructor),
+            JsValue::String(_) => Some(NativeFunction::StringConstructor),
+            _ => None,
+        };
+        if let Some(object) = self.objects.get_mut(&object_id) {
+            object
+                .properties
+                .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
+            object.property_attributes.insert(
+                BOXED_PRIMITIVE_VALUE_KEY.to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+            if let Some(constructor) = constructor {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(constructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+        }
+        JsValue::Object(object_id)
     }
 
     fn function_is_strict(&self, function: &CompiledFunction) -> bool {
@@ -5920,12 +5926,7 @@ impl Vm {
     }
 
     fn code_has_marker(&self, code: &[Opcode], marker: &str) -> bool {
-        let mut cursor = Self::skip_prologue_prefix(code);
-        if matches!(code.get(cursor), Some(Opcode::MarkStrict)) {
-            cursor += 1;
-        } else if cursor != 0 && matches!(code.first(), Some(Opcode::MarkStrict)) {
-            cursor = 1;
-        }
+        let mut cursor = 0usize;
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
                 (Opcode::LoadString(value), Opcode::Pop) => {
@@ -5934,7 +5935,7 @@ impl Vm {
                     }
                     cursor += 2;
                 }
-                _ => break,
+                _ => cursor += 1,
             }
         }
         false
@@ -7059,6 +7060,7 @@ impl Vm {
                     self.get_or_create_function_prototype_property(closure_id)
                 }
             }
+            "constructor" => Ok(JsValue::NativeFunction(NativeFunction::FunctionConstructor)),
             "toString" => Ok(
                 self.create_host_function_value(HostFunction::FunctionToString {
                     target: JsValue::Function(closure_id),
@@ -8559,6 +8561,28 @@ mod tests {
     }
 
     #[test]
+    fn function_declaration_hoists_over_var_binding() {
+        let script = parse_script(
+            "function f() { var x; return typeof x; function x() { return 7; } } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("function".to_string())));
+    }
+
+    #[test]
+    fn function_declaration_hoists_over_parameter_binding() {
+        let script = parse_script(
+            "function f(x) { return typeof x; function x() { return 7; } } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("function".to_string())));
+    }
+
+    #[test]
     fn reports_not_callable() {
         let chunk = empty_chunk(vec![Opcode::LoadNumber(1.0), Opcode::Call(0), Opcode::Halt]);
         let mut vm = Vm::default();
@@ -9027,17 +9051,14 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_property_access_for_non_object_receiver() {
+    fn property_access_boxes_numeric_receiver() {
         let chunk = empty_chunk(vec![
             Opcode::LoadNumber(1.0),
             Opcode::GetProperty("x".to_string()),
             Opcode::Halt,
         ]);
         let mut vm = Vm::default();
-        assert_eq!(
-            vm.execute(&chunk),
-            Err(VmError::TypeError("property access expects object"))
-        );
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
     }
 
     #[test]
