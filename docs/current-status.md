@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4734`、`failed=266`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4735`、`failed=265`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -83,7 +83,8 @@
   - VM 将 `Object.prototype.toString` 与 `Array.prototype.toString` 挂到真实原型对象，移除对象属性读取里的“隐式 toString fallback”。
   - VM `ToPropertyKey` 对对象分支改用 `toString/valueOf` 顺序的最小 `ToPrimitive` 语义；`Object.create(null)` 的 computed key 现可正确抛 TypeError。
   - object 方法/访问器通过 marker 标记为“无 prototype、不可构造”，并修复 `hasOwnProperty('prototype')` 对该标记的判断。
-  - 子集回归（latest）：`language/expressions/object` 进一步提升到 `265/6`；`language` 基线进一步提升到 `4734/266`。
+  - VM 补齐 `Object.getOwnPropertyNames`（Object constructor 静态方法），修复 `computed-property-evaluation-order.js` 的 `NotCallable`。
+  - 子集回归（latest）：`language/expressions/object` 进一步提升到 `266/5`；`language` 基线进一步提升到 `4735/265`。
 
 ## 3. 分阶段状态
 

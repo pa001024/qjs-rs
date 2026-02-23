@@ -10,6 +10,7 @@ pub enum NativeFunction {
     ArrayConstructor,
     ArrayIsArray,
     ObjectKeys,
+    ObjectGetOwnPropertyNames,
     ObjectCreate,
     ObjectSetPrototypeOf,
     ObjectDefineProperty,

@@ -3091,6 +3091,9 @@ impl Vm {
                 Ok(JsValue::Bool(is_array))
             }
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
+            NativeFunction::ObjectGetOwnPropertyNames => {
+                self.execute_object_get_own_property_names(&args)
+            }
             NativeFunction::ObjectCreate => self.execute_object_create(&args),
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
@@ -4089,6 +4092,41 @@ impl Vm {
                 .map(|attrs| attrs.enumerable)
                 .unwrap_or(true);
             if enumerable {
+                keys.push(key.clone());
+            }
+        }
+        self.create_array_from_string_keys(keys)
+    }
+
+    fn execute_object_get_own_property_names(
+        &mut self,
+        args: &[JsValue],
+    ) -> Result<JsValue, VmError> {
+        let target_id = match args.first() {
+            Some(JsValue::Object(id)) => *id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Object.getOwnPropertyNames target must be object",
+                ));
+            }
+        };
+
+        let object = self
+            .objects
+            .get(&target_id)
+            .ok_or(VmError::UnknownObject(target_id))?;
+
+        let mut keys = Vec::new();
+        for key in object.properties.keys() {
+            keys.push(key.clone());
+        }
+        for key in object.getters.keys() {
+            if !object.properties.contains_key(key) {
+                keys.push(key.clone());
+            }
+        }
+        for key in object.setters.keys() {
+            if !object.properties.contains_key(key) && !object.getters.contains_key(key) {
                 keys.push(key.clone());
             }
         }
@@ -6809,6 +6847,7 @@ impl Vm {
             (native, property),
             (NativeFunction::ObjectConstructor, "defineProperty")
                 | (NativeFunction::ObjectConstructor, "keys")
+                | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
@@ -7396,6 +7435,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "keys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectKeys)
+            }
+            (NativeFunction::ObjectConstructor, "getOwnPropertyNames") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyNames)
             }
             (NativeFunction::ObjectConstructor, "create") => {
                 JsValue::NativeFunction(NativeFunction::ObjectCreate)
