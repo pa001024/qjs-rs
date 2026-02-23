@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
+const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
@@ -58,6 +60,8 @@ pub enum Opcode {
     StoreReferenceValue,
     EnterScope,
     ExitScope,
+    EnterParamInitScope,
+    ExitParamInitScope,
     EnterWith,
     ExitWith,
     Add,
@@ -462,6 +466,16 @@ impl Compiler {
                 true
             }
             Stmt::Expression(expr) => {
+                if let Expr::String(StringLiteral { value, has_escape }) = expr {
+                    if !*has_escape && value == PARAM_INIT_SCOPE_START_MARKER {
+                        code.push(Opcode::EnterParamInitScope);
+                        return false;
+                    }
+                    if !*has_escape && value == PARAM_INIT_SCOPE_END_MARKER {
+                        code.push(Opcode::ExitParamInitScope);
+                        return false;
+                    }
+                }
                 self.compile_expr(expr, code);
                 if keep_value {
                     true
@@ -1262,6 +1276,8 @@ impl Compiler {
             Stmt::Expression(Expr::String(StringLiteral { value, .. })) => {
                 value == NON_SIMPLE_PARAMS_MARKER
                     || value == ARROW_FUNCTION_MARKER
+                    || value == PARAM_INIT_SCOPE_START_MARKER
+                    || value == PARAM_INIT_SCOPE_END_MARKER
                     || value == "use strict"
             }
             Stmt::VariableDeclaration(VariableDeclaration {

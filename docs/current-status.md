@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4666`、`failed=334`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4667`、`failed=333`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -66,6 +66,8 @@
   - VM 增加 `Object.freeze` 最小语义（对象 `extensible=false`）与 `String.prototype.toLowerCase`，并修复 `hasOwnProperty.call(...)` 的 this 覆盖语义。
   - runtime 错误路由改为 Error-like 对象（`constructor/name/message`），`TypeError`/`ReferenceError` 不再仅以字符串抛出。
   - `language/expressions/super` 子集从 `15/17` 提升至 `32/0`（executed=32）。
+  - parser 补齐“箭头函数默认参数=非简单参数”内部 marker（`$__qjs_non_simple_params__$`），修复 `EnterParamInitScope` 误弹参数作用域导致的 `UnknownIdentifier("p")` 回归。
+  - `language/eval-code/direct` 子集提升至 `143/0`（executed=143）。
 
 ## 3. 分阶段状态
 
@@ -85,7 +87,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `eval-code/*`、`statements/class`、`statements/function`），其中 `eval-code/direct` 的 arguments/annex-b function 声明交互仍需重点收敛。
+4. 函数/eval 与 class 继承链语义仍是 language 子集主失败簇（当前失败集中在 `function-code/*`、`statements/class/*`、`literals/regexp/*`）；`eval-code/direct` 当前子集已收敛到 `143/0`。
 
 ## 5. 下一步执行
 

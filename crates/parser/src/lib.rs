@@ -11,6 +11,8 @@ use lexer::{Token, TokenKind, lex};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
+const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
+const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
@@ -1201,7 +1203,11 @@ impl Parser {
         if initializers.is_empty() {
             return;
         }
-        let mut prefix = Vec::with_capacity(initializers.len());
+        let mut prefix = Vec::with_capacity(initializers.len() + 2);
+        prefix.push(Stmt::Expression(Expr::String(StringLiteral {
+            value: PARAM_INIT_SCOPE_START_MARKER.to_string(),
+            has_escape: false,
+        })));
         for (param, default_value) in initializers {
             let condition = Expr::Binary {
                 op: BinaryOp::StrictEqual,
@@ -1218,6 +1224,10 @@ impl Parser {
                 alternate: None,
             });
         }
+        prefix.push(Stmt::Expression(Expr::String(StringLiteral {
+            value: PARAM_INIT_SCOPE_END_MARKER.to_string(),
+            has_escape: false,
+        })));
         prefix.append(body);
         *body = prefix;
     }
@@ -2716,7 +2726,7 @@ impl Parser {
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
         let saved_pos = self.pos;
 
-        let (params, _simple_parameters, default_initializers) = if self.matches(&TokenKind::LParen)
+        let (params, simple_parameters, default_initializers) = if self.matches(&TokenKind::LParen)
         {
             let params = match self.parse_parameter_list() {
                 Ok(parsed) => parsed,
@@ -2765,6 +2775,9 @@ impl Parser {
             vec![Stmt::Return(Some(self.parse_assignment()?))]
         };
         self.prepend_parameter_initializers(&mut body, &default_initializers);
+        if !simple_parameters {
+            self.prepend_non_simple_params_marker(&mut body);
+        }
         self.prepend_arrow_function_marker(&mut body);
 
         Ok(Some(Expr::Function {
@@ -4978,6 +4991,14 @@ mod tests {
                     value: "$__qjs_arrow_function__$".to_string(),
                     has_escape: false,
                 })),
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_non_simple_params__$".to_string(),
+                    has_escape: false,
+                })),
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_param_init_scope_start__$".to_string(),
+                    has_escape: false,
+                })),
                 Stmt::If {
                     condition: Expr::Binary {
                         op: BinaryOp::StrictEqual,
@@ -4990,6 +5011,10 @@ mod tests {
                     })),
                     alternate: None,
                 },
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_param_init_scope_end__$".to_string(),
+                    has_escape: false,
+                })),
                 Stmt::Return(Some(Expr::Identifier(Identifier("arguments".to_string())))),
             ],
         };

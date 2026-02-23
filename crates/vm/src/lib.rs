@@ -32,6 +32,7 @@ type ScopeRef = Rc<RefCell<Scope>>;
 struct Binding {
     value: JsValue,
     mutable: bool,
+    deletable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -263,6 +264,8 @@ pub struct Vm {
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     eval_contexts: Vec<EvalContext>,
+    eval_deletable_binding_depth: usize,
+    param_init_body_scopes: Vec<ScopeRef>,
     var_scope_stack: Vec<usize>,
     gc_mark_stack: Vec<JsValue>,
     gc_shadow_roots: Vec<GcShadowRoots>,
@@ -313,6 +316,8 @@ impl Vm {
         self.exception_handlers.clear();
         self.pending_exception = None;
         self.eval_contexts.clear();
+        self.eval_deletable_binding_depth = 0;
+        self.param_init_body_scopes.clear();
         self.var_scope_stack.clear();
         self.gc_mark_stack.clear();
         self.gc_shadow_roots.clear();
@@ -774,7 +779,11 @@ impl Vm {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     } else {
-                        let binding_id = self.create_binding(JsValue::Undefined, true);
+                        let binding_id = self.create_binding_with_flags(
+                            JsValue::Undefined,
+                            true,
+                            self.eval_deletable_binding_depth > 0,
+                        );
                         let scope_ref = self.current_var_scope_ref()?;
                         if scope_ref
                             .borrow_mut()
@@ -835,7 +844,11 @@ impl Vm {
                         }
                         existing_binding.value = function_value;
                     } else {
-                        let function_binding = self.create_binding(function_value, true);
+                        let function_binding = self.create_binding_with_flags(
+                            function_value,
+                            true,
+                            self.eval_deletable_binding_depth > 0,
+                        );
                         let scope_ref = self.current_scope_ref()?;
                         if scope_ref
                             .borrow_mut()
@@ -1305,7 +1318,9 @@ impl Vm {
                         self.resolve_binding_or_with_reference(name, realm)?
                     {
                         match reference {
-                            IdentifierReference::Binding { .. } => false,
+                            IdentifierReference::Binding { binding_id, .. } => {
+                                self.delete_binding_reference(binding_id)
+                            }
                             IdentifierReference::Property { base, property, .. } => {
                                 self.delete_property(base, property)?
                             }
@@ -1379,6 +1394,26 @@ impl Vm {
                 Opcode::ExitScope => {
                     if self.scopes.pop().is_none() || self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
+                    }
+                }
+                Opcode::EnterParamInitScope => {
+                    if self.scopes.len() < 2 {
+                        return Err(VmError::ScopeUnderflow);
+                    }
+                    let body_scope = self.scopes.pop().ok_or(VmError::ScopeUnderflow)?;
+                    self.param_init_body_scopes.push(body_scope);
+                    if let Some(last_var_scope) = self.var_scope_stack.last_mut() {
+                        *last_var_scope = self.scopes.len().saturating_sub(1);
+                    }
+                }
+                Opcode::ExitParamInitScope => {
+                    let body_scope = self
+                        .param_init_body_scopes
+                        .pop()
+                        .ok_or(VmError::ScopeUnderflow)?;
+                    self.scopes.push(body_scope);
+                    if let Some(last_var_scope) = self.var_scope_stack.last_mut() {
+                        *last_var_scope = self.scopes.len().saturating_sub(1);
                     }
                 }
                 Opcode::EnterWith => {
@@ -2515,6 +2550,7 @@ impl Vm {
         let saved_pending_exception = self.pending_exception.take();
         let saved_identifier_references = std::mem::take(&mut self.identifier_references);
         let saved_var_scope_stack = std::mem::take(&mut self.var_scope_stack);
+        let saved_param_init_body_scopes = std::mem::take(&mut self.param_init_body_scopes);
         self.gc_shadow_roots.push(GcShadowRoots {
             stack: saved_stack,
             scopes: saved_scopes,
@@ -2524,11 +2560,15 @@ impl Vm {
 
         self.scopes = closure.captured_scopes;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
+        if non_simple_params {
+            self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+        }
         self.var_scope_stack = vec![self.scopes.len().saturating_sub(1)];
         self.stack = Vec::new();
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
         self.identifier_references = Vec::new();
+        self.param_init_body_scopes = Vec::new();
         self.eval_contexts.push(EvalContext {
             is_arrow_function,
             non_simple_params,
@@ -2547,12 +2587,20 @@ impl Vm {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
             Err(err) => {
-                self.restore_caller_state(saved_handlers, saved_var_scope_stack);
+                self.restore_caller_state(
+                    saved_handlers,
+                    saved_var_scope_stack,
+                    saved_param_init_body_scopes,
+                );
                 return Err(err);
             }
         };
 
-        self.restore_caller_state(saved_handlers, saved_var_scope_stack);
+        self.restore_caller_state(
+            saved_handlers,
+            saved_var_scope_stack,
+            saved_param_init_body_scopes,
+        );
         Ok(value)
     }
 
@@ -2560,6 +2608,7 @@ impl Vm {
         &mut self,
         saved_handlers: Vec<ExceptionHandler>,
         saved_var_scope_stack: Vec<usize>,
+        saved_param_init_body_scopes: Vec<ScopeRef>,
     ) {
         let saved = self
             .gc_shadow_roots
@@ -2571,6 +2620,7 @@ impl Vm {
         self.pending_exception = saved.pending_exception;
         self.identifier_references = saved.identifier_references;
         self.var_scope_stack = saved_var_scope_stack;
+        self.param_init_body_scopes = saved_param_init_body_scopes;
     }
 
     fn execute_host_function_call(
@@ -3464,7 +3514,16 @@ impl Vm {
             }
         }
 
+        let deletable_eval_bindings = matches!(call_kind, EvalCallKind::Direct)
+            && !eval_strict
+            && !self.eval_targets_global_var_scope(call_kind);
+        if deletable_eval_bindings {
+            self.eval_deletable_binding_depth = self.eval_deletable_binding_depth.saturating_add(1);
+        }
         let result = self.execute_inline_chunk(&chunk, realm, false);
+        if deletable_eval_bindings {
+            self.eval_deletable_binding_depth = self.eval_deletable_binding_depth.saturating_sub(1);
+        }
         self.scopes = saved_scopes;
         self.var_scope_stack = saved_var_scope_stack;
         self.with_objects = saved_with_objects;
@@ -4608,9 +4667,25 @@ impl Vm {
     }
 
     fn create_binding(&mut self, value: JsValue, mutable: bool) -> BindingId {
+        self.create_binding_with_flags(value, mutable, false)
+    }
+
+    fn create_binding_with_flags(
+        &mut self,
+        value: JsValue,
+        mutable: bool,
+        deletable: bool,
+    ) -> BindingId {
         let id = self.next_binding_id;
         self.next_binding_id += 1;
-        self.bindings.insert(id, Binding { value, mutable });
+        self.bindings.insert(
+            id,
+            Binding {
+                value,
+                mutable,
+                deletable,
+            },
+        );
         id
     }
 
@@ -4713,6 +4788,23 @@ impl Vm {
             }
         }
         None
+    }
+
+    fn delete_binding_reference(&mut self, binding_id: BindingId) -> bool {
+        let deletable = self
+            .bindings
+            .get(&binding_id)
+            .is_some_and(|binding| binding.deletable);
+        if !deletable {
+            return false;
+        }
+        for scope_ref in &self.scopes {
+            scope_ref
+                .borrow_mut()
+                .retain(|_, current_id| *current_id != binding_id);
+        }
+        self.bindings.remove(&binding_id);
+        true
     }
 
     fn with_object_from_value(&mut self, value: JsValue) -> Result<JsValue, VmError> {
