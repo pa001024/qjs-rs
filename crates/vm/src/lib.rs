@@ -15,6 +15,9 @@ const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
+const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
+const SURROGATE_PLACEHOLDER_END: u32 = 0xE7FF;
+const SURROGATE_START: u16 = 0xD800;
 const OBJECT_ID_SLOT_BITS: u64 = 32;
 const OBJECT_ID_SLOT_MASK: u64 = (1u64 << OBJECT_ID_SLOT_BITS) - 1;
 
@@ -6006,7 +6009,7 @@ impl Vm {
         if let (JsValue::String(left_string), JsValue::String(right_string)) =
             (&left_primitive, &right_primitive)
         {
-            return Ok(Some(left_string < right_string));
+            return Ok(Some(self.js_string_less_than(left_string, right_string)));
         }
 
         let left_number = self.to_number(&left_primitive);
@@ -6015,6 +6018,24 @@ impl Vm {
             return Ok(None);
         }
         Ok(Some(left_number < right_number))
+    }
+
+    fn string_to_js_code_units(&self, value: &str) -> Vec<u16> {
+        let mut units = Vec::with_capacity(value.len());
+        for ch in value.chars() {
+            let scalar = ch as u32;
+            if (SURROGATE_PLACEHOLDER_START..=SURROGATE_PLACEHOLDER_END).contains(&scalar) {
+                units.push((SURROGATE_START as u32 + (scalar - SURROGATE_PLACEHOLDER_START)) as u16);
+                continue;
+            }
+            let mut buf = [0u16; 2];
+            units.extend_from_slice(ch.encode_utf16(&mut buf));
+        }
+        units
+    }
+
+    fn js_string_less_than(&self, left: &str, right: &str) -> bool {
+        self.string_to_js_code_units(left) < self.string_to_js_code_units(right)
     }
 
     fn eval_relational_operator(
@@ -7241,6 +7262,15 @@ mod tests {
             Opcode::Gt,
             Opcode::Halt,
         ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn relational_string_compare_uses_utf16_code_unit_order() {
+        let script = parse_script("(\"\\uD7FF\" < \"\\u{10000}\") && (\"\\u{10000}\" < \"\\uFFFF\");")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }

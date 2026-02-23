@@ -146,6 +146,14 @@ fn decode_unicode_escape(source: &str, pos: usize) -> Option<(char, usize)> {
     Some((ch, end + 1 - pos))
 }
 
+fn surrogate_escape_placeholder(code_unit: u32) -> Option<char> {
+    if !(0xD800..=0xDFFF).contains(&code_unit) {
+        return None;
+    }
+    let mapped = 0xE000 + (code_unit - 0xD800);
+    char::from_u32(mapped)
+}
+
 fn decode_char(source: &str, pos: usize) -> Option<(char, usize)> {
     let tail = source.get(pos..)?;
     let ch = tail.chars().next()?;
@@ -845,28 +853,64 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             b'r' => ('\r', 1usize),
                             b't' => ('\t', 1usize),
                             b'u' => {
-                                if pos + 4 >= bytes.len() {
-                                    return Err(LexError {
-                                        message: "unterminated unicode escape".to_string(),
-                                        position: pos.saturating_sub(1),
-                                    });
+                                if pos + 4 < bytes.len() {
+                                    let hex =
+                                        std::str::from_utf8(&bytes[pos + 1..pos + 5]).map_err(
+                                            |_| LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            },
+                                        )?;
+                                    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                                        let code_unit = u32::from_str_radix(hex, 16).map_err(|_| {
+                                            LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            }
+                                        })?;
+                                        let ch = surrogate_escape_placeholder(code_unit)
+                                            .or_else(|| char::from_u32(code_unit))
+                                            .ok_or(LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            })?;
+                                        (ch, 5usize)
+                                    } else {
+                                        let escape_start = pos.saturating_sub(1);
+                                        let Some((ch, escape_len)) =
+                                            decode_unicode_escape(source, escape_start)
+                                        else {
+                                            return Err(LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            });
+                                        };
+                                        if escape_len <= 1 {
+                                            return Err(LexError {
+                                                message: "invalid unicode escape".to_string(),
+                                                position: pos.saturating_sub(1),
+                                            });
+                                        }
+                                        (ch, escape_len - 1)
+                                    }
+                                } else {
+                                    let escape_start = pos.saturating_sub(1);
+                                    let Some((ch, escape_len)) =
+                                        decode_unicode_escape(source, escape_start)
+                                    else {
+                                        return Err(LexError {
+                                            message: "invalid unicode escape".to_string(),
+                                            position: pos.saturating_sub(1),
+                                        });
+                                    };
+                                    if escape_len <= 1 {
+                                        return Err(LexError {
+                                            message: "invalid unicode escape".to_string(),
+                                            position: pos.saturating_sub(1),
+                                        });
+                                    }
+                                    (ch, escape_len - 1)
                                 }
-                                let hex = std::str::from_utf8(&bytes[pos + 1..pos + 5]).map_err(
-                                    |_| LexError {
-                                        message: "invalid unicode escape".to_string(),
-                                        position: pos.saturating_sub(1),
-                                    },
-                                )?;
-                                let code_point =
-                                    u32::from_str_radix(hex, 16).map_err(|_| LexError {
-                                        message: "invalid unicode escape".to_string(),
-                                        position: pos.saturating_sub(1),
-                                    })?;
-                                let ch = char::from_u32(code_point).ok_or(LexError {
-                                    message: "invalid unicode escape".to_string(),
-                                    position: pos.saturating_sub(1),
-                                })?;
-                                (ch, 5usize)
                             }
                             b'x' => {
                                 if pos + 2 >= bytes.len() {
@@ -906,8 +950,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     pos += advance;
                     continue;
                 }
-                value.push(current as char);
-                pos += 1;
+                if current.is_ascii() {
+                    value.push(current as char);
+                    pos += 1;
+                } else {
+                    let Some((ch, len)) = decode_char(source, pos) else {
+                        return Err(LexError {
+                            message: "unterminated string literal".to_string(),
+                            position: start,
+                        });
+                    };
+                    if ch == '\n' || ch == '\r' || ch == '\u{2028}' || ch == '\u{2029}' {
+                        return Err(LexError {
+                            message: "unterminated string literal".to_string(),
+                            position: start,
+                        });
+                    }
+                    value.push(ch);
+                    pos += len;
+                }
+                continue;
             }
             if !terminated {
                 return Err(LexError {
@@ -1083,6 +1145,26 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::String("a".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::String("b".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_unicode_codepoint_string_escape() {
+        let tokens = lex("\"\\u{1F600}\"").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::String("😀".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_surrogate_unicode_escape_in_string() {
+        let tokens = lex("\"\\uD800\\uDC00\"").expect("tokenization should succeed");
+        let TokenKind::String(value) = &tokens[0].kind else {
+            panic!("expected string token");
+        };
+        let mut chars = value.chars();
+        assert_eq!(chars.next().map(|ch| ch as u32), Some(0xE000));
+        assert_eq!(chars.next().map(|ch| ch as u32), Some(0xE400));
+        assert_eq!(chars.next(), None);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
     }
 
     #[test]
