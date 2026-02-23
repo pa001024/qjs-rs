@@ -76,6 +76,18 @@ pub fn install_baseline(realm: &mut Realm) {
         "SyntaxError",
         JsValue::NativeFunction(NativeFunction::Test262Error),
     );
+    realm.define_global(
+        "EvalError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "RangeError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
+    realm.define_global(
+        "URIError",
+        JsValue::NativeFunction(NativeFunction::Test262Error),
+    );
 }
 
 #[cfg(test)]
@@ -110,6 +122,24 @@ mod tests {
         assert_eq!(
             realm.get_global("isFinite"),
             Some(&JsValue::NativeFunction(NativeFunction::IsFinite))
+        );
+    }
+
+    #[test]
+    fn installs_additional_error_globals() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("EvalError"),
+            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
+        );
+        assert_eq!(
+            realm.get_global("RangeError"),
+            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
+        );
+        assert_eq!(
+            realm.get_global("URIError"),
+            Some(&JsValue::NativeFunction(NativeFunction::Test262Error))
         );
     }
 }
