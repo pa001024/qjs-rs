@@ -132,6 +132,7 @@ enum HostFunction {
     ArrayForEach(ObjectId),
     ArrayReduce(ObjectId),
     ArrayJoin(ObjectId),
+    ArrayJoinThis,
     ArrayReverse(ObjectId),
     ArraySort(ObjectId),
     RegExpTest(ObjectId),
@@ -679,6 +680,7 @@ impl Vm {
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
             | HostFunction::ObjectToString
+            | HostFunction::ArrayJoinThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
             | HostFunction::AssertThrows
@@ -2911,6 +2913,17 @@ impl Vm {
                     Some(value) => self.coerce_to_string(value),
                 };
                 self.execute_array_join(object_id, &separator)
+            }
+            HostFunction::ArrayJoinThis => {
+                let receiver_id = match this_arg {
+                    Some(JsValue::Object(id)) => id,
+                    _ => return Err(VmError::TypeError("Array.prototype.join receiver must be object")),
+                };
+                let separator = match args.first() {
+                    None | Some(JsValue::Undefined) => ",".to_string(),
+                    Some(value) => self.coerce_to_string(value),
+                };
+                self.execute_array_join(receiver_id, &separator)
             }
             HostFunction::ArrayReverse(object_id) => self.execute_array_reverse(object_id),
             HostFunction::ArraySort(object_id) => self.execute_array_sort(object_id),
@@ -5819,6 +5832,7 @@ impl Vm {
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             let join = self.create_host_function_value(HostFunction::ArrayJoin(id));
+            let to_string = self.create_host_function_value(HostFunction::ArrayJoinThis);
             let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
             let sort = self.create_host_function_value(HostFunction::ArraySort(id));
             let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
@@ -5855,7 +5869,7 @@ impl Vm {
                         configurable: true,
                     },
                 );
-                object.properties.insert("toString".to_string(), join);
+                object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "toString".to_string(),
                     PropertyAttributes {
@@ -6960,6 +6974,17 @@ impl Vm {
                 .and_then(|object| object.properties.get(&key).cloned());
             let part = match value {
                 None | Some(JsValue::Undefined) | Some(JsValue::Null) => String::new(),
+                Some(JsValue::Object(nested_id))
+                    if self.objects.get(&nested_id).is_some_and(|object| {
+                        object.properties.contains_key("length")
+                            && object.prototype == self.array_prototype_id
+                    }) =>
+                {
+                    match self.execute_array_join(nested_id, ",")? {
+                        JsValue::String(text) => text,
+                        other => self.coerce_to_string(&other),
+                    }
+                }
                 Some(value) => self.coerce_to_string(&value),
             };
             parts.push(part);
