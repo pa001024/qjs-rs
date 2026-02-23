@@ -122,4 +122,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser/bytecode/vm/runtime/builtins 对齐 QuickJS 补齐本轮主链路：`super` 方法上下文放行、`===/!==` 独立 opcode、`++/--` 显式 `ToNumber`、`Number.MIN_VALUE=5e-324`、全局 `parseInt/parseFloat`；`language` 基线由 `4320/680` 提升至 `4324/676`。
 - bytecode/vm 新增 `CallMethod*`，在 `obj.m()` / `obj[k]()` 场景保留 receiver `this`；配合 `__proto__` 字面量处理与 `super` 运行时回退，`language` 基线进一步提升至 `4337/663`。
 - bytecode/vm 新增 `CallIdentifier*`（reference-aware 标识符调用），修复 `with (obj) { method(); }` 的 base object `this` 绑定，并在 strict 回归用例下收敛 `this` 选择；同时 parser 补齐 `class extends` 匿名类表达式吞吐、builtins/vm 补齐 `isFinite`。当前 `language` 基线：`4338/662`。
+- lexer 补齐前导小数字面量（`.DecimalDigits`）与指数形态（如 `.25e1`）词法吞吐，清理 `literals/numeric` 与 `expressions/division` 的一批 `unexpected operator at expression start` 失败簇；`language` 基线进一步提升至 `4352/648`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
