@@ -1682,9 +1682,17 @@ impl Compiler {
                     }
                 }
                 Expr::Member { object, property } => {
+                    let is_super_member =
+                        matches!(object.as_ref(), Expr::Identifier(Identifier(name)) if name == "super");
                     self.compile_expr(object, code);
-                    code.push(Opcode::Dup);
-                    code.push(Opcode::GetProperty(property.clone()));
+                    if is_super_member {
+                        code.push(Opcode::GetProperty(property.clone()));
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        code.push(Opcode::Swap);
+                    } else {
+                        code.push(Opcode::Dup);
+                        code.push(Opcode::GetProperty(property.clone()));
+                    }
                     let mut spread_flags = Vec::with_capacity(arguments.len());
                     for argument in arguments {
                         if let Expr::SpreadArgument(inner) = argument {
@@ -1702,10 +1710,19 @@ impl Compiler {
                     }
                 }
                 Expr::MemberComputed { object, property } => {
+                    let is_super_member =
+                        matches!(object.as_ref(), Expr::Identifier(Identifier(name)) if name == "super");
                     self.compile_expr(object, code);
-                    code.push(Opcode::Dup);
-                    self.compile_expr(property, code);
-                    code.push(Opcode::GetPropertyByValue);
+                    if is_super_member {
+                        self.compile_expr(property, code);
+                        code.push(Opcode::GetPropertyByValue);
+                        code.push(Opcode::LoadIdentifier("this".to_string()));
+                        code.push(Opcode::Swap);
+                    } else {
+                        code.push(Opcode::Dup);
+                        self.compile_expr(property, code);
+                        code.push(Opcode::GetPropertyByValue);
+                    }
                     let mut spread_flags = Vec::with_capacity(arguments.len());
                     for argument in arguments {
                         if let Expr::SpreadArgument(inner) = argument {

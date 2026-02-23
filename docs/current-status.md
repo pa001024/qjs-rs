@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4596`、`failed=404`（命令见 `docs/test262-baseline.md`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4624`、`failed=376`（命令见 `docs/test262-baseline.md`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -53,6 +53,10 @@
   - `eval` 作用域策略对齐推进：strict eval 使用隔离变量环境；indirect eval 切换到全局执行上下文（清理 caller with 环境影响），non-strict 维持函数声明对 caller/global 的可见性。
   - eval 补齐 global function 可声明性守卫：当 eval 命中全局 var 环境且声明受限函数名（如 `NaN/Infinity/undefined`）时抛 TypeError，修复 `non-definable-global-function`。
   - `language/eval-code` 子集从 `162/18` 提升到 `168/12`（executed=180）。
+  - parser class lowering 补齐 `extends` 链路：保留 extends 表达式、派生类默认构造器生成 `super(...arguments)`、方法 super 绑定改为基于 extends 值（覆盖 static/instance/constructor）。
+  - VM 新增 `super(...)` 专用构造调用路径（不再走普通 Call），修复 derived constructor 调父类构造器时的 `class constructor cannot be invoked without 'new'` 误报。
+  - bytecode 对 `super.method(...)` 与 `super[expr](...)` 调整 receiver 绑定，调用路径改为以当前 `this` 作为 thisArg。
+  - `language/expressions/super` 子集从 `9/23` 提升到 `15/17`（executed=32）；`language/statements/class/subclass` 子集从 `17/60` 提升到 `22/55`（executed=77）。
 
 ## 3. 分阶段状态
 

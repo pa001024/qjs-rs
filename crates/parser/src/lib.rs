@@ -560,6 +560,7 @@ struct ClassMethodDefinition {
 #[derive(Debug, Clone, PartialEq, Default)]
 struct ParsedClassTail {
     methods: Vec<ClassMethodDefinition>,
+    extends: Option<Expr>,
 }
 
 fn validate_statement_list_early_errors(
@@ -3339,12 +3340,11 @@ impl Parser {
     }
 
     fn parse_class_tail_detailed(&mut self) -> Result<ParsedClassTail, ParseError> {
+        let mut parsed = ParsedClassTail::default();
         if self.matches_keyword("extends") {
-            let _ = self.parse_expression_inner()?;
+            parsed.extends = Some(self.parse_expression_inner()?);
         }
         self.expect(TokenKind::LBrace, "expected '{' before class body")?;
-
-        let mut parsed = ParsedClassTail::default();
         while !self.check(&TokenKind::RBrace) {
             if self.is_eof() {
                 return Err(self.error_current("expected '}' after class body"));
@@ -3448,30 +3448,93 @@ impl Parser {
     fn lower_class_tail(&mut self, class_tail: ParsedClassTail) -> Expr {
         let class_temp = self.next_class_temp_name();
         let class_ident = Identifier(class_temp.clone());
+        let ParsedClassTail { methods, extends } = class_tail;
+        let has_extends = extends.is_some();
+        let super_ident = Identifier("$__class_super".to_string());
         let mut constructor_value = Expr::Function {
             name: None,
             params: vec![],
             body: vec![],
         };
+        let mut has_explicit_constructor = false;
         let mut lowered_methods = Vec::new();
-        for method in class_tail.methods {
+        for method in methods {
             let is_constructor = !method.is_static
                 && matches!(method.kind, ClassElementKind::Method)
                 && matches!(&method.key, ClassMethodKey::Static(name) if name == "constructor");
             if is_constructor {
-                constructor_value =
-                    self.lower_class_method_with_super_binding(method.value, false, &class_ident);
+                constructor_value = self.lower_class_method_with_super_binding(
+                    method.value,
+                    false,
+                    &class_ident,
+                    true,
+                    if has_extends {
+                        Some(Expr::Identifier(super_ident.clone()))
+                    } else {
+                        None
+                    },
+                );
+                has_explicit_constructor = true;
                 continue;
             }
             lowered_methods.push(method);
         }
 
-        let mut body = vec![
-            Stmt::VariableDeclaration(VariableDeclaration {
+        if extends.is_some() && !has_explicit_constructor {
+            constructor_value = self.lower_class_method_with_super_binding(
+                Expr::Function {
+                    name: None,
+                    params: vec![],
+                    body: vec![Stmt::Return(Some(Expr::Call {
+                        callee: Box::new(Expr::Identifier(Identifier("super".to_string()))),
+                        arguments: vec![Expr::SpreadArgument(Box::new(Expr::Identifier(
+                            Identifier("arguments".to_string()),
+                        )))],
+                    }))],
+                },
+                false,
+                &class_ident,
+                true,
+                Some(Expr::Identifier(super_ident.clone())),
+            );
+        }
+
+        let mut body = vec![Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: class_ident.clone(),
+            initializer: Some(constructor_value),
+        })];
+
+        let prototype_value = if let Some(extends_expr) = extends {
+            body.push(Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
-                name: class_ident.clone(),
-                initializer: Some(constructor_value),
-            }),
+                name: super_ident.clone(),
+                initializer: Some(extends_expr),
+            }));
+            let super_parent_prototype = Expr::Conditional {
+                condition: Box::new(Expr::Binary {
+                    op: BinaryOp::StrictEqual,
+                    left: Box::new(Expr::Identifier(super_ident.clone())),
+                    right: Box::new(Expr::Null),
+                }),
+                consequent: Box::new(Expr::Null),
+                alternate: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(super_ident.clone())),
+                    property: "prototype".to_string(),
+                }),
+            };
+            Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "create".to_string(),
+                }),
+                arguments: vec![super_parent_prototype],
+            }
+        } else {
+            Expr::ObjectLiteral(vec![])
+        };
+
+        body.extend([
             Stmt::Expression(Expr::AssignMember {
                 object: Box::new(Expr::Identifier(class_ident.clone())),
                 property: CLASS_CONSTRUCTOR_MARKER.to_string(),
@@ -3491,7 +3554,7 @@ impl Parser {
                     Expr::ObjectLiteral(vec![
                         ObjectProperty {
                             key: ObjectPropertyKey::Static("value".to_string()),
-                            value: Expr::ObjectLiteral(vec![]),
+                            value: prototype_value,
                         },
                         ObjectProperty {
                             key: ObjectPropertyKey::Static("writable".to_string()),
@@ -3542,7 +3605,7 @@ impl Parser {
                     ]),
                 ],
             }),
-        ];
+        ]);
 
         for method in lowered_methods {
             let ClassMethodDefinition {
@@ -3559,8 +3622,34 @@ impl Parser {
                 continue;
             }
 
+            let method_super_override = if has_extends {
+                if is_static {
+                    Some(Expr::Identifier(super_ident.clone()))
+                } else {
+                    Some(Expr::Conditional {
+                        condition: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(Expr::Identifier(super_ident.clone())),
+                            right: Box::new(Expr::Null),
+                        }),
+                        consequent: Box::new(Expr::Null),
+                        alternate: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(super_ident.clone())),
+                            property: "prototype".to_string(),
+                        }),
+                    })
+                }
+            } else {
+                None
+            };
             let method_value = self.mark_class_method_non_constructible(
-                self.lower_class_method_with_super_binding(value, is_static, &class_ident),
+                self.lower_class_method_with_super_binding(
+                    value,
+                    is_static,
+                    &class_ident,
+                    false,
+                    method_super_override,
+                ),
             );
             let target = if is_static {
                 Expr::Identifier(class_ident.clone())
@@ -3673,16 +3762,29 @@ impl Parser {
         value: Expr,
         is_static: bool,
         class_ident: &Identifier,
+        constructor_super: bool,
+        super_override: Option<Expr>,
     ) -> Expr {
         let Expr::Function { name, params, body } = value else {
             return value;
         };
-        let super_base = if is_static {
-            Expr::Identifier(class_ident.clone())
+        let super_base = if let Some(override_expr) = super_override {
+            override_expr
         } else {
-            Expr::Member {
-                object: Box::new(Expr::Identifier(class_ident.clone())),
-                property: "prototype".to_string(),
+            let super_anchor = if is_static || constructor_super {
+                Expr::Identifier(class_ident.clone())
+            } else {
+                Expr::Member {
+                    object: Box::new(Expr::Identifier(class_ident.clone())),
+                    property: "prototype".to_string(),
+                }
+            };
+            Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "getPrototypeOf".to_string(),
+                }),
+                arguments: vec![super_anchor],
             }
         };
         let mut lowered_body = vec![
@@ -3693,13 +3795,7 @@ impl Parser {
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
                 name: Identifier("super".to_string()),
-                initializer: Some(Expr::Call {
-                    callee: Box::new(Expr::Member {
-                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                        property: "getPrototypeOf".to_string(),
-                    }),
-                    arguments: vec![super_base],
-                }),
+                initializer: Some(super_base),
             }),
         ];
         lowered_body.extend(body);

@@ -1796,6 +1796,9 @@ impl Vm {
         let args = self.pop_call_arguments(arg_count)?;
         let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        if name == "super" {
+            return self.execute_super_constructor_call(callee, args, realm, caller_strict);
+        }
         if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
             return self.execute_eval_argument(
                 args.first(),
@@ -1826,6 +1829,9 @@ impl Vm {
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let reference = self.resolve_identifier_reference(name, realm, caller_strict)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
+        if name == "super" {
+            return self.execute_super_constructor_call(callee, args, realm, caller_strict);
+        }
         if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
             return self.execute_eval_argument(
                 args.first(),
@@ -1979,6 +1985,79 @@ impl Vm {
                     Ok(result)
                 } else {
                     Ok(constructed)
+                }
+            }
+            JsValue::Object(object_id) => {
+                if self.is_class_constructor_object(object_id) {
+                    self.construct_from_class_object(object_id, realm)
+                } else {
+                    Err(VmError::NotCallable)
+                }
+            }
+            JsValue::NativeFunction(native) => {
+                if matches!(native, NativeFunction::SymbolConstructor) {
+                    return Err(VmError::NotCallable);
+                }
+                if matches!(native, NativeFunction::DateConstructor) {
+                    return self.execute_date_constructor(&args);
+                }
+                if matches!(
+                    native,
+                    NativeFunction::NumberConstructor
+                        | NativeFunction::BooleanConstructor
+                        | NativeFunction::StringConstructor
+                ) {
+                    return self.execute_boxed_primitive_constructor(
+                        native,
+                        args,
+                        realm,
+                        caller_strict,
+                    );
+                }
+                self.execute_native_call(native, args, realm, caller_strict)
+            }
+            JsValue::HostFunction(host_id) => {
+                let constructed = self.create_object_value();
+                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
+                let result =
+                    self.execute_host_function_call(host_id, args, realm, caller_strict)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(constructed)
+                }
+            }
+            _ => Err(VmError::NotCallable),
+        }
+    }
+
+    fn execute_super_constructor_call(
+        &mut self,
+        callee: JsValue,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let this_binding_id = self
+            .resolve_binding_id("this")
+            .ok_or_else(|| VmError::UnknownIdentifier("this".to_string()))?;
+        let this_value = self
+            .bindings
+            .get(&this_binding_id)
+            .map(|binding| binding.value.clone())
+            .ok_or(VmError::ScopeUnderflow)?;
+
+        match callee {
+            JsValue::Function(closure_id) => {
+                if self.closure_is_arrow(closure_id)? || self.closure_has_no_prototype(closure_id) {
+                    return Err(VmError::NotCallable);
+                }
+                let result =
+                    self.execute_closure_call(closure_id, args, Some(this_value.clone()), realm)?;
+                if matches!(result, JsValue::Object(_)) {
+                    Ok(result)
+                } else {
+                    Ok(this_value)
                 }
             }
             JsValue::Object(object_id) => {
