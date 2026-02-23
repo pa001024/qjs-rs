@@ -2907,7 +2907,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_shift()?;
+        let mut expr = self.parse_relational()?;
         loop {
             let op = if self.matches(&TokenKind::EqualEqualEqual) {
                 BinaryOp::StrictEqual
@@ -2917,7 +2917,23 @@ impl Parser {
                 BinaryOp::Equal
             } else if self.matches(&TokenKind::BangEqual) {
                 BinaryOp::NotEqual
-            } else if self.matches(&TokenKind::Less) {
+            } else {
+                break;
+            };
+            let right = self.parse_relational()?;
+            expr = Expr::Binary {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_relational(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_shift()?;
+        loop {
+            let op = if self.matches(&TokenKind::Less) {
                 BinaryOp::Less
             } else if self.matches(&TokenKind::LessEqual) {
                 BinaryOp::LessEqual
@@ -5682,6 +5698,29 @@ mod tests {
                 has_escape: false,
             })),
             right: Box::new(Expr::This),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_equality_after_in_with_correct_precedence() {
+        let parsed =
+            parse_expression("true in object !== \"true\" in object").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::StrictNotEqual,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::In,
+                left: Box::new(Expr::Bool(true)),
+                right: Box::new(Expr::Identifier(Identifier("object".to_string()))),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::In,
+                left: Box::new(Expr::String(StringLiteral {
+                    value: "true".to_string(),
+                    has_escape: false,
+                })),
+                right: Box::new(Expr::Identifier(Identifier("object".to_string()))),
+            }),
         };
         assert_eq!(parsed, expected);
     }

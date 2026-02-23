@@ -146,6 +146,7 @@ enum HostFunction {
         target: JsValue,
     },
     ObjectToString,
+    ObjectValueOf,
     AssertSameValue,
     AssertNotSameValue,
     AssertThrows,
@@ -360,6 +361,7 @@ impl Vm {
         let _ = self.json_object_value()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
+            let value_of = self.create_host_function_value(HostFunction::ObjectValueOf);
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
                     "constructor".to_string(),
@@ -378,6 +380,15 @@ impl Vm {
                     .insert("toString".to_string(), to_string);
                 object_prototype.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype.properties.insert("valueOf".to_string(), value_of);
+                object_prototype.property_attributes.insert(
+                    "valueOf".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -713,6 +724,7 @@ impl Vm {
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
             | HostFunction::ObjectToString
+            | HostFunction::ObjectValueOf
             | HostFunction::ArrayJoinThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
@@ -3207,6 +3219,7 @@ impl Vm {
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
             HostFunction::ObjectToString => Ok(JsValue::String("[object Object]".to_string())),
+            HostFunction::ObjectValueOf => Ok(this_arg.unwrap_or(JsValue::Undefined)),
             HostFunction::DateToString(object_id) => {
                 let timestamp = self
                     .objects
@@ -10104,6 +10117,14 @@ mod tests {
             Opcode::In,
             Opcode::Halt,
         ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn in_operator_walks_object_prototype_chain() {
+        let script = parse_script("\"valueOf\" in ({})").expect("script should parse");
+        let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
