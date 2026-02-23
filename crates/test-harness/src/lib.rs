@@ -1084,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_regexp_literal_global_flag_baseline() {
+        let result = run_script("var r = /x/g; r.global === true && r.flags === 'g';", &[]);
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_regexp_test_method_baseline() {
+        let result = run_script("/a/.test('a') && !/a/.test('b');", &[]);
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn supports_regexp_instanceof_baseline() {
+        let result = run_script("/(?:)/ instanceof RegExp;", &[]);
+        assert_eq!(result, Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn evaluates_boolean_and_null_literals() {
         assert_eq!(run_expression("true"), Ok(JsValue::Bool(true)));
         assert_eq!(run_expression("false"), Ok(JsValue::Bool(false)));

@@ -10,3 +10,4 @@ ast.workspace = true
 bytecode.workspace = true
 parser.workspace = true
 runtime.workspace = true
+regex = "1"

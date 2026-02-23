@@ -10,7 +10,7 @@
 | Bytecode compiler | `crates/bytecode` | In Progress | 已形成 AST 到指令集的主降级路径，包含函数/作用域/跳转/异常处理相关 opcode。 | 继续稳定 completion record 与复杂控制流的编译约束。 |
 | VM execution | `crates/vm` | In Progress | 可执行脚本链路，支持作用域栈、调用、异常传播、对象读写、部分内建交互；已新增 `CallMethod*` 与 `CallIdentifier*` 路径以对齐 receiver/base-object `this` 绑定语义；函数对象已支持 `Object.defineProperty` accessor 路径。 | `this`、严格模式细节、descriptor 细节与 corner cases 仍需对齐。 |
 | Value/object model | `crates/runtime` | In Progress | 提供 `JsValue`、`Realm` 与对象存储基线，支撑当前执行路径；已提供 `Realm.globals_values()` 供 GC root 收集。函数闭包对象已区分默认原型与显式 `[[Prototype]]` 覆盖（含 `setPrototypeOf(fn, null)`）。 | 对象属性描述符细节、宿主对象生命周期与跨 realm 行为仍需收敛。 |
-| Builtins | `crates/builtins` | In Progress | 已注入一批 baseline 全局对象与函数（含 `parseInt`/`parseFloat`/`isFinite` 与 test harness 运行所需最小集）。 | 仍需系统化补齐 `JSON`、`Error` 族细节、`Promise` 等高阶内建。 |
+| Builtins | `crates/builtins` | In Progress | 已注入一批 baseline 全局对象与函数（含 `parseInt`/`parseFloat`/`isFinite` 与 test harness 运行所需最小集），并补齐 `EvalError/RangeError/URIError` 入口。 | 仍需系统化补齐 `JSON`、`Error` 族细节、`Promise` 等高阶内建。 |
 | Compatibility harness | `crates/test-harness` | In Progress | 已有 `test262-lite` 跑批与 CLI，支持 frontmatter 驱动与失败样本导出。 | 真实 test262 覆盖、host hooks、严格模式 include 机制仍待扩展。 |
 | GC / Memory model | `crates/vm`, `crates/runtime` | In Progress | 已完成 root 盘点、策略、GC 设计、测试计划与最小 mark-sweep PoC；已实现 `ObjectId(slot+generation)` 句柄防护。 | 继续强化运行中触发策略、压力回归覆盖与性能观测。 |
 | Module / Job queue | `crates/parser`, `crates/runtime`, `crates/vm` | Planned | 尚无完整 ES Module 与微任务执行链路。 | Phase 6 需补齐解析、实例化、执行与 Promise job queue。 |

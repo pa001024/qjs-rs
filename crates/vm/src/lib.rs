@@ -3,6 +3,7 @@
 use ast::{BindingKind, ForInitializer, Identifier, Script, Stmt, VariableDeclaration};
 use bytecode::{compile_expression, compile_script, Chunk, CompiledFunction, Opcode};
 use parser::{parse_expression, parse_script};
+use regex::RegexBuilder;
 use runtime::{JsValue, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -107,6 +108,7 @@ enum HostFunction {
     ArrayJoin(ObjectId),
     ArrayReverse(ObjectId),
     ArraySort(ObjectId),
+    RegExpTest(ObjectId),
     HasOwnProperty {
         target: JsValue,
     },
@@ -595,6 +597,7 @@ impl Vm {
             | HostFunction::ArrayJoin(object_id)
             | HostFunction::ArrayReverse(object_id)
             | HostFunction::ArraySort(object_id)
+            | HostFunction::RegExpTest(object_id)
             | HostFunction::DateToString(object_id)
             | HostFunction::DateValueOf(object_id) => {
                 self.gc_mark_stack.push(JsValue::Object(object_id));
@@ -2484,6 +2487,14 @@ impl Vm {
             }
             HostFunction::ArrayReverse(object_id) => self.execute_array_reverse(object_id),
             HostFunction::ArraySort(object_id) => self.execute_array_sort(object_id),
+            HostFunction::RegExpTest(object_id) => {
+                let input = args.first().map_or_else(
+                    || "undefined".to_string(),
+                    |value| self.coerce_to_string(value),
+                );
+                let matched = self.execute_regexp_test(object_id, &input)?;
+                Ok(JsValue::Bool(matched))
+            }
             HostFunction::HasOwnProperty { target } => {
                 let key = args
                     .first()
@@ -2847,23 +2858,95 @@ impl Vm {
                 let flags = args
                     .get(1)
                     .map_or(String::new(), |value| self.coerce_to_string(value));
-                let object = self.create_object_value();
-                let object_id = match object {
-                    JsValue::Object(id) => id,
-                    _ => unreachable!(),
-                };
-                let target = self
-                    .objects
-                    .get_mut(&object_id)
-                    .ok_or(VmError::UnknownObject(object_id))?;
-                target
-                    .properties
-                    .insert("source".to_string(), JsValue::String(pattern));
-                target
-                    .properties
-                    .insert("flags".to_string(), JsValue::String(flags));
-                Ok(JsValue::Object(object_id))
+                self.create_regexp_value(pattern, flags)
             }
+        }
+    }
+
+    fn create_regexp_value(
+        &mut self,
+        pattern: String,
+        flags: String,
+    ) -> Result<JsValue, VmError> {
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let test_method = self.create_host_function_value(HostFunction::RegExpTest(object_id));
+        let global = flags.contains('g');
+        let ignore_case = flags.contains('i');
+        let multiline = flags.contains('m');
+        let dot_all = flags.contains('s');
+        let unicode = flags.contains('u');
+        let sticky = flags.contains('y');
+
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target
+            .properties
+            .insert("source".to_string(), JsValue::String(pattern));
+        target
+            .properties
+            .insert("flags".to_string(), JsValue::String(flags));
+        target
+            .properties
+            .insert("global".to_string(), JsValue::Bool(global));
+        target
+            .properties
+            .insert("ignoreCase".to_string(), JsValue::Bool(ignore_case));
+        target
+            .properties
+            .insert("multiline".to_string(), JsValue::Bool(multiline));
+        target
+            .properties
+            .insert("dotAll".to_string(), JsValue::Bool(dot_all));
+        target
+            .properties
+            .insert("unicode".to_string(), JsValue::Bool(unicode));
+        target
+            .properties
+            .insert("sticky".to_string(), JsValue::Bool(sticky));
+        target
+            .properties
+            .insert("lastIndex".to_string(), JsValue::Number(0.0));
+        target.properties.insert(
+            "constructor".to_string(),
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        target.properties.insert("test".to_string(), test_method);
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_regexp_test(&self, object_id: ObjectId, input: &str) -> Result<bool, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let pattern = object
+            .properties
+            .get("source")
+            .map_or_else(String::new, |value| self.coerce_to_string(value));
+        let flags = object
+            .properties
+            .get("flags")
+            .map_or_else(String::new, |value| self.coerce_to_string(value));
+
+        let sticky = flags.contains('y');
+        let mut builder = RegexBuilder::new(&pattern);
+        builder.case_insensitive(flags.contains('i'));
+        builder.multi_line(flags.contains('m'));
+        builder.dot_matches_new_line(flags.contains('s'));
+        let Ok(regex) = builder.build() else {
+            return Ok(false);
+        };
+
+        if sticky {
+            Ok(regex.find(input).is_some_and(|m| m.start() == 0))
+        } else {
+            Ok(regex.is_match(input))
         }
     }
 

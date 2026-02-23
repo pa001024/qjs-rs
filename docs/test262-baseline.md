@@ -22,6 +22,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+1)`: discovered=23882, executed=5000, skipped=18579, passed=4462, failed=538
 - `language max-cases=5000 (latest+2)`: discovered=23882, executed=5000, skipped=18579, passed=4470, failed=530
 - `language max-cases=5000 (latest+3)`: discovered=23882, executed=5000, skipped=18579, passed=4490, failed=510
+- `language max-cases=5000 (latest+4)`: discovered=23882, executed=5000, skipped=18579, passed=4498, failed=502
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 
@@ -138,4 +139,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM 增加函数对象 `[[Prototype]]` 显式改写状态（区分“默认 Function.prototype”与“显式设为 null”），修复 class static `super` 赋值在 `Object.setPrototypeOf(C, null)` 下的求值路径；`language` 基线提升至 `4462/538`。
 - parser/class lowering + VM 函数对象描述符路径进一步收敛：`Object.defineProperty` 支持函数目标、函数属性 get/set 支持 accessor、构造路径取消实例自有 `constructor` 强写，修复 `computed-property-names/class/*constructor*` 一批失败；`language` 基线提升至 `4470/530`。
 - bytecode 将 `var` 初始化编译为 reference-aware PutValue（`ResolveIdentifierReference + StoreReferenceValue`），修复 `with` 语句中 `var` 初始化错误绕过对象环境的问题；`language` 基线提升至 `4490/510`。
+- bytecode/vm 将 regex literal 统一走 `RegExp(pattern, flags)` 构造路径，`RegExp` 对象补齐 flags 派生属性与 `test()` 调用能力，修复 `literals/regexp` 中一批 `NotCallable` 与 `instanceof` 偏差；`language` 基线提升至 `4498/502`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
