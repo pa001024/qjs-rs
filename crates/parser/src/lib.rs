@@ -27,7 +27,7 @@ pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
         position: err.position,
     })?;
     let mut parser = Parser::new(tokens, source);
-    let expr = parser.parse_expression_inner()?;
+    let expr = parser.parse_expression_with_commas()?;
     validate_expression_strict_mode(&expr, false)?;
     parser.expect_eof()?;
     Ok(expr)
@@ -1071,7 +1071,7 @@ impl Parser {
         if self.check_identifier() && self.check_next(&TokenKind::Colon) {
             return self.parse_labeled_statement();
         }
-        let expr = self.parse_expression_inner()?;
+        let expr = self.parse_expression_with_commas()?;
         Ok(Stmt::Expression(expr))
     }
 
@@ -1206,7 +1206,7 @@ impl Parser {
 
     fn parse_if_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'if'")?;
-        let condition = self.parse_expression_inner()?;
+        let condition = self.parse_expression_with_commas()?;
         self.expect(TokenKind::RParen, "expected ')' after if condition")?;
 
         let consequent = self.parse_embedded_statement(true)?;
@@ -1225,7 +1225,7 @@ impl Parser {
 
     fn parse_while_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'while'")?;
-        let condition = self.parse_expression_inner()?;
+        let condition = self.parse_expression_with_commas()?;
         self.expect(TokenKind::RParen, "expected ')' after while condition")?;
         self.loop_depth += 1;
         self.breakable_depth += 1;
@@ -1251,7 +1251,7 @@ impl Parser {
             return Err(self.error_current("expected 'while' after do-while body"));
         }
         self.expect(TokenKind::LParen, "expected '(' after 'while'")?;
-        let condition = self.parse_expression_inner()?;
+        let condition = self.parse_expression_with_commas()?;
         self.expect(TokenKind::RParen, "expected ')' after do-while condition")?;
         let _ = self.matches(&TokenKind::Semicolon);
         Ok(Stmt::DoWhile {
@@ -1377,14 +1377,14 @@ impl Parser {
         let condition = if self.check(&TokenKind::Semicolon) {
             None
         } else {
-            Some(self.parse_expression_inner()?)
+            Some(self.parse_expression_with_commas()?)
         };
         self.expect(TokenKind::Semicolon, "expected ';' after for condition")?;
 
         let update = if self.check(&TokenKind::RParen) {
             None
         } else {
-            Some(self.parse_expression_inner()?)
+            Some(self.parse_expression_with_commas()?)
         };
         self.expect(TokenKind::RParen, "expected ')' after for clauses")?;
 
@@ -2150,7 +2150,7 @@ impl Parser {
 
     fn parse_with_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'with'")?;
-        let object = self.parse_expression_inner()?;
+        let object = self.parse_expression_with_commas()?;
         self.expect(TokenKind::RParen, "expected ')' after with object")?;
         let body = self.parse_embedded_statement(false)?;
         Ok(Stmt::With {
@@ -2161,7 +2161,7 @@ impl Parser {
 
     fn parse_switch_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'switch'")?;
-        let discriminant = self.parse_expression_inner()?;
+        let discriminant = self.parse_expression_with_commas()?;
         self.expect(TokenKind::RParen, "expected ')' after switch discriminant")?;
         self.expect(TokenKind::LBrace, "expected '{' before switch body")?;
 
@@ -2182,7 +2182,7 @@ impl Parser {
         let mut has_default = false;
         while !self.check(&TokenKind::RBrace) {
             if self.matches_keyword("case") {
-                let test = self.parse_expression_inner()?;
+                let test = self.parse_expression_with_commas()?;
                 self.expect(TokenKind::Colon, "expected ':' after case label")?;
                 let consequent = self.parse_switch_case_consequent()?;
                 cases.push(SwitchCase {
@@ -2319,7 +2319,7 @@ impl Parser {
                 position: self.previous_position(),
             });
         }
-        let expr = self.parse_expression_inner()?;
+        let expr = self.parse_expression_with_commas()?;
         Ok(Stmt::Throw(expr))
     }
 
@@ -2406,7 +2406,7 @@ impl Parser {
             return Err(self.error_current("class declaration not allowed in statement position"));
         }
         let statement = if self.check_keyword("let") && !self.check_next(&TokenKind::Colon) {
-            Stmt::Expression(self.parse_expression_inner()?)
+            Stmt::Expression(self.parse_expression_with_commas()?)
         } else {
             self.parse_statement()?
         };
@@ -2464,7 +2464,7 @@ impl Parser {
             Some(TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) | None
         );
         if has_expr {
-            let expr = self.parse_expression_inner()?;
+            let expr = self.parse_expression_with_commas()?;
             Ok(Stmt::Return(Some(expr)))
         } else {
             Ok(Stmt::Return(None))
@@ -2534,10 +2534,22 @@ impl Parser {
         result
     }
 
+    fn parse_expression_with_commas(&mut self) -> Result<Expr, ParseError> {
+        let mut expressions = vec![self.parse_assignment()?];
+        while self.matches(&TokenKind::Comma) {
+            expressions.push(self.parse_assignment()?);
+        }
+        if expressions.len() == 1 {
+            Ok(expressions.pop().expect("single expression should exist"))
+        } else {
+            Ok(Expr::Sequence(expressions))
+        }
+    }
+
     fn parse_expression_no_in(&mut self) -> Result<Expr, ParseError> {
         let saved_allow_in = self.allow_in;
         self.allow_in = false;
-        let result = self.parse_expression_inner();
+        let result = self.parse_expression_with_commas();
         self.allow_in = saved_allow_in;
         result
     }

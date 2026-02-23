@@ -125,4 +125,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 补齐前导小数字面量（`.DecimalDigits`）与指数形态（如 `.25e1`）词法吞吐，清理 `literals/numeric` 与 `expressions/division` 的一批 `unexpected operator at expression start` 失败簇；`language` 基线进一步提升至 `4352/648`。
 - lexer 补齐字符串 `\u{...}` code point 转义与 surrogate `\uD800-\uDFFF` 转义最小可解析路径；VM 关系运算中的字符串比较改为按 UTF-16 code unit 顺序，进一步收敛 `relational` 与 `for-of/string-astral` 相关失败；`language` 基线提升至 `4361/639`。
 - lexer 补齐十六进制数字字面量 `0x.../0X...` 词法路径，清理 `literals/numeric` 与 `literals/regexp` 中一批 `expected ')' after if condition` / `expected ';' after for condition` 解析失败；`language` 基线提升至 `4373/627`。
+- parser 在 `Expression` 语法上下文补齐逗号运算符（sequence expression）解析，而保留参数列表/对象字面量/数组元素中的 `AssignmentExpression` 语义边界，清理 `expressions/comma` 与相关 `for` 语句误判失败；`language` 基线提升至 `4381/619`。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
