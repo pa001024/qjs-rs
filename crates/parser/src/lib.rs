@@ -2844,7 +2844,11 @@ impl Parser {
         if !self.matches(&TokenKind::Question) {
             return Ok(condition);
         }
-        let consequent = self.parse_assignment()?;
+        let saved_allow_in = self.allow_in;
+        self.allow_in = true;
+        let consequent = self.parse_assignment();
+        self.allow_in = saved_allow_in;
+        let consequent = consequent?;
         self.expect(TokenKind::Colon, "expected ':' in conditional expression")?;
         let alternate = self.parse_assignment()?;
         Ok(Expr::Conditional {
@@ -5749,6 +5753,13 @@ mod tests {
             right: Box::new(Expr::Number(0.0)),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_conditional_consequent_with_in_when_forbidding_in_elsewhere() {
+        let script = "for (true ? '' in cond1() : cond2(); false; ) ;";
+        let parsed = parse_script(script).expect("parser should succeed");
+        assert!(!parsed.statements.is_empty());
     }
 
     #[test]
