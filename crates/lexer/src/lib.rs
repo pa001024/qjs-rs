@@ -1245,7 +1245,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             position: start,
                         });
                     }
-                    let raw = &source[start..pos];
+                    let digits_end = pos;
+                    let raw = &source[start..digits_end];
                     let digits = &raw[2..];
                     let value = u64::from_str_radix(digits, radix)
                         .map(|number| number as f64)
@@ -1253,6 +1254,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                             message: format!("invalid number literal '{raw}'"),
                             position: start,
                         })?;
+                    if pos < bytes.len() && bytes[pos] == b'n' {
+                        pos += 1;
+                    }
                     tokens.push(Token {
                         kind: TokenKind::Number(value),
                         span: Span { start, end: pos },
@@ -1267,14 +1271,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     let digits = &bytes[(pos + 1)..end];
                     let has_non_octal = digits.iter().any(|digit| !matches!(digit, b'0'..=b'7'));
                     if !has_non_octal {
-                        pos = end;
-                        let raw = &source[start..pos];
+                        let digits_end = end;
+                        pos = digits_end;
+                        let raw = &source[start..digits_end];
                         let value = u64::from_str_radix(&raw[1..], 8)
                             .map(|number| number as f64)
                             .map_err(|_| LexError {
                                 message: format!("invalid number literal '{raw}'"),
                                 position: start,
                             })?;
+                        if pos < bytes.len() && bytes[pos] == b'n' {
+                            pos += 1;
+                        }
                         tokens.push(Token {
                             kind: TokenKind::Number(value),
                             span: Span { start, end: pos },
@@ -1284,6 +1292,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
             }
             let mut has_dot = false;
+            let mut has_exponent = false;
             while pos < bytes.len() {
                 let current = bytes[pos];
                 if current.is_ascii_digit() {
@@ -1314,12 +1323,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         position: start + raw.len(),
                     });
                 }
+                has_exponent = true;
             }
-            let raw = &source[start..pos];
+            let numeric_end = pos;
+            let raw = &source[start..numeric_end];
             let value = raw.parse::<f64>().map_err(|_| LexError {
                 message: format!("invalid number literal '{raw}'"),
                 position: start,
             })?;
+            if !has_dot && !has_exponent && pos < bytes.len() && bytes[pos] == b'n' {
+                pos += 1;
+            }
             tokens.push(Token {
                 kind: TokenKind::Number(value),
                 span: Span { start, end: pos },
@@ -1638,6 +1652,19 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::Plus);
         assert_eq!(tokens[4].kind, TokenKind::Number(9.0));
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_bigint_suffix_as_numeric_baseline() {
+        let tokens = lex("0n + 0x10n + 0o7n + 0b11n").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(0.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(16.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(7.0));
+        assert_eq!(tokens[5].kind, TokenKind::Plus);
+        assert_eq!(tokens[6].kind, TokenKind::Number(3.0));
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
     }
 
     #[test]

@@ -20,6 +20,7 @@ const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
+const ASYNC_FUNCTION_MARKER: &str = "$__qjs_async_function__$";
 const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
@@ -990,6 +991,7 @@ struct Parser {
     label_stack: Vec<String>,
     class_temp_index: usize,
     allow_super_reference: bool,
+    async_function_depth: usize,
 }
 
 impl Parser {
@@ -1006,6 +1008,7 @@ impl Parser {
             label_stack: Vec::new(),
             class_temp_index: 0,
             allow_super_reference: false,
+            async_function_depth: 0,
         }
     }
 
@@ -1082,10 +1085,10 @@ impl Parser {
         {
             self.advance();
             self.advance();
-            return self.parse_function_declaration_statement();
+            return self.parse_function_declaration_statement(true);
         }
         if self.matches_keyword("function") {
-            return self.parse_function_declaration_statement();
+            return self.parse_function_declaration_statement(false);
         }
         if self.matches_keyword("class") {
             return self.parse_class_declaration_statement();
@@ -1179,10 +1182,32 @@ impl Parser {
         end_error: &str,
         allow_super_reference: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
+        self.parse_function_body_with_context(
+            start_error,
+            end_error,
+            allow_super_reference,
+            false,
+        )
+    }
+
+    fn parse_function_body_with_context(
+        &mut self,
+        start_error: &str,
+        end_error: &str,
+        allow_super_reference: bool,
+        is_async: bool,
+    ) -> Result<Vec<Stmt>, ParseError> {
         let saved_allow_super_reference = self.allow_super_reference;
+        let saved_async_function_depth = self.async_function_depth;
         self.allow_super_reference = allow_super_reference;
+        self.async_function_depth = if is_async {
+            saved_async_function_depth + 1
+        } else {
+            0
+        };
         let body = self.parse_function_body(start_error, end_error);
         self.allow_super_reference = saved_allow_super_reference;
+        self.async_function_depth = saved_async_function_depth;
         body
     }
 
@@ -1216,6 +1241,23 @@ impl Parser {
     fn insert_generator_function_marker(&self, body: &mut Vec<Stmt>) {
         let marker = Stmt::Expression(Expr::String(StringLiteral {
             value: GENERATOR_FUNCTION_MARKER.to_string(),
+            has_escape: false,
+        }));
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, marker);
+    }
+
+    fn insert_async_function_marker(&self, body: &mut Vec<Stmt>) {
+        let marker = Stmt::Expression(Expr::String(StringLiteral {
+            value: ASYNC_FUNCTION_MARKER.to_string(),
             has_escape: false,
         }));
         let mut insert_at = 0usize;
@@ -1294,7 +1336,10 @@ impl Parser {
         *body = prefix;
     }
 
-    fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_function_declaration_statement(
+        &mut self,
+        is_async: bool,
+    ) -> Result<Stmt, ParseError> {
         let is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
@@ -1302,14 +1347,18 @@ impl Parser {
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body_with_super_policy(
+        let mut body = self.parse_function_body_with_context(
             "expected '{' before function body",
             "expected '}' after function body",
             false,
+            is_async,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_async {
+            self.insert_async_function_marker(&mut body);
         }
         if is_generator {
             self.insert_generator_function_marker(&mut body);
@@ -2940,7 +2989,7 @@ impl Parser {
     }
 
     fn rewrite_assignment_target(
-        &self,
+        &mut self,
         left: Expr,
         right: Expr,
         binary_op: Option<BinaryOp>,
@@ -2982,6 +3031,24 @@ impl Parser {
                     value: Box::new(value),
                 })
             }
+            Expr::ArrayLiteral(elements) => {
+                if binary_op.is_some() {
+                    return Err(ParseError {
+                        message: "invalid assignment target".to_string(),
+                        position: assignment_position,
+                    });
+                }
+                self.lower_array_assignment_pattern(elements, right, assignment_position)
+            }
+            Expr::ObjectLiteral(properties) => {
+                if binary_op.is_some() {
+                    return Err(ParseError {
+                        message: "invalid assignment target".to_string(),
+                        position: assignment_position,
+                    });
+                }
+                self.lower_object_assignment_pattern(properties, right, assignment_position)
+            }
             _ => Err(ParseError {
                 message: "invalid assignment target".to_string(),
                 position: assignment_position,
@@ -3003,6 +3070,290 @@ impl Parser {
             }
         } else {
             right
+        }
+    }
+
+    fn lower_object_assignment_pattern(
+        &mut self,
+        properties: Vec<ObjectProperty>,
+        right: Expr,
+        assignment_position: usize,
+    ) -> Result<Expr, ParseError> {
+        let source_name = self.next_for_in_temp_identifier("obj_assign_source");
+        let mut sequence = vec![Expr::Assign {
+            target: source_name.clone(),
+            value: Box::new(right),
+        }];
+
+        for property in properties {
+            let key_expr = match property.key {
+                ObjectPropertyKey::Static(name) => Expr::String(StringLiteral {
+                    value: name,
+                    has_escape: false,
+                }),
+                ObjectPropertyKey::ProtoSetter => Expr::String(StringLiteral {
+                    value: "__proto__".to_string(),
+                    has_escape: false,
+                }),
+                ObjectPropertyKey::Computed(expr) => *expr,
+                ObjectPropertyKey::AccessorGet(_)
+                | ObjectPropertyKey::AccessorSet(_)
+                | ObjectPropertyKey::AccessorGetComputed(_)
+                | ObjectPropertyKey::AccessorSetComputed(_) => {
+                    return Err(ParseError {
+                        message: "invalid assignment target".to_string(),
+                        position: assignment_position,
+                    });
+                }
+            };
+            let Some((target_expr, default_initializer)) = self
+                .extract_assignment_pattern_target(property.value, true, assignment_position)?
+            else {
+                return Err(ParseError {
+                    message: "invalid assignment target".to_string(),
+                    position: assignment_position,
+                });
+            };
+            let read = Expr::MemberComputed {
+                object: Box::new(Expr::Identifier(source_name.clone())),
+                property: Box::new(key_expr),
+            };
+            let value = self.wrap_default_assignment_value(read, default_initializer);
+            sequence.push(self.build_simple_assignment_target_expr(
+                target_expr,
+                value,
+                assignment_position,
+            )?);
+        }
+
+        sequence.push(Expr::Identifier(source_name));
+        Ok(Expr::Sequence(sequence))
+    }
+
+    fn lower_array_assignment_pattern(
+        &mut self,
+        elements: Vec<Expr>,
+        right: Expr,
+        assignment_position: usize,
+    ) -> Result<Expr, ParseError> {
+        let source_name = self.next_for_in_temp_identifier("array_assign_source");
+        let record_name = self.next_for_in_temp_identifier("array_assign_record");
+        let done_name = self.next_for_in_temp_identifier("array_assign_done");
+        let close_name = self.next_for_in_temp_identifier("array_assign_close");
+
+        let mut try_block = Vec::new();
+        for (index, element) in elements.into_iter().enumerate() {
+            let category = format!("array_assign_current_{index}");
+            let current_name = self.next_for_in_temp_identifier(&category);
+            try_block.push(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: current_name.clone(),
+                initializer: Some(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(Expr::Number(0.0)),
+                }),
+            }));
+
+            let step_name = self.next_for_in_temp_identifier("array_assign_step");
+            try_block.push(Stmt::If {
+                condition: Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(Expr::Identifier(done_name.clone())),
+                },
+                consequent: Box::new(Stmt::Block(vec![
+                    Stmt::VariableDeclaration(VariableDeclaration {
+                        kind: BindingKind::Let,
+                        name: step_name.clone(),
+                        initializer: Some(Expr::Call {
+                            callee: Box::new(Expr::Member {
+                                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                                property: "__forOfStep".to_string(),
+                            }),
+                            arguments: vec![Expr::Identifier(record_name.clone())],
+                        }),
+                    }),
+                    Stmt::If {
+                        condition: Expr::Member {
+                            object: Box::new(Expr::Identifier(step_name.clone())),
+                            property: "done".to_string(),
+                        },
+                        consequent: Box::new(Stmt::Expression(Expr::Assign {
+                            target: done_name.clone(),
+                            value: Box::new(Expr::Bool(true)),
+                        })),
+                        alternate: Some(Box::new(Stmt::Expression(Expr::Assign {
+                            target: current_name.clone(),
+                            value: Box::new(Expr::Member {
+                                object: Box::new(Expr::Identifier(step_name)),
+                                property: "value".to_string(),
+                            }),
+                        }))),
+                    },
+                ])),
+                alternate: None,
+            });
+
+            if let Some((target_expr, default_initializer)) =
+                self.extract_assignment_pattern_target(element, false, assignment_position)?
+            {
+                let value = self.wrap_default_assignment_value(
+                    Expr::Identifier(current_name),
+                    default_initializer,
+                );
+                let assignment = self.build_simple_assignment_target_expr(
+                    target_expr,
+                    value,
+                    assignment_position,
+                )?;
+                try_block.push(Stmt::Expression(assignment));
+            }
+        }
+        try_block.push(Stmt::Expression(Expr::Assign {
+            target: done_name.clone(),
+            value: Box::new(Expr::Bool(true)),
+        }));
+
+        let body = vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: record_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfIterator".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(source_name.clone())],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::Try {
+                try_block,
+                catch_param: None,
+                catch_block: None,
+                finally_block: Some(vec![Stmt::If {
+                    condition: Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(Expr::Identifier(done_name)),
+                    },
+                    consequent: Box::new(Stmt::Try {
+                        try_block: vec![Stmt::VariableDeclaration(VariableDeclaration {
+                            kind: BindingKind::Let,
+                            name: close_name,
+                            initializer: Some(Expr::Call {
+                                callee: Box::new(Expr::Member {
+                                    object: Box::new(Expr::Identifier(Identifier(
+                                        "Object".to_string(),
+                                    ))),
+                                    property: "__forOfClose".to_string(),
+                                }),
+                                arguments: vec![Expr::Identifier(record_name)],
+                            }),
+                        })],
+                        catch_param: None,
+                        catch_block: Some(Vec::new()),
+                        finally_block: None,
+                    }),
+                    alternate: None,
+                }]),
+            },
+            Stmt::Return(Some(Expr::Identifier(source_name.clone()))),
+        ];
+
+        Ok(Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![source_name],
+                body,
+            }),
+            arguments: vec![right],
+        })
+    }
+
+    fn extract_assignment_pattern_target(
+        &self,
+        expr: Expr,
+        disallow_elision: bool,
+        assignment_position: usize,
+    ) -> Result<Option<(Expr, Option<Expr>)>, ParseError> {
+        match expr {
+            Expr::Elision if !disallow_elision => Ok(None),
+            Expr::Identifier(_) | Expr::Member { .. } | Expr::MemberComputed { .. } => {
+                Ok(Some((expr, None)))
+            }
+            Expr::Assign { target, value } => {
+                Ok(Some((Expr::Identifier(target), Some(*value))))
+            }
+            Expr::AssignMember {
+                object,
+                property,
+                value,
+            } => Ok(Some((Expr::Member { object, property }, Some(*value)))),
+            Expr::AssignMemberComputed {
+                object,
+                property,
+                value,
+            } => Ok(Some((
+                Expr::MemberComputed { object, property },
+                Some(*value),
+            ))),
+            _ => Err(ParseError {
+                message: "invalid assignment target".to_string(),
+                position: assignment_position,
+            }),
+        }
+    }
+
+    fn wrap_default_assignment_value(
+        &self,
+        current_value: Expr,
+        default_initializer: Option<Expr>,
+    ) -> Expr {
+        let Some(default_initializer) = default_initializer else {
+            return current_value;
+        };
+        Expr::Conditional {
+            condition: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(current_value.clone()),
+                right: Box::new(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(Expr::Number(0.0)),
+                }),
+            }),
+            consequent: Box::new(default_initializer),
+            alternate: Box::new(current_value),
+        }
+    }
+
+    fn build_simple_assignment_target_expr(
+        &self,
+        target: Expr,
+        value: Expr,
+        assignment_position: usize,
+    ) -> Result<Expr, ParseError> {
+        match target {
+            Expr::Identifier(target) => Ok(Expr::Assign {
+                target,
+                value: Box::new(value),
+            }),
+            Expr::Member { object, property } => Ok(Expr::AssignMember {
+                object,
+                property,
+                value: Box::new(value),
+            }),
+            Expr::MemberComputed { object, property } => Ok(Expr::AssignMemberComputed {
+                object,
+                property,
+                value: Box::new(value),
+            }),
+            _ => Err(ParseError {
+                message: "invalid assignment target".to_string(),
+                position: assignment_position,
+            }),
         }
     }
 
@@ -3344,6 +3695,9 @@ impl Parser {
                 op: UnaryOp::Delete,
                 expr: Box::new(expr),
             });
+        }
+        if self.async_function_depth > 0 && self.matches_keyword("await") {
+            return self.parse_unary();
         }
         if self.matches_keyword("new") {
             return self.parse_new_expression();
@@ -3859,7 +4213,10 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_function_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
+    fn parse_function_expression_after_keyword(
+        &mut self,
+        is_async: bool,
+    ) -> Result<Expr, ParseError> {
         let is_generator = self.matches(&TokenKind::Star);
         let name = if self.check_identifier() {
             Some(Identifier(
@@ -3873,14 +4230,18 @@ impl Parser {
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body_with_super_policy(
+        let mut body = self.parse_function_body_with_context(
             "expected '{' before function body",
             "expected '}' after function body",
             false,
+            is_async,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_async {
+            self.insert_async_function_marker(&mut body);
         }
         if name.is_some() {
             self.insert_named_function_expression_marker(&mut body);
@@ -4913,7 +5274,7 @@ impl Parser {
                 {
                     self.advance();
                     self.advance();
-                    return self.parse_function_expression_after_keyword();
+                    return self.parse_function_expression_after_keyword(true);
                 }
                 self.advance();
                 match name.as_str() {
@@ -4930,7 +5291,7 @@ impl Parser {
                         Ok(Expr::This)
                     }
                     "function" if self.identifier_token_matches_keyword(&token, "function") => {
-                        self.parse_function_expression_after_keyword()
+                        self.parse_function_expression_after_keyword(false)
                     }
                     "class" if self.identifier_token_matches_keyword(&token, "class") => {
                         self.parse_class_expression_after_keyword()
@@ -6627,6 +6988,26 @@ mod tests {
         parse_script("function * h() {}").expect("script parsing should succeed");
         parse_expression("(async function foo() {}.prototype)")
             .expect("expression parsing should succeed");
+    }
+
+    #[test]
+    fn parses_async_function_await_expression_baseline() {
+        parse_script("async function foo() { await new Promise(); }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_await_identifier_in_nested_non_async_function() {
+        parse_script("var await; async function foo() { function bar() { await = 1; } bar(); }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_assignment_pattern_array_and_object_baseline() {
+        parse_script("([a = thrower()] = iterator); ([target.a] = iterator);")
+            .expect("script parsing should succeed");
+        parse_script("({ __proto__: x, __proto__: y } = value);")
+            .expect("script parsing should succeed");
     }
 
     #[test]

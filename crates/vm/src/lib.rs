@@ -20,6 +20,7 @@ const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
+const ASYNC_FUNCTION_MARKER: &str = "$__qjs_async_function__$";
 const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
@@ -2680,6 +2681,7 @@ impl Vm {
         let mapped_arguments_enabled =
             !restrict_caller_arguments && !is_arrow_function && !non_simple_params;
         let rest_param_index = self.function_rest_param_index(&function);
+        let is_async_function = self.function_is_async(&function);
 
         let mut frame_scope: Scope = BTreeMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
@@ -2823,16 +2825,35 @@ impl Vm {
             closure.strict,
         );
         let _ = self.eval_contexts.pop();
+        let mut async_rejection: Option<JsValue> = None;
         let mut value = match signal {
             Ok(ExecutionSignal::Return) => self.stack.pop().unwrap_or(JsValue::Undefined),
             Ok(ExecutionSignal::Halt) => JsValue::Undefined,
             Err(err) => {
-                self.restore_caller_state(
-                    saved_handlers,
-                    saved_var_scope_stack,
-                    saved_param_init_body_scopes,
-                );
-                return Err(err);
+                if is_async_function {
+                    let rejection = match &err {
+                        VmError::UncaughtException(exception) => Some(exception.clone()),
+                        other => self.runtime_error_exception_value(&other),
+                    };
+                    if let Some(rejection) = rejection {
+                        async_rejection = Some(rejection);
+                        JsValue::Undefined
+                    } else {
+                        self.restore_caller_state(
+                            saved_handlers,
+                            saved_var_scope_stack,
+                            saved_param_init_body_scopes,
+                        );
+                        return Err(err);
+                    }
+                } else {
+                    self.restore_caller_state(
+                        saved_handlers,
+                        saved_var_scope_stack,
+                        saved_param_init_body_scopes,
+                    );
+                    return Err(err);
+                }
             }
         };
 
@@ -2879,6 +2900,20 @@ impl Vm {
                     "derived class constructor must return object or undefined",
                 ));
             }
+        }
+
+        if is_async_function {
+            let promise = if let Some(rejection) = async_rejection {
+                self.create_async_settled_promise(false, rejection)?
+            } else {
+                self.create_async_settled_promise(true, value)?
+            };
+            self.restore_caller_state(
+                saved_handlers,
+                saved_var_scope_stack,
+                saved_param_init_body_scopes,
+            );
+            return Ok(promise);
         }
 
         self.restore_caller_state(
@@ -5188,6 +5223,36 @@ impl Vm {
             realm,
             caller_strict,
         )?;
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn create_async_settled_promise(
+        &mut self,
+        fulfilled: bool,
+        result: JsValue,
+    ) -> Result<JsValue, VmError> {
+        if self.promise_prototype_id.is_none() {
+            let _ = self.promise_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.promise_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__promiseTag".to_string(), JsValue::Bool(true));
+        target.properties.insert(
+            "__asyncState".to_string(),
+            JsValue::String(if fulfilled { "fulfilled" } else { "rejected" }.to_string()),
+        );
+        target.properties.insert("__asyncResult".to_string(), result);
         Ok(JsValue::Object(object_id))
     }
 
@@ -9012,6 +9077,10 @@ impl Vm {
 
     fn function_is_generator(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
+    }
+
+    fn function_is_async(&self, function: &CompiledFunction) -> bool {
+        self.code_has_marker(&function.code, ASYNC_FUNCTION_MARKER)
     }
 
     fn function_is_named_function_expression(&self, function: &CompiledFunction) -> bool {
@@ -13609,6 +13678,36 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+    }
+
+    #[test]
+    fn async_function_call_returns_promise_instance() {
+        let script = parse_script("async function f() { return 1; } var p = f(); p instanceof Promise;")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn async_function_await_error_is_wrapped_into_returned_promise() {
+        let script = parse_script(
+            "let called = false; async function foo() { called = true; await new Promise(); } var p = foo(); called && (p instanceof Promise);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
