@@ -8304,10 +8304,11 @@ impl Vm {
         }
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
-            let (getter, value, next, prototype_value) = {
+            let (getter, setter_exists, value, next, prototype_value) = {
                 let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
                 (
                     object.getters.get(property).cloned(),
+                    object.setters.contains_key(property),
                     object.properties.get(property).cloned(),
                     object.prototype,
                     object.prototype_value.clone(),
@@ -8321,6 +8322,9 @@ impl Vm {
                     realm,
                     false,
                 );
+            }
+            if setter_exists {
+                return Ok(JsValue::Undefined);
             }
             if let Some(value) = value {
                 return Ok(value);
