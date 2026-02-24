@@ -13982,6 +13982,17 @@ mod tests {
     }
 
     #[test]
+    fn eval_statement_list_preserves_prior_value_across_empty_block_completion() {
+        let script = parse_script("var result = eval('{length: 3000}{}'); result;")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Number(3000.0)));
+    }
+
+    #[test]
     fn async_function_call_returns_promise_instance() {
         let script = parse_script("async function f() { return 1; } var p = f(); p instanceof Promise;")
             .expect("script should parse");

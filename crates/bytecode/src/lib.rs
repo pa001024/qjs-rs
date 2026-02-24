@@ -273,13 +273,7 @@ impl Compiler {
             .collect();
         let last_value_candidate = if preserve_value {
             statements.iter().enumerate().rev().find_map(|(idx, stmt)| {
-                if matches!(
-                    stmt,
-                    Stmt::FunctionDeclaration(_)
-                        | Stmt::VariableDeclaration(_)
-                        | Stmt::VariableDeclarations(_)
-                        | Stmt::Empty
-                ) {
+                if Self::statement_has_static_empty_completion(stmt) {
                     None
                 } else {
                     Some(idx)
@@ -308,6 +302,29 @@ impl Compiler {
         }
 
         produced_value
+    }
+
+    fn statement_list_has_static_empty_completion(statements: &[Stmt]) -> bool {
+        for statement in statements {
+            if matches!(statement, Stmt::FunctionDeclaration(_)) {
+                continue;
+            }
+            if !Self::statement_has_static_empty_completion(statement) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn statement_has_static_empty_completion(statement: &Stmt) -> bool {
+        match statement {
+            Stmt::FunctionDeclaration(_)
+            | Stmt::VariableDeclaration(_)
+            | Stmt::VariableDeclarations(_)
+            | Stmt::Empty => true,
+            Stmt::Block(statements) => Self::statement_list_has_static_empty_completion(statements),
+            _ => false,
+        }
     }
 
     fn statement_list_has_use_strict_directive(&self, statements: &[Stmt]) -> bool {
