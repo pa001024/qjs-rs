@@ -17,6 +17,7 @@ const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor__$";
 const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
+const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
@@ -157,6 +158,7 @@ enum HostFunction {
     AssertNotSameValue,
     AssertThrows,
     AssertCompareArray,
+    ThrowTypeError,
     DateToString(ObjectId),
     DateValueOf(ObjectId),
     FunctionToString {
@@ -746,6 +748,7 @@ impl Vm {
             | HostFunction::NumberToFixed
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
+            | HostFunction::ThrowTypeError
             | HostFunction::FunctionPrototype
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
@@ -2618,9 +2621,12 @@ impl Vm {
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         let is_arrow_function = self.function_is_arrow(&function);
         let is_derived_class_constructor = self.closure_is_derived_class_constructor(closure_id);
+        let restrict_caller_arguments =
+            closure.strict || self.closure_marks_restricted_caller_arguments(closure_id);
         let non_simple_params = self.function_has_non_simple_params(&function);
         let has_arguments_param = function.params.iter().any(|name| name == "arguments");
-        let mapped_arguments_enabled = !closure.strict && !is_arrow_function && !non_simple_params;
+        let mapped_arguments_enabled =
+            !restrict_caller_arguments && !is_arrow_function && !non_simple_params;
         let rest_param_index = self.function_rest_param_index(&function);
 
         let mut frame_scope: Scope = BTreeMap::new();
@@ -2661,6 +2667,12 @@ impl Vm {
                 JsValue::Object(id) => id,
                 _ => unreachable!(),
             };
+            let strict_arguments_callee = restrict_caller_arguments;
+            let throw_type_error = if strict_arguments_callee {
+                Some(self.create_host_function_value(HostFunction::ThrowTypeError))
+            } else {
+                None
+            };
             {
                 let object = self
                     .objects
@@ -2669,9 +2681,14 @@ impl Vm {
                 object
                     .properties
                     .insert("length".to_string(), JsValue::Number(args.len() as f64));
-                object
-                    .properties
-                    .insert("callee".to_string(), JsValue::Function(closure_id));
+                if let Some(thrower) = throw_type_error {
+                    object.getters.insert("callee".to_string(), thrower.clone());
+                    object.setters.insert("callee".to_string(), thrower);
+                } else {
+                    object
+                        .properties
+                        .insert("callee".to_string(), JsValue::Function(closure_id));
+                }
                 object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::ObjectConstructor),
@@ -2700,9 +2717,9 @@ impl Vm {
                 object.property_attributes.insert(
                     "callee".to_string(),
                     PropertyAttributes {
-                        writable: true,
+                        writable: !strict_arguments_callee,
                         enumerable: false,
-                        configurable: true,
+                        configurable: !strict_arguments_callee,
                     },
                 );
             }
@@ -3464,6 +3481,9 @@ impl Vm {
                     };
                     Err(self.assertion_failure(&detail))
                 }
+            }
+            HostFunction::ThrowTypeError => {
+                Err(VmError::TypeError("restricted function property access"))
             }
         }
     }
@@ -7291,6 +7311,13 @@ impl Vm {
             .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
     }
 
+    fn closure_marks_restricted_caller_arguments(&self, closure_id: u64) -> bool {
+        self.closure_objects
+            .get(&closure_id)
+            .and_then(|object| object.properties.get(CLASS_HERITAGE_RESTRICTED_MARKER))
+            .is_some_and(|marker| matches!(marker, JsValue::Bool(true)))
+    }
+
     fn closure_has_no_prototype(&self, closure_id: u64) -> bool {
         if self
             .closure_objects
@@ -7884,7 +7911,8 @@ impl Vm {
         Ok(
             closure.strict
                 || self.function_is_arrow(function)
-                || self.closure_is_class_constructor(closure_id),
+                || self.closure_is_class_constructor(closure_id)
+                || self.closure_marks_restricted_caller_arguments(closure_id),
         )
     }
 

@@ -17,6 +17,7 @@ const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_CONSTRUCTOR_MARKER: &str = "$__qjs_class_constructor__$";
 const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor__$";
 const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
+const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
@@ -3816,24 +3817,36 @@ impl Parser {
             );
         }
 
-        let mut body = vec![Stmt::VariableDeclaration(VariableDeclaration {
-            kind: BindingKind::Let,
-            name: class_ident.clone(),
-            initializer: Some(constructor_value),
-        })];
-        if let Some(class_name) = class_name {
-            body.push(Stmt::VariableDeclaration(VariableDeclaration {
-                kind: BindingKind::Const,
-                name: class_name,
-                initializer: Some(Expr::Identifier(class_ident.clone())),
-            }));
-        }
+        let mut body = vec![
+            Stmt::Expression(Expr::String(StringLiteral {
+                value: "use strict".to_string(),
+                has_escape: false,
+            })),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: class_ident.clone(),
+                initializer: Some(constructor_value),
+            }),
+        ];
 
         let prototype_value = if let Some(extends_expr) = extends {
             body.push(Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
                 name: super_ident.clone(),
                 initializer: Some(extends_expr),
+            }));
+            body.push(Stmt::Expression(Expr::Conditional {
+                condition: Box::new(Expr::Binary {
+                    op: BinaryOp::StrictEqual,
+                    left: Box::new(Expr::Identifier(super_ident.clone())),
+                    right: Box::new(Expr::Null),
+                }),
+                consequent: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                alternate: Box::new(Expr::AssignMember {
+                    object: Box::new(Expr::Identifier(super_ident.clone())),
+                    property: CLASS_HERITAGE_RESTRICTED_MARKER.to_string(),
+                    value: Box::new(Expr::Bool(true)),
+                }),
             }));
             let super_parent_prototype = Expr::Conditional {
                 condition: Box::new(Expr::Binary {
@@ -3857,6 +3870,13 @@ impl Parser {
         } else {
             Expr::ObjectLiteral(vec![])
         };
+        if let Some(class_name) = class_name {
+            body.push(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Const,
+                name: class_name,
+                initializer: Some(Expr::Identifier(class_ident.clone())),
+            }));
+        }
 
         body.push(Stmt::Expression(Expr::AssignMember {
             object: Box::new(Expr::Identifier(class_ident.clone())),

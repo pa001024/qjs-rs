@@ -59,6 +59,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+38)`: discovered=23882, executed=5000, skipped=18579, passed=4813, failed=187
 - `language max-cases=5000 (latest+39)`: discovered=23882, executed=5000, skipped=18579, passed=4818, failed=182
 - `language max-cases=5000 (latest+40)`: discovered=23882, executed=5000, skipped=18579, passed=4856, failed=144
+- `language max-cases=5000 (latest+41)`: discovered=23882, executed=5000, skipped=18579, passed=4860, failed=140
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -76,7 +77,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
 - `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
 - `language/statements/class/definition (latest)`: discovered=65, executed=33, skipped=32, passed=33, failed=0
-- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=162, failed=26
+- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=166, failed=22
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -231,4 +232,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 为 class declaration/expression 注入类名内部词法绑定（`const <ClassName> = $__class_ctor_*`），收敛 methods/heritage 中类名解析与不可变语义；该轮后 `language/statements/class` 提升至 `142/46`、`language/expressions/class` 提升至 `32/15`，整体 `language` 基线提升至 `4818/182`。
 - VM 增加 callable prototype 最小语义：`Object.create/Object.setPrototypeOf/Object.getPrototypeOf` 接受并保持函数值原型；derived `super()` 构造在 native/host 超类路径按派生 `this` 的原型提示回写构造结果，收敛 `extends Function`/`extends Array`/`extends Error` 的 `new_target` 方向偏差。
 - class `subclass-builtins` 双目录已清零：`language/expressions/class/subclass-builtins`=`15/0`，`language/statements/class/subclass-builtins`=`15/0`；`language/statements/class` 提升至 `162/26`、`language/expressions/class` 提升至 `47/0`，整体 `language` 基线提升至 `4856/144`（快照：`target/test262-language-baseline-5000-20260224-v21.json`）。
+- parser 调整 class lowering 注入顺序（类名内部绑定延后到 heritage 求值之后）并在 class heritage function 上注入受限标记；VM 对应扩展 `arguments/caller` 限制判定与 strict arguments `callee` thrower accessor（TypeError），收敛 `name-binding/in-extends-expression*` 与 `strict-mode/arguments-callee`。该轮后 `language/statements/class` 提升至 `166/22`，整体 `language` 基线提升至 `4860/140`（快照：`target/test262-language-baseline-5000-20260224-v22.json`）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
