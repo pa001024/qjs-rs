@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4884`、`failed=116`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v30.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4897`、`failed=103`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v33.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -126,6 +126,10 @@
   - 子集回归（latest+19）：`language/statements/class/subclass` 提升至 `76/1`，`language/statements/class` 提升至 `187/1`，`language` 基线提升至 `4883/117`（快照：`target/test262-language-baseline-5000-20260224-v29.json`）。
   - 对齐 QuickJS `js_function_constructor(..., JS_FUNC_GENERATOR)` 分流：新增 `GeneratorFunctionConstructor` native 路径（构造器拼接逻辑独立于 `Function`），并让 `function*` 闭包 `[[Prototype]]` 走 `GeneratorFunction.prototype`；补齐最小 generator 迭代器 `next()` 返回链路，修复 `class/subclass/builtin-objects/GeneratorFunction/regular-subclassing.js`。
   - 子集回归（latest+20）：`language/statements/class/subclass` 收敛至 `77/0`，`language/statements/class` 收敛至 `188/0`，`language` 基线提升至 `4884/116`（快照：`target/test262-language-baseline-5000-20260224-v30.json`）。
+  - VM 为数组迭代补齐 `keys/entries/values/[Symbol.iterator]` 与最小 `Array.prototype.pop`；for-of 数组路径切换为 runtime iterator record，并在 `Object.defineProperty` 数组索引定义时同步 `length`，收敛 `for-of` 的 array contract/error 分支。
+  - 子集回归（latest+21）：`language/statements/for-of` 提升至 `74/2`，`language` 基线提升至 `4895/105`（快照：`target/test262-language-baseline-5000-20260224-v32.json`）。
+  - parser for-of lowering 将 `finally` 中的 `__forOfClose` 调用改为内部 `let` 声明形态，避免覆盖外层 loop completion；VM 字符串 for-of 改为按 JS code-unit/代理对规则产出迭代值（对齐 astral symbol）。
+  - 子集回归（latest+22）：`language/statements/for-of` 收敛至 `76/0`，`language` 基线提升至 `4897/103`（快照：`target/test262-language-baseline-5000-20260224-v33.json`）。
 
 ## 3. 分阶段状态
 

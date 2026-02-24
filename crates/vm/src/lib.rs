@@ -26,6 +26,10 @@ const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 const GENERATOR_VALUES_KEY: &str = "$__qjs_generator_values__$";
 const GENERATOR_INDEX_KEY: &str = "$__qjs_generator_index__$";
 const GENERATOR_ITERATOR_MARKER_KEY: &str = "$__qjs_generator_iterator__$";
+const ARRAY_ITERATOR_TARGET_KEY: &str = "$__qjs_array_iterator_target__$";
+const ARRAY_ITERATOR_INDEX_KEY: &str = "$__qjs_array_iterator_index__$";
+const ARRAY_ITERATOR_KIND_KEY: &str = "$__qjs_array_iterator_kind__$";
+const ARRAY_ITERATOR_MARKER_KEY: &str = "$__qjs_array_iterator__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
 const SURROGATE_PLACEHOLDER_END: u32 = 0xE7FF;
 const SURROGATE_START: u16 = 0xD800;
@@ -158,6 +162,11 @@ enum HostFunction {
     ArrayReduce(ObjectId),
     ArrayJoin(ObjectId),
     ArrayJoinThis,
+    ArrayPopThis,
+    ArrayKeysThis,
+    ArrayEntriesThis,
+    ArrayValuesThis,
+    ArrayIteratorNextThis,
     ArrayReverse(ObjectId),
     ArraySort(ObjectId),
     RegExpTest(ObjectId),
@@ -808,6 +817,11 @@ impl Vm {
             | HostFunction::ObjectToString
             | HostFunction::ObjectValueOf
             | HostFunction::ArrayJoinThis
+            | HostFunction::ArrayPopThis
+            | HostFunction::ArrayKeysThis
+            | HostFunction::ArrayEntriesThis
+            | HostFunction::ArrayValuesThis
+            | HostFunction::ArrayIteratorNextThis
             | HostFunction::GeneratorIteratorNextThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
@@ -2563,10 +2577,7 @@ impl Vm {
                 }
                 Ok(values)
             }
-            JsValue::String(value) => Ok(value
-                .chars()
-                .map(|ch| JsValue::String(ch.to_string()))
-                .collect()),
+            JsValue::String(value) => Ok(self.js_string_iterator_values(&value)),
             _ => Err(VmError::TypeError("spread expects array-like object")),
         }
     }
@@ -3598,6 +3609,52 @@ impl Vm {
                 };
                 self.execute_array_join(receiver_id, &separator)
             }
+            HostFunction::ArrayPopThis => {
+                let receiver_id = match this_arg {
+                    Some(JsValue::Object(id)) => id,
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.pop receiver must be object",
+                        ));
+                    }
+                };
+                let length = self
+                    .objects
+                    .get(&receiver_id)
+                    .and_then(|object| object.properties.get("length").cloned())
+                    .map(|value| self.to_number(&value))
+                    .unwrap_or(0.0)
+                    .max(0.0) as usize;
+                let value = {
+                    let object = self
+                        .objects
+                        .get_mut(&receiver_id)
+                        .ok_or(VmError::UnknownObject(receiver_id))?;
+                    if length == 0 {
+                        object
+                            .properties
+                            .insert("length".to_string(), JsValue::Number(0.0));
+                        JsValue::Undefined
+                    } else {
+                        let index = length - 1;
+                        let key = index.to_string();
+                        let value = object.properties.remove(&key).unwrap_or(JsValue::Undefined);
+                        object
+                            .properties
+                            .insert("length".to_string(), JsValue::Number(index as f64));
+                        value
+                    }
+                };
+                Ok(value)
+            }
+            HostFunction::ArrayKeysThis => self.create_array_iterator_from_this(this_arg, "keys"),
+            HostFunction::ArrayEntriesThis => {
+                self.create_array_iterator_from_this(this_arg, "entries")
+            }
+            HostFunction::ArrayValuesThis => {
+                self.create_array_iterator_from_this(this_arg, "values")
+            }
+            HostFunction::ArrayIteratorNextThis => self.execute_array_iterator_next(this_arg, realm),
             HostFunction::ArrayReverse(object_id) => self.execute_array_reverse(object_id),
             HostFunction::ArraySort(object_id) => self.execute_array_sort(object_id),
             HostFunction::RegExpTest(object_id) => {
@@ -4467,6 +4524,7 @@ impl Vm {
             _ => unreachable!(),
         };
         let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let object = self
             .objects
             .get_mut(&iterator_id)
@@ -4481,8 +4539,19 @@ impl Vm {
             .properties
             .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
         object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
         object.property_attributes.insert(
             "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
             PropertyAttributes {
                 writable: true,
                 enumerable: false,
@@ -4561,6 +4630,124 @@ impl Vm {
                 .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number((index + 1) as f64));
         }
         self.create_for_of_step_result(done, value)
+    }
+
+    fn create_array_iterator_from_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        kind: &str,
+    ) -> Result<JsValue, VmError> {
+        let target_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => return Err(VmError::TypeError("Array iterator receiver must be object")),
+        };
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let next = self.create_host_function_value(HostFunction::ArrayIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        object
+            .properties
+            .insert(ARRAY_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object.properties.insert(
+            ARRAY_ITERATOR_TARGET_KEY.to_string(),
+            JsValue::Object(target_id),
+        );
+        object
+            .properties
+            .insert(ARRAY_ITERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert(
+            ARRAY_ITERATOR_KIND_KEY.to_string(),
+            JsValue::String(kind.to_string()),
+        );
+        object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
+    fn execute_array_iterator_next(
+        &mut self,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => return Err(VmError::TypeError("Array iterator next receiver must be object")),
+        };
+        let (target_id, index, kind, is_array_iterator) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_array_iterator = iterator
+                .properties
+                .get(ARRAY_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let target_id = match iterator.properties.get(ARRAY_ITERATOR_TARGET_KEY) {
+                Some(JsValue::Object(object_id)) => *object_id,
+                _ => return self.create_for_of_step_result(true, JsValue::Undefined),
+            };
+            let index = iterator
+                .properties
+                .get(ARRAY_ITERATOR_INDEX_KEY)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
+                .max(0.0) as usize;
+            let kind = iterator
+                .properties
+                .get(ARRAY_ITERATOR_KIND_KEY)
+                .map(|value| self.coerce_to_string(value))
+                .unwrap_or_else(|| "values".to_string());
+            (target_id, index, kind, is_array_iterator)
+        };
+        if !is_array_iterator {
+            return Err(VmError::TypeError("incompatible Array iterator"));
+        }
+
+        let length = self.array_length(target_id)?;
+        if index >= length {
+            return self.create_for_of_step_result(true, JsValue::Undefined);
+        }
+
+        let element = self.get_object_property(target_id, &index.to_string(), realm)?;
+        let step_value = match kind.as_str() {
+            "keys" => JsValue::Number(index as f64),
+            "entries" => {
+                self.create_array_from_values(vec![JsValue::Number(index as f64), element])?
+            }
+            _ => element,
+        };
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator.properties.insert(
+                ARRAY_ITERATOR_INDEX_KEY.to_string(),
+                JsValue::Number((index + 1) as f64),
+            );
+        }
+        self.create_for_of_step_result(false, step_value)
     }
 
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
@@ -5407,6 +5594,22 @@ impl Vm {
 
         match target {
             DefinePropertyTarget::Object(target_id) => {
+                if target_object.properties.contains_key("length") {
+                    if let Ok(index) = property.parse::<usize>() {
+                        let current_length = target_object
+                            .properties
+                            .get("length")
+                            .map(|value| self.to_number(value))
+                            .unwrap_or(0.0)
+                            .max(0.0) as usize;
+                        if index >= current_length {
+                            target_object.properties.insert(
+                                "length".to_string(),
+                                JsValue::Number((index + 1) as f64),
+                            );
+                        }
+                    }
+                }
                 let object = self
                     .objects
                     .get_mut(&target_id)
@@ -5576,21 +5779,10 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         match target {
-            JsValue::String(value) => self.create_for_of_snapshot_record(
-                value
-                    .chars()
-                    .map(|ch| JsValue::String(ch.to_string()))
-                    .collect(),
-            ),
+            JsValue::String(value) => {
+                self.create_for_of_snapshot_record(self.js_string_iterator_values(&value))
+            }
             JsValue::Object(object_id) => {
-                if self
-                    .objects
-                    .get(&object_id)
-                    .is_some_and(|object| object.properties.contains_key("length"))
-                {
-                    let values = self.collect_for_of_values(JsValue::Object(object_id), realm)?;
-                    return self.create_for_of_snapshot_record(values);
-                }
                 self.create_for_of_runtime_iterator_record(JsValue::Object(object_id), realm)
             }
             JsValue::Null | JsValue::Undefined => Err(VmError::TypeError("for-of expects iterable")),
@@ -6833,6 +7025,14 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
         }
+        if property == "pop"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
+        }
         if property == "forEach"
             && self
                 .objects
@@ -6872,6 +7072,30 @@ impl Vm {
                 .is_some_and(|object| object.properties.contains_key("length"))
         {
             return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
+        }
+        if property == "keys"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
+        }
+        if property == "entries"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayEntriesThis));
+        }
+        if (property == "values" || property == "Symbol.iterator")
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
         }
         let mapped_binding = self
             .objects
@@ -8751,6 +8975,14 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
         }
+        if property == "pop"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
+        }
         if property == "forEach"
             && self
                 .objects
@@ -8790,6 +9022,30 @@ impl Vm {
                 .is_some_and(|object| object.properties.contains_key("length"))
         {
             return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
+        }
+        if property == "keys"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
+        }
+        if property == "entries"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayEntriesThis));
+        }
+        if (property == "values" || property == "Symbol.iterator")
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
         }
         let mapped_binding = self
             .objects
@@ -10439,6 +10695,38 @@ impl Vm {
             units.extend_from_slice(ch.encode_utf16(&mut buf));
         }
         units
+    }
+
+    fn js_string_iterator_values(&self, value: &str) -> Vec<JsValue> {
+        let units = self.string_to_js_code_units(value);
+        let mut values = Vec::with_capacity(units.len());
+        let mut index = 0usize;
+        while index < units.len() {
+            let unit = units[index];
+            if (0xD800..=0xDBFF).contains(&unit) && index + 1 < units.len() {
+                let next = units[index + 1];
+                if (0xDC00..=0xDFFF).contains(&next) {
+                    let code_point = 0x1_0000
+                        + (((unit as u32) - 0xD800) << 10)
+                        + ((next as u32) - 0xDC00);
+                    if let Some(ch) = char::from_u32(code_point) {
+                        values.push(JsValue::String(ch.to_string()));
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+            let ch = if (0xD800..=0xDFFF).contains(&unit) {
+                let placeholder =
+                    SURROGATE_PLACEHOLDER_START + ((unit as u32) - (SURROGATE_START as u32));
+                char::from_u32(placeholder).unwrap_or('\u{FFFD}')
+            } else {
+                char::from_u32(unit as u32).unwrap_or('\u{FFFD}')
+            };
+            values.push(JsValue::String(ch.to_string()));
+            index += 1;
+        }
+        values
     }
 
     fn js_string_less_than(&self, left: &str, right: &str) -> bool {

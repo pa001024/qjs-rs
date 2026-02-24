@@ -1795,6 +1795,7 @@ impl Parser {
         let done_name = self.next_for_in_temp_identifier("done");
         let step_name = self.next_for_in_temp_identifier("step");
         let current_name = self.next_for_in_temp_identifier("current");
+        let close_name = self.next_for_in_temp_identifier("close");
 
         let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
             .into_iter()
@@ -1916,13 +1917,19 @@ impl Parser {
                 op: UnaryOp::Not,
                 expr: Box::new(Expr::Identifier(done_name)),
             },
-            consequent: Box::new(Stmt::Block(vec![Stmt::Expression(Expr::Call {
-                callee: Box::new(Expr::Member {
-                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                    property: "__forOfClose".to_string(),
-                }),
-                arguments: vec![Expr::Identifier(iterator_name)],
-            })])),
+            consequent: Box::new(Stmt::Block(vec![Stmt::VariableDeclaration(
+                VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: close_name,
+                    initializer: Some(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "__forOfClose".to_string(),
+                        }),
+                        arguments: vec![Expr::Identifier(iterator_name)],
+                    }),
+                },
+            )])),
             alternate: None,
         }];
         statements.push(Stmt::Try {
@@ -2069,6 +2076,7 @@ impl Parser {
         let done_name = self.next_for_in_temp_identifier("done");
         let step_name = self.next_for_in_temp_identifier("step");
         let current_name = self.next_for_in_temp_identifier("current");
+        let close_name = self.next_for_in_temp_identifier("close");
 
         let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
             elements
@@ -2162,13 +2170,19 @@ impl Parser {
                 op: UnaryOp::Not,
                 expr: Box::new(Expr::Identifier(done_name)),
             },
-            consequent: Box::new(Stmt::Block(vec![Stmt::Expression(Expr::Call {
-                callee: Box::new(Expr::Member {
-                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                    property: "__forOfClose".to_string(),
-                }),
-                arguments: vec![Expr::Identifier(iterator_name)],
-            })])),
+            consequent: Box::new(Stmt::Block(vec![Stmt::VariableDeclaration(
+                VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: close_name,
+                    initializer: Some(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "__forOfClose".to_string(),
+                        }),
+                        arguments: vec![Expr::Identifier(iterator_name)],
+                    }),
+                },
+            )])),
             alternate: None,
         }];
         statements.push(Stmt::Try {
