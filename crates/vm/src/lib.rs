@@ -126,6 +126,7 @@ enum HostFunction {
     StringSplitThis,
     StringToLowerCaseThis,
     StringToUpperCase,
+    StringTrim,
     StringToString,
     StringValueOf,
     StringCharAt,
@@ -135,6 +136,7 @@ enum HostFunction {
     NumberToString,
     NumberValueOf,
     NumberToFixed,
+    NumberToExponential,
     BooleanToString,
     BooleanValueOf,
     FunctionPrototype,
@@ -737,6 +739,7 @@ impl Vm {
             | HostFunction::StringSplitThis
             | HostFunction::StringToLowerCaseThis
             | HostFunction::StringToUpperCase
+            | HostFunction::StringTrim
             | HostFunction::StringToString
             | HostFunction::StringValueOf
             | HostFunction::StringCharAt
@@ -746,6 +749,7 @@ impl Vm {
             | HostFunction::NumberToString
             | HostFunction::NumberValueOf
             | HostFunction::NumberToFixed
+            | HostFunction::NumberToExponential
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
             | HostFunction::ThrowTypeError
@@ -3020,6 +3024,10 @@ impl Vm {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(JsValue::String(receiver.to_uppercase()))
             }
+            HostFunction::StringTrim => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(JsValue::String(receiver.trim().to_string()))
+            }
             HostFunction::StringToString | HostFunction::StringValueOf => {
                 let receiver = self.strict_this_string(this_arg)?;
                 Ok(JsValue::String(receiver))
@@ -3136,6 +3144,39 @@ impl Vm {
                     "{number:.precision$}",
                     precision = digits
                 )))
+            }
+            HostFunction::NumberToExponential => {
+                let number = self.strict_this_number(this_arg)?;
+                if number.is_nan() {
+                    return Ok(JsValue::String("NaN".to_string()));
+                }
+                if number.is_infinite() {
+                    return Ok(JsValue::String(if number.is_sign_negative() {
+                        "-Infinity".to_string()
+                    } else {
+                        "Infinity".to_string()
+                    }));
+                }
+                let precision = match args.first() {
+                    None | Some(JsValue::Undefined) => None,
+                    Some(value) => {
+                        let digits = self.to_number(value);
+                        if !digits.is_finite() || digits < 0.0 || digits > 100.0 {
+                            return Err(VmError::UncaughtException(self.create_error_exception(
+                                NativeFunction::RangeErrorConstructor,
+                                "RangeError",
+                                "invalid number of digits".to_string(),
+                            )));
+                        }
+                        Some(digits as usize)
+                    }
+                };
+                let raw = if let Some(precision) = precision {
+                    format!("{number:.precision$e}", precision = precision)
+                } else {
+                    format!("{number:e}")
+                };
+                Ok(JsValue::String(Self::normalize_exponent_string(raw)))
             }
             HostFunction::BooleanToString => {
                 let value = self.strict_this_boolean(this_arg)?;
@@ -5655,6 +5696,7 @@ impl Vm {
                         | "substring"
                         | "toLowerCase"
                         | "toUpperCase"
+                        | "trim"
                         | "toString"
                         | "valueOf"
                         | "charAt"
@@ -6705,6 +6747,7 @@ impl Vm {
             let substring = self.create_host_function_value(HostFunction::StringSubstring);
             let to_lower_case = self.create_host_function_value(HostFunction::StringToLowerCaseThis);
             let to_upper_case = self.create_host_function_value(HostFunction::StringToUpperCase);
+            let trim = self.create_host_function_value(HostFunction::StringTrim);
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -6741,6 +6784,7 @@ impl Vm {
                     ("substring", substring),
                     ("toLowerCase", to_lower_case),
                     ("toUpperCase", to_upper_case),
+                    ("trim", trim),
                     ("replace", replace),
                 ] {
                     object.properties.insert(name.to_string(), value);
@@ -6768,6 +6812,8 @@ impl Vm {
             let to_string = self.create_host_function_value(HostFunction::NumberToString);
             let value_of = self.create_host_function_value(HostFunction::NumberValueOf);
             let to_fixed = self.create_host_function_value(HostFunction::NumberToFixed);
+            let to_exponential =
+                self.create_host_function_value(HostFunction::NumberToExponential);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -6785,6 +6831,7 @@ impl Vm {
                     ("toString", to_string),
                     ("valueOf", value_of),
                     ("toFixed", to_fixed),
+                    ("toExponential", to_exponential),
                 ] {
                     object.properties.insert(name.to_string(), value);
                     object.property_attributes.insert(
@@ -7677,17 +7724,33 @@ impl Vm {
                 binding.value = value.clone();
             }
         }
+        let can_write_property = {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            object.extensible
+                || object.properties.contains_key(&property)
+                || object.getters.contains_key(&property)
+                || object.setters.contains_key(&property)
+        };
+        if !can_write_property {
+            return Ok(value);
+        }
+        if self.is_array_length_tracking_object(object_id)? {
+            if property == "length" {
+                self.set_array_length_property(object_id, &value)?;
+                return Ok(value);
+            }
+            if let Some(index) = Self::canonical_array_index(&property) {
+                self.set_array_index_property(object_id, index, property, value.clone())?;
+                return Ok(value);
+            }
+        }
         let object = self
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        if !object.extensible
-            && !object.properties.contains_key(&property)
-            && !object.getters.contains_key(&property)
-            && !object.setters.contains_key(&property)
-        {
-            return Ok(value);
-        }
         object.properties.insert(property.clone(), value.clone());
         object
             .property_attributes
@@ -7990,6 +8053,163 @@ impl Vm {
                 | (_, "length")
                 | (_, "constructor")
         )
+    }
+
+    fn is_array_length_tracking_object(&self, object_id: ObjectId) -> Result<bool, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        if !object.properties.contains_key("length") {
+            return Ok(false);
+        }
+        let Some(attributes) = object.property_attributes.get("length") else {
+            return Ok(false);
+        };
+        if attributes.enumerable || attributes.configurable {
+            return Ok(false);
+        }
+        let Some(array_prototype_id) = self.array_prototype_id else {
+            return Ok(false);
+        };
+        self.object_inherits_prototype(object_id, array_prototype_id)
+    }
+
+    fn object_inherits_prototype(
+        &self,
+        object_id: ObjectId,
+        target_prototype: ObjectId,
+    ) -> Result<bool, VmError> {
+        let mut current = Some(object_id);
+        while let Some(id) = current {
+            if id == target_prototype {
+                return Ok(true);
+            }
+            current = self
+                .objects
+                .get(&id)
+                .ok_or(VmError::UnknownObject(id))?
+                .prototype;
+        }
+        Ok(false)
+    }
+
+    fn canonical_array_index(property: &str) -> Option<usize> {
+        if property.is_empty() {
+            return None;
+        }
+        if property != "0" && property.starts_with('0') {
+            return None;
+        }
+        let index = property.parse::<u64>().ok()?;
+        if index >= u32::MAX as u64 {
+            return None;
+        }
+        if index.to_string() != property {
+            return None;
+        }
+        Some(index as usize)
+    }
+
+    fn to_valid_array_length_or_throw(&mut self, value: &JsValue) -> Result<usize, VmError> {
+        let number = self.to_number(value);
+        let integer = number.trunc();
+        if !number.is_finite()
+            || number < 0.0
+            || integer != number
+            || number > u32::MAX as f64
+        {
+            return Err(VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::RangeErrorConstructor,
+                "RangeError",
+                "Invalid array length".to_string(),
+            )));
+        }
+        Ok(integer as usize)
+    }
+
+    fn set_array_length_property(
+        &mut self,
+        object_id: ObjectId,
+        value: &JsValue,
+    ) -> Result<(), VmError> {
+        let requested_length = self.to_valid_array_length_or_throw(value)?;
+        let current_length = self.array_length(object_id)?;
+        {
+            let object = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            if object
+                .property_attributes
+                .get("length")
+                .is_some_and(|attributes| !attributes.writable)
+            {
+                return Ok(());
+            }
+            object
+                .properties
+                .insert("length".to_string(), JsValue::Number(requested_length as f64));
+            object
+                .property_attributes
+                .entry("length".to_string())
+                .or_insert(PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: false,
+                });
+        }
+        if requested_length >= current_length {
+            return Ok(());
+        }
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        for index in (requested_length..current_length).rev() {
+            let key = index.to_string();
+            if object
+                .property_attributes
+                .get(&key)
+                .is_some_and(|attributes| !attributes.configurable)
+            {
+                object
+                    .properties
+                    .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+                return Ok(());
+            }
+            object.properties.remove(&key);
+            object.getters.remove(&key);
+            object.setters.remove(&key);
+            object.property_attributes.remove(&key);
+        }
+        Ok(())
+    }
+
+    fn set_array_index_property(
+        &mut self,
+        object_id: ObjectId,
+        index: usize,
+        property: String,
+        value: JsValue,
+    ) -> Result<(), VmError> {
+        let current_length = self.array_length(object_id)?;
+        let next_length = (index + 1).max(current_length);
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object.properties.insert(property.clone(), value);
+        object
+            .property_attributes
+            .entry(property)
+            .or_insert_with(PropertyAttributes::default);
+        if next_length != current_length {
+            object
+                .properties
+                .insert("length".to_string(), JsValue::Number(next_length as f64));
+        }
+        Ok(())
     }
 
     fn current_array_literal_target(&self) -> Result<ObjectId, VmError> {
@@ -8523,6 +8743,7 @@ impl Vm {
             "charCodeAt" => self.create_host_function_value(HostFunction::StringCharCodeAt),
             "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
             "substring" => self.create_host_function_value(HostFunction::StringSubstring),
+            "trim" => self.create_host_function_value(HostFunction::StringTrim),
             _ => match property.parse::<usize>() {
                 Ok(index) => receiver
                     .chars()
@@ -10628,6 +10849,85 @@ mod tests {
     }
 
     #[test]
+    fn primitive_constructor_prototypes_expose_trim_and_to_exponential() {
+        let script = parse_script(
+            "typeof String.prototype.trim === 'function' && typeof Number.prototype.toExponential === 'function';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_length_shrink_deletes_elements_for_subclass_instances() {
+        let script = parse_script(
+            "class Ar extends Array {} let arr = new Ar('foo', 'bar'); arr.length = 1; arr[0] === 'foo' && arr[1] === undefined && arr.length === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn number_subclass_inherits_to_exponential() {
+        let script = parse_script(
+            "class N extends Number {} let n = new N(42); n.toFixed(2) === '42.00' && n.toExponential(2) === '4.20e+1';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn string_subclass_inherits_trim() {
+        let script =
+            parse_script("class S extends String {} let s = new S(' test262 '); s.trim() === 'test262';")
+                .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn object_define_properties_baseline_applies_descriptors() {
         let script = parse_script(
             "var count = 0; Object.defineProperties(this, { x: { value: 1 }, y: { get() { count++; return 1; } } }); (typeof x === 'number') && (typeof y === 'number') && (count === 1);",
@@ -10726,6 +11026,22 @@ mod tests {
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn class_constructor_super_property_read_baseline() {
+        let script = parse_script(
+            "var calls = 0; class B {} B.prototype.x = 42; class C extends B { constructor() { super(); calls++; this.v = super.x; } } var c = new C; c.v === 42 && calls === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 

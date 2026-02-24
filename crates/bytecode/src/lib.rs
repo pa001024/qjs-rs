@@ -13,6 +13,7 @@ const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
 const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
 const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
@@ -1293,7 +1294,7 @@ impl Compiler {
                 kind: BindingKind::Let,
                 name: Identifier(name),
                 ..
-            }) => name == "super",
+            }) => name == "super" || name == CLASS_CONSTRUCTOR_SUPER_BASE_BINDING,
             _ => false,
         }
     }
@@ -2100,7 +2101,11 @@ impl Compiler {
     }
 
     fn is_super_identifier(expr: &Expr) -> bool {
-        matches!(expr, Expr::Identifier(Identifier(name)) if name == "super")
+        matches!(
+            expr,
+            Expr::Identifier(Identifier(name))
+                if name == "super" || name == CLASS_CONSTRUCTOR_SUPER_BASE_BINDING
+        )
     }
 
     fn binary_opcode(op: BinaryOp) -> Opcode {

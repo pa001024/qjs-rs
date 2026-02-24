@@ -19,6 +19,7 @@ const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor
 const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
 
@@ -4135,7 +4136,8 @@ impl Parser {
         let Expr::Function { name, params, body } = value else {
             return value;
         };
-        let super_base = if let Some(override_expr) = super_override {
+        let rewrite_constructor_super_base = constructor_super && super_override.is_some();
+        let super_value = if let Some(override_expr) = super_override {
             override_expr
         } else {
             let super_anchor = if is_static || constructor_super {
@@ -4162,14 +4164,391 @@ impl Parser {
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
                 name: Identifier("super".to_string()),
-                initializer: Some(super_base),
+                initializer: Some(super_value),
             }),
         ];
-        lowered_body.extend(body);
+        let lowered_user_body = if rewrite_constructor_super_base {
+            lowered_body.push(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(CLASS_CONSTRUCTOR_SUPER_BASE_BINDING.to_string()),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Function {
+                        name: None,
+                        params: vec![Identifier("$__super_ctor".to_string())],
+                        body: vec![Stmt::Return(Some(Expr::Conditional {
+                            condition: Box::new(Expr::Binary {
+                                op: BinaryOp::StrictEqual,
+                                left: Box::new(Expr::Identifier(Identifier(
+                                    "$__super_ctor".to_string(),
+                                ))),
+                                right: Box::new(Expr::Null),
+                            }),
+                            consequent: Box::new(Expr::Null),
+                            alternate: Box::new(Expr::Member {
+                                object: Box::new(Expr::Identifier(Identifier(
+                                    "$__super_ctor".to_string(),
+                                ))),
+                                property: "prototype".to_string(),
+                            }),
+                        }))],
+                    }),
+                    arguments: vec![Expr::Identifier(Identifier("super".to_string()))],
+                }),
+            }));
+            body.into_iter()
+                .map(Self::rewrite_constructor_super_property_stmt)
+                .collect()
+        } else {
+            body
+        };
+        lowered_body.extend(lowered_user_body);
         Expr::Function {
             name,
             params,
             body: lowered_body,
+        }
+    }
+
+    fn rewrite_constructor_super_property_stmt(stmt: Stmt) -> Stmt {
+        match stmt {
+            Stmt::Empty => Stmt::Empty,
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind,
+                name,
+                initializer,
+            }) => Stmt::VariableDeclaration(VariableDeclaration {
+                kind,
+                name,
+                initializer: initializer.map(Self::rewrite_constructor_super_property_expr),
+            }),
+            Stmt::VariableDeclarations(declarations) => Stmt::VariableDeclarations(
+                declarations
+                    .into_iter()
+                    .map(
+                        |VariableDeclaration {
+                             kind,
+                             name,
+                             initializer,
+                         }| VariableDeclaration {
+                            kind,
+                            name,
+                            initializer: initializer
+                                .map(Self::rewrite_constructor_super_property_expr),
+                        },
+                    )
+                    .collect(),
+            ),
+            Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) => {
+                Stmt::FunctionDeclaration(FunctionDeclaration {
+                    name,
+                    params,
+                    body: body
+                        .into_iter()
+                        .map(Self::rewrite_constructor_super_property_stmt)
+                        .collect(),
+                })
+            }
+            Stmt::Return(expr) => Stmt::Return(expr.map(Self::rewrite_constructor_super_property_expr)),
+            Stmt::Expression(expr) => {
+                Stmt::Expression(Self::rewrite_constructor_super_property_expr(expr))
+            }
+            Stmt::Block(statements) => Stmt::Block(
+                statements
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_stmt)
+                    .collect(),
+            ),
+            Stmt::If {
+                condition,
+                consequent,
+                alternate,
+            } => Stmt::If {
+                condition: Self::rewrite_constructor_super_property_expr(condition),
+                consequent: Box::new(Self::rewrite_constructor_super_property_stmt(*consequent)),
+                alternate: alternate.map(|stmt| {
+                    Box::new(Self::rewrite_constructor_super_property_stmt(*stmt))
+                }),
+            },
+            Stmt::While { condition, body } => Stmt::While {
+                condition: Self::rewrite_constructor_super_property_expr(condition),
+                body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
+            },
+            Stmt::With { object, body } => Stmt::With {
+                object: Self::rewrite_constructor_super_property_expr(object),
+                body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
+            },
+            Stmt::DoWhile { body, condition } => Stmt::DoWhile {
+                body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
+                condition: Self::rewrite_constructor_super_property_expr(condition),
+            },
+            Stmt::For {
+                initializer,
+                condition,
+                update,
+                body,
+            } => Stmt::For {
+                initializer: initializer.map(|init| match init {
+                    ForInitializer::VariableDeclaration(VariableDeclaration {
+                        kind,
+                        name,
+                        initializer,
+                    }) => ForInitializer::VariableDeclaration(VariableDeclaration {
+                        kind,
+                        name,
+                        initializer: initializer
+                            .map(Self::rewrite_constructor_super_property_expr),
+                    }),
+                    ForInitializer::VariableDeclarations(declarations) => {
+                        ForInitializer::VariableDeclarations(
+                            declarations
+                                .into_iter()
+                                .map(
+                                    |VariableDeclaration {
+                                         kind,
+                                         name,
+                                         initializer,
+                                     }| VariableDeclaration {
+                                        kind,
+                                        name,
+                                        initializer: initializer
+                                            .map(Self::rewrite_constructor_super_property_expr),
+                                    },
+                                )
+                                .collect(),
+                        )
+                    }
+                    ForInitializer::Expression(expr) => {
+                        ForInitializer::Expression(Self::rewrite_constructor_super_property_expr(expr))
+                    }
+                }),
+                condition: condition.map(Self::rewrite_constructor_super_property_expr),
+                update: update.map(Self::rewrite_constructor_super_property_expr),
+                body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
+            },
+            Stmt::Switch { discriminant, cases } => Stmt::Switch {
+                discriminant: Self::rewrite_constructor_super_property_expr(discriminant),
+                cases: cases
+                    .into_iter()
+                    .map(|SwitchCase { test, consequent }| SwitchCase {
+                        test: test.map(Self::rewrite_constructor_super_property_expr),
+                        consequent: consequent
+                            .into_iter()
+                            .map(Self::rewrite_constructor_super_property_stmt)
+                            .collect(),
+                    })
+                    .collect(),
+            },
+            Stmt::Throw(expr) => Stmt::Throw(Self::rewrite_constructor_super_property_expr(expr)),
+            Stmt::Try {
+                try_block,
+                catch_param,
+                catch_block,
+                finally_block,
+            } => Stmt::Try {
+                try_block: try_block
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_stmt)
+                    .collect(),
+                catch_param,
+                catch_block: catch_block.map(|block| {
+                    block
+                        .into_iter()
+                        .map(Self::rewrite_constructor_super_property_stmt)
+                        .collect()
+                }),
+                finally_block: finally_block.map(|block| {
+                    block
+                        .into_iter()
+                        .map(Self::rewrite_constructor_super_property_stmt)
+                        .collect()
+                }),
+            },
+            Stmt::Labeled { label, body } => Stmt::Labeled {
+                label,
+                body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
+            },
+            Stmt::Break => Stmt::Break,
+            Stmt::BreakLabel(label) => Stmt::BreakLabel(label),
+            Stmt::Continue => Stmt::Continue,
+            Stmt::ContinueLabel(label) => Stmt::ContinueLabel(label),
+        }
+    }
+
+    fn rewrite_constructor_super_property_expr(expr: Expr) -> Expr {
+        match expr {
+            Expr::Number(value) => Expr::Number(value),
+            Expr::Bool(value) => Expr::Bool(value),
+            Expr::Null => Expr::Null,
+            Expr::String(value) => Expr::String(value),
+            Expr::RegexLiteral { pattern, flags } => Expr::RegexLiteral { pattern, flags },
+            Expr::This => Expr::This,
+            Expr::Identifier(identifier) => Expr::Identifier(identifier),
+            Expr::Function { name, params, body } => Expr::Function {
+                name,
+                params,
+                body: body
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_stmt)
+                    .collect(),
+            },
+            Expr::ObjectLiteral(properties) => Expr::ObjectLiteral(
+                properties
+                    .into_iter()
+                    .map(|ObjectProperty { key, value }| ObjectProperty {
+                        key: match key {
+                            ObjectPropertyKey::Static(name) => ObjectPropertyKey::Static(name),
+                            ObjectPropertyKey::ProtoSetter => ObjectPropertyKey::ProtoSetter,
+                            ObjectPropertyKey::Computed(key_expr) => {
+                                ObjectPropertyKey::Computed(Box::new(
+                                    Self::rewrite_constructor_super_property_expr(*key_expr),
+                                ))
+                            }
+                            ObjectPropertyKey::AccessorGet(name) => {
+                                ObjectPropertyKey::AccessorGet(name)
+                            }
+                            ObjectPropertyKey::AccessorSet(name) => {
+                                ObjectPropertyKey::AccessorSet(name)
+                            }
+                            ObjectPropertyKey::AccessorGetComputed(key_expr) => {
+                                ObjectPropertyKey::AccessorGetComputed(Box::new(
+                                    Self::rewrite_constructor_super_property_expr(*key_expr),
+                                ))
+                            }
+                            ObjectPropertyKey::AccessorSetComputed(key_expr) => {
+                                ObjectPropertyKey::AccessorSetComputed(Box::new(
+                                    Self::rewrite_constructor_super_property_expr(*key_expr),
+                                ))
+                            }
+                        },
+                        value: Self::rewrite_constructor_super_property_expr(value),
+                    })
+                    .collect(),
+            ),
+            Expr::ArrayLiteral(items) => Expr::ArrayLiteral(
+                items
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_expr)
+                    .collect(),
+            ),
+            Expr::Elision => Expr::Elision,
+            Expr::Unary { op, expr } => Expr::Unary {
+                op,
+                expr: Box::new(Self::rewrite_constructor_super_property_expr(*expr)),
+            },
+            Expr::Conditional {
+                condition,
+                consequent,
+                alternate,
+            } => Expr::Conditional {
+                condition: Box::new(Self::rewrite_constructor_super_property_expr(*condition)),
+                consequent: Box::new(Self::rewrite_constructor_super_property_expr(*consequent)),
+                alternate: Box::new(Self::rewrite_constructor_super_property_expr(*alternate)),
+            },
+            Expr::Sequence(values) => Expr::Sequence(
+                values
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_expr)
+                    .collect(),
+            ),
+            Expr::Member { object, property } => Expr::Member {
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                property,
+            },
+            Expr::MemberComputed { object, property } => Expr::MemberComputed {
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                property: Box::new(Self::rewrite_constructor_super_property_expr(*property)),
+            },
+            Expr::Call { callee, arguments } => {
+                let callee = match *callee {
+                    Expr::Identifier(Identifier(name)) if name == "super" => {
+                        Expr::Identifier(Identifier(name))
+                    }
+                    other => Self::rewrite_constructor_super_property_expr(other),
+                };
+                Expr::Call {
+                    callee: Box::new(callee),
+                    arguments: arguments
+                        .into_iter()
+                        .map(Self::rewrite_constructor_super_property_expr)
+                        .collect(),
+                }
+            }
+            Expr::New { callee, arguments } => Expr::New {
+                callee: Box::new(Self::rewrite_constructor_super_property_expr(*callee)),
+                arguments: arguments
+                    .into_iter()
+                    .map(Self::rewrite_constructor_super_property_expr)
+                    .collect(),
+            },
+            Expr::Binary { op, left, right } => Expr::Binary {
+                op,
+                left: Box::new(Self::rewrite_constructor_super_property_expr(*left)),
+                right: Box::new(Self::rewrite_constructor_super_property_expr(*right)),
+            },
+            Expr::Assign { target, value } => Expr::Assign {
+                target,
+                value: Box::new(Self::rewrite_constructor_super_property_expr(*value)),
+            },
+            Expr::AssignMember {
+                object,
+                property,
+                value,
+            } => Expr::AssignMember {
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                property,
+                value: Box::new(Self::rewrite_constructor_super_property_expr(*value)),
+            },
+            Expr::AssignMemberComputed {
+                object,
+                property,
+                value,
+            } => Expr::AssignMemberComputed {
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                property: Box::new(Self::rewrite_constructor_super_property_expr(*property)),
+                value: Box::new(Self::rewrite_constructor_super_property_expr(*value)),
+            },
+            Expr::Update {
+                target,
+                increment,
+                prefix,
+            } => Expr::Update {
+                target: match target {
+                    UpdateTarget::Identifier(identifier) => UpdateTarget::Identifier(identifier),
+                    UpdateTarget::Member { object, property } => UpdateTarget::Member {
+                        object: Box::new(
+                            Self::rewrite_constructor_super_property_member_base(*object),
+                        ),
+                        property,
+                    },
+                    UpdateTarget::MemberComputed { object, property } => {
+                        UpdateTarget::MemberComputed {
+                            object: Box::new(
+                                Self::rewrite_constructor_super_property_member_base(*object),
+                            ),
+                            property: Box::new(
+                                Self::rewrite_constructor_super_property_expr(*property),
+                            ),
+                        }
+                    }
+                },
+                increment,
+                prefix,
+            },
+            Expr::SpreadArgument(value) => Expr::SpreadArgument(Box::new(
+                Self::rewrite_constructor_super_property_expr(*value),
+            )),
+        }
+    }
+
+    fn rewrite_constructor_super_property_member_base(object: Expr) -> Expr {
+        let rewritten = Self::rewrite_constructor_super_property_expr(object);
+        match rewritten {
+            Expr::Identifier(Identifier(name)) if name == "super" => {
+                Expr::Identifier(Identifier(
+                    CLASS_CONSTRUCTOR_SUPER_BASE_BINDING.to_string(),
+                ))
+            }
+            other => other,
         }
     }
 
