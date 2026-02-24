@@ -66,6 +66,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+45)`: discovered=23882, executed=5000, skipped=18579, passed=4871, failed=129
 - `language max-cases=5000 (latest+46)`: discovered=23882, executed=5000, skipped=18579, passed=4882, failed=118
 - `language max-cases=5000 (latest+47)`: discovered=23882, executed=5000, skipped=18579, passed=4883, failed=117
+- `language max-cases=5000 (latest+48)`: discovered=23882, executed=5000, skipped=18579, passed=4884, failed=116
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -83,7 +84,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
 - `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
 - `language/statements/class/definition (latest)`: discovered=65, executed=33, skipped=32, passed=33, failed=0
-- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=187, failed=1
+- `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=188, failed=0
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -245,4 +246,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser for-of lowering 新增迭代器记录路径（`Object.__forOfIterator/__forOfStep/__forOfClose`）并在 `try/finally` 中执行关闭；随后调整循环条件为序列表达式（保留 completion value 口径），修复 `class/subclass/derived-class-return-override-for-of*` 且避免 `for-of cptn-*` 回归。该轮后 `language/statements/class/subclass` 提升至 `64/13`、`language/statements/for-of` 提升至 `63/13`，整体 `language` 基线提升至 `4871/129`（快照：`target/test262-language-baseline-5000-20260224-v27.json`）。
 - runtime/builtins 补齐 `ArrayBuffer/DataView/Map/Set/Promise/Uint8Array` 最小构造语义（含原型对象、`Map.prototype.set`、`Set.prototype.add`、`ArrayBuffer.prototype.slice`、`Promise` executor 调用、`Uint8Array` index 写入裁剪与 `Object.prototype.toString` typed-array tag），清理 `class/subclass/builtin-objects/*` 缺失内建失败簇。该轮后 `language/statements/class/subclass` 提升至 `75/2`、`language/statements/class` 提升至 `186/2`，整体 `language` 基线提升至 `4882/118`（快照：`target/test262-language-baseline-5000-20260224-v28.json`）。
 - VM Date 构造器补齐 `new Date(y, m, d)` 最小本地分量存储，并新增 `Date.prototype.getFullYear/getMonth/getDate/getUTCFullYear/getUTCMonth/getUTCDate` host 方法（UTC 路径按 timestamp 还原 civil date），收敛 class 内建子类化的 Date 失败簇。该轮后 `language/statements/class/subclass` 提升至 `76/1`、`language/statements/class` 提升至 `187/1`，整体 `language` 基线提升至 `4883/117`（快照：`target/test262-language-baseline-5000-20260224-v29.json`）。
+- 对齐 QuickJS `js_function_constructor(..., JS_FUNC_GENERATOR)` 分流：runtime 新增 `GeneratorFunctionConstructor`，parser 对 `function*` 注入 generator marker，VM 将 generator function `[[Prototype]]` 指向 `GeneratorFunction.prototype`，并补齐最小 generator 迭代器 `next()` 返回路径（覆盖 `yield <expr>;` 主路径）。该轮后 `language/statements/class/subclass` 收敛至 `77/0`、`language/statements/class` 收敛至 `188/0`，整体 `language` 基线提升至 `4884/116`（快照：`target/test262-language-baseline-5000-20260224-v30.json`）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

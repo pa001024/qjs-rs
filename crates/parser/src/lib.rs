@@ -19,6 +19,7 @@ const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor
 const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
 const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
@@ -1210,6 +1211,23 @@ impl Parser {
         body.insert(insert_at, marker);
     }
 
+    fn insert_generator_function_marker(&self, body: &mut Vec<Stmt>) {
+        let marker = Stmt::Expression(Expr::String(StringLiteral {
+            value: GENERATOR_FUNCTION_MARKER.to_string(),
+            has_escape: false,
+        }));
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, marker);
+    }
+
     fn prepend_non_simple_params_marker(&self, body: &mut Vec<Stmt>) {
         self.prepend_marker(body, NON_SIMPLE_PARAMS_MARKER);
     }
@@ -1258,7 +1276,7 @@ impl Parser {
     }
 
     fn parse_function_declaration_statement(&mut self) -> Result<Stmt, ParseError> {
-        let _is_generator = self.matches(&TokenKind::Star);
+        let is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
         let (params, simple_parameters, default_initializers, pattern_effects) =
@@ -1273,6 +1291,9 @@ impl Parser {
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_generator {
+            self.insert_generator_function_marker(&mut body);
         }
 
         Ok(Stmt::FunctionDeclaration(FunctionDeclaration {
@@ -3659,7 +3680,7 @@ impl Parser {
     }
 
     fn parse_function_expression_after_keyword(&mut self) -> Result<Expr, ParseError> {
-        let _is_generator = self.matches(&TokenKind::Star);
+        let is_generator = self.matches(&TokenKind::Star);
         let name = if self.check_identifier() {
             Some(Identifier(
                 self.expect_binding_identifier("expected function name")?,
@@ -3680,6 +3701,9 @@ impl Parser {
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_generator {
+            self.insert_generator_function_marker(&mut body);
         }
 
         Ok(Expr::Function { name, params, body })
@@ -3766,7 +3790,6 @@ impl Parser {
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
             }
-
             parsed.methods.push(ClassMethodDefinition {
                 key,
                 value: Expr::Function {
@@ -5261,7 +5284,6 @@ impl Parser {
             self.prepend_non_simple_params_marker(&mut body);
         }
         self.insert_no_prototype_marker(&mut body);
-
         Ok(Expr::Function {
             name: None,
             params,

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub enum NativeFunction {
     Eval,
     FunctionConstructor,
+    GeneratorFunctionConstructor,
     ObjectConstructor,
     ArrayConstructor,
     ArrayIsArray,

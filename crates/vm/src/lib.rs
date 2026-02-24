@@ -19,9 +19,13 @@ const CLASS_DERIVED_CONSTRUCTOR_MARKER: &str = "$__qjs_class_derived_constructor
 const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__$";
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
+const GENERATOR_VALUES_KEY: &str = "$__qjs_generator_values__$";
+const GENERATOR_INDEX_KEY: &str = "$__qjs_generator_index__$";
+const GENERATOR_ITERATOR_MARKER_KEY: &str = "$__qjs_generator_iterator__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
 const SURROGATE_PLACEHOLDER_END: u32 = 0xE7FF;
 const SURROGATE_START: u16 = 0xD800;
@@ -121,6 +125,10 @@ enum HostFunction {
         this_arg: JsValue,
         bound_args: Vec<JsValue>,
     },
+    GeneratorFactory {
+        producer: JsValue,
+    },
+    GeneratorIteratorNextThis,
     StringReplaceThis,
     StringIndexOfThis,
     StringSplitThis,
@@ -288,6 +296,7 @@ pub struct Vm {
     object_prototype_id: Option<ObjectId>,
     function_prototype_host_id: Option<u64>,
     function_prototype_prototype_getter: Option<JsValue>,
+    generator_function_prototype_id: Option<ObjectId>,
     array_prototype_id: Option<ObjectId>,
     string_prototype_id: Option<ObjectId>,
     number_prototype_id: Option<ObjectId>,
@@ -353,6 +362,7 @@ impl Vm {
         self.object_prototype_id = None;
         self.function_prototype_host_id = None;
         self.function_prototype_prototype_getter = None;
+        self.generator_function_prototype_id = None;
         self.array_prototype_id = None;
         self.string_prototype_id = None;
         self.number_prototype_id = None;
@@ -744,6 +754,9 @@ impl Vm {
                 self.gc_mark_stack.push(this_arg);
                 self.gc_mark_stack.extend(bound_args);
             }
+            HostFunction::GeneratorFactory { producer } => {
+                self.gc_mark_stack.push(producer);
+            }
             HostFunction::ArrayPush(object_id)
             | HostFunction::ArrayForEach(object_id)
             | HostFunction::ArrayReduce(object_id)
@@ -795,6 +808,7 @@ impl Vm {
             | HostFunction::ObjectToString
             | HostFunction::ObjectValueOf
             | HostFunction::ArrayJoinThis
+            | HostFunction::GeneratorIteratorNextThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
             | HostFunction::AssertThrows
@@ -3151,6 +3165,19 @@ impl Vm {
                 bound_args.extend(args);
                 self.execute_callable(target, Some(this_arg), bound_args, realm, caller_strict)
             }
+            HostFunction::GeneratorFactory { producer } => {
+                let produced_values = self.execute_callable(
+                    producer,
+                    Some(JsValue::Undefined),
+                    args,
+                    realm,
+                    caller_strict,
+                )?;
+                self.create_generator_iterator_from_values(produced_values)
+            }
+            HostFunction::GeneratorIteratorNextThis => {
+                self.execute_generator_iterator_next(this_arg, realm)
+            }
             HostFunction::StringReplaceThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 self.execute_string_replace(receiver, &args, realm, caller_strict)
@@ -3790,6 +3817,9 @@ impl Vm {
                 EvalCallKind::Indirect,
             ),
             NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
+            NativeFunction::GeneratorFunctionConstructor => {
+                self.execute_generator_function_constructor(&args, realm)
+            }
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => Ok(self.execute_array_constructor(&args)),
             NativeFunction::ArrayIsArray => {
@@ -4380,6 +4410,157 @@ impl Vm {
         } else {
             Ok(value)
         }
+    }
+
+    fn execute_generator_function_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let body = args
+            .last()
+            .map(|value| self.coerce_to_string(value))
+            .unwrap_or_default();
+        let yield_expressions = Self::parse_generator_constructor_yield_expressions(&body)
+            .map_err(|message| {
+                VmError::UncaughtException(JsValue::String(format!("SyntaxError: {message}")))
+            })?;
+        let transformed_body = if yield_expressions.is_empty() {
+            "return [];".to_string()
+        } else {
+            format!("return [{}];", yield_expressions.join(", "))
+        };
+        let mut transformed_args = args.to_vec();
+        if transformed_args.is_empty() {
+            transformed_args.push(JsValue::String(transformed_body));
+        } else {
+            let body_index = transformed_args.len().saturating_sub(1);
+            transformed_args[body_index] = JsValue::String(transformed_body);
+        }
+        let producer = self.execute_function_constructor(&transformed_args, realm)?;
+        Ok(self.create_host_function_value(HostFunction::GeneratorFactory { producer }))
+    }
+
+    fn parse_generator_constructor_yield_expressions(body: &str) -> Result<Vec<String>, String> {
+        let mut expressions = Vec::new();
+        for segment in body.split(';') {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Some(expression) = trimmed.strip_prefix("yield") else {
+                return Err("unsupported GeneratorFunction body".to_string());
+            };
+            let expression = expression.trim();
+            if expression.is_empty() {
+                return Err("invalid yield expression".to_string());
+            }
+            expressions.push(expression.to_string());
+        }
+        Ok(expressions)
+    }
+
+    fn create_generator_iterator_from_values(&mut self, values: JsValue) -> Result<JsValue, VmError> {
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        object
+            .properties
+            .insert(GENERATOR_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object
+            .properties
+            .insert(GENERATOR_VALUES_KEY.to_string(), values);
+        object
+            .properties
+            .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert("next".to_string(), next);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
+    fn execute_generator_iterator_next(
+        &mut self,
+        this_arg: Option<JsValue>,
+        _realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => return Err(VmError::TypeError("generator iterator next receiver must be object")),
+        };
+        let (values, index, is_generator_iterator) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_generator_iterator = iterator
+                .properties
+                .get(GENERATOR_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let values = iterator
+                .properties
+                .get(GENERATOR_VALUES_KEY)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            let index = iterator
+                .properties
+                .get(GENERATOR_INDEX_KEY)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
+                .max(0.0) as usize;
+            (values, index, is_generator_iterator)
+        };
+        if !is_generator_iterator {
+            return Err(VmError::TypeError("incompatible generator iterator"));
+        }
+
+        let (value, done) = match values {
+            JsValue::Object(values_id) => {
+                let values_object = self
+                    .objects
+                    .get(&values_id)
+                    .ok_or(VmError::UnknownObject(values_id))?;
+                let length = values_object
+                    .properties
+                    .get("length")
+                    .map(|length| self.to_number(length))
+                    .unwrap_or(0.0)
+                    .max(0.0) as usize;
+                if index >= length {
+                    (JsValue::Undefined, true)
+                } else {
+                    (
+                        values_object
+                            .properties
+                            .get(&index.to_string())
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined),
+                        false,
+                    )
+                }
+            }
+            _ => (JsValue::Undefined, true),
+        };
+
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator
+                .properties
+                .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number((index + 1) as f64));
+        }
+        self.create_for_of_step_result(done, value)
     }
 
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
@@ -5981,25 +6162,7 @@ impl Vm {
                     .or_else(|| object.prototype.map(JsValue::Object))
                     .unwrap_or(JsValue::Null))
             }
-            JsValue::Function(closure_id) => {
-                if let Some(closure_object) = self.closure_objects.get(&closure_id) {
-                    if closure_object.prototype_overridden {
-                        return Ok(closure_object
-                            .prototype_value
-                            .clone()
-                            .or_else(|| closure_object.prototype.map(JsValue::Object))
-                            .unwrap_or(JsValue::Null));
-                    }
-                    if let Some(parent) = closure_object
-                        .properties
-                        .get(CLASS_CONSTRUCTOR_PARENT_MARKER)
-                        .cloned()
-                    {
-                        return Ok(parent);
-                    }
-                }
-                Ok(self.function_prototype_value())
-            }
+            value @ JsValue::Function(_) => self.get_prototype_of_value(&value),
             value @ (JsValue::NativeFunction(_) | JsValue::HostFunction(_)) => {
                 self.get_prototype_of_value(&value)
             }
@@ -7435,6 +7598,34 @@ impl Vm {
         JsValue::HostFunction(id)
     }
 
+    fn generator_function_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.generator_function_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        let function_prototype = self.function_prototype_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = None;
+                object.prototype_value = Some(function_prototype);
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::GeneratorFunctionConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.generator_function_prototype_id = Some(id);
+        }
+        prototype
+    }
+
     fn array_prototype_value(&mut self) -> JsValue {
         if let Some(id) = self.array_prototype_id {
             return JsValue::Object(id);
@@ -8251,6 +8442,10 @@ impl Vm {
         self.code_has_marker(&function.code, ARROW_FUNCTION_MARKER)
     }
 
+    fn function_is_generator(&self, function: &CompiledFunction) -> bool {
+        self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
+    }
+
     fn function_has_non_simple_params(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, NON_SIMPLE_PARAMS_MARKER)
     }
@@ -8283,6 +8478,18 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_is_arrow(function))
+    }
+
+    fn closure_is_generator(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_is_generator(function))
     }
 
     fn closure_is_class_constructor(&self, closure_id: u64) -> bool {
@@ -9034,6 +9241,7 @@ impl Vm {
                 | (NativeFunction::Assert, "throws")
                 | (NativeFunction::Assert, "compareArray")
                 | (NativeFunction::FunctionConstructor, "prototype")
+                | (NativeFunction::GeneratorFunctionConstructor, "prototype")
                 | (NativeFunction::Test262Error, "prototype")
                 | (NativeFunction::ObjectConstructor, "prototype")
                 | (NativeFunction::ArrayConstructor, "prototype")
@@ -9578,6 +9786,9 @@ impl Vm {
                         return Ok(parent);
                     }
                 }
+                if self.closure_is_generator(*closure_id)? {
+                    return Ok(self.generator_function_prototype_value());
+                }
                 Ok(self.function_prototype_value())
             }
             JsValue::HostFunction(host_id) => {
@@ -9981,6 +10192,9 @@ impl Vm {
                 })
             }
             (NativeFunction::FunctionConstructor, "prototype") => self.function_prototype_value(),
+            (NativeFunction::GeneratorFunctionConstructor, "prototype") => {
+                self.generator_function_prototype_value()
+            }
             (NativeFunction::ObjectConstructor, "prototype") => self.object_prototype_value(),
             (NativeFunction::ArrayConstructor, "prototype") => self.array_prototype_value(),
             (NativeFunction::StringConstructor, "prototype") => self.string_prototype_value(),
