@@ -553,6 +553,11 @@ impl Compiler {
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
+                if let Some(name) = &completion_name {
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::StoreVariable(name.clone()));
+                    code.push(Opcode::Pop);
+                }
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     handler_depth: self.handler_depth,
@@ -609,6 +614,11 @@ impl Compiler {
                     None
                 };
                 let loop_start = code.len();
+                if let Some(name) = &completion_name {
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::StoreVariable(name.clone()));
+                    code.push(Opcode::Pop);
+                }
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     handler_depth: self.handler_depth,
@@ -704,6 +714,11 @@ impl Compiler {
                 } else {
                     None
                 };
+                if let Some(name) = &completion_name {
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::StoreVariable(name.clone()));
+                    code.push(Opcode::Pop);
+                }
 
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
@@ -1431,8 +1446,10 @@ impl Compiler {
         self.finally_contexts.truncate(remaining);
 
         for context in contexts_to_run.iter().rev() {
-            code.push(Opcode::PopExceptionHandler);
-            self.handler_depth = self.handler_depth.saturating_sub(1);
+            while self.handler_depth >= context.handler_depth {
+                code.push(Opcode::PopExceptionHandler);
+                self.handler_depth = self.handler_depth.saturating_sub(1);
+            }
             match &context.action {
                 FinallyAction::Statements(statements) => {
                     self.compile_scoped_statement_list(statements, code);
@@ -1447,7 +1464,24 @@ impl Compiler {
     fn compile_scoped_statement_list(&mut self, statements: &[Stmt], code: &mut Vec<Opcode>) {
         code.push(Opcode::EnterScope);
         self.scope_depth += 1;
+        let loop_completion_restore = self.loop_completion_targets.last().cloned().map(|name| {
+            let saved_name = self.next_loop_completion_temp_name();
+            code.push(Opcode::LoadIdentifier(name.clone()));
+            code.push(Opcode::DefineVariable {
+                name: saved_name.clone(),
+                mutable: true,
+            });
+            code.push(Opcode::LoadUndefined);
+            code.push(Opcode::StoreVariable(name.clone()));
+            code.push(Opcode::Pop);
+            (name, saved_name)
+        });
         self.compile_statement_list(statements, code, false);
+        if let Some((name, saved_name)) = loop_completion_restore {
+            code.push(Opcode::LoadIdentifier(saved_name));
+            code.push(Opcode::StoreVariable(name));
+            code.push(Opcode::Pop);
+        }
         code.push(Opcode::ExitScope);
         self.scope_depth = self.scope_depth.saturating_sub(1);
     }
@@ -2915,11 +2949,14 @@ mod tests {
                     name: "$__loop_completion_0".to_string(),
                     mutable: true,
                 },
+                Opcode::LoadUndefined,
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::Pop,
                 Opcode::LoadNumber(1.0),
                 Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::LoadNumber(0.0),
-                Opcode::JumpIfFalse(8),
+                Opcode::JumpIfFalse(11),
                 Opcode::Jump(2),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
@@ -3000,7 +3037,10 @@ mod tests {
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(19),
+                Opcode::JumpIfFalse(22),
+                Opcode::LoadUndefined,
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::Pop,
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
@@ -3042,7 +3082,10 @@ mod tests {
                     mutable: true,
                 },
                 Opcode::LoadNumber(1.0),
-                Opcode::JumpIfFalse(14),
+                Opcode::JumpIfFalse(17),
+                Opcode::LoadUndefined,
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::Pop,
                 Opcode::EnterScope,
                 Opcode::EnterScope,
                 Opcode::ExitScope,
@@ -3050,7 +3093,7 @@ mod tests {
                 Opcode::Jump(2),
                 Opcode::ExitScope,
                 Opcode::ExitScope,
-                Opcode::Jump(14),
+                Opcode::Jump(17),
                 Opcode::ExitScope,
                 Opcode::Jump(2),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),

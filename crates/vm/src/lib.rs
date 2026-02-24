@@ -162,6 +162,7 @@ enum HostFunction {
     ArrayReduce(ObjectId),
     ArrayJoin(ObjectId),
     ArrayJoinThis,
+    ArrayConcatThis,
     ArrayPopThis,
     ArrayKeysThis,
     ArrayEntriesThis,
@@ -176,6 +177,7 @@ enum HostFunction {
     },
     ObjectToString,
     ObjectValueOf,
+    ErrorToStringThis,
     AssertSameValue,
     AssertNotSameValue,
     AssertThrows,
@@ -804,6 +806,8 @@ impl Vm {
             | HostFunction::SetAddThis
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
+            | HostFunction::ArrayConcatThis
+            | HostFunction::ErrorToStringThis
             | HostFunction::DateGetFullYearThis
             | HostFunction::DateGetMonthThis
             | HostFunction::DateGetDateThis
@@ -3647,6 +3651,49 @@ impl Vm {
                 };
                 Ok(value)
             }
+            HostFunction::ArrayConcatThis => {
+                let receiver_id = match this_arg {
+                    Some(JsValue::Object(id)) => id,
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.concat receiver must be object",
+                        ));
+                    }
+                };
+                let mut concatenated = Vec::new();
+                for candidate in std::iter::once(JsValue::Object(receiver_id)).chain(args) {
+                    if let JsValue::Object(object_id) = candidate.clone() {
+                        let maybe_elements = self.objects.get(&object_id).and_then(|object| {
+                            if !object.properties.contains_key("length") {
+                                return None;
+                            }
+                            let length = object
+                                .properties
+                                .get("length")
+                                .map(|value| self.to_number(value))
+                                .unwrap_or(0.0)
+                                .max(0.0) as usize;
+                            Some(
+                                (0..length)
+                                    .map(|index| {
+                                        object
+                                            .properties
+                                            .get(&index.to_string())
+                                            .cloned()
+                                            .unwrap_or(JsValue::Undefined)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        });
+                        if let Some(elements) = maybe_elements {
+                            concatenated.extend(elements);
+                            continue;
+                        }
+                    }
+                    concatenated.push(candidate);
+                }
+                self.create_array_from_values(concatenated)
+            }
             HostFunction::ArrayKeysThis => self.create_array_iterator_from_this(this_arg, "keys"),
             HostFunction::ArrayEntriesThis => {
                 self.create_array_iterator_from_this(this_arg, "entries")
@@ -3696,6 +3743,34 @@ impl Vm {
                 Ok(JsValue::String(tag.to_string()))
             }
             HostFunction::ObjectValueOf => Ok(this_arg.unwrap_or(JsValue::Undefined)),
+            HostFunction::ErrorToStringThis => {
+                let receiver = this_arg.unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&receiver) {
+                    return Err(VmError::TypeError(
+                        "Error.prototype.toString called on non-object",
+                    ));
+                }
+                let name_value = self.get_property_from_receiver(receiver.clone(), "name", realm)?;
+                let message_value =
+                    self.get_property_from_receiver(receiver.clone(), "message", realm)?;
+                let name = if matches!(name_value, JsValue::Undefined) {
+                    "Error".to_string()
+                } else {
+                    self.coerce_to_string(&name_value)
+                };
+                let message = if matches!(message_value, JsValue::Undefined) {
+                    String::new()
+                } else {
+                    self.coerce_to_string(&message_value)
+                };
+                if name.is_empty() {
+                    return Ok(JsValue::String(message));
+                }
+                if message.is_empty() {
+                    return Ok(JsValue::String(name));
+                }
+                Ok(JsValue::String(format!("{name}: {message}")))
+            }
             HostFunction::DateToString(object_id) => {
                 let timestamp = self
                     .objects
@@ -4188,6 +4263,14 @@ impl Vm {
                 _ => None,
             },
             NativeFunction::TypeErrorConstructor => match self.type_error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::ReferenceErrorConstructor
+            | NativeFunction::SyntaxErrorConstructor
+            | NativeFunction::EvalErrorConstructor
+            | NativeFunction::RangeErrorConstructor
+            | NativeFunction::URIErrorConstructor => match self.error_prototype_value() {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
@@ -7033,6 +7116,14 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
         }
+        if property == "concat"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
+        }
         if property == "forEach"
             && self
                 .objects
@@ -7858,6 +7949,7 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             let join = self.create_host_function_value(HostFunction::ArrayJoin(id));
             let to_string = self.create_host_function_value(HostFunction::ArrayJoinThis);
+            let concat = self.create_host_function_value(HostFunction::ArrayConcatThis);
             let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
             let sort = self.create_host_function_value(HostFunction::ArraySort(id));
             let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
@@ -7897,6 +7989,15 @@ impl Vm {
                 object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("concat".to_string(), concat);
+                object.property_attributes.insert(
+                    "concat".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -8098,13 +8199,47 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
+            let to_string = self.create_host_function_value(HostFunction::ErrorToStringThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::ErrorConstructor),
                 );
+                object
+                    .properties
+                    .insert("name".to_string(), JsValue::String("Error".to_string()));
+                object
+                    .properties
+                    .insert("message".to_string(), JsValue::String(String::new()));
+                object
+                    .properties
+                    .insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.property_attributes.insert(
+                    "name".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.property_attributes.insert(
+                    "message".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.property_attributes.insert(
+                    "toString".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -8982,6 +9117,14 @@ impl Vm {
                 .is_some_and(|object| object.properties.contains_key("length"))
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
+        }
+        if property == "concat"
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.properties.contains_key("length"))
+        {
+            return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
         }
         if property == "forEach"
             && self
