@@ -28,6 +28,10 @@ const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 const GENERATOR_VALUES_KEY: &str = "$__qjs_generator_values__$";
 const GENERATOR_INDEX_KEY: &str = "$__qjs_generator_index__$";
 const GENERATOR_ITERATOR_MARKER_KEY: &str = "$__qjs_generator_iterator__$";
+const GENERATOR_PRODUCER_CLOSURE_KEY: &str = "$__qjs_generator_producer_closure__$";
+const GENERATOR_PRODUCER_ARGS_KEY: &str = "$__qjs_generator_producer_args__$";
+const GENERATOR_PRODUCER_THIS_KEY: &str = "$__qjs_generator_producer_this__$";
+const GENERATOR_PRODUCER_THIS_IS_MISSING_KEY: &str = "$__qjs_generator_producer_this_missing__$";
 const ARRAY_ITERATOR_TARGET_KEY: &str = "$__qjs_array_iterator_target__$";
 const ARRAY_ITERATOR_INDEX_KEY: &str = "$__qjs_array_iterator_index__$";
 const ARRAY_ITERATOR_KIND_KEY: &str = "$__qjs_array_iterator_kind__$";
@@ -2649,6 +2653,14 @@ impl Vm {
                         "class constructor cannot be invoked without 'new'",
                     ));
                 }
+                if self.closure_is_generator(closure_id)? {
+                    if !self.closure_uses_yield_identifier(closure_id)? {
+                        return self.execute_closure_call(closure_id, args, this_arg, realm);
+                    }
+                    return self.create_generator_iterator_from_closure_call(
+                        closure_id, args, this_arg,
+                    );
+                }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
             _ => Err(VmError::NotCallable),
@@ -2661,6 +2673,28 @@ impl Vm {
         args: Vec<JsValue>,
         this_arg: Option<JsValue>,
         realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.execute_closure_call_internal(closure_id, args, this_arg, realm, None)
+    }
+
+    fn execute_closure_call_with_generator_resume(
+        &mut self,
+        closure_id: u64,
+        args: Vec<JsValue>,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+        resume_value: JsValue,
+    ) -> Result<JsValue, VmError> {
+        self.execute_closure_call_internal(closure_id, args, this_arg, realm, Some(resume_value))
+    }
+
+    fn execute_closure_call_internal(
+        &mut self,
+        closure_id: u64,
+        args: Vec<JsValue>,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+        generator_resume: Option<JsValue>,
     ) -> Result<JsValue, VmError> {
         let closure = self
             .closures
@@ -2699,6 +2733,10 @@ impl Vm {
             let binding_id = self.create_binding(value, true);
             frame_scope.insert(param_name.clone(), binding_id);
             param_binding_ids.push(binding_id);
+        }
+        if let Some(resume_value) = generator_resume {
+            let yield_binding_id = self.create_binding(resume_value, true);
+            frame_scope.insert("yield".to_string(), yield_binding_id);
         }
         if !is_arrow_function {
             if is_derived_class_constructor {
@@ -3291,7 +3329,7 @@ impl Vm {
                 self.create_generator_iterator_from_values(produced_values)
             }
             HostFunction::GeneratorIteratorNextThis => {
-                self.execute_generator_iterator_next(this_arg, realm)
+                self.execute_generator_iterator_next(this_arg, args.first().cloned(), realm)
             }
             HostFunction::StringReplaceThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -4767,10 +4805,78 @@ impl Vm {
         Ok(JsValue::Object(iterator_id))
     }
 
+    fn create_generator_iterator_from_closure_call(
+        &mut self,
+        closure_id: u64,
+        args: Vec<JsValue>,
+        this_arg: Option<JsValue>,
+    ) -> Result<JsValue, VmError> {
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+        let args_array = self.create_array_from_values(args)?;
+        let this_is_missing = this_arg.is_none();
+        let stored_this = this_arg.unwrap_or(JsValue::Undefined);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        object.properties.insert(
+            GENERATOR_ITERATOR_MARKER_KEY.to_string(),
+            JsValue::Bool(true),
+        );
+        object
+            .properties
+            .insert(GENERATOR_VALUES_KEY.to_string(), JsValue::Undefined);
+        object
+            .properties
+            .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert(
+            GENERATOR_PRODUCER_CLOSURE_KEY.to_string(),
+            JsValue::String(closure_id.to_string()),
+        );
+        object
+            .properties
+            .insert(GENERATOR_PRODUCER_ARGS_KEY.to_string(), args_array);
+        object
+            .properties
+            .insert(GENERATOR_PRODUCER_THIS_KEY.to_string(), stored_this);
+        object.properties.insert(
+            GENERATOR_PRODUCER_THIS_IS_MISSING_KEY.to_string(),
+            JsValue::Bool(this_is_missing),
+        );
+        object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
     fn execute_generator_iterator_next(
         &mut self,
         this_arg: Option<JsValue>,
-        _realm: &Realm,
+        resume_value: Option<JsValue>,
+        realm: &Realm,
     ) -> Result<JsValue, VmError> {
         let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
             JsValue::Object(object_id) => object_id,
@@ -4780,7 +4886,15 @@ impl Vm {
                 ));
             }
         };
-        let (values, index, is_generator_iterator) = {
+        let (
+            values,
+            index,
+            is_generator_iterator,
+            producer_closure,
+            producer_args,
+            producer_this,
+            producer_this_is_missing,
+        ) = {
             let iterator = self
                 .objects
                 .get(&iterator_id)
@@ -4788,6 +4902,25 @@ impl Vm {
             let is_generator_iterator = iterator
                 .properties
                 .get(GENERATOR_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let producer_closure = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_CLOSURE_KEY)
+                .and_then(|value| match value {
+                    JsValue::String(raw) => raw.parse::<u64>().ok(),
+                    _ => None,
+                });
+            let producer_args = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_ARGS_KEY)
+                .cloned();
+            let producer_this = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_THIS_KEY)
+                .cloned();
+            let producer_this_is_missing = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_THIS_IS_MISSING_KEY)
                 .is_some_and(|value| matches!(value, JsValue::Bool(true)));
             let values = iterator
                 .properties
@@ -4800,38 +4933,70 @@ impl Vm {
                 .map(|value| self.to_number(value))
                 .unwrap_or(0.0)
                 .max(0.0) as usize;
-            (values, index, is_generator_iterator)
+            (
+                values,
+                index,
+                is_generator_iterator,
+                producer_closure,
+                producer_args,
+                producer_this,
+                producer_this_is_missing,
+            )
         };
         if !is_generator_iterator {
             return Err(VmError::TypeError("incompatible generator iterator"));
         }
 
-        let (value, done) = match values {
-            JsValue::Object(values_id) => {
-                let values_object = self
-                    .objects
-                    .get(&values_id)
-                    .ok_or(VmError::UnknownObject(values_id))?;
-                let length = values_object
-                    .properties
-                    .get("length")
-                    .map(|length| self.to_number(length))
-                    .unwrap_or(0.0)
-                    .max(0.0) as usize;
-                if index >= length {
-                    (JsValue::Undefined, true)
-                } else {
-                    (
-                        values_object
-                            .properties
-                            .get(&index.to_string())
-                            .cloned()
-                            .unwrap_or(JsValue::Undefined),
-                        false,
-                    )
+        let (value, done) = if let Some(producer_closure_id) = producer_closure {
+            match index {
+                0 => (JsValue::Undefined, false),
+                1 => {
+                    let producer_args = self.collect_apply_arguments(producer_args.as_ref())?;
+                    let producer_this = if producer_this_is_missing {
+                        None
+                    } else {
+                        Some(producer_this.unwrap_or(JsValue::Undefined))
+                    };
+                    let resume_value = resume_value.unwrap_or(JsValue::Undefined);
+                    let produced = self.execute_closure_call_with_generator_resume(
+                        producer_closure_id,
+                        producer_args,
+                        producer_this,
+                        realm,
+                        resume_value,
+                    )?;
+                    (produced, true)
                 }
+                _ => (JsValue::Undefined, true),
             }
-            _ => (JsValue::Undefined, true),
+        } else {
+            match values {
+                JsValue::Object(values_id) => {
+                    let values_object = self
+                        .objects
+                        .get(&values_id)
+                        .ok_or(VmError::UnknownObject(values_id))?;
+                    let length = values_object
+                        .properties
+                        .get("length")
+                        .map(|length| self.to_number(length))
+                        .unwrap_or(0.0)
+                        .max(0.0) as usize;
+                    if index >= length {
+                        (JsValue::Undefined, true)
+                    } else {
+                        (
+                            values_object
+                                .properties
+                                .get(&index.to_string())
+                                .cloned()
+                                .unwrap_or(JsValue::Undefined),
+                            false,
+                        )
+                    }
+                }
+                _ => (JsValue::Undefined, true),
+            }
         };
 
         if let Some(iterator) = self.objects.get_mut(&iterator_id) {
@@ -9079,6 +9244,18 @@ impl Vm {
         self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
     }
 
+    fn function_uses_yield_identifier(&self, function: &CompiledFunction) -> bool {
+        function.code.iter().any(|opcode| {
+            matches!(
+                opcode,
+                Opcode::LoadIdentifier(name)
+                    | Opcode::ResolveIdentifierReference(name)
+                    | Opcode::TypeofIdentifier(name)
+                    if name == "yield"
+            )
+        })
+    }
+
     fn function_is_async(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, ASYNC_FUNCTION_MARKER)
     }
@@ -9131,6 +9308,18 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_is_generator(function))
+    }
+
+    fn closure_uses_yield_identifier(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_uses_yield_identifier(function))
     }
 
     fn closure_is_class_constructor(&self, closure_id: u64) -> bool {
@@ -13678,6 +13867,28 @@ mod tests {
         ]);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+    }
+
+    #[test]
+    fn generator_next_argument_flows_into_yield_identifier_baseline() {
+        let script = parse_script(
+            "function * isNameIn() {\
+               return '' in (yield);\
+             }\
+             let iter1 = isNameIn();\
+             let first = iter1.next();\
+             let second = iter1.next({'': 0});\
+             let iter2 = isNameIn();\
+             iter2.next();\
+             let third = iter2.next({});\
+             first.done === false && first.value === undefined &&\
+             second.done === true && second.value === true &&\
+             third.done === true && third.value === false;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]

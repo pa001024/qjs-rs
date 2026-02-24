@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4977`、`failed=23`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v49.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4978`、`failed=22`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v50.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -151,6 +151,7 @@
   - 子集回归（latest+35）：parser 对 array assignment destructuring 的 lowering 从 `try/finally` 调整为 `try/catch + explicit rethrow`，在 catch 路径调用 `Object.__forOfClose` 并吞掉 close 自身异常，避免原始 abrupt completion 被吞掉；`language/expressions/assignment/destructuring` 收敛至 `5/0`，`language` 基线提升至 `4974/26`（快照：`target/test262-language-baseline-5000-20260224-v47.json`）。
   - 子集回归（latest+36）：parser 修复对象参数模式绑定链路：`CoverParenthesizedExpressionAndArrowParameterList` 下的 `{x = 1}` 现在会生成 `x` 绑定并按 `undefined` 分支应用默认值，清理 `arrowparameters-cover-initialize-2.js`；`language/expressions/arrow-function` 收敛至 `75/0`，`language` 基线提升至 `4975/25`（快照：`target/test262-language-baseline-5000-20260224-v48.json`）。
   - 子集回归（latest+37）：lexer 调整 regexp 启发式分流：移除 `Identifier("of")` 后“允许 regexp literal 起始”的分支，修复 `instance/of/g` 类表达式被误判为 regexp 的问题；`language/expressions/division` 收敛至 `38/0`，`language` 基线提升至 `4977/23`（快照：`target/test262-language-baseline-5000-20260224-v49.json`）。
+  - 子集回归（latest+38）：VM 为 `function*` 增加最小惰性迭代器调用路径，并在 `next(value)` 恢复点注入 `yield` 绑定（仅对包含 `yield` 标识符读取的生成器闭包启用），对齐 QuickJS “resume value” 主路径且不破坏既有 generator eval 语义；`language/expressions/in` 收敛至 `16/0`，`language` 基线提升至 `4978/22`（快照：`target/test262-language-baseline-5000-20260224-v50.json`）。
 
 ## 3. 分阶段状态
 
@@ -170,7 +171,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 当前主失败簇已收敛为 `expressions/tagged-template/*`、`literals/regexp/*`、`statementList/*regexp*` 与少量语义边角（`expressions/in/rhs-yield-present.js`、`source-text/6.1.js`、`statementList/eval-block-with-statment-block.js`）。
+4. 当前主失败簇已收敛为 `expressions/tagged-template/*`、`literals/regexp/*`、`statementList/*regexp*` 与少量语义边角（`source-text/6.1.js`、`statementList/eval-block-with-statment-block.js`）。
 
 ## 5. 下一步执行
 

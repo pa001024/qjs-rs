@@ -85,6 +85,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+64)`: discovered=23882, executed=5000, skipped=18579, passed=4974, failed=26
 - `language max-cases=5000 (latest+65)`: discovered=23882, executed=5000, skipped=18579, passed=4975, failed=25
 - `language max-cases=5000 (latest+66)`: discovered=23882, executed=5000, skipped=18579, passed=4977, failed=23
+- `language max-cases=5000 (latest+67)`: discovered=23882, executed=5000, skipped=18579, passed=4978, failed=22
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -97,7 +98,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/rest-parameters (latest)`: discovered=11, executed=8, skipped=3, passed=8, failed=0
 - `language/expressions/arrow-function (latest)`: discovered=343, executed=75, skipped=268, passed=71, failed=4
 - `language/expressions/property-accessors (latest)`: discovered=21, executed=21, skipped=0, passed=21, failed=0
-- `language/expressions/in (latest)`: discovered=36, executed=16, skipped=20, passed=15, failed=1
+- `language/expressions/in (latest)`: discovered=36, executed=16, skipped=20, passed=16, failed=0
 - `language/expressions/typeof (latest)`: discovered=16, executed=13, skipped=3, passed=13, failed=0
 - `language/expressions/conditional (latest)`: discovered=22, executed=18, skipped=4, passed=18, failed=0
 - `language/expressions/instanceof (latest)`: discovered=43, executed=39, skipped=4, passed=39, failed=0
@@ -292,4 +293,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 对 assignment destructuring 的 array lowering 调整为 `try/catch + explicit rethrow`（并在 catch 路径显式 `IteratorClose` 且吞掉 close 自身异常），避免在当前 bytecode `try/finally` 形态下吞掉原始异常。该轮后 `language/expressions/assignment/destructuring` 收敛至 `5/0`，整体 `language` 基线提升至 `4974/26`（快照：`target/test262-language-baseline-5000-20260224-v47.json`）。
 - parser 修复对象参数模式绑定：`{x = 1}` 现会在参数初始化阶段正确生成 `x` 绑定并应用默认值；`language/expressions/arrow-function` 子集提升至 `75/0`，整体 `language` 基线提升至 `4975/25`（快照：`target/test262-language-baseline-5000-20260224-v48.json`）。
 - lexer 调整 regexp 词法启发式：移除 `Identifier("of")` 后的 regexp 起始特判，避免 `instance/of/g` 被误切成 regexp literal，`language/expressions/division` 子集提升至 `38/0`，整体 `language` 基线提升至 `4977/23`（快照：`target/test262-language-baseline-5000-20260224-v49.json`）。
-- 当前失败主簇集中在 `expressions/tagged-template/*`、`literals/regexp/*`、`statementList/*regexp*`，以及少量语义边角（`expressions/in/rhs-yield-present.js`、`source-text/6.1.js`、`statementList/eval-block-with-statment-block.js`）。
+- VM 为 `function*` 增加最小惰性迭代器路径，并将 `next(value)` 恢复值注入为 `yield` 绑定（仅对包含 `yield` 标识符读取的生成器闭包启用），对齐 QuickJS `yield` resume 主路径且避免 generator eval 语义回归；`language/expressions/in` 子集收敛至 `16/0`，整体 `language` 基线提升至 `4978/22`（快照：`target/test262-language-baseline-5000-20260224-v50.json`）。
+- 当前失败主簇集中在 `expressions/tagged-template/*`、`literals/regexp/*`、`statementList/*regexp*`，以及少量语义边角（`source-text/6.1.js`、`statementList/eval-block-with-statment-block.js`）。
