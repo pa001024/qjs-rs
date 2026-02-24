@@ -20,6 +20,7 @@ const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
+const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
@@ -46,6 +47,7 @@ struct Binding {
     value: JsValue,
     mutable: bool,
     deletable: bool,
+    sloppy_readonly_write_ignored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -447,7 +449,9 @@ impl Vm {
                         configurable: true,
                     },
                 );
-                object_prototype.properties.insert("valueOf".to_string(), value_of);
+                object_prototype
+                    .properties
+                    .insert("valueOf".to_string(), value_of);
                 object_prototype.property_attributes.insert(
                     "valueOf".to_string(),
                     PropertyAttributes {
@@ -1033,6 +1037,7 @@ impl Vm {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     if let Some(binding_id) = self.resolve_binding_id(name) {
+                        let mut wrote_binding = false;
                         {
                             let binding = self
                                 .bindings
@@ -1042,11 +1047,17 @@ impl Vm {
                                 return Err(VmError::UnknownIdentifier(name.clone()));
                             }
                             if !binding.mutable {
-                                return Err(VmError::ImmutableBinding(name.clone()));
+                                if !(binding.sloppy_readonly_write_ignored && !strict) {
+                                    return Err(VmError::ImmutableBinding(name.clone()));
+                                }
+                            } else {
+                                binding.value = value.clone();
+                                wrote_binding = true;
                             }
-                            binding.value = value.clone();
                         }
-                        self.sync_global_property_from_binding(name, binding_id)?;
+                        if wrote_binding {
+                            self.sync_global_property_from_binding(name, binding_id)?;
+                        }
                     } else {
                         if strict {
                             return Err(VmError::UnknownIdentifier(name.clone()));
@@ -2386,7 +2397,11 @@ impl Vm {
 
         let pending_this = self
             .resolve_binding_id(DERIVED_THIS_BINDING)
-            .and_then(|binding_id| self.bindings.get(&binding_id).map(|binding| binding.value.clone()))
+            .and_then(|binding_id| {
+                self.bindings
+                    .get(&binding_id)
+                    .map(|binding| binding.value.clone())
+            })
             .unwrap_or(JsValue::Undefined);
         let super_this = if already_initialized {
             this_value.clone()
@@ -2879,18 +2894,22 @@ impl Vm {
             JsValue::String(value) => Ok(value),
             JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
                 Some(JsValue::String(value)) => Ok(value),
-                _ => Err(VmError::TypeError("String.prototype method called on incompatible")),
+                _ => Err(VmError::TypeError(
+                    "String.prototype method called on incompatible",
+                )),
             },
-            _ => Err(VmError::TypeError("String.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "String.prototype method called on incompatible",
+            )),
         }
     }
 
     fn coerce_this_string(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
         let value = this_arg.unwrap_or(JsValue::Undefined);
         match value {
-            JsValue::Null | JsValue::Undefined => {
-                Err(VmError::TypeError("String method called on null or undefined"))
-            }
+            JsValue::Null | JsValue::Undefined => Err(VmError::TypeError(
+                "String method called on null or undefined",
+            )),
             JsValue::String(value) => Ok(value),
             JsValue::Object(object_id) => {
                 if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
@@ -2909,9 +2928,13 @@ impl Vm {
             JsValue::Number(value) => Ok(value),
             JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
                 Some(JsValue::Number(value)) => Ok(value),
-                _ => Err(VmError::TypeError("Number.prototype method called on incompatible")),
+                _ => Err(VmError::TypeError(
+                    "Number.prototype method called on incompatible",
+                )),
             },
-            _ => Err(VmError::TypeError("Number.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "Number.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -2921,9 +2944,13 @@ impl Vm {
             JsValue::Bool(value) => Ok(value),
             JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
                 Some(JsValue::Bool(value)) => Ok(value),
-                _ => Err(VmError::TypeError("Boolean.prototype method called on incompatible")),
+                _ => Err(VmError::TypeError(
+                    "Boolean.prototype method called on incompatible",
+                )),
             },
-            _ => Err(VmError::TypeError("Boolean.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "Boolean.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -2932,15 +2959,22 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        Ok(matches!(object.properties.get(marker), Some(JsValue::Bool(true))))
+        Ok(matches!(
+            object.properties.get(marker),
+            Some(JsValue::Bool(true))
+        ))
     }
 
     fn strict_this_array_buffer(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
         match this_arg.unwrap_or(JsValue::Undefined) {
-            JsValue::Object(object_id) if self.has_object_marker(object_id, "__arrayBufferTag")? => {
+            JsValue::Object(object_id)
+                if self.has_object_marker(object_id, "__arrayBufferTag")? =>
+            {
                 Ok(object_id)
             }
-            _ => Err(VmError::TypeError("ArrayBuffer.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "ArrayBuffer.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -2949,7 +2983,9 @@ impl Vm {
             JsValue::Object(object_id) if self.has_object_marker(object_id, "__mapTag")? => {
                 Ok(object_id)
             }
-            _ => Err(VmError::TypeError("Map.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "Map.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -2958,7 +2994,9 @@ impl Vm {
             JsValue::Object(object_id) if self.has_object_marker(object_id, "__setTag")? => {
                 Ok(object_id)
             }
-            _ => Err(VmError::TypeError("Set.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "Set.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -2979,7 +3017,9 @@ impl Vm {
     fn strict_this_date_object(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
         match this_arg.unwrap_or(JsValue::Undefined) {
             JsValue::Object(object_id) if self.is_date_object(object_id) => Ok(object_id),
-            _ => Err(VmError::TypeError("Date.prototype method called on incompatible")),
+            _ => Err(VmError::TypeError(
+                "Date.prototype method called on incompatible",
+            )),
         }
     }
 
@@ -3103,7 +3143,11 @@ impl Vm {
         JsValue::Number(-1.0)
     }
 
-    fn execute_string_split(&mut self, receiver: String, args: &[JsValue]) -> Result<JsValue, VmError> {
+    fn execute_string_split(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+    ) -> Result<JsValue, VmError> {
         let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
         let limit = args
             .get(1)
@@ -3275,8 +3319,8 @@ impl Vm {
                 if search_chars.len() > receiver_chars.len() {
                     return Ok(JsValue::Number(-1.0));
                 }
-                let start = start_index
-                    .min(receiver_chars.len().saturating_sub(search_chars.len()));
+                let start =
+                    start_index.min(receiver_chars.len().saturating_sub(search_chars.len()));
                 for index in (0..=start).rev() {
                     if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
                         return Ok(JsValue::Number(index as f64));
@@ -3300,7 +3344,11 @@ impl Vm {
                     .unwrap_or(len as f64)
                     .max(0.0)
                     .min(len as f64) as usize;
-                let (from, to) = if start <= end { (start, end) } else { (end, start) };
+                let (from, to) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
                 Ok(JsValue::String(chars[from..to].iter().collect()))
             }
             HostFunction::NumberToString => {
@@ -3313,7 +3361,10 @@ impl Vm {
             }
             HostFunction::NumberToFixed => {
                 let number = self.strict_this_number(this_arg)?;
-                let digits = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+                let digits = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
                 let digits = if digits.is_finite() && digits >= 0.0 {
                     (digits as usize).min(100)
                 } else {
@@ -3385,8 +3436,11 @@ impl Vm {
                     .unwrap_or(byte_length)
                     .min(byte_length);
                 let sliced_length = end.saturating_sub(start) as f64;
-                let constructor =
-                    self.get_property_from_receiver(JsValue::Object(receiver_id), "constructor", realm)?;
+                let constructor = self.get_property_from_receiver(
+                    JsValue::Object(receiver_id),
+                    "constructor",
+                    realm,
+                )?;
                 self.execute_construct_value(
                     constructor,
                     vec![JsValue::Number(sliced_length)],
@@ -3438,7 +3492,9 @@ impl Vm {
             }
             HostFunction::BooleanToString => {
                 let value = self.strict_this_boolean(this_arg)?;
-                Ok(JsValue::String(if value { "true" } else { "false" }.to_string()))
+                Ok(JsValue::String(
+                    if value { "true" } else { "false" }.to_string(),
+                ))
             }
             HostFunction::BooleanValueOf => {
                 let value = self.strict_this_boolean(this_arg)?;
@@ -3701,7 +3757,9 @@ impl Vm {
             HostFunction::ArrayValuesThis => {
                 self.create_array_iterator_from_this(this_arg, "values")
             }
-            HostFunction::ArrayIteratorNextThis => self.execute_array_iterator_next(this_arg, realm),
+            HostFunction::ArrayIteratorNextThis => {
+                self.execute_array_iterator_next(this_arg, realm)
+            }
             HostFunction::ArrayReverse(object_id) => self.execute_array_reverse(object_id),
             HostFunction::ArraySort(object_id) => self.execute_array_sort(object_id),
             HostFunction::RegExpTest(object_id) => {
@@ -3750,7 +3808,8 @@ impl Vm {
                         "Error.prototype.toString called on non-object",
                     ));
                 }
-                let name_value = self.get_property_from_receiver(receiver.clone(), "name", realm)?;
+                let name_value =
+                    self.get_property_from_receiver(receiver.clone(), "name", realm)?;
                 let message_value =
                     self.get_property_from_receiver(receiver.clone(), "message", realm)?;
                 let name = if matches!(name_value, JsValue::Undefined) {
@@ -4000,18 +4059,14 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Bool(false));
                 Ok(JsValue::Bool(self.is_truthy(&value)))
             }
-            NativeFunction::ArrayBufferConstructor => {
-                self.execute_array_buffer_constructor(&args)
-            }
+            NativeFunction::ArrayBufferConstructor => self.execute_array_buffer_constructor(&args),
             NativeFunction::DataViewConstructor => self.execute_data_view_constructor(&args),
             NativeFunction::MapConstructor => self.execute_map_constructor(&args, realm),
             NativeFunction::SetConstructor => self.execute_set_constructor(&args, realm),
             NativeFunction::PromiseConstructor => {
                 self.execute_promise_constructor(&args, realm, caller_strict)
             }
-            NativeFunction::Uint8ArrayConstructor => {
-                self.execute_uint8_array_constructor(&args)
-            }
+            NativeFunction::Uint8ArrayConstructor => self.execute_uint8_array_constructor(&args),
             NativeFunction::DateConstructor => {
                 let timestamp = args
                     .first()
@@ -4600,7 +4655,10 @@ impl Vm {
         Ok(expressions)
     }
 
-    fn create_generator_iterator_from_values(&mut self, values: JsValue) -> Result<JsValue, VmError> {
+    fn create_generator_iterator_from_values(
+        &mut self,
+        values: JsValue,
+    ) -> Result<JsValue, VmError> {
         let iterator = self.create_object_value();
         let iterator_id = match iterator {
             JsValue::Object(id) => id,
@@ -4612,9 +4670,10 @@ impl Vm {
             .objects
             .get_mut(&iterator_id)
             .ok_or(VmError::UnknownObject(iterator_id))?;
-        object
-            .properties
-            .insert(GENERATOR_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object.properties.insert(
+            GENERATOR_ITERATOR_MARKER_KEY.to_string(),
+            JsValue::Bool(true),
+        );
         object
             .properties
             .insert(GENERATOR_VALUES_KEY.to_string(), values);
@@ -4651,7 +4710,11 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
             JsValue::Object(object_id) => object_id,
-            _ => return Err(VmError::TypeError("generator iterator next receiver must be object")),
+            _ => {
+                return Err(VmError::TypeError(
+                    "generator iterator next receiver must be object",
+                ));
+            }
         };
         let (values, index, is_generator_iterator) = {
             let iterator = self
@@ -4708,9 +4771,10 @@ impl Vm {
         };
 
         if let Some(iterator) = self.objects.get_mut(&iterator_id) {
-            iterator
-                .properties
-                .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number((index + 1) as f64));
+            iterator.properties.insert(
+                GENERATOR_INDEX_KEY.to_string(),
+                JsValue::Number((index + 1) as f64),
+            );
         }
         self.create_for_of_step_result(done, value)
     }
@@ -4779,7 +4843,11 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
             JsValue::Object(object_id) => object_id,
-            _ => return Err(VmError::TypeError("Array iterator next receiver must be object")),
+            _ => {
+                return Err(VmError::TypeError(
+                    "Array iterator next receiver must be object",
+                ));
+            }
         };
         let (target_id, index, kind, is_array_iterator) = {
             let iterator = self
@@ -4935,10 +5003,14 @@ impl Vm {
     fn execute_data_view_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let buffer = args.first().cloned().unwrap_or(JsValue::Undefined);
         let JsValue::Object(buffer_id) = buffer.clone() else {
-            return Err(VmError::TypeError("DataView constructor requires ArrayBuffer"));
+            return Err(VmError::TypeError(
+                "DataView constructor requires ArrayBuffer",
+            ));
         };
         if !self.has_object_marker(buffer_id, "__arrayBufferTag")? {
-            return Err(VmError::TypeError("DataView constructor requires ArrayBuffer"));
+            return Err(VmError::TypeError(
+                "DataView constructor requires ArrayBuffer",
+            ));
         }
         if self.data_view_prototype_id.is_none() {
             let _ = self.data_view_prototype_value();
@@ -5152,9 +5224,8 @@ impl Vm {
     }
 
     fn execute_object_create(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let (prototype, prototype_value) = self.parse_prototype_value(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-        )?;
+        let (prototype, prototype_value) =
+            self.parse_prototype_value(args.first().cloned().unwrap_or(JsValue::Undefined))?;
 
         let object = self.create_object_value();
         let object_id = match object {
@@ -5173,9 +5244,8 @@ impl Vm {
     fn execute_object_set_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
 
-        let (prototype, prototype_value) = self.parse_prototype_value(
-            args.get(1).cloned().unwrap_or(JsValue::Undefined),
-        )?;
+        let (prototype, prototype_value) =
+            self.parse_prototype_value(args.get(1).cloned().unwrap_or(JsValue::Undefined))?;
 
         match target {
             JsValue::Object(target_id) => {
@@ -5280,7 +5350,9 @@ impl Vm {
                 .map(|duration| duration.as_millis() as f64)
                 .unwrap_or(0.0)
         } else {
-            args.first().map(|value| self.to_number(value)).unwrap_or(0.0)
+            args.first()
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
         };
         let local_components = if args.len() >= 2 {
             let year = self.to_number(&args[0]) as i32;
@@ -5380,14 +5452,12 @@ impl Vm {
                                     "getter must be callable or undefined",
                                 ));
                             }
-                            self.function_prototype_prototype_getter = if matches!(
-                                getter,
-                                JsValue::Undefined
-                            ) {
-                                None
-                            } else {
-                                Some(getter)
-                            };
+                            self.function_prototype_prototype_getter =
+                                if matches!(getter, JsValue::Undefined) {
+                                    None
+                                } else {
+                                    Some(getter)
+                                };
                         }
                     }
                     return Ok(JsValue::HostFunction(*host_id));
@@ -5686,10 +5756,9 @@ impl Vm {
                             .unwrap_or(0.0)
                             .max(0.0) as usize;
                         if index >= current_length {
-                            target_object.properties.insert(
-                                "length".to_string(),
-                                JsValue::Number((index + 1) as f64),
-                            );
+                            target_object
+                                .properties
+                                .insert("length".to_string(), JsValue::Number((index + 1) as f64));
                         }
                     }
                 }
@@ -5825,11 +5894,7 @@ impl Vm {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>();
         for (property_name, descriptor) in descriptor_entries {
-            let define_args = [
-                target.clone(),
-                JsValue::String(property_name),
-                descriptor,
-            ];
+            let define_args = [target.clone(), JsValue::String(property_name), descriptor];
             let _ = self.execute_object_define_property(&define_args, realm)?;
         }
         Ok(target)
@@ -5868,7 +5933,9 @@ impl Vm {
             JsValue::Object(object_id) => {
                 self.create_for_of_runtime_iterator_record(JsValue::Object(object_id), realm)
             }
-            JsValue::Null | JsValue::Undefined => Err(VmError::TypeError("for-of expects iterable")),
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("for-of expects iterable"))
+            }
             primitive => {
                 let boxed = self.box_primitive_receiver(primitive);
                 self.create_for_of_runtime_iterator_record(boxed, realm)
@@ -5884,7 +5951,11 @@ impl Vm {
         let record = args.first().cloned().unwrap_or(JsValue::Undefined);
         let record_id = match record {
             JsValue::Object(id) => id,
-            _ => return Err(VmError::TypeError("for-of step expects iterator record object")),
+            _ => {
+                return Err(VmError::TypeError(
+                    "for-of step expects iterator record object",
+                ));
+            }
         };
         let is_snapshot = self
             .objects
@@ -5918,9 +5989,10 @@ impl Vm {
                 .objects
                 .get_mut(&record_id)
                 .ok_or(VmError::UnknownObject(record_id))?;
-            object
-                .properties
-                .insert("__forOfIndex".to_string(), JsValue::Number((index + 1) as f64));
+            object.properties.insert(
+                "__forOfIndex".to_string(),
+                JsValue::Number((index + 1) as f64),
+            );
             return self.create_for_of_step_result(false, value);
         }
 
@@ -5929,11 +6001,14 @@ impl Vm {
                 .objects
                 .get(&record_id)
                 .ok_or(VmError::UnknownObject(record_id))?;
-            let iterator = object
-                .properties
-                .get("__forOfIterator")
-                .cloned()
-                .ok_or(VmError::TypeError("for-of iterator record missing iterator"))?;
+            let iterator =
+                object
+                    .properties
+                    .get("__forOfIterator")
+                    .cloned()
+                    .ok_or(VmError::TypeError(
+                        "for-of iterator record missing iterator",
+                    ))?;
             let next_method = object
                 .properties
                 .get("__forOfNext")
@@ -5941,9 +6016,17 @@ impl Vm {
                 .ok_or(VmError::TypeError("for-of iterator record missing next"))?;
             (iterator, next_method)
         };
-        let step_value = self.execute_callable(next_method, Some(iterator.clone()), Vec::new(), realm, false)?;
+        let step_value = self.execute_callable(
+            next_method,
+            Some(iterator.clone()),
+            Vec::new(),
+            realm,
+            false,
+        )?;
         if !Self::is_object_like_value(&step_value) {
-            return Err(VmError::TypeError("for-of iterator next must return object"));
+            return Err(VmError::TypeError(
+                "for-of iterator next must return object",
+            ));
         }
         let done = self
             .get_property_from_receiver(step_value.clone(), "done", realm)
@@ -5963,7 +6046,11 @@ impl Vm {
         let record = args.first().cloned().unwrap_or(JsValue::Undefined);
         let record_id = match record {
             JsValue::Object(id) => id,
-            _ => return Err(VmError::TypeError("for-of close expects iterator record object")),
+            _ => {
+                return Err(VmError::TypeError(
+                    "for-of close expects iterator record object",
+                ));
+            }
         };
         let is_snapshot = self
             .objects
@@ -5978,15 +6065,20 @@ impl Vm {
             .get(&record_id)
             .and_then(|object| object.properties.get("__forOfIterator"))
             .cloned()
-            .ok_or(VmError::TypeError("for-of iterator record missing iterator"))?;
+            .ok_or(VmError::TypeError(
+                "for-of iterator record missing iterator",
+            ))?;
         let return_method = self.get_property_from_receiver(iterator.clone(), "return", realm)?;
         if matches!(return_method, JsValue::Undefined | JsValue::Null) {
             return Ok(JsValue::Undefined);
         }
         if !Self::is_callable_value(&return_method) {
-            return Err(VmError::TypeError("for-of iterator return must be callable"));
+            return Err(VmError::TypeError(
+                "for-of iterator return must be callable",
+            ));
         }
-        let result = self.execute_callable(return_method, Some(iterator), Vec::new(), realm, false)?;
+        let result =
+            self.execute_callable(return_method, Some(iterator), Vec::new(), realm, false)?;
         if !matches!(result, JsValue::Undefined) && !Self::is_object_like_value(&result) {
             return Err(VmError::TypeError(
                 "for-of iterator return must return object",
@@ -6000,14 +6092,16 @@ impl Vm {
         target: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let iterator_method = self.get_property_from_receiver(target.clone(), "Symbol.iterator", realm)?;
+        let iterator_method =
+            self.get_property_from_receiver(target.clone(), "Symbol.iterator", realm)?;
         if matches!(iterator_method, JsValue::Undefined | JsValue::Null) {
             return Err(VmError::TypeError("for-of expects iterable"));
         }
         if !Self::is_callable_value(&iterator_method) {
             return Err(VmError::TypeError("for-of expects iterable"));
         }
-        let iterator = self.execute_callable(iterator_method, Some(target), Vec::new(), realm, false)?;
+        let iterator =
+            self.execute_callable(iterator_method, Some(target), Vec::new(), realm, false)?;
         if !Self::is_object_like_value(&iterator) {
             return Err(VmError::TypeError("for-of iterator must return object"));
         }
@@ -6073,7 +6167,9 @@ impl Vm {
             .objects
             .get_mut(&step_id)
             .ok_or(VmError::UnknownObject(step_id))?;
-        object.properties.insert("done".to_string(), JsValue::Bool(done));
+        object
+            .properties
+            .insert("done".to_string(), JsValue::Bool(done));
         object.properties.insert("value".to_string(), value);
         Ok(JsValue::Object(step_id))
     }
@@ -6687,6 +6783,16 @@ impl Vm {
         mutable: bool,
         deletable: bool,
     ) -> BindingId {
+        self.create_binding_with_behavior(value, mutable, deletable, false)
+    }
+
+    fn create_binding_with_behavior(
+        &mut self,
+        value: JsValue,
+        mutable: bool,
+        deletable: bool,
+        sloppy_readonly_write_ignored: bool,
+    ) -> BindingId {
         let id = self.next_binding_id;
         self.next_binding_id += 1;
         self.bindings.insert(
@@ -6695,6 +6801,7 @@ impl Vm {
                 value,
                 mutable,
                 deletable,
+                sloppy_readonly_write_ignored,
             },
         );
         id
@@ -6757,16 +6864,24 @@ impl Vm {
         functions: &[CompiledFunction],
         enclosing_strict: bool,
     ) -> Result<JsValue, VmError> {
-        if function_id >= functions.len() {
-            return Err(VmError::UnknownFunction(function_id));
-        }
-        let strict = functions
+        let function = functions
             .get(function_id)
-            .map(|function| enclosing_strict || self.function_is_strict(function))
-            .unwrap_or(enclosing_strict);
+            .ok_or(VmError::UnknownFunction(function_id))?;
+        let strict = enclosing_strict || self.function_is_strict(function);
         let closure_id = self.next_closure_id;
         self.next_closure_id += 1;
-        let captured_scopes = self.scopes.clone();
+        let mut captured_scopes = self.scopes.clone();
+        if self.function_is_named_function_expression(function) && function.name != "<anonymous>" {
+            let mut name_scope = BTreeMap::new();
+            let function_name_binding = self.create_binding_with_behavior(
+                JsValue::Function(closure_id),
+                false,
+                false,
+                true,
+            );
+            name_scope.insert(function.name.clone(), function_name_binding);
+            captured_scopes.push(Rc::new(RefCell::new(name_scope)));
+        }
         self.closures.insert(
             closure_id,
             Closure {
@@ -6899,11 +7014,15 @@ impl Vm {
                 if !self.host_functions.contains_key(host_id) {
                     return Err(VmError::UnknownHostFunction(*host_id));
                 }
-                if self.host_function_objects.get(host_id).is_some_and(|object| {
-                    object.properties.contains_key(property)
-                        || object.getters.contains_key(property)
-                        || object.setters.contains_key(property)
-                }) {
+                if self
+                    .host_function_objects
+                    .get(host_id)
+                    .is_some_and(|object| {
+                        object.properties.contains_key(property)
+                            || object.getters.contains_key(property)
+                            || object.setters.contains_key(property)
+                    })
+                {
                     return Ok(true);
                 }
                 Ok(Self::host_function_has_default_property(property))
@@ -7501,7 +7620,7 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match reference {
             IdentifierReference::Binding { name, binding_id } => {
-                {
+                let should_write = {
                     let binding = self
                         .bindings
                         .get(&binding_id)
@@ -7510,18 +7629,24 @@ impl Vm {
                         return Err(VmError::UnknownIdentifier(name));
                     }
                     if !binding.mutable {
-                        return Err(VmError::ImmutableBinding(name));
+                        if binding.sloppy_readonly_write_ignored && !strict {
+                            false
+                        } else {
+                            return Err(VmError::ImmutableBinding(name));
+                        }
+                    } else {
+                        true
                     }
-                }
+                };
                 self.maybe_set_inferred_function_name(&value, &name);
-                {
+                if should_write {
                     let binding = self
                         .bindings
                         .get_mut(&binding_id)
                         .ok_or(VmError::ScopeUnderflow)?;
                     binding.value = value.clone();
+                    self.sync_global_property_from_binding(&name, binding_id)?;
                 }
-                self.sync_global_property_from_binding(&name, binding_id)?;
                 Ok(value)
             }
             IdentifierReference::Property {
@@ -7908,7 +8033,8 @@ impl Vm {
         }
         let id = self.next_host_function_id;
         self.next_host_function_id += 1;
-        self.host_functions.insert(id, HostFunction::FunctionPrototype);
+        self.host_functions
+            .insert(id, HostFunction::FunctionPrototype);
         self.function_prototype_host_id = Some(id);
         JsValue::HostFunction(id)
     }
@@ -8051,7 +8177,8 @@ impl Vm {
             let last_index_of = self.create_host_function_value(HostFunction::StringLastIndexOf);
             let split = self.create_host_function_value(HostFunction::StringSplitThis);
             let substring = self.create_host_function_value(HostFunction::StringSubstring);
-            let to_lower_case = self.create_host_function_value(HostFunction::StringToLowerCaseThis);
+            let to_lower_case =
+                self.create_host_function_value(HostFunction::StringToLowerCaseThis);
             let to_upper_case = self.create_host_function_value(HostFunction::StringToUpperCase);
             let trim = self.create_host_function_value(HostFunction::StringTrim);
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
@@ -8118,8 +8245,7 @@ impl Vm {
             let to_string = self.create_host_function_value(HostFunction::NumberToString);
             let value_of = self.create_host_function_value(HostFunction::NumberValueOf);
             let to_fixed = self.create_host_function_value(HostFunction::NumberToFixed);
-            let to_exponential =
-                self.create_host_function_value(HostFunction::NumberToExponential);
+            let to_exponential = self.create_host_function_value(HostFunction::NumberToExponential);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -8211,9 +8337,7 @@ impl Vm {
                 object
                     .properties
                     .insert("message".to_string(), JsValue::String(String::new()));
-                object
-                    .properties
-                    .insert("toString".to_string(), to_string);
+                object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "constructor".to_string(),
                     PropertyAttributes {
@@ -8289,14 +8413,12 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
-            let get_full_year =
-                self.create_host_function_value(HostFunction::DateGetFullYearThis);
+            let get_full_year = self.create_host_function_value(HostFunction::DateGetFullYearThis);
             let get_month = self.create_host_function_value(HostFunction::DateGetMonthThis);
             let get_date = self.create_host_function_value(HostFunction::DateGetDateThis);
             let get_utc_full_year =
                 self.create_host_function_value(HostFunction::DateGetUTCFullYearThis);
-            let get_utc_month =
-                self.create_host_function_value(HostFunction::DateGetUTCMonthThis);
+            let get_utc_month = self.create_host_function_value(HostFunction::DateGetUTCMonthThis);
             let get_utc_date = self.create_host_function_value(HostFunction::DateGetUTCDateThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -8358,10 +8480,7 @@ impl Vm {
                         "getUTCDate" => get_utc_date.clone(),
                         _ => JsValue::NativeFunction(NativeFunction::DatePrototypeMethod),
                     };
-                    object.properties.insert(
-                        method.to_string(),
-                        value,
-                    );
+                    object.properties.insert(method.to_string(), value);
                     object.property_attributes.insert(
                         method.to_string(),
                         PropertyAttributes {
@@ -8803,6 +8922,10 @@ impl Vm {
 
     fn function_is_generator(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
+    }
+
+    fn function_is_named_function_expression(&self, function: &CompiledFunction) -> bool {
+        self.code_has_marker(&function.code, NAMED_FUNCTION_EXPR_MARKER)
     }
 
     fn function_has_non_simple_params(&self, function: &CompiledFunction) -> bool {
@@ -9527,12 +9650,10 @@ impl Vm {
             .functions
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
-        Ok(
-            closure.strict
-                || self.function_is_arrow(function)
-                || self.closure_is_class_constructor(closure_id)
-                || self.closure_marks_restricted_caller_arguments(closure_id),
-        )
+        Ok(closure.strict
+            || self.function_is_arrow(function)
+            || self.closure_is_class_constructor(closure_id)
+            || self.closure_marks_restricted_caller_arguments(closure_id))
     }
 
     fn is_restricted_function_property(property: &str) -> bool {
@@ -9570,11 +9691,15 @@ impl Vm {
                 if !self.host_functions.contains_key(host_id) {
                     return Err(VmError::UnknownHostFunction(*host_id));
                 }
-                if self.host_function_objects.get(host_id).is_some_and(|object| {
-                    object.properties.contains_key(property)
-                        || object.getters.contains_key(property)
-                        || object.setters.contains_key(property)
-                }) {
+                if self
+                    .host_function_objects
+                    .get(host_id)
+                    .is_some_and(|object| {
+                        object.properties.contains_key(property)
+                            || object.getters.contains_key(property)
+                            || object.setters.contains_key(property)
+                    })
+                {
                     return Ok(true);
                 }
                 Ok(Self::host_function_has_default_property(property))
@@ -9586,7 +9711,14 @@ impl Vm {
     fn host_function_has_default_property(property: &str) -> bool {
         matches!(
             property,
-            "length" | "call" | "apply" | "bind" | "toString" | "valueOf" | "hasOwnProperty" | "constructor"
+            "length"
+                | "call"
+                | "apply"
+                | "bind"
+                | "toString"
+                | "valueOf"
+                | "hasOwnProperty"
+                | "constructor"
         )
     }
 
@@ -9727,11 +9859,7 @@ impl Vm {
     fn to_valid_array_length_or_throw(&mut self, value: &JsValue) -> Result<usize, VmError> {
         let number = self.to_number(value);
         let integer = number.trunc();
-        if !number.is_finite()
-            || number < 0.0
-            || integer != number
-            || number > u32::MAX as f64
-        {
+        if !number.is_finite() || number < 0.0 || integer != number || number > u32::MAX as f64 {
             return Err(VmError::UncaughtException(self.create_error_exception(
                 NativeFunction::RangeErrorConstructor,
                 "RangeError",
@@ -9760,9 +9888,10 @@ impl Vm {
             {
                 return Ok(());
             }
-            object
-                .properties
-                .insert("length".to_string(), JsValue::Number(requested_length as f64));
+            object.properties.insert(
+                "length".to_string(),
+                JsValue::Number(requested_length as f64),
+            );
             object
                 .property_attributes
                 .entry("length".to_string())
@@ -9854,7 +9983,9 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         let key = index.to_string();
-        object.properties.insert(key.clone(), JsValue::Number(clamped));
+        object
+            .properties
+            .insert(key.clone(), JsValue::Number(clamped));
         object
             .property_attributes
             .entry(key)
@@ -10849,9 +10980,8 @@ impl Vm {
             if (0xD800..=0xDBFF).contains(&unit) && index + 1 < units.len() {
                 let next = units[index + 1];
                 if (0xDC00..=0xDFFF).contains(&next) {
-                    let code_point = 0x1_0000
-                        + (((unit as u32) - 0xD800) << 10)
-                        + ((next as u32) - 0xDC00);
+                    let code_point =
+                        0x1_0000 + (((unit as u32) - 0xD800) << 10) + ((next as u32) - 0xDC00);
                     if let Some(ch) = char::from_u32(code_point) {
                         values.push(JsValue::String(ch.to_string()));
                         index += 2;
@@ -12166,6 +12296,38 @@ mod tests {
     }
 
     #[test]
+    fn named_function_expression_assignment_is_ignored_in_sloppy_mode() {
+        let script =
+            parse_script("var f = function g() { g = 1; return typeof g === 'function'; }; f();")
+                .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn named_function_expression_assignment_throws_in_strict_mode() {
+        let script = parse_script(
+            "var f = function g() { 'use strict'; var threw = false; try { g = 1; } catch (e) { threw = true; } return threw && typeof g === 'function'; }; f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn named_function_expression_binding_does_not_mutate_outer_name() {
+        let script = parse_script(
+            "var g = 42; var f = function g() { g = 1; return g === f; }; var innerOk = f(); innerOk && g === 42;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn function_declaration_hoists_over_var_binding() {
         let script = parse_script(
             "function f() { var x; return typeof x; function x() { return 7; } } f();",
@@ -12621,9 +12783,10 @@ mod tests {
 
     #[test]
     fn string_subclass_inherits_trim() {
-        let script =
-            parse_script("class S extends String {} let s = new S(' test262 '); s.trim() === 'test262';")
-                .expect("script should parse");
+        let script = parse_script(
+            "class S extends String {} let s = new S(' test262 '); s.trim() === 'test262';",
+        )
+        .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(
@@ -13087,9 +13250,10 @@ mod tests {
 
     #[test]
     fn type_error_instances_are_instanceof_error_and_type_error() {
-        let script =
-            parse_script("let e = new TypeError('x'); (e instanceof Error) && (e instanceof TypeError);")
-                .expect("script should parse");
+        let script = parse_script(
+            "let e = new TypeError('x'); (e instanceof Error) && (e instanceof TypeError);",
+        )
+        .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(

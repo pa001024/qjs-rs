@@ -13,6 +13,7 @@ const PARAM_INIT_SCOPE_START_MARKER: &str = "$__qjs_param_init_scope_start__$";
 const PARAM_INIT_SCOPE_END_MARKER: &str = "$__qjs_param_init_scope_end__$";
 const REST_PARAM_MARKER_PREFIX: &str = "$__qjs_rest_param__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
+const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -914,7 +915,8 @@ impl Compiler {
                 } else {
                     None
                 };
-                let body_value = self.compile_stmt(body, code, keep_value && completion_name.is_none());
+                let body_value =
+                    self.compile_stmt(body, code, keep_value && completion_name.is_none());
                 if completion_name.is_some() {
                     self.loop_completion_targets
                         .pop()
@@ -1332,6 +1334,7 @@ impl Compiler {
                     || value == PARAM_INIT_SCOPE_END_MARKER
                     || value.starts_with(REST_PARAM_MARKER_PREFIX)
                     || value == CLASS_METHOD_NO_PROTOTYPE_MARKER
+                    || value == NAMED_FUNCTION_EXPR_MARKER
                     || value == "use strict"
             }
             Stmt::VariableDeclaration(VariableDeclaration {

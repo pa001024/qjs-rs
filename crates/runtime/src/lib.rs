@@ -112,7 +112,9 @@ impl Realm {
     }
 
     pub fn globals_entries(&self) -> impl Iterator<Item = (&str, &JsValue)> {
-        self.globals.iter().map(|(name, value)| (name.as_str(), value))
+        self.globals
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
     }
 }
 

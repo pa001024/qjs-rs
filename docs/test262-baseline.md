@@ -74,6 +74,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+53)`: discovered=23882, executed=5000, skipped=18579, passed=4908, failed=92
 - `language max-cases=5000 (latest+54)`: discovered=23882, executed=5000, skipped=18579, passed=4911, failed=89
 - `language max-cases=5000 (latest+55)`: discovered=23882, executed=5000, skipped=18579, passed=4912, failed=88
+- `language max-cases=5000 (latest+56)`: discovered=23882, executed=5000, skipped=18579, passed=4919, failed=81
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -96,6 +97,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/statements/try (latest)`: discovered=201, executed=91, skipped=110, passed=91, failed=0
 - `language/statements/if (latest)`: discovered=69, executed=47, skipped=22, passed=47, failed=0
 - `language/statements/labeled (latest)`: discovered=24, executed=14, skipped=10, passed=14, failed=0
+- `language/expressions/function (latest)`: discovered=264, executed=42, skipped=222, passed=42, failed=0
+- `language/statements/function (latest)`: discovered=451, executed=207, skipped=244, passed=188, failed=19
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -264,4 +267,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - bytecode 对 loop completion 与 finally 传播对齐：每次迭代入口重置 completion、finally 作用域仅在正常路径恢复外层 completion，并修正 unwind finally 的 handler 弹栈顺序；VM 补齐 `Array.prototype.concat`、`Error.prototype.toString` 与 Error 构造器原型回退。该轮后 `language/statements/try` 收敛至 `91/0`，整体 `language` 基线提升至 `4908/92`（快照：`target/test262-language-baseline-5000-20260224-v35.json`）。
 - bytecode 在 `if` 语句进入分支前重置当前 completion target（仅在 loop/switch completion 聚合上下文），对齐 `UpdateEmpty(..., undefined)`；修复 `if` 分支 `break/continue` 空完成值污染。该轮后 `language/statements/if` 收敛至 `47/0`，整体 `language` 基线提升至 `4911/89`（快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
 - bytecode 为 `LabelledStatement` keep-value 路径接入独立 completion temp，修复 `label: { expr; break label; ... }` 的 completion 传播与 `StackUnderflow`。该轮后 `language/statements/labeled` 收敛至 `14/0`，整体 `language` 基线提升至 `4912/88`（快照：`target/test262-language-baseline-5000-20260224-v37.json`）。
+- 对齐 QuickJS `quickjs.c` 的 `is_func_expr/func_name/add_func_var` 语义：命名函数表达式创建专用函数名绑定，sloppy 模式赋值静默忽略、strict 模式抛错。该轮后 `language/expressions/function` 收敛至 `42/0`，整体 `language` 基线提升至 `4919/81`（快照：`target/test262-language-baseline-5000-20260224-v38.json`）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。

@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4912`、`failed=88`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v37.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4919`、`failed=81`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v38.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -139,6 +139,8 @@
   - 子集回归（latest+25）：`language/statements/if` 收敛至 `47/0`，`language` 基线提升至 `4911/89`（快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
   - bytecode 为 `LabelledStatement` 的 keep-value 路径接入独立 completion temp（走与 loop/switch 一致的 completion 聚合策略），修复 `label: { 5; break label; ... }` 的值传播和 `StackUnderflow`。
   - 子集回归（latest+26）：`language/statements/labeled` 收敛至 `14/0`，`language` 基线提升至 `4912/88`（快照：`target/test262-language-baseline-5000-20260224-v37.json`）。
+  - 对齐 QuickJS `is_func_expr/func_name` 路径：parser 为命名函数表达式注入内部 marker，VM 在闭包实例化时建立函数名专用只读绑定，并实现“non-strict 写入静默忽略、strict 抛错”语义；`language/expressions/function` 子集收敛至 `42/0`。
+  - 子集回归（latest+27）：`language/expressions/function` 收敛至 `42/0`，`language` 基线提升至 `4919/81`（快照：`target/test262-language-baseline-5000-20260224-v38.json`）。
 
 ## 3. 分阶段状态
 

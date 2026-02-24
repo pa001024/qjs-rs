@@ -20,6 +20,7 @@ const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
+const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 
 type DefaultParameterInitializer = (Identifier, Expr);
@@ -1214,6 +1215,23 @@ impl Parser {
     fn insert_generator_function_marker(&self, body: &mut Vec<Stmt>) {
         let marker = Stmt::Expression(Expr::String(StringLiteral {
             value: GENERATOR_FUNCTION_MARKER.to_string(),
+            has_escape: false,
+        }));
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, marker);
+    }
+
+    fn insert_named_function_expression_marker(&self, body: &mut Vec<Stmt>) {
+        let marker = Stmt::Expression(Expr::String(StringLiteral {
+            value: NAMED_FUNCTION_EXPR_MARKER.to_string(),
             has_escape: false,
         }));
         let mut insert_at = 0usize;
@@ -2472,7 +2490,7 @@ impl Parser {
                     catch_param = Some(temp_name);
                 } else {
                     return Err(
-                        self.error_current("expected catch binding identifier or array pattern"),
+                        self.error_current("expected catch binding identifier or array pattern")
                     );
                 }
                 self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
@@ -2518,11 +2536,13 @@ impl Parser {
         let temp_expr = Expr::Identifier(temp_name.clone());
         elements
             .iter()
-            .map(|element| Stmt::VariableDeclaration(VariableDeclaration {
-                kind: BindingKind::Let,
-                name: element.name.clone(),
-                initializer: Some(Self::array_pattern_element_value_expr(&temp_expr, element)),
-            }))
+            .map(|element| {
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: element.name.clone(),
+                    initializer: Some(Self::array_pattern_element_value_expr(&temp_expr, element)),
+                })
+            })
             .collect()
     }
 
@@ -3757,6 +3777,9 @@ impl Parser {
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
+        if name.is_some() {
+            self.insert_named_function_expression_marker(&mut body);
+        }
         if is_generator {
             self.insert_generator_function_marker(&mut body);
         }
@@ -4384,7 +4407,9 @@ impl Parser {
                         .collect(),
                 })
             }
-            Stmt::Return(expr) => Stmt::Return(expr.map(Self::rewrite_constructor_super_property_expr)),
+            Stmt::Return(expr) => {
+                Stmt::Return(expr.map(Self::rewrite_constructor_super_property_expr))
+            }
             Stmt::Expression(expr) => {
                 Stmt::Expression(Self::rewrite_constructor_super_property_expr(expr))
             }
@@ -4401,9 +4426,8 @@ impl Parser {
             } => Stmt::If {
                 condition: Self::rewrite_constructor_super_property_expr(condition),
                 consequent: Box::new(Self::rewrite_constructor_super_property_stmt(*consequent)),
-                alternate: alternate.map(|stmt| {
-                    Box::new(Self::rewrite_constructor_super_property_stmt(*stmt))
-                }),
+                alternate: alternate
+                    .map(|stmt| Box::new(Self::rewrite_constructor_super_property_stmt(*stmt))),
             },
             Stmt::While { condition, body } => Stmt::While {
                 condition: Self::rewrite_constructor_super_property_expr(condition),
@@ -4431,8 +4455,7 @@ impl Parser {
                     }) => ForInitializer::VariableDeclaration(VariableDeclaration {
                         kind,
                         name,
-                        initializer: initializer
-                            .map(Self::rewrite_constructor_super_property_expr),
+                        initializer: initializer.map(Self::rewrite_constructor_super_property_expr),
                     }),
                     ForInitializer::VariableDeclarations(declarations) => {
                         ForInitializer::VariableDeclarations(
@@ -4453,15 +4476,18 @@ impl Parser {
                                 .collect(),
                         )
                     }
-                    ForInitializer::Expression(expr) => {
-                        ForInitializer::Expression(Self::rewrite_constructor_super_property_expr(expr))
-                    }
+                    ForInitializer::Expression(expr) => ForInitializer::Expression(
+                        Self::rewrite_constructor_super_property_expr(expr),
+                    ),
                 }),
                 condition: condition.map(Self::rewrite_constructor_super_property_expr),
                 update: update.map(Self::rewrite_constructor_super_property_expr),
                 body: Box::new(Self::rewrite_constructor_super_property_stmt(*body)),
             },
-            Stmt::Switch { discriminant, cases } => Stmt::Switch {
+            Stmt::Switch {
+                discriminant,
+                cases,
+            } => Stmt::Switch {
                 discriminant: Self::rewrite_constructor_super_property_expr(discriminant),
                 cases: cases
                     .into_iter()
@@ -4534,11 +4560,9 @@ impl Parser {
                         key: match key {
                             ObjectPropertyKey::Static(name) => ObjectPropertyKey::Static(name),
                             ObjectPropertyKey::ProtoSetter => ObjectPropertyKey::ProtoSetter,
-                            ObjectPropertyKey::Computed(key_expr) => {
-                                ObjectPropertyKey::Computed(Box::new(
-                                    Self::rewrite_constructor_super_property_expr(*key_expr),
-                                ))
-                            }
+                            ObjectPropertyKey::Computed(key_expr) => ObjectPropertyKey::Computed(
+                                Box::new(Self::rewrite_constructor_super_property_expr(*key_expr)),
+                            ),
                             ObjectPropertyKey::AccessorGet(name) => {
                                 ObjectPropertyKey::AccessorGet(name)
                             }
@@ -4587,11 +4611,15 @@ impl Parser {
                     .collect(),
             ),
             Expr::Member { object, property } => Expr::Member {
-                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                    *object,
+                )),
                 property,
             },
             Expr::MemberComputed { object, property } => Expr::MemberComputed {
-                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                    *object,
+                )),
                 property: Box::new(Self::rewrite_constructor_super_property_expr(*property)),
             },
             Expr::Call { callee, arguments } => {
@@ -4630,7 +4658,9 @@ impl Parser {
                 property,
                 value,
             } => Expr::AssignMember {
-                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                    *object,
+                )),
                 property,
                 value: Box::new(Self::rewrite_constructor_super_property_expr(*value)),
             },
@@ -4639,7 +4669,9 @@ impl Parser {
                 property,
                 value,
             } => Expr::AssignMemberComputed {
-                object: Box::new(Self::rewrite_constructor_super_property_member_base(*object)),
+                object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                    *object,
+                )),
                 property: Box::new(Self::rewrite_constructor_super_property_expr(*property)),
                 value: Box::new(Self::rewrite_constructor_super_property_expr(*value)),
             },
@@ -4651,19 +4683,19 @@ impl Parser {
                 target: match target {
                     UpdateTarget::Identifier(identifier) => UpdateTarget::Identifier(identifier),
                     UpdateTarget::Member { object, property } => UpdateTarget::Member {
-                        object: Box::new(
-                            Self::rewrite_constructor_super_property_member_base(*object),
-                        ),
+                        object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                            *object,
+                        )),
                         property,
                     },
                     UpdateTarget::MemberComputed { object, property } => {
                         UpdateTarget::MemberComputed {
-                            object: Box::new(
-                                Self::rewrite_constructor_super_property_member_base(*object),
-                            ),
-                            property: Box::new(
-                                Self::rewrite_constructor_super_property_expr(*property),
-                            ),
+                            object: Box::new(Self::rewrite_constructor_super_property_member_base(
+                                *object,
+                            )),
+                            property: Box::new(Self::rewrite_constructor_super_property_expr(
+                                *property,
+                            )),
                         }
                     }
                 },
@@ -4680,9 +4712,7 @@ impl Parser {
         let rewritten = Self::rewrite_constructor_super_property_expr(object);
         match rewritten {
             Expr::Identifier(Identifier(name)) if name == "super" => {
-                Expr::Identifier(Identifier(
-                    CLASS_CONSTRUCTOR_SUPER_BASE_BINDING.to_string(),
-                ))
+                Expr::Identifier(Identifier(CLASS_CONSTRUCTOR_SUPER_BASE_BINDING.to_string()))
             }
             other => other,
         }
@@ -5867,13 +5897,36 @@ mod tests {
         let expected = Expr::Function {
             name: Some(Identifier("add".to_string())),
             params: vec![Identifier("a".to_string()), Identifier("b".to_string())],
-            body: vec![Stmt::Return(Some(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
-                right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
-            }))],
+            body: vec![
+                Stmt::Expression(Expr::String(StringLiteral {
+                    value: "$__qjs_named_function_expr__$".to_string(),
+                    has_escape: false,
+                })),
+                Stmt::Return(Some(Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expr::Identifier(Identifier("a".to_string()))),
+                    right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+                })),
+            ],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn inserts_named_function_expression_marker_after_use_strict() {
+        let parsed = parse_expression("function add() { 'use strict'; return 1; }")
+            .expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected function expression");
+        };
+        assert!(matches!(
+            body.first(),
+            Some(Stmt::Expression(Expr::String(StringLiteral { value, .. }))) if value == "use strict"
+        ));
+        assert!(matches!(
+            body.get(1),
+            Some(Stmt::Expression(Expr::String(StringLiteral { value, .. }))) if value == "$__qjs_named_function_expr__$"
+        ));
     }
 
     #[test]
@@ -6282,8 +6335,8 @@ mod tests {
 
     #[test]
     fn parses_equality_after_in_with_correct_precedence() {
-        let parsed =
-            parse_expression("true in object !== \"true\" in object").expect("parser should succeed");
+        let parsed = parse_expression("true in object !== \"true\" in object")
+            .expect("parser should succeed");
         let expected = Expr::Binary {
             op: BinaryOp::StrictNotEqual,
             left: Box::new(Expr::Binary {
@@ -7116,8 +7169,8 @@ mod tests {
 
     #[test]
     fn rejects_catch_array_parameter_lexical_conflict() {
-        let err = parse_script("try { 1; } catch ([x]) { let x = 1; }")
-            .expect_err("parser should fail");
+        let err =
+            parse_script("try { 1; } catch ([x]) { let x = 1; }").expect_err("parser should fail");
         assert_eq!(err.message, "duplicate lexical declaration: x");
     }
 
