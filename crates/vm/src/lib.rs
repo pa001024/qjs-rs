@@ -55,6 +55,7 @@ struct JsObject {
     property_attributes: BTreeMap<String, PropertyAttributes>,
     argument_mappings: BTreeMap<String, BindingId>,
     prototype: Option<ObjectId>,
+    prototype_value: Option<JsValue>,
     prototype_overridden: bool,
     extensible: bool,
 }
@@ -68,6 +69,7 @@ impl Default for JsObject {
             property_attributes: BTreeMap::new(),
             argument_mappings: BTreeMap::new(),
             prototype: None,
+            prototype_value: None,
             prototype_overridden: false,
             extensible: true,
         }
@@ -690,7 +692,9 @@ impl Vm {
         self.gc_mark_stack.extend(object.properties.into_values());
         self.gc_mark_stack.extend(object.getters.into_values());
         self.gc_mark_stack.extend(object.setters.into_values());
-        if let Some(proto_id) = object.prototype {
+        if let Some(prototype_value) = object.prototype_value {
+            self.gc_mark_stack.push(prototype_value);
+        } else if let Some(proto_id) = object.prototype {
             self.gc_mark_stack.push(JsValue::Object(proto_id));
         }
     }
@@ -1123,9 +1127,11 @@ impl Vm {
                     match value {
                         JsValue::Object(proto_id) => {
                             object.prototype = Some(proto_id);
+                            object.prototype_value = None;
                         }
                         JsValue::Null => {
                             object.prototype = None;
+                            object.prototype_value = None;
                         }
                         _ => {}
                     }
@@ -2201,11 +2207,12 @@ impl Vm {
                 ) {
                     if let Some(instance) = self.objects.get_mut(&instance_id) {
                         instance.prototype = Some(prototype_id);
+                        instance.prototype_value = None;
                     }
                 }
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
                     Ok(result)
                 } else {
                     Ok(constructed)
@@ -2245,7 +2252,7 @@ impl Vm {
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
                 let result =
                     self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
                     Ok(result)
                 } else {
                     Ok(constructed)
@@ -2277,11 +2284,12 @@ impl Vm {
                 ) {
                     if let Some(instance) = self.objects.get_mut(&instance_id) {
                         instance.prototype = Some(prototype_id);
+                        instance.prototype_value = None;
                     }
                 }
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
                     Ok(result)
                 } else {
                     Ok(constructed)
@@ -2321,7 +2329,7 @@ impl Vm {
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
                 let result =
                     self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
                     Ok(result)
                 } else {
                     Ok(constructed)
@@ -2357,6 +2365,7 @@ impl Vm {
         } else {
             pending_this.clone()
         };
+        let super_prototype_hint = self.prototype_components_of_value(&super_this);
 
         let initialized_this = match callee {
             JsValue::Function(closure_id) => {
@@ -2365,7 +2374,7 @@ impl Vm {
                 }
                 let result =
                     self.execute_closure_call(closure_id, args, Some(super_this.clone()), realm)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
                     result
                 } else {
                     super_this.clone()
@@ -2394,21 +2403,33 @@ impl Vm {
                 } else {
                     self.execute_native_call(native, args, realm, caller_strict)?
                 };
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
+                    if let Some((prototype, prototype_value)) = super_prototype_hint.clone() {
+                        self.apply_prototype_components_to_value(
+                            &result,
+                            prototype,
+                            prototype_value,
+                        );
+                    }
                     result
                 } else {
                     super_this.clone()
                 }
             }
             JsValue::HostFunction(host_id) => {
-                let constructed = self.create_object_value();
-                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
                 let result =
                     self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
-                if matches!(result, JsValue::Object(_)) {
+                if Self::is_object_like_value(&result) {
+                    if let Some((prototype, prototype_value)) = super_prototype_hint {
+                        self.apply_prototype_components_to_value(
+                            &result,
+                            prototype,
+                            prototype_value,
+                        );
+                    }
                     result
                 } else {
-                    constructed
+                    super_this.clone()
                 }
             }
             _ => return Err(VmError::NotCallable),
@@ -2418,7 +2439,7 @@ impl Vm {
             return Err(VmError::UnknownIdentifier("this".to_string()));
         }
 
-        if !matches!(initialized_this, JsValue::Object(_)) {
+        if !Self::is_object_like_value(&initialized_this) {
             return Err(VmError::TypeError(
                 "super constructor did not initialize this",
             ));
@@ -2774,7 +2795,7 @@ impl Vm {
             }
             if matches!(value, JsValue::Undefined) {
                 value = this_value;
-            } else if !matches!(value, JsValue::Object(_)) {
+            } else if !Self::is_object_like_value(&value) {
                 self.restore_caller_state(
                     saved_handlers,
                     saved_var_scope_stack,
@@ -3918,6 +3939,7 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         target.prototype = prototype_id;
+        target.prototype_value = None;
         target
             .properties
             .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
@@ -4135,15 +4157,9 @@ impl Vm {
     }
 
     fn execute_object_create(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let prototype = match args.first().cloned().unwrap_or(JsValue::Undefined) {
-            JsValue::Object(object_id) => Some(object_id),
-            JsValue::Null => None,
-            _ => {
-                return Err(VmError::TypeError(
-                    "Object prototype may only be an Object or null",
-                ));
-            }
-        };
+        let (prototype, prototype_value) = self.parse_prototype_value(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+        )?;
 
         let object = self.create_object_value();
         let object_id = match object {
@@ -4155,21 +4171,16 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         target.prototype = prototype;
+        target.prototype_value = prototype_value;
         Ok(JsValue::Object(object_id))
     }
 
     fn execute_object_set_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
 
-        let prototype = match args.get(1).cloned().unwrap_or(JsValue::Undefined) {
-            JsValue::Object(object_id) => Some(object_id),
-            JsValue::Null => None,
-            _ => {
-                return Err(VmError::TypeError(
-                    "Object prototype may only be an Object or null",
-                ));
-            }
-        };
+        let (prototype, prototype_value) = self.parse_prototype_value(
+            args.get(1).cloned().unwrap_or(JsValue::Undefined),
+        )?;
 
         match target {
             JsValue::Object(target_id) => {
@@ -4178,17 +4189,92 @@ impl Vm {
                     .get_mut(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
                 object.prototype = prototype;
+                object.prototype_value = prototype_value.clone();
                 Ok(JsValue::Object(target_id))
             }
             JsValue::Function(closure_id) => {
                 let closure_object = self.closure_objects.entry(closure_id).or_default();
                 closure_object.prototype = prototype;
+                closure_object.prototype_value = prototype_value.clone();
                 closure_object.prototype_overridden = true;
                 Ok(JsValue::Function(closure_id))
+            }
+            JsValue::HostFunction(host_id) => {
+                let host_object = self.host_function_objects.entry(host_id).or_default();
+                host_object.prototype = prototype;
+                host_object.prototype_value = prototype_value;
+                host_object.prototype_overridden = true;
+                Ok(JsValue::HostFunction(host_id))
             }
             _ => Err(VmError::TypeError(
                 "Object.setPrototypeOf target must be object",
             )),
+        }
+    }
+
+    fn parse_prototype_value(
+        &self,
+        value: JsValue,
+    ) -> Result<(Option<ObjectId>, Option<JsValue>), VmError> {
+        match value {
+            JsValue::Object(object_id) => Ok((Some(object_id), None)),
+            JsValue::Null => Ok((None, None)),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok((None, Some(value)))
+            }
+            _ => Err(VmError::TypeError(
+                "Object prototype may only be an Object or null",
+            )),
+        }
+    }
+
+    fn prototype_components_of_value(
+        &self,
+        value: &JsValue,
+    ) -> Option<(Option<ObjectId>, Option<JsValue>)> {
+        match value {
+            JsValue::Object(object_id) => self
+                .objects
+                .get(object_id)
+                .map(|object| (object.prototype, object.prototype_value.clone())),
+            JsValue::Function(closure_id) => self
+                .closure_objects
+                .get(closure_id)
+                .map(|object| (object.prototype, object.prototype_value.clone())),
+            JsValue::HostFunction(host_id) => self
+                .host_function_objects
+                .get(host_id)
+                .map(|object| (object.prototype, object.prototype_value.clone())),
+            _ => None,
+        }
+    }
+
+    fn apply_prototype_components_to_value(
+        &mut self,
+        value: &JsValue,
+        prototype: Option<ObjectId>,
+        prototype_value: Option<JsValue>,
+    ) {
+        match value {
+            JsValue::Object(object_id) => {
+                if let Some(object) = self.objects.get_mut(object_id) {
+                    object.prototype = prototype;
+                    object.prototype_value = prototype_value;
+                }
+            }
+            JsValue::Function(closure_id) => {
+                let object = self.closure_objects.entry(*closure_id).or_default();
+                object.prototype = prototype;
+                object.prototype_value = prototype_value;
+                object.prototype_overridden = true;
+            }
+            JsValue::HostFunction(host_id) => {
+                let object = self.host_function_objects.entry(*host_id).or_default();
+                object.prototype = prototype;
+                object.prototype_value = prototype_value;
+                object.prototype_overridden = true;
+            }
+            _ => {}
         }
     }
 
@@ -4212,6 +4298,7 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         target.prototype = self.date_prototype_id;
+        target.prototype_value = None;
         target
             .properties
             .insert(DATE_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -5085,16 +5172,18 @@ impl Vm {
                     .get(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
                 Ok(object
-                    .prototype
-                    .map(JsValue::Object)
+                    .prototype_value
+                    .clone()
+                    .or_else(|| object.prototype.map(JsValue::Object))
                     .unwrap_or(JsValue::Null))
             }
             JsValue::Function(closure_id) => {
                 if let Some(closure_object) = self.closure_objects.get(&closure_id) {
                     if closure_object.prototype_overridden {
                         return Ok(closure_object
-                            .prototype
-                            .map(JsValue::Object)
+                            .prototype_value
+                            .clone()
+                            .or_else(|| closure_object.prototype.map(JsValue::Object))
                             .unwrap_or(JsValue::Null));
                     }
                     if let Some(parent) = closure_object
@@ -5107,8 +5196,8 @@ impl Vm {
                 }
                 Ok(self.function_prototype_value())
             }
-            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                Ok(self.function_prototype_value())
+            value @ (JsValue::NativeFunction(_) | JsValue::HostFunction(_)) => {
+                self.get_prototype_of_value(&value)
             }
             _ => Err(VmError::TypeError(
                 "Object.getPrototypeOf target must be object",
@@ -5263,6 +5352,7 @@ impl Vm {
         let prototype = self.error_prototype_for_constructor(constructor);
         if let Some(object) = self.objects.get_mut(&object_id) {
             object.prototype = prototype;
+            object.prototype_value = None;
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(constructor),
@@ -5391,6 +5481,7 @@ impl Vm {
         }
         if let Some(object) = self.objects.get_mut(&object_id) {
             object.prototype = self.array_prototype_id;
+            object.prototype_value = None;
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -6813,6 +6904,7 @@ impl Vm {
             };
             if let Some(object) = self.objects.get_mut(&id) {
                 object.prototype = error_proto;
+                object.prototype_value = None;
                 object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
@@ -7113,6 +7205,7 @@ impl Vm {
         };
         if let Some(object) = self.objects.get_mut(&object_id) {
             object.prototype = prototype_id;
+            object.prototype_value = None;
             object
                 .properties
                 .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
@@ -8215,16 +8308,18 @@ impl Vm {
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
                 Ok(object
-                    .prototype
-                    .map(JsValue::Object)
+                    .prototype_value
+                    .clone()
+                    .or_else(|| object.prototype.map(JsValue::Object))
                     .unwrap_or(JsValue::Null))
             }
             JsValue::Function(closure_id) => {
                 if let Some(closure_object) = self.closure_objects.get(closure_id) {
                     if closure_object.prototype_overridden {
                         return Ok(closure_object
-                            .prototype
-                            .map(JsValue::Object)
+                            .prototype_value
+                            .clone()
+                            .or_else(|| closure_object.prototype.map(JsValue::Object))
                             .unwrap_or(JsValue::Null));
                     }
                     if let Some(parent) = closure_object
@@ -8237,7 +8332,16 @@ impl Vm {
                 }
                 Ok(self.function_prototype_value())
             }
-            JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+            JsValue::HostFunction(host_id) => {
+                if let Some(host_object) = self.host_function_objects.get(host_id) {
+                    if host_object.prototype_overridden {
+                        return Ok(host_object
+                            .prototype_value
+                            .clone()
+                            .or_else(|| host_object.prototype.map(JsValue::Object))
+                            .unwrap_or(JsValue::Null));
+                    }
+                }
                 if matches!(value, JsValue::HostFunction(host_id) if Some(*host_id) == self.function_prototype_host_id)
                 {
                     Ok(self.object_prototype_value())
@@ -8245,6 +8349,7 @@ impl Vm {
                     Ok(self.function_prototype_value())
                 }
             }
+            JsValue::NativeFunction(_) => Ok(self.function_prototype_value()),
             _ => Ok(JsValue::Null),
         }
     }
@@ -9292,8 +9397,14 @@ impl Vm {
         let this_value = self.bindings.get(&binding_id)?.value.clone();
         match this_value {
             JsValue::Object(object_id) => {
-                let prototype = self.objects.get(&object_id)?.prototype;
-                Some(prototype.map(JsValue::Object).unwrap_or(JsValue::Null))
+                let object = self.objects.get(&object_id)?;
+                Some(
+                    object
+                        .prototype_value
+                        .clone()
+                        .or_else(|| object.prototype.map(JsValue::Object))
+                        .unwrap_or(JsValue::Null),
+                )
             }
             _ => None,
         }
@@ -10897,6 +11008,44 @@ mod tests {
         realm.define_global(
             "TypeError",
             JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn derived_constructor_super_array_uses_derived_prototype_chain() {
+        let script = parse_script(
+            "var ArrayCtor = [].constructor;\
+             class Sub extends ArrayCtor {}\
+             var sub = new Sub();\
+             sub instanceof Sub && sub instanceof ArrayCtor;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn derived_constructor_super_function_returns_function_instance() {
+        let script = parse_script(
+            "var FunctionCtor = (function() {}).constructor;\
+             class Sub extends FunctionCtor {}\
+             var sub = new Sub('return 1;');\
+             sub instanceof Sub && sub instanceof FunctionCtor && sub() === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
