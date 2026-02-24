@@ -2330,6 +2330,12 @@ impl Parser {
         Identifier(name)
     }
 
+    fn next_catch_temp_identifier(&mut self) -> Identifier {
+        let name = format!("$__catch_param_{}", self.class_temp_index);
+        self.class_temp_index += 1;
+        Identifier(name)
+    }
+
     fn parse_with_statement(&mut self) -> Result<Stmt, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after 'with'")?;
         let object = self.parse_expression_with_commas()?;
@@ -2451,17 +2457,37 @@ impl Parser {
 
         let mut catch_param = None;
         let mut catch_block = None;
+        let mut catch_array_pattern = None;
         if self.matches_keyword("catch") {
             if self.matches(&TokenKind::LParen) {
-                catch_param = Some(Identifier(
-                    self.expect_binding_identifier("expected catch binding identifier")?,
-                ));
+                if self.check_identifier() {
+                    catch_param = Some(Identifier(
+                        self.expect_binding_identifier("expected catch binding identifier")?,
+                    ));
+                } else if self.matches(&TokenKind::LBracket) {
+                    let temp_name = self.next_catch_temp_identifier();
+                    let elements =
+                        self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
+                    catch_array_pattern = Some((temp_name.clone(), elements));
+                    catch_param = Some(temp_name);
+                } else {
+                    return Err(
+                        self.error_current("expected catch binding identifier or array pattern"),
+                    );
+                }
                 self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
             }
-            catch_block = Some(self.parse_block_body(
+            let mut parsed_catch_block = self.parse_block_body(
                 "expected '{' before catch block",
                 "expected '}' after catch block",
-            )?);
+            )?;
+            if let Some((temp_name, elements)) = catch_array_pattern {
+                let mut lowered_bindings =
+                    Self::lower_catch_array_pattern_bindings(&temp_name, &elements);
+                lowered_bindings.append(&mut parsed_catch_block);
+                parsed_catch_block = lowered_bindings;
+            }
+            catch_block = Some(parsed_catch_block);
         }
 
         let finally_block = if self.matches_keyword("finally") {
@@ -2483,6 +2509,21 @@ impl Parser {
             catch_block,
             finally_block,
         })
+    }
+
+    fn lower_catch_array_pattern_bindings(
+        temp_name: &Identifier,
+        elements: &[ForHeadArrayPatternElement],
+    ) -> Vec<Stmt> {
+        let temp_expr = Expr::Identifier(temp_name.clone());
+        elements
+            .iter()
+            .map(|element| Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: element.name.clone(),
+                initializer: Some(Self::array_pattern_element_value_expr(&temp_expr, element)),
+            }))
+            .collect()
     }
 
     fn parse_throw_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -6797,6 +6838,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_try_catch_with_array_pattern_parameter() {
+        let parsed = parse_script("try { throw ['inside']; } catch ([x, _ = 1]) { x; _; }")
+            .expect("script parsing should succeed");
+        let Stmt::Try {
+            catch_param,
+            catch_block,
+            ..
+        } = &parsed.statements[0]
+        else {
+            panic!("expected try statement");
+        };
+        let Some(Identifier(param_name)) = catch_param else {
+            panic!("expected synthesized catch parameter");
+        };
+        assert!(param_name.starts_with("$__catch_param_"));
+
+        let catch_block = catch_block.as_ref().expect("expected catch block");
+        assert!(matches!(
+            catch_block.first(),
+            Some(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(name),
+                ..
+            })) if name == "x"
+        ));
+        assert!(matches!(
+            catch_block.get(1),
+            Some(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(name),
+                ..
+            })) if name == "_"
+        ));
+    }
+
+    #[test]
     fn rejects_return_outside_function() {
         let err = parse_script("return 1;").expect_err("parser should fail");
         assert_eq!(err.message, "return outside function");
@@ -7035,6 +7112,13 @@ mod tests {
             err.message,
             "catch parameter conflicts with lexical declaration: e"
         );
+    }
+
+    #[test]
+    fn rejects_catch_array_parameter_lexical_conflict() {
+        let err = parse_script("try { 1; } catch ([x]) { let x = 1; }")
+            .expect_err("parser should fail");
+        assert_eq!(err.message, "duplicate lexical declaration: x");
     }
 
     #[test]

@@ -70,6 +70,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+49)`: discovered=23882, executed=5000, skipped=18579, passed=4890, failed=110
 - `language max-cases=5000 (latest+50)`: discovered=23882, executed=5000, skipped=18579, passed=4895, failed=105
 - `language max-cases=5000 (latest+51)`: discovered=23882, executed=5000, skipped=18579, passed=4897, failed=103
+- `language max-cases=5000 (latest+52)`: discovered=23882, executed=5000, skipped=18579, passed=4899, failed=101
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -89,6 +90,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/statements/class/definition (latest)`: discovered=65, executed=33, skipped=32, passed=33, failed=0
 - `language/statements/class (latest)`: discovered=4367, executed=188, skipped=4179, passed=188, failed=0
 - `language/statements/for-of (latest)`: discovered=751, executed=76, skipped=675, passed=76, failed=0
+- `language/statements/try (latest)`: discovered=201, executed=91, skipped=110, passed=79, failed=12
 
 备注：
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
@@ -253,4 +255,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 对齐 QuickJS `js_function_constructor(..., JS_FUNC_GENERATOR)` 分流：runtime 新增 `GeneratorFunctionConstructor`，parser 对 `function*` 注入 generator marker，VM 将 generator function `[[Prototype]]` 指向 `GeneratorFunction.prototype`，并补齐最小 generator 迭代器 `next()` 返回路径（覆盖 `yield <expr>;` 主路径）。该轮后 `language/statements/class/subclass` 收敛至 `77/0`、`language/statements/class` 收敛至 `188/0`，整体 `language` 基线提升至 `4884/116`（快照：`target/test262-language-baseline-5000-20260224-v30.json`）。
 - VM 对数组迭代链路补齐 `keys/entries/values/[Symbol.iterator]`、最小 `Array.prototype.pop`、数组索引 `Object.defineProperty` 的 `length` 同步，并将 for-of 数组路径切换为 runtime iterator record。该轮后 `language/statements/for-of` 提升至 `73/3`，整体 `language` 基线提升至 `4895/105`（快照：`target/test262-language-baseline-5000-20260224-v32.json`）。
 - parser for-of lowering 将 finally 内部 `Object.__forOfClose(...)` 调用改为内部 `let` 声明执行，避免覆盖外层 loop completion；VM 字符串 for-of 迭代改为按 JS code-unit/代理对规则输出 code point，收敛 `for-of cptn-*` 与 `string-astral`。该轮后 `language/statements/for-of` 收敛至 `76/0`，整体 `language` 基线提升至 `4897/103`（快照：`target/test262-language-baseline-5000-20260224-v33.json`）。
+- parser `catch` 参数新增数组绑定模式降级（异常值临时绑定 + 前置 `let` 解构声明），修复 `scope-catch-param-lex-open.js` 与 `scope-catch-param-var-none.js` 的 parse fail；该轮后 `language/statements/try` 提升至 `79/12`，整体 `language` 基线提升至 `4899/101`（快照：`target/test262-language-baseline-5000-20260224-v34.json`）。
 - 当前仍处于语法/运行时早期阶段，失败主要来自语义不完整与内建缺失（如更完整 ASI/早期错误、`this`、严格模式、内建对象与 harness）。
