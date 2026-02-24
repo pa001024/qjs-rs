@@ -1259,6 +1259,29 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     });
                     continue;
                 }
+                if matches!(bytes[pos + 1], b'0'..=b'7') {
+                    let mut end = pos + 1;
+                    while end < bytes.len() && bytes[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    let digits = &bytes[(pos + 1)..end];
+                    let has_non_octal = digits.iter().any(|digit| !matches!(digit, b'0'..=b'7'));
+                    if !has_non_octal {
+                        pos = end;
+                        let raw = &source[start..pos];
+                        let value = u64::from_str_radix(&raw[1..], 8)
+                            .map(|number| number as f64)
+                            .map_err(|_| LexError {
+                                message: format!("invalid number literal '{raw}'"),
+                                position: start,
+                            })?;
+                        tokens.push(Token {
+                            kind: TokenKind::Number(value),
+                            span: Span { start, end: pos },
+                        });
+                        continue;
+                    }
+                }
             }
             let mut has_dot = false;
             while pos < bytes.len() {
@@ -1604,6 +1627,17 @@ mod tests {
         assert_eq!(tokens[5].kind, TokenKind::Plus);
         assert_eq!(tokens[6].kind, TokenKind::Number(7.0));
         assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_legacy_octal_numbers() {
+        let tokens = lex("070 + 08 + 09").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(56.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(8.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(9.0));
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
 
     #[test]
