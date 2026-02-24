@@ -188,6 +188,7 @@ enum HostFunction {
     ArrayOf,
     ArrayEveryThis,
     ArrayFilterThis,
+    ArrayMapThis,
     ArrayFillThis,
     ArrayFindThis,
     ArrayFindIndexThis,
@@ -953,6 +954,7 @@ impl Vm {
             | HostFunction::ArrayOf
             | HostFunction::ArrayEveryThis
             | HostFunction::ArrayFilterThis
+            | HostFunction::ArrayMapThis
             | HostFunction::ArrayFillThis
             | HostFunction::ArrayFindThis
             | HostFunction::ArrayFindIndexThis
@@ -3698,6 +3700,7 @@ impl Vm {
     fn array_species_create_for_concat(
         &mut self,
         original: JsValue,
+        length: i64,
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
@@ -3708,12 +3711,12 @@ impl Vm {
             _ => false,
         };
         if !is_array {
-            return Ok(self.create_array_value());
+            return self.execute_array_constructor(&[JsValue::Number(length as f64)]);
         }
 
         let constructor = self.get_property_from_receiver(original, "constructor", realm)?;
         if matches!(constructor, JsValue::Undefined) {
-            return Ok(self.create_array_value());
+            return self.execute_array_constructor(&[JsValue::Number(length as f64)]);
         }
         if !Self::is_object_like_value(&constructor) {
             return Err(VmError::TypeError(
@@ -3728,7 +3731,7 @@ impl Vm {
             species
         };
         if matches!(constructor, JsValue::Undefined | JsValue::Null) {
-            return Ok(self.create_array_value());
+            return self.execute_array_constructor(&[JsValue::Number(length as f64)]);
         }
         let is_constructor = match &constructor {
             JsValue::NativeFunction(native) => Self::native_function_is_constructor(*native),
@@ -3744,7 +3747,7 @@ impl Vm {
         }
         let result = self.execute_construct_value(
             constructor,
-            vec![JsValue::Number(0.0)],
+            vec![JsValue::Number(length as f64)],
             realm,
             caller_strict,
         )?;
@@ -3767,7 +3770,8 @@ impl Vm {
             this_arg,
             "Array.prototype.concat receiver must be object",
         )?;
-        let result = self.array_species_create_for_concat(source.clone(), realm, caller_strict)?;
+        let result =
+            self.array_species_create_for_concat(source.clone(), 0, realm, caller_strict)?;
         let mut index: i64 = 0;
         for candidate in std::iter::once(source).chain(args.iter().cloned()) {
             if self.is_concat_spreadable_value(&candidate, realm)? {
@@ -3958,7 +3962,8 @@ impl Vm {
             ));
         }
         let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
-        let result = self.array_species_create_for_concat(target.clone(), realm, caller_strict)?;
+        let result =
+            self.array_species_create_for_concat(target.clone(), 0, realm, caller_strict)?;
         let mut to = 0i64;
 
         for index in 0..length {
@@ -3986,6 +3991,49 @@ impl Vm {
             JsValue::Number(to as f64),
             realm,
         )?;
+        Ok(result)
+    }
+
+    fn execute_array_map_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.map called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.map callback must be callable",
+            ));
+        }
+        let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let result =
+            self.array_species_create_for_concat(target.clone(), length, realm, caller_strict)?;
+
+        for index in 0..length {
+            let key = index.to_string();
+            if !self.has_property_on_receiver(&target, &key, realm)? {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            let mapped = self.execute_callable(
+                callback.clone(),
+                Some(callback_this.clone()),
+                vec![value, JsValue::Number(index as f64), target.clone()],
+                realm,
+                caller_strict,
+            )?;
+            self.create_data_property_or_throw(result.clone(), key, mapped, realm)?;
+        }
         Ok(result)
     }
 
@@ -4775,6 +4823,9 @@ impl Vm {
             }
             HostFunction::ArrayFilterThis => {
                 self.execute_array_filter_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayMapThis => {
+                self.execute_array_map_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::ArrayFillThis => {
                 self.execute_array_fill_this(this_arg, &args, realm, caller_strict)
@@ -9751,6 +9802,7 @@ impl Vm {
                     || (property == "copyWithin" && object.properties.contains_key("length"))
                     || (property == "every" && object.properties.contains_key("length"))
                     || (property == "filter" && object.properties.contains_key("length"))
+                    || (property == "map" && object.properties.contains_key("length"))
                     || (property == "fill" && object.properties.contains_key("length"))
                     || (property == "find" && object.properties.contains_key("length"))
                     || (property == "findIndex" && object.properties.contains_key("length"))
@@ -10178,6 +10230,9 @@ impl Vm {
         }
         if property == "filter" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayFilterThis));
+        }
+        if property == "map" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayMapThis));
         }
         if property == "fill" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
@@ -11131,6 +11186,7 @@ impl Vm {
             let every = self.create_host_function_value(HostFunction::ArrayEveryThis);
             let for_each = self.create_host_function_value(HostFunction::ArrayForEachThis);
             let filter = self.create_host_function_value(HostFunction::ArrayFilterThis);
+            let map = self.create_host_function_value(HostFunction::ArrayMapThis);
             let fill = self.create_host_function_value(HostFunction::ArrayFillThis);
             let find = self.create_host_function_value(HostFunction::ArrayFindThis);
             let find_index = self.create_host_function_value(HostFunction::ArrayFindIndexThis);
@@ -11145,6 +11201,7 @@ impl Vm {
             self.set_builtin_function_length(&every, 1.0);
             self.set_builtin_function_length(&for_each, 1.0);
             self.set_builtin_function_length(&filter, 1.0);
+            self.set_builtin_function_length(&map, 1.0);
             self.set_builtin_function_length(&fill, 1.0);
             self.set_builtin_function_length(&find, 1.0);
             self.set_builtin_function_length(&find_index, 1.0);
@@ -11226,6 +11283,15 @@ impl Vm {
                 object.properties.insert("filter".to_string(), filter);
                 object.property_attributes.insert(
                     "filter".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("map".to_string(), map);
+                object.property_attributes.insert(
+                    "map".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -12672,6 +12738,9 @@ impl Vm {
         if property == "filter" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayFilterThis));
         }
+        if property == "map" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayMapThis));
+        }
         if property == "fill" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
         }
@@ -13904,6 +13973,16 @@ impl Vm {
         from_end: bool,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        fn to_integer_or_infinity(number: f64) -> f64 {
+            if number.is_nan() || number == 0.0 {
+                0.0
+            } else if number.is_infinite() {
+                number
+            } else {
+                number.trunc()
+            }
+        }
+
         let target = self.object_prototype_this_object(
             this_arg,
             "Array.prototype indexOf/lastIndexOf receiver must be object",
@@ -13917,7 +13996,11 @@ impl Vm {
         }
 
         let from_index = match args.get(1) {
-            Some(value) => self.coerce_number_runtime(value.clone(), realm, caller_strict)?,
+            Some(value) => to_integer_or_infinity(self.coerce_number_runtime(
+                value.clone(),
+                realm,
+                caller_strict,
+            )?),
             None => {
                 if from_end {
                     (length - 1) as f64
@@ -13926,27 +14009,29 @@ impl Vm {
                 }
             }
         };
-        let index_from_number = if from_index.is_nan() {
-            if from_end { length - 1 } else { 0 }
-        } else {
-            from_index.trunc() as i64
-        };
 
         let mut current = if from_end {
-            if index_from_number >= 0 {
-                index_from_number.min(length - 1)
+            let index = if from_index >= 0.0 {
+                from_index.min((length - 1) as f64)
             } else {
-                length + index_from_number
+                (length as f64) + from_index
+            };
+            if index < 0.0 {
+                return Ok(JsValue::Number(-1.0));
             }
-        } else if index_from_number >= 0 {
-            index_from_number
+            index as i64
         } else {
-            (length + index_from_number).max(0)
+            let index = if from_index >= 0.0 {
+                from_index
+            } else {
+                ((length as f64) + from_index).max(0.0)
+            };
+            if index >= length as f64 {
+                return Ok(JsValue::Number(-1.0));
+            }
+            index as i64
         };
 
-        if !from_end && current >= length {
-            return Ok(JsValue::Number(-1.0));
-        }
         if from_end && current < 0 {
             return Ok(JsValue::Number(-1.0));
         }
@@ -17215,6 +17300,42 @@ mod tests {
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_map_supports_generic_array_like_values() {
+        let script = parse_script(
+            "var obj = {0: 1, 2: 3, length: 3}; var out = Array.prototype.map.call(obj, function(v) { return v * 2; }); Array.isArray(out) && out.length === 3 && out[0] === 2 && out[1] === undefined && out[2] === 6;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_last_index_of_uses_zero_for_explicit_undefined_or_nan_from_index() {
+        let script = parse_script(
+            "var a = [1, 2, 1]; var b = [0, true]; var c = [true, 0]; a.lastIndexOf(2, undefined) === -1 && a.lastIndexOf(1, undefined) === 0 && a.lastIndexOf(1) === 2 && b.lastIndexOf(true, NaN) === -1 && c.lastIndexOf(true, NaN) === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
         realm.define_global(
             "Array",
             JsValue::NativeFunction(NativeFunction::ArrayConstructor),

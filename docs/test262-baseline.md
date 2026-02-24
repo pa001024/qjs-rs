@@ -130,6 +130,10 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `built-ins/Array/prototype/indexOf (v1)`: discovered=201, executed=192, skipped=9, passed=192, failed=0
 - `built-ins/Array/prototype/join (v2)`: discovered=23, executed=16, skipped=7, passed=16, failed=0
 - `built-ins/Array --max-cases 1000 (v12-s1000)`: discovered=3081, executed=1000, skipped=467, passed=1000, failed=0
+- `built-ins/Array/prototype/map (v16)`: discovered=216, executed=193, skipped=23, passed=193, failed=0
+- `built-ins/Array/prototype/lastIndexOf (v16)`: discovered=198, executed=190, skipped=8, passed=190, failed=0
+- `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
+- `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0

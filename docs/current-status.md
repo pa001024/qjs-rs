@@ -22,6 +22,9 @@
 - `test262 built-ins/Array/of` 最新全量：`executed=9`、`passed=9`、`failed=0`（快照：`target/test262-builtins-array-of-20260225-v1.json`）。
 - `test262 built-ins/Array --max-cases 300` 最新采样：`executed=300`、`passed=300`、`failed=0`（快照：`target/test262-builtins-array-20260225-v8-s300.json`）。
 - `test262 built-ins/Array --max-cases 1000` 最新采样：`executed=1000`、`passed=1000`、`failed=0`（快照：`target/test262-builtins-array-20260225-v12-s1000.json`）。
+- `test262 built-ins/Array/prototype/map` 最新全量：`executed=193`、`passed=193`、`failed=0`（快照：`target/test262-builtins-array-prototype-map-20260225-v16.json`）。
+- `test262 built-ins/Array/prototype/lastIndexOf` 最新全量：`executed=190`、`passed=190`、`failed=0`（快照：`target/test262-builtins-array-prototype-lastIndexOf-20260225-v16.json`）。
+- `test262 built-ins/Array --max-cases 2000` 最新采样：`executed=2000`、`passed=1547`、`failed=453`（快照：`target/test262-builtins-array-20260225-v16-s2000.json`；上一版 `v13-s2000` 为 `1373/627`）。
 - 本轮新增语义收敛：
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `Array` 失败簇首轮收敛：补齐 `Array.from`（迭代器/array-like 双路径 + mapfn + constructor 分派）、`Array(length)` 非法长度 `RangeError`、`Array.isArray`（Array marker）和 `Array.prototype.splice` 最小路径；同时修复 `NativeFunction` 属性读取的原型链回退并补回 `Object.__tdzMarker` 自有属性声明，消除 for-in/for-of 回归。
@@ -30,6 +33,7 @@
   - `Array.prototype.concat/copyWithin/every` 对齐 QuickJS 主路径：补齐 `ToObject(this)`、`ArraySpeciesCreate` 最小行为、hole 传播与 `copyWithin` 删除分支、`every` 的 `LengthOfArrayLike` 与 callback 执行顺序（先取 `length` 再校验 callback）；`concat`(14/0)、`copyWithin`(12/0)、`every`(210/0) 子目录清零。
   - `Array.prototype.fill/filter/find/findIndex/forEach` 主路径补齐：统一 `ToObject(this)` + `LengthOfArrayLike` + callback 调用顺序/参数，并补齐 `find/findIndex` 对 hole 的逐索引访问语义；对应子目录 `fill`(8/0)、`filter`(220/0)、`find`(11/0)、`findIndex`(11/0)、`forEach`(182/0) 清零。
   - `Array.prototype.indexOf/join` 边界语义补齐：`indexOf` 接入 runtime `ToLength/ToInteger` 转换链路；`join` 改为 receiver 驱动路径并补齐 separator/元素 `ToPrimitive(..., String)` 顺序（空数组也先转换 separator）。`indexOf`(192/0)、`join`(16/0) 子目录清零。
+  - `Array.prototype.map/lastIndexOf` 再收敛：`map` 补齐 array-like generic 路径与 species 构造长度传递（`ArraySpeciesCreate` 的长度边界跟随 `ToLength`）；`lastIndexOf` 修复 `fromIndex` 参数“显式传入 `undefined/NaN` 时按 `+0`，仅缺参时默认 `len-1`”语义。对应 `map`(193/0)、`lastIndexOf`(190/0) 子目录清零。
   - `Array.prototype.entries` 迭代器补齐“耗尽后不可复活”语义（对齐 test262 `iteration-mutable`），并新增 VM 回归测试。
   - `Number.MAX_SAFE_INTEGER/MIN_SAFE_INTEGER` 常量已接入（含属性特性与默认键集合），支撑大长度 array-like 边界测试。
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
