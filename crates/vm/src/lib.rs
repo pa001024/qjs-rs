@@ -176,9 +176,8 @@ enum HostFunction {
     JsonStringify,
     JsonParse,
     ArrayPush(ObjectId),
-    ArrayForEach(ObjectId),
+    ArrayForEachThis,
     ArrayReduce(ObjectId),
-    ArrayJoin(ObjectId),
     ArrayJoinThis,
     ArrayConcatThis,
     ArrayPopThis,
@@ -188,6 +187,10 @@ enum HostFunction {
     ArrayFrom,
     ArrayOf,
     ArrayEveryThis,
+    ArrayFilterThis,
+    ArrayFillThis,
+    ArrayFindThis,
+    ArrayFindIndexThis,
     ArrayCopyWithinThis,
     ArrayKeysThis,
     ArrayEntriesThis,
@@ -886,9 +889,7 @@ impl Vm {
                 self.gc_mark_stack.push(producer);
             }
             HostFunction::ArrayPush(object_id)
-            | HostFunction::ArrayForEach(object_id)
             | HostFunction::ArrayReduce(object_id)
-            | HostFunction::ArrayJoin(object_id)
             | HostFunction::ArrayReverse(object_id)
             | HostFunction::ArraySort(object_id)
             | HostFunction::DateToString(object_id)
@@ -925,6 +926,7 @@ impl Vm {
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
             | HostFunction::ArrayConcatThis
+            | HostFunction::ArrayForEachThis
             | HostFunction::ErrorToStringThis
             | HostFunction::DateGetFullYearThis
             | HostFunction::DateGetMonthThis
@@ -950,6 +952,10 @@ impl Vm {
             | HostFunction::ArrayFrom
             | HostFunction::ArrayOf
             | HostFunction::ArrayEveryThis
+            | HostFunction::ArrayFilterThis
+            | HostFunction::ArrayFillThis
+            | HostFunction::ArrayFindThis
+            | HostFunction::ArrayFindIndexThis
             | HostFunction::ArrayCopyWithinThis
             | HostFunction::ArrayKeysThis
             | HostFunction::ArrayEntriesThis
@@ -3844,6 +3850,213 @@ impl Vm {
         Ok(JsValue::Bool(true))
     }
 
+    fn execute_array_for_each_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.forEach called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.forEach callback must be callable",
+            ));
+        }
+        let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        for index in 0..length {
+            let key = index.to_string();
+            if !self.has_property_on_receiver(&target, &key, realm)? {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            let _ = self.execute_callable(
+                callback.clone(),
+                Some(callback_this.clone()),
+                vec![value, JsValue::Number(index as f64), target.clone()],
+                realm,
+                caller_strict,
+            )?;
+        }
+        Ok(JsValue::Undefined)
+    }
+
+    fn execute_array_find_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+        return_index: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.find called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.find/findIndex callback must be callable",
+            ));
+        }
+        let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        for index in 0..length {
+            let key = index.to_string();
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            let matched = self.execute_callable(
+                callback.clone(),
+                Some(callback_this.clone()),
+                vec![value.clone(), JsValue::Number(index as f64), target.clone()],
+                realm,
+                caller_strict,
+            )?;
+            if self.is_truthy(&matched) {
+                if return_index {
+                    return Ok(JsValue::Number(index as f64));
+                }
+                return Ok(value);
+            }
+        }
+        if return_index {
+            Ok(JsValue::Number(-1.0))
+        } else {
+            Ok(JsValue::Undefined)
+        }
+    }
+
+    fn execute_array_filter_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.filter called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.filter callback must be callable",
+            ));
+        }
+        let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let result = self.array_species_create_for_concat(target.clone(), realm, caller_strict)?;
+        let mut to = 0i64;
+
+        for index in 0..length {
+            let key = index.to_string();
+            if !self.has_property_on_receiver(&target, &key, realm)? {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            let keep = self.execute_callable(
+                callback.clone(),
+                Some(callback_this.clone()),
+                vec![value.clone(), JsValue::Number(index as f64), target.clone()],
+                realm,
+                caller_strict,
+            )?;
+            if self.is_truthy(&keep) {
+                self.create_data_property_or_throw(result.clone(), to.to_string(), value, realm)?;
+                to += 1;
+            }
+        }
+
+        let _ = self.set_property_on_receiver(
+            result.clone(),
+            "length".to_string(),
+            JsValue::Number(to as f64),
+            realm,
+        )?;
+        Ok(result)
+    }
+
+    fn execute_array_fill_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        fn to_integer_or_infinity(number: f64) -> f64 {
+            if number.is_nan() || number == 0.0 {
+                0.0
+            } else if number.is_infinite() {
+                number
+            } else {
+                number.trunc()
+            }
+        }
+
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.fill called on null or undefined",
+        )?;
+        let fill_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let start_index = match args.get(1) {
+            Some(value) => to_integer_or_infinity(self.coerce_number_runtime(
+                value.clone(),
+                realm,
+                caller_strict,
+            )?),
+            None => 0.0,
+        };
+        let end_index = match args.get(2) {
+            Some(JsValue::Undefined) | None => length as f64,
+            Some(value) => to_integer_or_infinity(self.coerce_number_runtime(
+                value.clone(),
+                realm,
+                caller_strict,
+            )?),
+        };
+
+        let normalize_index = |index: f64, len: i64| -> i64 {
+            if index.is_sign_negative() {
+                ((len as f64) + index).max(0.0) as i64
+            } else {
+                index.min(len as f64) as i64
+            }
+        };
+
+        let start = normalize_index(start_index, length);
+        let end = normalize_index(end_index, length);
+        if start >= end {
+            return Ok(target);
+        }
+
+        for index in start..end {
+            let _ = self.set_property_on_receiver(
+                target.clone(),
+                index.to_string(),
+                fill_value.clone(),
+                realm,
+            )?;
+        }
+        Ok(target)
+    }
+
     fn execute_array_copy_within_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -4335,53 +4548,6 @@ impl Vm {
                     });
                 Ok(JsValue::Number(length as f64))
             }
-            HostFunction::ArrayForEach(object_id) => {
-                let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
-                if !Self::is_callable_value(&callback) {
-                    return Err(VmError::NotCallable);
-                }
-                let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
-                let (length, indexed_values) = {
-                    let object = self
-                        .objects
-                        .get(&object_id)
-                        .ok_or(VmError::UnknownObject(object_id))?;
-                    let length = object
-                        .properties
-                        .get("length")
-                        .map(|value| self.to_number(value))
-                        .unwrap_or(0.0)
-                        .max(0.0) as usize;
-                    let indexed_values = (0..length)
-                        .map(|index| {
-                            let key = index.to_string();
-                            object
-                                .properties
-                                .get(&key)
-                                .cloned()
-                                .map(|value| (index, value))
-                        })
-                        .collect::<Vec<_>>();
-                    (length, indexed_values)
-                };
-                for maybe_entry in indexed_values.into_iter().take(length) {
-                    let Some((index, value)) = maybe_entry else {
-                        continue;
-                    };
-                    let _ = self.execute_callable(
-                        callback.clone(),
-                        Some(callback_this.clone()),
-                        vec![
-                            value,
-                            JsValue::Number(index as f64),
-                            JsValue::Object(object_id),
-                        ],
-                        realm,
-                        caller_strict,
-                    )?;
-                }
-                Ok(JsValue::Undefined)
-            }
             HostFunction::ArrayReduce(object_id) => {
                 let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if !Self::is_callable_value(&callback) {
@@ -4445,27 +4611,34 @@ impl Vm {
                 }
                 Ok(accumulator)
             }
-            HostFunction::ArrayJoin(object_id) => {
+            HostFunction::ArrayJoinThis => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Array.prototype.join called on null or undefined",
+                )?;
+                let length_value =
+                    self.get_property_from_receiver(target.clone(), "length", realm)?;
+                let length_number =
+                    self.coerce_number_runtime(length_value, realm, caller_strict)?;
+                let length = Self::to_length_from_number(length_number);
                 let separator = match args.first() {
                     None | Some(JsValue::Undefined) => ",".to_string(),
-                    Some(value) => self.coerce_to_string(value),
-                };
-                self.execute_array_join(object_id, &separator)
-            }
-            HostFunction::ArrayJoinThis => {
-                let receiver_id = match this_arg {
-                    Some(JsValue::Object(id)) => id,
-                    _ => {
-                        return Err(VmError::TypeError(
-                            "Array.prototype.join receiver must be object",
-                        ));
+                    Some(value) => {
+                        self.coerce_to_string_runtime(value.clone(), realm, caller_strict)?
                     }
                 };
-                let separator = match args.first() {
-                    None | Some(JsValue::Undefined) => ",".to_string(),
-                    Some(value) => self.coerce_to_string(value),
-                };
-                self.execute_array_join(receiver_id, &separator)
+
+                let mut parts = Vec::with_capacity(length.max(0) as usize);
+                for index in 0..length {
+                    let value =
+                        self.get_property_from_receiver(target.clone(), &index.to_string(), realm)?;
+                    let part = match value {
+                        JsValue::Undefined | JsValue::Null => String::new(),
+                        other => self.coerce_to_string_runtime(other, realm, caller_strict)?,
+                    };
+                    parts.push(part);
+                }
+                Ok(JsValue::String(parts.join(&separator)))
             }
             HostFunction::ArrayPopThis => {
                 let receiver_id = match this_arg {
@@ -4583,10 +4756,10 @@ impl Vm {
                 self.create_array_from_values(removed)
             }
             HostFunction::ArrayIndexOfThis => {
-                self.execute_array_index_lookup(this_arg, &args, realm, false)
+                self.execute_array_index_lookup(this_arg, &args, realm, false, caller_strict)
             }
             HostFunction::ArrayLastIndexOfThis => {
-                self.execute_array_index_lookup(this_arg, &args, realm, true)
+                self.execute_array_index_lookup(this_arg, &args, realm, true, caller_strict)
             }
             HostFunction::ArrayFrom => {
                 self.execute_array_from_this(this_arg, &args, realm, caller_strict)
@@ -4596,6 +4769,21 @@ impl Vm {
             }
             HostFunction::ArrayEveryThis => {
                 self.execute_array_every_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayForEachThis => {
+                self.execute_array_for_each_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayFilterThis => {
+                self.execute_array_filter_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayFillThis => {
+                self.execute_array_fill_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayFindThis => {
+                self.execute_array_find_this(this_arg, &args, realm, caller_strict, false)
+            }
+            HostFunction::ArrayFindIndexThis => {
+                self.execute_array_find_this(this_arg, &args, realm, caller_strict, true)
             }
             HostFunction::ArrayCopyWithinThis => {
                 self.execute_array_copy_within_this(this_arg, &args, realm, caller_strict)
@@ -8529,6 +8717,9 @@ impl Vm {
                         | "indexOf"
                         | "lastIndexOf"
                         | "every"
+                        | "fill"
+                        | "find"
+                        | "findIndex"
                         | "some"
                         | "forEach"
                         | "map"
@@ -9559,6 +9750,10 @@ impl Vm {
                     || (property == "concat" && object.properties.contains_key("length"))
                     || (property == "copyWithin" && object.properties.contains_key("length"))
                     || (property == "every" && object.properties.contains_key("length"))
+                    || (property == "filter" && object.properties.contains_key("length"))
+                    || (property == "fill" && object.properties.contains_key("length"))
+                    || (property == "find" && object.properties.contains_key("length"))
+                    || (property == "findIndex" && object.properties.contains_key("length"))
                     || (property == "forEach" && object.properties.contains_key("length"))
                     || (property == "reduce" && object.properties.contains_key("length"))
                     || (property == "join" && object.properties.contains_key("length"))
@@ -9981,17 +10176,29 @@ impl Vm {
         if property == "every" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayEveryThis));
         }
+        if property == "filter" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFilterThis));
+        }
+        if property == "fill" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
+        }
+        if property == "find" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFindThis));
+        }
+        if property == "findIndex" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFindIndexThis));
+        }
         if property == "copyWithin" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayCopyWithinThis));
         }
         if property == "forEach" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayForEachThis));
         }
         if property == "reduce" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
         if property == "join" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayJoin(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayJoinThis));
         }
         if property == "splice" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArraySpliceThis));
@@ -10918,10 +11125,15 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
-            let join = self.create_host_function_value(HostFunction::ArrayJoin(id));
+            let join = self.create_host_function_value(HostFunction::ArrayJoinThis);
             let to_string = self.create_host_function_value(HostFunction::ArrayJoinThis);
             let concat = self.create_host_function_value(HostFunction::ArrayConcatThis);
             let every = self.create_host_function_value(HostFunction::ArrayEveryThis);
+            let for_each = self.create_host_function_value(HostFunction::ArrayForEachThis);
+            let filter = self.create_host_function_value(HostFunction::ArrayFilterThis);
+            let fill = self.create_host_function_value(HostFunction::ArrayFillThis);
+            let find = self.create_host_function_value(HostFunction::ArrayFindThis);
+            let find_index = self.create_host_function_value(HostFunction::ArrayFindIndexThis);
             let copy_within = self.create_host_function_value(HostFunction::ArrayCopyWithinThis);
             let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
             let sort = self.create_host_function_value(HostFunction::ArraySort(id));
@@ -10931,6 +11143,11 @@ impl Vm {
             let last_index_of = self.create_host_function_value(HostFunction::ArrayLastIndexOfThis);
             self.set_builtin_function_length(&concat, 1.0);
             self.set_builtin_function_length(&every, 1.0);
+            self.set_builtin_function_length(&for_each, 1.0);
+            self.set_builtin_function_length(&filter, 1.0);
+            self.set_builtin_function_length(&fill, 1.0);
+            self.set_builtin_function_length(&find, 1.0);
+            self.set_builtin_function_length(&find_index, 1.0);
             self.set_builtin_function_length(&copy_within, 2.0);
             self.set_builtin_function_length(&splice, 2.0);
             self.set_builtin_function_length(&index_of, 1.0);
@@ -11000,6 +11217,53 @@ impl Vm {
                 object.properties.insert("every".to_string(), every);
                 object.property_attributes.insert(
                     "every".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("filter".to_string(), filter);
+                object.property_attributes.insert(
+                    "filter".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("fill".to_string(), fill);
+                object.property_attributes.insert(
+                    "fill".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("find".to_string(), find);
+                object.property_attributes.insert(
+                    "find".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("findIndex".to_string(), find_index);
+                object.property_attributes.insert(
+                    "findIndex".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("forEach".to_string(), for_each);
+                object.property_attributes.insert(
+                    "forEach".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -11696,6 +11960,43 @@ impl Vm {
         }
     }
 
+    fn coerce_to_string_runtime(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<String, VmError> {
+        match value {
+            JsValue::Object(object_id) => {
+                if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                    return Ok(self.coerce_to_string(&boxed));
+                }
+                if self.objects.get(&object_id).is_some_and(|object| {
+                    object.properties.contains_key("length")
+                        && object.prototype == self.array_prototype_id
+                }) {
+                    return match self.execute_array_join(object_id, ",")? {
+                        JsValue::String(text) => Ok(text),
+                        other => Ok(self.coerce_to_string(&other)),
+                    };
+                }
+                let primitive =
+                    self.ordinary_to_primitive_for_add(object_id, true, realm, caller_strict)?;
+                Ok(self.coerce_to_string(&primitive))
+            }
+            JsValue::Function(closure_id) => {
+                let primitive = self.ordinary_to_primitive_for_function(
+                    closure_id,
+                    true,
+                    realm,
+                    caller_strict,
+                )?;
+                Ok(self.coerce_to_string(&primitive))
+            }
+            other => Ok(self.coerce_to_string(&other)),
+        }
+    }
+
     fn ordinary_to_primitive_for_add(
         &mut self,
         object_id: ObjectId,
@@ -12368,17 +12669,29 @@ impl Vm {
         if property == "every" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayEveryThis));
         }
+        if property == "filter" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFilterThis));
+        }
+        if property == "fill" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
+        }
+        if property == "find" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFindThis));
+        }
+        if property == "findIndex" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFindIndexThis));
+        }
         if property == "copyWithin" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayCopyWithinThis));
         }
         if property == "forEach" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayForEachThis));
         }
         if property == "reduce" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
         if property == "join" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayJoin(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayJoinThis));
         }
         if property == "splice" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArraySpliceThis));
@@ -13589,21 +13902,30 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
         from_end: bool,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let target = self.object_prototype_this_object(
             this_arg,
             "Array.prototype indexOf/lastIndexOf receiver must be object",
         )?;
         let search = args.first().cloned().unwrap_or(JsValue::Undefined);
-        let length = self.array_like_length_from_value(&target, realm)?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
         if length <= 0 {
             return Ok(JsValue::Number(-1.0));
         }
 
-        let from_index = args
-            .get(1)
-            .map(|value| self.to_number(value))
-            .unwrap_or(if from_end { (length - 1) as f64 } else { 0.0 });
+        let from_index = match args.get(1) {
+            Some(value) => self.coerce_number_runtime(value.clone(), realm, caller_strict)?,
+            None => {
+                if from_end {
+                    (length - 1) as f64
+                } else {
+                    0.0
+                }
+            }
+        };
         let index_from_number = if from_index.is_nan() {
             if from_end { length - 1 } else { 0 }
         } else {
@@ -16865,6 +17187,90 @@ mod tests {
     fn array_every_supports_generic_array_like_values() {
         let script = parse_script(
             "var obj = {0: 1, length: 1}; function cb(v, i, o) { return v === 1 && i === 0 && o === obj; } typeof Array.prototype.every === 'function' && Array.prototype.every.call(obj, cb) === true;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_filter_supports_generic_array_like_values() {
+        let script = parse_script(
+            "var obj = {0: 1, 1: 2, length: 2}; var out = Array.prototype.filter.call(obj, function(v) { return v > 1; }); Array.isArray(out) && out.length === 1 && out[0] === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_fill_returns_receiver_and_supports_primitive_this() {
+        let script = parse_script(
+            "var arr = [0, 1, 2]; var ret = arr.fill(9, 1, 2); var boxed = Array.prototype.fill.call(true); ret === arr && arr[0] === 0 && arr[1] === 9 && arr[2] === 2 && (boxed instanceof Boolean);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Boolean",
+            JsValue::NativeFunction(NativeFunction::BooleanConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_find_and_find_index_cover_holes() {
+        let script = parse_script(
+            "var arr = [undefined, , , 'foo']; var called = 0; var idx = arr.findIndex(function(v) { called++; return v === 'foo'; }); called === 4 && idx === 3 && arr.find(function(v) { return v === 'foo'; }) === 'foo';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_for_each_supports_generic_receivers() {
+        let script = parse_script(
+            "var obj = {0: 1, 2: 3, length: 3}; var sum = 0; Array.prototype.forEach.call(obj, function(v) { sum += v; }); sum === 4;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);

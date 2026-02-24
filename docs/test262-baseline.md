@@ -122,6 +122,14 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `built-ins/Array/prototype/copyWithin (v3)`: discovered=39, executed=12, skipped=27, passed=12, failed=0
 - `built-ins/Array/prototype/every (v3)`: discovered=218, executed=210, skipped=8, passed=210, failed=0
 - `built-ins/Array --max-cases 300 (v8-s300)`: discovered=3081, executed=300, skipped=261, passed=300, failed=0
+- `built-ins/Array/prototype/fill (v1)`: discovered=22, executed=8, skipped=14, passed=8, failed=0
+- `built-ins/Array/prototype/filter (v1)`: discovered=242, executed=220, skipped=22, passed=220, failed=0
+- `built-ins/Array/prototype/find (v1)`: discovered=23, executed=11, skipped=12, passed=11, failed=0
+- `built-ins/Array/prototype/findIndex (v1)`: discovered=23, executed=11, skipped=12, passed=11, failed=0
+- `built-ins/Array/prototype/forEach (v1)`: discovered=190, executed=182, skipped=8, passed=182, failed=0
+- `built-ins/Array/prototype/indexOf (v1)`: discovered=201, executed=192, skipped=9, passed=192, failed=0
+- `built-ins/Array/prototype/join (v2)`: discovered=23, executed=16, skipped=7, passed=16, failed=0
+- `built-ins/Array --max-cases 1000 (v12-s1000)`: discovered=3081, executed=1000, skipped=467, passed=1000, failed=0
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0

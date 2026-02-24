@@ -105,7 +105,15 @@
   - `built-ins/Array/prototype/concat`: `14/0`（`target/test262-array-prototype-concat-20260225-v2.json`）
   - `built-ins/Array/prototype/copyWithin`: `12/0`（`target/test262-array-prototype-copyWithin-20260225-v3.json`）
   - `built-ins/Array/prototype/every`: `210/0`（`target/test262-array-prototype-every-20260225-v3.json`）
+  - `built-ins/Array/prototype/fill`: `8/0`（`target/test262-array-prototype-fill-20260225-v1.json`）
+  - `built-ins/Array/prototype/filter`: `220/0`（`target/test262-array-prototype-filter-20260225-v1.json`）
+  - `built-ins/Array/prototype/find`: `11/0`（`target/test262-array-prototype-find-20260225-v1.json`）
+  - `built-ins/Array/prototype/findIndex`: `11/0`（`target/test262-array-prototype-findIndex-20260225-v1.json`）
+  - `built-ins/Array/prototype/forEach`: `182/0`（`target/test262-array-prototype-forEach-20260225-v1.json`）
+  - `built-ins/Array/prototype/indexOf`: `192/0`（`target/test262-array-prototype-indexOf-20260225-v1.json`）
+  - `built-ins/Array/prototype/join`: `16/0`（`target/test262-array-prototype-join-20260225-v2.json`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
+  - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array.length` 超时根因已清理：按 QuickJS `set_array_length` 方向改为“仅删除已存在索引属性”，避免稀疏大索引 O(range) 退化。
 - 下一轮并行模块拆分（建议 4 条线并行，每线 2~3h）：
   - Track F（Proxy 正式化）：补齐 `get/set/has/deleteProperty/getOwnPropertyDescriptor/defineProperty/ownKeys` trap 与不变量校验，对照 QuickJS `JSProxy` 路径。
