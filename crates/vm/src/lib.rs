@@ -175,9 +175,10 @@ enum HostFunction {
     FunctionPrototype,
     JsonStringify,
     JsonParse,
-    ArrayPush(ObjectId),
+    ArrayPushThis,
     ArrayForEachThis,
-    ArrayReduce(ObjectId),
+    ArrayReduceThis,
+    ArrayReduceRightThis,
     ArrayJoinThis,
     ArrayConcatThis,
     ArrayPopThis,
@@ -889,9 +890,7 @@ impl Vm {
             HostFunction::GeneratorFactory { producer } => {
                 self.gc_mark_stack.push(producer);
             }
-            HostFunction::ArrayPush(object_id)
-            | HostFunction::ArrayReduce(object_id)
-            | HostFunction::ArrayReverse(object_id)
+            HostFunction::ArrayReverse(object_id)
             | HostFunction::ArraySort(object_id)
             | HostFunction::DateToString(object_id)
             | HostFunction::DateValueOf(object_id) => {
@@ -946,7 +945,10 @@ impl Vm {
             | HostFunction::ReflectDefineProperty
             | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ArrayJoinThis
+            | HostFunction::ArrayPushThis
             | HostFunction::ArrayPopThis
+            | HostFunction::ArrayReduceThis
+            | HostFunction::ArrayReduceRightThis
             | HostFunction::ArraySpliceThis
             | HostFunction::ArrayIndexOfThis
             | HostFunction::ArrayLastIndexOfThis
@@ -4037,6 +4039,212 @@ impl Vm {
         Ok(result)
     }
 
+    fn execute_array_push_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.push called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+        let arg_count =
+            i64::try_from(args.len()).map_err(|_| VmError::TypeError("invalid array length"))?;
+        let new_length = length
+            .checked_add(arg_count)
+            .filter(|next| *next <= MAX_SAFE_INTEGER_F64 as i64)
+            .ok_or(VmError::TypeError("invalid array length"))?;
+
+        let mut index = length;
+        for arg in args {
+            let key = index.to_string();
+            self.ensure_assign_target_writable(&target, &key)?;
+            let _ = self.set_property_on_receiver(target.clone(), key, arg.clone(), realm)?;
+            index += 1;
+        }
+
+        self.ensure_assign_target_writable(&target, "length")?;
+        let _ = self.set_property_on_receiver(
+            target,
+            "length".to_string(),
+            JsValue::Number(new_length as f64),
+            realm,
+        )?;
+        Ok(JsValue::Number(new_length as f64))
+    }
+
+    fn execute_array_pop_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.pop called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+        if length <= 0 {
+            self.ensure_assign_target_writable(&target, "length")?;
+            let _ = self.set_property_on_receiver(
+                target,
+                "length".to_string(),
+                JsValue::Number(0.0),
+                realm,
+            )?;
+            return Ok(JsValue::Undefined);
+        }
+
+        let new_length = length - 1;
+        let index_key = new_length.to_string();
+        let value = self.get_property_from_receiver(target.clone(), &index_key, realm)?;
+        let deleted = self.delete_property(target.clone(), index_key)?;
+        if !deleted {
+            return Err(VmError::TypeError(
+                "Array.prototype.pop could not delete property",
+            ));
+        }
+
+        self.ensure_assign_target_writable(&target, "length")?;
+        let _ = self.set_property_on_receiver(
+            target,
+            "length".to_string(),
+            JsValue::Number(new_length as f64),
+            realm,
+        )?;
+        Ok(value)
+    }
+
+    fn execute_array_reduce_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.reduce called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.reduce callback must be callable",
+            ));
+        }
+        let mut index = 0i64;
+        let mut accumulator = if args.len() >= 2 {
+            args[1].clone()
+        } else {
+            let mut initial = None;
+            while index < length {
+                let key = index.to_string();
+                if self.has_property_on_receiver(&target, &key, realm)? {
+                    initial = Some(self.get_property_from_receiver(target.clone(), &key, realm)?);
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            initial.ok_or(VmError::TypeError(
+                "Array.prototype.reduceRight of empty array with no initial value",
+            ))?
+        };
+
+        while index < length {
+            let key = index.to_string();
+            if self.has_property_on_receiver(&target, &key, realm)? {
+                let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+                accumulator = self.execute_callable(
+                    callback.clone(),
+                    Some(JsValue::Undefined),
+                    vec![
+                        accumulator,
+                        value,
+                        JsValue::Number(index as f64),
+                        target.clone(),
+                    ],
+                    realm,
+                    caller_strict,
+                )?;
+            }
+            index += 1;
+        }
+        Ok(accumulator)
+    }
+
+    fn execute_array_reduce_right_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.reduceRight called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.reduceRight callback must be callable",
+            ));
+        }
+
+        let mut index = length - 1;
+        let mut accumulator = if args.len() >= 2 {
+            args[1].clone()
+        } else {
+            let mut initial = None;
+            while index >= 0 {
+                let key = index.to_string();
+                if self.has_property_on_receiver(&target, &key, realm)? {
+                    initial = Some(self.get_property_from_receiver(target.clone(), &key, realm)?);
+                    index -= 1;
+                    break;
+                }
+                index -= 1;
+            }
+            initial.ok_or(VmError::TypeError(
+                "Array.prototype.reduce of empty array with no initial value",
+            ))?
+        };
+
+        while index >= 0 {
+            let key = index.to_string();
+            if self.has_property_on_receiver(&target, &key, realm)? {
+                let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+                accumulator = self.execute_callable(
+                    callback.clone(),
+                    Some(JsValue::Undefined),
+                    vec![
+                        accumulator,
+                        value,
+                        JsValue::Number(index as f64),
+                        target.clone(),
+                    ],
+                    realm,
+                    caller_strict,
+                )?;
+            }
+            index -= 1;
+        }
+        Ok(accumulator)
+    }
+
     fn execute_array_fill_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -4562,102 +4770,14 @@ impl Vm {
             HostFunction::FunctionPrototype => Ok(JsValue::Undefined),
             HostFunction::JsonStringify => Ok(self.execute_json_stringify(args.first())),
             HostFunction::JsonParse => Ok(self.execute_json_parse(args.first())),
-            HostFunction::ArrayPush(object_id) => {
-                let mut length = self
-                    .objects
-                    .get(&object_id)
-                    .and_then(|object| object.properties.get("length"))
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0)
-                    .max(0.0) as usize;
-                let object = self
-                    .objects
-                    .get_mut(&object_id)
-                    .ok_or(VmError::UnknownObject(object_id))?;
-                for arg in args {
-                    let key = length.to_string();
-                    object.properties.insert(key.clone(), arg);
-                    object
-                        .property_attributes
-                        .entry(key)
-                        .or_insert_with(PropertyAttributes::default);
-                    length += 1;
-                }
-                object
-                    .properties
-                    .insert("length".to_string(), JsValue::Number(length as f64));
-                object
-                    .property_attributes
-                    .entry("length".to_string())
-                    .or_insert(PropertyAttributes {
-                        writable: true,
-                        enumerable: false,
-                        configurable: false,
-                    });
-                Ok(JsValue::Number(length as f64))
+            HostFunction::ArrayPushThis => {
+                self.execute_array_push_this(this_arg, &args, realm, caller_strict)
             }
-            HostFunction::ArrayReduce(object_id) => {
-                let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
-                if !Self::is_callable_value(&callback) {
-                    return Err(VmError::NotCallable);
-                }
-                let length = self
-                    .objects
-                    .get(&object_id)
-                    .map(|object| {
-                        object
-                            .properties
-                            .get("length")
-                            .map(|value| self.to_number(value))
-                            .unwrap_or(0.0)
-                            .max(0.0) as usize
-                    })
-                    .ok_or(VmError::UnknownObject(object_id))?;
-                let mut index = 0usize;
-                let mut accumulator = if args.len() >= 2 {
-                    args[1].clone()
-                } else {
-                    let mut initial = None;
-                    while index < length {
-                        let key = index.to_string();
-                        let value = self
-                            .objects
-                            .get(&object_id)
-                            .and_then(|object| object.properties.get(&key).cloned());
-                        if let Some(value) = value {
-                            initial = Some(value);
-                            index += 1;
-                            break;
-                        }
-                        index += 1;
-                    }
-                    initial.ok_or(VmError::TypeError(
-                        "Array.prototype.reduce of empty array with no initial value",
-                    ))?
-                };
-                while index < length {
-                    let key = index.to_string();
-                    if let Some(value) = self
-                        .objects
-                        .get(&object_id)
-                        .and_then(|object| object.properties.get(&key).cloned())
-                    {
-                        accumulator = self.execute_callable(
-                            callback.clone(),
-                            Some(JsValue::Undefined),
-                            vec![
-                                accumulator,
-                                value,
-                                JsValue::Number(index as f64),
-                                JsValue::Object(object_id),
-                            ],
-                            realm,
-                            caller_strict,
-                        )?;
-                    }
-                    index += 1;
-                }
-                Ok(accumulator)
+            HostFunction::ArrayReduceThis => {
+                self.execute_array_reduce_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayReduceRightThis => {
+                self.execute_array_reduce_right_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::ArrayJoinThis => {
                 let target = self.object_prototype_this_object(
@@ -4689,42 +4809,7 @@ impl Vm {
                 Ok(JsValue::String(parts.join(&separator)))
             }
             HostFunction::ArrayPopThis => {
-                let receiver_id = match this_arg {
-                    Some(JsValue::Object(id)) => id,
-                    _ => {
-                        return Err(VmError::TypeError(
-                            "Array.prototype.pop receiver must be object",
-                        ));
-                    }
-                };
-                let length = self
-                    .objects
-                    .get(&receiver_id)
-                    .and_then(|object| object.properties.get("length").cloned())
-                    .map(|value| self.to_number(&value))
-                    .unwrap_or(0.0)
-                    .max(0.0) as usize;
-                let value = {
-                    let object = self
-                        .objects
-                        .get_mut(&receiver_id)
-                        .ok_or(VmError::UnknownObject(receiver_id))?;
-                    if length == 0 {
-                        object
-                            .properties
-                            .insert("length".to_string(), JsValue::Number(0.0));
-                        JsValue::Undefined
-                    } else {
-                        let index = length - 1;
-                        let key = index.to_string();
-                        let value = object.properties.remove(&key).unwrap_or(JsValue::Undefined);
-                        object
-                            .properties
-                            .insert("length".to_string(), JsValue::Number(index as f64));
-                        value
-                    }
-                };
-                Ok(value)
+                self.execute_array_pop_this(this_arg, realm, caller_strict)
             }
             HostFunction::ArraySpliceThis => {
                 let receiver_id = match this_arg {
@@ -9798,6 +9883,7 @@ impl Vm {
                 }
                 Ok(matches!(property, "hasOwnProperty" | "isPrototypeOf")
                     || (property == "push" && object.properties.contains_key("length"))
+                    || (property == "pop" && object.properties.contains_key("length"))
                     || (property == "concat" && object.properties.contains_key("length"))
                     || (property == "copyWithin" && object.properties.contains_key("length"))
                     || (property == "every" && object.properties.contains_key("length"))
@@ -9808,6 +9894,7 @@ impl Vm {
                     || (property == "findIndex" && object.properties.contains_key("length"))
                     || (property == "forEach" && object.properties.contains_key("length"))
                     || (property == "reduce" && object.properties.contains_key("length"))
+                    || (property == "reduceRight" && object.properties.contains_key("length"))
                     || (property == "join" && object.properties.contains_key("length"))
                     || (property == "splice" && object.properties.contains_key("length"))
                     || (property == "reverse" && object.properties.contains_key("length"))
@@ -10217,7 +10304,7 @@ impl Vm {
             }
         }
         if property == "push" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayPushThis));
         }
         if property == "pop" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
@@ -10250,7 +10337,10 @@ impl Vm {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEachThis));
         }
         if property == "reduce" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayReduceThis));
+        }
+        if property == "reduceRight" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayReduceRightThis));
         }
         if property == "join" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayJoinThis));
@@ -11182,6 +11272,8 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             let join = self.create_host_function_value(HostFunction::ArrayJoinThis);
             let to_string = self.create_host_function_value(HostFunction::ArrayJoinThis);
+            let push = self.create_host_function_value(HostFunction::ArrayPushThis);
+            let pop = self.create_host_function_value(HostFunction::ArrayPopThis);
             let concat = self.create_host_function_value(HostFunction::ArrayConcatThis);
             let every = self.create_host_function_value(HostFunction::ArrayEveryThis);
             let for_each = self.create_host_function_value(HostFunction::ArrayForEachThis);
@@ -11193,10 +11285,13 @@ impl Vm {
             let copy_within = self.create_host_function_value(HostFunction::ArrayCopyWithinThis);
             let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
             let sort = self.create_host_function_value(HostFunction::ArraySort(id));
-            let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
+            let reduce = self.create_host_function_value(HostFunction::ArrayReduceThis);
+            let reduce_right = self.create_host_function_value(HostFunction::ArrayReduceRightThis);
             let splice = self.create_host_function_value(HostFunction::ArraySpliceThis);
             let index_of = self.create_host_function_value(HostFunction::ArrayIndexOfThis);
             let last_index_of = self.create_host_function_value(HostFunction::ArrayLastIndexOfThis);
+            self.set_builtin_function_length(&push, 1.0);
+            self.set_builtin_function_length(&pop, 0.0);
             self.set_builtin_function_length(&concat, 1.0);
             self.set_builtin_function_length(&every, 1.0);
             self.set_builtin_function_length(&for_each, 1.0);
@@ -11209,6 +11304,8 @@ impl Vm {
             self.set_builtin_function_length(&splice, 2.0);
             self.set_builtin_function_length(&index_of, 1.0);
             self.set_builtin_function_length(&last_index_of, 1.0);
+            self.set_builtin_function_length(&reduce, 1.0);
+            self.set_builtin_function_length(&reduce_right, 1.0);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -11256,6 +11353,24 @@ impl Vm {
                 object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("push".to_string(), push);
+                object.property_attributes.insert(
+                    "push".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("pop".to_string(), pop);
+                object.property_attributes.insert(
+                    "pop".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -11377,6 +11492,17 @@ impl Vm {
                 object.properties.insert("reduce".to_string(), reduce);
                 object.property_attributes.insert(
                     "reduce".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("reduceRight".to_string(), reduce_right);
+                object.property_attributes.insert(
+                    "reduceRight".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -12724,7 +12850,7 @@ impl Vm {
             }
         }
         if property == "push" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayPushThis));
         }
         if property == "pop" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
@@ -12757,7 +12883,10 @@ impl Vm {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEachThis));
         }
         if property == "reduce" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArrayReduceThis));
+        }
+        if property == "reduceRight" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayReduceRightThis));
         }
         if property == "join" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayJoinThis));
@@ -17332,6 +17461,54 @@ mod tests {
     fn array_last_index_of_uses_zero_for_explicit_undefined_or_nan_from_index() {
         let script = parse_script(
             "var a = [1, 2, 1]; var b = [0, true]; var c = [true, 0]; a.lastIndexOf(2, undefined) === -1 && a.lastIndexOf(1, undefined) === 0 && a.lastIndexOf(1) === 2 && b.lastIndexOf(true, NaN) === -1 && c.lastIndexOf(true, NaN) === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_push_and_pop_support_generic_receivers() {
+        let script = parse_script(
+            "var obj = {}; obj.push = Array.prototype.push; obj.pop = Array.prototype.pop; var a = obj.push(-1); var b = obj.push(-2); var c = obj.pop(); a === 1 && b === 2 && c === -2 && obj.length === 1 && obj[0] === -1 && Array.prototype.push.call(true) === 0 && Array.prototype.pop.call(true) === undefined;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_reduce_supports_array_like_and_inherited_indices() {
+        let script = parse_script(
+            "function callbackfn(prevVal, curVal, idx, obj) { return obj.length === 2; } var obj = { 0: 12, 1: 11, 2: 9, length: 2 }; function Foo() {} Foo.prototype = [1]; var f = new Foo(); Array.prototype.reduce.call(obj, callbackfn, 1) === true && f.reduce(function(v) { return v; }) === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_reduce_right_supports_generic_array_like_values() {
+        let script = parse_script(
+            "var obj = {0: 1, 1: 2, length: 2}; var value = Array.prototype.reduceRight.call(obj, function(acc, v) { return acc * 10 + v; }, 0); value === 21;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
