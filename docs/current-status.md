@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4882`、`failed=118`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v28.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4883`、`failed=117`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v29.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -122,6 +122,8 @@
   - 子集回归（latest+17）：`language/statements/class/subclass` 提升至 `64/13`，`language/statements/for-of` 提升至 `63/13`，`language/statements/class` 提升至 `175/13`，`language` 基线提升至 `4871/129`（快照：`target/test262-language-baseline-5000-20260224-v27.json`）。
   - runtime/builtins 新增 `ArrayBuffer/DataView/Map/Set/Promise/Uint8Array` 最小内建构造器与原型路径：接入 `ArrayBuffer.prototype.slice`、`Map.prototype.set`、`Set.prototype.add`、Promise executor 双回调调用、`Uint8Array` index 写入 `ToUint8` 裁剪与 `Object.prototype.toString` 的 `[object Uint8Array]` 标记。
   - 子集回归（latest+18）：`language/statements/class/subclass` 提升至 `75/2`，`language/statements/class` 提升至 `186/2`，`language` 基线提升至 `4882/118`（快照：`target/test262-language-baseline-5000-20260224-v28.json`）。
+  - VM Date 构造器补齐最小本地日期分量链路（多参数 `new Date(y, m, d)`）并新增 `Date.prototype.getFullYear/getMonth/getDate/getUTCFullYear/getUTCMonth/getUTCDate` host 路径，收敛 class 内建子类化中的 Date 失败簇。
+  - 子集回归（latest+19）：`language/statements/class/subclass` 提升至 `76/1`，`language/statements/class` 提升至 `187/1`，`language` 基线提升至 `4883/117`（快照：`target/test262-language-baseline-5000-20260224-v29.json`）。
 
 ## 3. 分阶段状态
 

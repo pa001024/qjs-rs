@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -166,6 +166,12 @@ enum HostFunction {
     ThrowTypeError,
     DateToString(ObjectId),
     DateValueOf(ObjectId),
+    DateGetFullYearThis,
+    DateGetMonthThis,
+    DateGetDateThis,
+    DateGetUTCFullYearThis,
+    DateGetUTCMonthThis,
+    DateGetUTCDateThis,
     FunctionToString {
         target: JsValue,
     },
@@ -776,6 +782,12 @@ impl Vm {
             | HostFunction::SetAddThis
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
+            | HostFunction::DateGetFullYearThis
+            | HostFunction::DateGetMonthThis
+            | HostFunction::DateGetDateThis
+            | HostFunction::DateGetUTCFullYearThis
+            | HostFunction::DateGetUTCMonthThis
+            | HostFunction::DateGetUTCDateThis
             | HostFunction::ThrowTypeError
             | HostFunction::FunctionPrototype
             | HostFunction::JsonStringify
@@ -2935,6 +2947,68 @@ impl Vm {
         Ok(length as usize)
     }
 
+    fn strict_this_date_object(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.is_date_object(object_id) => Ok(object_id),
+            _ => Err(VmError::TypeError("Date.prototype method called on incompatible")),
+        }
+    }
+
+    fn date_parts_for_object(
+        &self,
+        object_id: ObjectId,
+        utc: bool,
+    ) -> Result<(i32, u32, u32), VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        if !utc {
+            let year = object
+                .properties
+                .get("__dateYear")
+                .map(|value| self.to_number(value) as i32);
+            let month = object
+                .properties
+                .get("__dateMonth")
+                .map(|value| self.to_number(value) as u32);
+            let day = object
+                .properties
+                .get("__dateDay")
+                .map(|value| self.to_number(value) as u32);
+            if let (Some(year), Some(month), Some(day)) = (year, month, day) {
+                return Ok((year, month, day));
+            }
+        }
+        let timestamp = object
+            .properties
+            .get("value")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
+        Ok(Self::utc_date_parts_from_timestamp(timestamp))
+    }
+
+    fn utc_date_parts_from_timestamp(timestamp_ms: f64) -> (i32, u32, u32) {
+        let millis_per_day = 86_400_000.0;
+        let days = (timestamp_ms / millis_per_day).floor() as i64;
+        Self::civil_from_days(days)
+    }
+
+    // Howard Hinnant's civil-from-days algorithm.
+    fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+        let z = days_since_epoch + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        let year = y + if month <= 2 { 1 } else { 0 };
+        (year as i32, (month as u32).saturating_sub(1), day as u32)
+    }
+
     fn execute_string_replace(
         &mut self,
         receiver: String,
@@ -3558,6 +3632,36 @@ impl Vm {
                     .map(|value| self.to_number(value))
                     .unwrap_or(0.0);
                 Ok(JsValue::Number(timestamp))
+            }
+            HostFunction::DateGetFullYearThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (year, _, _) = self.date_parts_for_object(object_id, false)?;
+                Ok(JsValue::Number(year as f64))
+            }
+            HostFunction::DateGetMonthThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (_, month, _) = self.date_parts_for_object(object_id, false)?;
+                Ok(JsValue::Number(month as f64))
+            }
+            HostFunction::DateGetDateThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (_, _, day) = self.date_parts_for_object(object_id, false)?;
+                Ok(JsValue::Number(day as f64))
+            }
+            HostFunction::DateGetUTCFullYearThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (year, _, _) = self.date_parts_for_object(object_id, true)?;
+                Ok(JsValue::Number(year as f64))
+            }
+            HostFunction::DateGetUTCMonthThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (_, month, _) = self.date_parts_for_object(object_id, true)?;
+                Ok(JsValue::Number(month as f64))
+            }
+            HostFunction::DateGetUTCDateThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let (_, _, day) = self.date_parts_for_object(object_id, true)?;
+                Ok(JsValue::Number(day as f64))
             }
             HostFunction::FunctionToString { target } => Ok(JsValue::String(format!(
                 "{}() {{ [native code] }}",
@@ -4719,10 +4823,25 @@ impl Vm {
     }
 
     fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let timestamp = args
-            .first()
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0);
+        let timestamp = if args.is_empty() {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as f64)
+                .unwrap_or(0.0)
+        } else {
+            args.first().map(|value| self.to_number(value)).unwrap_or(0.0)
+        };
+        let local_components = if args.len() >= 2 {
+            let year = self.to_number(&args[0]) as i32;
+            let month = self.to_number(&args[1]) as i32;
+            let day = args
+                .get(2)
+                .map(|value| self.to_number(value))
+                .unwrap_or(1.0) as i32;
+            Some((year, month, day))
+        } else {
+            None
+        };
         let object = self.create_object_value();
         let object_id = match object {
             JsValue::Object(id) => id,
@@ -4767,6 +4886,17 @@ impl Vm {
                 configurable: false,
             },
         );
+        if let Some((year, month, day)) = local_components {
+            target
+                .properties
+                .insert("__dateYear".to_string(), JsValue::Number(year as f64));
+            target
+                .properties
+                .insert("__dateMonth".to_string(), JsValue::Number(month as f64));
+            target
+                .properties
+                .insert("__dateDay".to_string(), JsValue::Number(day as f64));
+        }
         Ok(JsValue::Object(object_id))
     }
 
@@ -7609,6 +7739,15 @@ impl Vm {
         }
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
+            let get_full_year =
+                self.create_host_function_value(HostFunction::DateGetFullYearThis);
+            let get_month = self.create_host_function_value(HostFunction::DateGetMonthThis);
+            let get_date = self.create_host_function_value(HostFunction::DateGetDateThis);
+            let get_utc_full_year =
+                self.create_host_function_value(HostFunction::DateGetUTCFullYearThis);
+            let get_utc_month =
+                self.create_host_function_value(HostFunction::DateGetUTCMonthThis);
+            let get_utc_date = self.create_host_function_value(HostFunction::DateGetUTCDateThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -7660,9 +7799,18 @@ impl Vm {
                     "toLocaleString",
                     "toUTCString",
                 ] {
+                    let value = match method {
+                        "getFullYear" => get_full_year.clone(),
+                        "getMonth" => get_month.clone(),
+                        "getDate" => get_date.clone(),
+                        "getUTCFullYear" => get_utc_full_year.clone(),
+                        "getUTCMonth" => get_utc_month.clone(),
+                        "getUTCDate" => get_utc_date.clone(),
+                        _ => JsValue::NativeFunction(NativeFunction::DatePrototypeMethod),
+                    };
                     object.properties.insert(
                         method.to_string(),
-                        JsValue::NativeFunction(NativeFunction::DatePrototypeMethod),
+                        value,
                     );
                     object.property_attributes.insert(
                         method.to_string(),
