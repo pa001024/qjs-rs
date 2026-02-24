@@ -4369,6 +4369,167 @@ impl Vm {
         Ok(result)
     }
 
+    fn execute_array_splice_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        fn to_integer_or_infinity(number: f64) -> f64 {
+            if number.is_nan() || number == 0.0 {
+                0.0
+            } else if number.is_infinite() {
+                number
+            } else {
+                number.trunc()
+            }
+        }
+
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.splice called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let start_index = args
+            .first()
+            .map(|value| {
+                self.coerce_number_runtime(value.clone(), realm, caller_strict)
+                    .map(to_integer_or_infinity)
+            })
+            .transpose()?
+            .unwrap_or(0.0);
+        let actual_start = if start_index.is_sign_negative() {
+            ((length as f64) + start_index).max(0.0) as i64
+        } else {
+            start_index.min(length as f64) as i64
+        };
+
+        let insert_count = args.len().saturating_sub(2) as i64;
+        let actual_delete_count = if args.len() <= 1 {
+            length - actual_start
+        } else {
+            let delete_count_number = to_integer_or_infinity(self.coerce_number_runtime(
+                args[1].clone(),
+                realm,
+                caller_strict,
+            )?);
+            if delete_count_number.is_sign_negative() {
+                0
+            } else {
+                delete_count_number.min((length - actual_start) as f64) as i64
+            }
+        };
+        let new_length = length - actual_delete_count + insert_count;
+        if new_length > MAX_SAFE_INTEGER_F64 as i64 {
+            return Err(VmError::TypeError("invalid array length"));
+        }
+
+        let result = self.array_species_create_for_concat(
+            target.clone(),
+            actual_delete_count,
+            realm,
+            caller_strict,
+        )?;
+        for index in 0..actual_delete_count {
+            let from_key = (actual_start + index).to_string();
+            if self.has_property_on_receiver(&target, &from_key, realm)? {
+                let value = self.get_property_from_receiver(target.clone(), &from_key, realm)?;
+                self.create_data_property_or_throw(
+                    result.clone(),
+                    index.to_string(),
+                    value,
+                    realm,
+                )?;
+            }
+        }
+        let _ = self.set_property_on_receiver(
+            result.clone(),
+            "length".to_string(),
+            JsValue::Number(actual_delete_count as f64),
+            realm,
+        )?;
+
+        if insert_count < actual_delete_count {
+            let mut index = actual_start;
+            while index < length - actual_delete_count {
+                let from = index + actual_delete_count;
+                let to = index + insert_count;
+                let from_key = from.to_string();
+                let to_key = to.to_string();
+                if self.has_property_on_receiver(&target, &from_key, realm)? {
+                    let value =
+                        self.get_property_from_receiver(target.clone(), &from_key, realm)?;
+                    self.ensure_assign_target_writable(&target, &to_key)?;
+                    let _ = self.set_property_on_receiver(target.clone(), to_key, value, realm)?;
+                } else {
+                    let deleted = self.delete_property(target.clone(), to_key)?;
+                    if !deleted {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.splice could not delete property",
+                        ));
+                    }
+                }
+                index += 1;
+            }
+            let mut index = length;
+            while index > new_length {
+                let deleted = self.delete_property(target.clone(), (index - 1).to_string())?;
+                if !deleted {
+                    return Err(VmError::TypeError(
+                        "Array.prototype.splice could not delete property",
+                    ));
+                }
+                index -= 1;
+            }
+        } else if insert_count > actual_delete_count {
+            let mut index = length - actual_delete_count;
+            while index > actual_start {
+                let from = index + actual_delete_count - 1;
+                let to = index + insert_count - 1;
+                let from_key = from.to_string();
+                let to_key = to.to_string();
+                if self.has_property_on_receiver(&target, &from_key, realm)? {
+                    let value =
+                        self.get_property_from_receiver(target.clone(), &from_key, realm)?;
+                    self.ensure_assign_target_writable(&target, &to_key)?;
+                    let _ = self.set_property_on_receiver(target.clone(), to_key, value, realm)?;
+                } else {
+                    let deleted = self.delete_property(target.clone(), to_key)?;
+                    if !deleted {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.splice could not delete property",
+                        ));
+                    }
+                }
+                index -= 1;
+            }
+        }
+
+        for index in 0..insert_count {
+            let key = (actual_start + index).to_string();
+            self.ensure_assign_target_writable(&target, &key)?;
+            let _ = self.set_property_on_receiver(
+                target.clone(),
+                key,
+                args[(index + 2) as usize].clone(),
+                realm,
+            )?;
+        }
+
+        self.ensure_assign_target_writable(&target, "length")?;
+        let _ = self.set_property_on_receiver(
+            target.clone(),
+            "length".to_string(),
+            JsValue::Number(new_length as f64),
+            realm,
+        )?;
+        Ok(result)
+    }
+
     fn execute_array_reduce_right_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -5001,81 +5162,7 @@ impl Vm {
                 self.execute_array_shift_this(this_arg, realm, caller_strict)
             }
             HostFunction::ArraySpliceThis => {
-                let receiver_id = match this_arg {
-                    Some(JsValue::Object(id)) => id,
-                    _ => {
-                        return Err(VmError::TypeError(
-                            "Array.prototype.splice receiver must be object",
-                        ));
-                    }
-                };
-                let length = self
-                    .objects
-                    .get(&receiver_id)
-                    .and_then(|object| object.properties.get("length").cloned())
-                    .map(|value| self.to_number(&value))
-                    .unwrap_or(0.0)
-                    .max(0.0) as usize;
-                let raw_start = args
-                    .first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0);
-                let start = if raw_start.is_sign_negative() {
-                    length.saturating_sub(raw_start.abs().floor() as usize)
-                } else {
-                    (raw_start.floor() as usize).min(length)
-                };
-                let delete_count = args
-                    .get(1)
-                    .map(|value| self.to_number(value))
-                    .map(|value| value.max(0.0).floor() as usize)
-                    .unwrap_or(length.saturating_sub(start))
-                    .min(length.saturating_sub(start));
-                let mut removed = Vec::with_capacity(delete_count);
-                {
-                    let object = self
-                        .objects
-                        .get_mut(&receiver_id)
-                        .ok_or(VmError::UnknownObject(receiver_id))?;
-                    for index in 0..delete_count {
-                        removed.push(
-                            object
-                                .properties
-                                .get(&(start + index).to_string())
-                                .cloned()
-                                .unwrap_or(JsValue::Undefined),
-                        );
-                    }
-                    for index in start..length.saturating_sub(delete_count) {
-                        let from = (index + delete_count).to_string();
-                        let to = index.to_string();
-                        if let Some(value) = object.properties.get(&from).cloned() {
-                            object.properties.insert(to.clone(), value);
-                            if let Some(attrs) = object.property_attributes.get(&from).copied() {
-                                object.property_attributes.insert(to, attrs);
-                            } else {
-                                object.property_attributes.entry(to).or_default();
-                            }
-                        } else {
-                            object.properties.remove(&to);
-                            object.getters.remove(&to);
-                            object.setters.remove(&to);
-                            object.property_attributes.remove(&to);
-                        }
-                    }
-                    for index in length.saturating_sub(delete_count)..length {
-                        let key = index.to_string();
-                        object.properties.remove(&key);
-                        object.getters.remove(&key);
-                        object.setters.remove(&key);
-                        object.property_attributes.remove(&key);
-                    }
-                    object.properties.insert(
-                        "length".to_string(),
-                        JsValue::Number(length.saturating_sub(delete_count) as f64),
-                    );
-                }
-                self.create_array_from_values(removed)
+                self.execute_array_splice_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::ArraySliceThis => {
                 self.execute_array_slice_this(this_arg, &args, realm, caller_strict)
@@ -17900,6 +17987,22 @@ mod tests {
     fn array_slice_supports_generic_array_like_values() {
         let script = parse_script(
             "var obj = {0: 1, 2: 3, length: 3}; var out = Array.prototype.slice.call(obj, 0, 3); Array.isArray(out) && out.length === 3 && out[0] === 1 && out[1] === undefined && out[2] === 3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_splice_handles_insert_and_generic_receivers() {
+        let script = parse_script(
+            "var arr = [0, 1, 2, 3]; var removed = arr.splice(1, 2, 4, 5); var obj = {0: 0, 1: 1, length: 2}; var removedObj = Array.prototype.splice.call(obj, 0, 1, 9); removed.length === 2 && removed[0] === 1 && removed[1] === 2 && arr.length === 4 && arr[0] === 0 && arr[1] === 4 && arr[2] === 5 && arr[3] === 3 && removedObj.length === 1 && removedObj[0] === 0 && obj.length === 2 && obj[0] === 9 && obj[1] === 1;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);

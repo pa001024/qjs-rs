@@ -122,12 +122,14 @@
   - `built-ins/Array/prototype/shift`: `16/0`（`target/test262-builtins-array-prototype-shift-20260225-v23.json`）
   - `built-ins/Array/prototype/slice`: `46/0`（`target/test262-builtins-array-prototype-slice-20260225-v23.json`）
   - `built-ins/Array/prototype/some`: `211/0`（`target/test262-builtins-array-prototype-some-20260225-v24.json`）
+  - `built-ins/Array/prototype/splice`: `54/0`（`target/test262-builtins-array-prototype-splice-20260225-v26.json`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
+  - `Array` 扩容采样（`--max-cases 3000`）：`2288/41`（`target/test262-builtins-array-20260225-v26-s3000.json`，失败簇主要集中在 `sort`）。
   - `Array.length` 超时根因已清理：按 QuickJS `set_array_length` 方向改为“仅删除已存在索引属性”，避免稀疏大索引 O(range) 退化。
 - 下一轮并行模块拆分（建议 4 条线并行，每线 2~3h）：
-  - Track L（Array 样本继续扩容）：从 `--max-cases 2000` 提升到 `--max-cases 3000/4000`，优先按新增失败簇收敛并维持“每簇清零后即提交”节奏。
+  - Track M（Array sort/unshift/toLocaleString 收敛）：优先处理 `sort` 的可观察顺序与原型/hole 行为，再补齐 `unshift` 与 `Array.prototype.toString/toLocaleString` 的 generic 路径。
   - Track F（Proxy 正式化）：补齐 `get/set/has/deleteProperty/getOwnPropertyDescriptor/defineProperty/ownKeys` trap 与不变量校验，对照 QuickJS `JSProxy` 路径。
   - Track G（TypedArray 扩展）：从当前 alias 过渡到真实 typed-array 家族构造器与 element 读写语义，覆盖 `Int8/Uint8Clamped/Int16/Uint16/Int32/Uint32/Float32/Float64/BigInt64/BigUint64`。
   - Track H（WeakMap/WeakSet 语义）：从 Map/Set alias 过渡到最小真实语义（对象键约束、`set/get/has/delete`），并补齐与 GC root 的交互约束。
