@@ -443,7 +443,6 @@ fn is_regexp_allowed_after(token: Option<&TokenKind>) -> bool {
                     | "typeof"
                     | "instanceof"
                     | "in"
-                    | "of"
                     | "new"
                     | "do"
                     | "else"

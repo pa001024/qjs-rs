@@ -84,6 +84,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+63)`: discovered=23882, executed=5000, skipped=18579, passed=4970, failed=30
 - `language max-cases=5000 (latest+64)`: discovered=23882, executed=5000, skipped=18579, passed=4974, failed=26
 - `language max-cases=5000 (latest+65)`: discovered=23882, executed=5000, skipped=18579, passed=4975, failed=25
+- `language max-cases=5000 (latest+66)`: discovered=23882, executed=5000, skipped=18579, passed=4977, failed=23
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -290,4 +291,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 对齐 QuickJS `TOK_AWAIT`/`JS_FUNC_ASYNC` 方向补齐 async 最小闭环：parser 为 async function 注入专用 marker、VM 在 async 调用路径统一返回 Promise 实例并将运行时错误封装为 rejected promise；同时补齐 bigint 后缀词法吞吐（`0n/0x10n/0o7n/0b11n`）与 assignment destructuring 最小解析降级（array/object 赋值模式）。该轮后 `language/expressions/async-function` 与 `language/statements/async-function` 均收敛至 `0` 失败，整体 `language` 基线提升至 `4970/30`（快照：`target/test262-language-baseline-5000-20260224-v46.json`）。
 - parser 对 assignment destructuring 的 array lowering 调整为 `try/catch + explicit rethrow`（并在 catch 路径显式 `IteratorClose` 且吞掉 close 自身异常），避免在当前 bytecode `try/finally` 形态下吞掉原始异常。该轮后 `language/expressions/assignment/destructuring` 收敛至 `5/0`，整体 `language` 基线提升至 `4974/26`（快照：`target/test262-language-baseline-5000-20260224-v47.json`）。
 - parser 修复对象参数模式绑定：`{x = 1}` 现会在参数初始化阶段正确生成 `x` 绑定并应用默认值；`language/expressions/arrow-function` 子集提升至 `75/0`，整体 `language` 基线提升至 `4975/25`（快照：`target/test262-language-baseline-5000-20260224-v48.json`）。
-- 当前失败主簇集中在 `literals/regexp/*`、`expressions/tagged-template/*` 与少量 parser/词法边角（division/regexp 边界、generator `yield` in-expression）。
+- lexer 调整 regexp 词法启发式：移除 `Identifier("of")` 后的 regexp 起始特判，避免 `instance/of/g` 被误切成 regexp literal，`language/expressions/division` 子集提升至 `38/0`，整体 `language` 基线提升至 `4977/23`（快照：`target/test262-language-baseline-5000-20260224-v49.json`）。
+- 当前失败主簇集中在 `expressions/tagged-template/*`、`literals/regexp/*`、`statementList/*regexp*`，以及少量语义边角（`expressions/in/rhs-yield-present.js`、`source-text/6.1.js`、`statementList/eval-block-with-statment-block.js`）。
