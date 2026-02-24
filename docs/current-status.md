@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4954`、`failed=46`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v41.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4962`、`failed=38`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v42.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -144,6 +144,7 @@
   - 子集回归（latest+28）：VM 对齐 QuickJS/ECMAScript 函数对象与原型链语义（`isPrototypeOf`、函数值 prototype 链访问、`new` 构造 prototype 处理）、闭包捕获 `with` 环境、`instanceof Test262Error` 精确匹配、`arguments` 形参遮蔽和 `Array.prototype.sort(comparefn)` 可调用分支；`language/statements/function` 提升至 `204/3`，`language` 基线提升至 `4924/76`（快照：`target/test262-language-baseline-5000-20260224-v39.json`）。
   - 子集回归（latest+29）：`language/statements/function` 收敛至 `207/0`，`language` 基线提升至 `4949/51`（快照：`target/test262-language-baseline-5000-20260224-v40.json`）。
   - 子集回归（latest+30）：switch 分发改为 strict equality（对齐 QuickJS `OP_strict_eq`），并修复“全局对象属性写入 -> 全局 `var` 绑定”同步；`language/statements/switch` 收敛至 `64/0`、`language/statements/variable` 收敛至 `34/0`，`language` 基线提升至 `4954/46`（快照：`target/test262-language-baseline-5000-20260224-v41.json`）。
+  - 子集回归（latest+31）：`for (let ...)` 编译链路新增 per-iteration 词法环境（条件/循环体/更新分阶段环境复制）并引入 let 声明的 TDZ 预绑定（`Uninitialized`），修复 closure 捕获与“初始化前写入”语义；`language/statements/let` 收敛至 `43/0`，`language` 基线提升至 `4962/38`（快照：`target/test262-language-baseline-5000-20260224-v42.json`）。
 
 ## 3. 分阶段状态
 
@@ -163,7 +164,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 当前主失败簇已收敛为 `literals/regexp/*`、`expressions/tagged-template/*`、`statements/let/*`、`expressions/assignment/destructuring/*`、`statements/async-function/*` 与少量 parser 边角（如 `for` 头部特例）。
+4. 当前主失败簇已收敛为 `literals/regexp/*`、`expressions/tagged-template/*`、`expressions/assignment/destructuring/*`、`statements/async-function/*` 与少量 parser 边角（如 `for` 头部特例）。
 
 ## 5. 下一步执行
 

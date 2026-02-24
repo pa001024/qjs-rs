@@ -1,7 +1,7 @@
 # Long Horizon Task Plan (Phase 7 Compatibility Push)
 
 基线日期：2026-02-24
-目标：以 QuickJS 语义对齐为前提，持续压降 test262 language 失败簇（当前 5000 样本：`4954/46`）。
+目标：以 QuickJS 语义对齐为前提，持续压降 test262 language 失败簇（当前 5000 样本：`4962/38`）。
 预计总时长：`>= 10h`（建议按 5 个 2h 冲刺执行）。
 
 ## 1. 迁移原则（强约束）

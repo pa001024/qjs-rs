@@ -23,6 +23,7 @@ pub enum Opcode {
     LoadNull,
     LoadString(String),
     LoadUndefined,
+    LoadUninitialized,
     CreateObject,
     CreateArray,
     LoadIdentifier(String),
@@ -238,6 +239,15 @@ impl Compiler {
                 code.push(Opcode::DefineVar(name));
             }
         }
+        let mut hoisted_let_names = BTreeSet::new();
+        self.collect_hoisted_let_names(statements, &mut hoisted_let_names);
+        for name in hoisted_let_names {
+            code.push(Opcode::LoadUninitialized);
+            code.push(Opcode::DefineVariable {
+                name,
+                mutable: true,
+            });
+        }
 
         // Function declarations are hoisted to the top of their containing scope.
         for stmt in statements {
@@ -397,6 +407,28 @@ impl Compiler {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn collect_hoisted_let_names(&self, statements: &[Stmt], names: &mut BTreeSet<String>) {
+        for stmt in statements {
+            match stmt {
+                Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: Identifier(binding_name),
+                    ..
+                }) => {
+                    names.insert(binding_name.clone());
+                }
+                Stmt::VariableDeclarations(declarations) => {
+                    for declaration in declarations {
+                        if declaration.kind == BindingKind::Let {
+                            names.insert(declaration.name.0.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -678,6 +710,7 @@ impl Compiler {
             } => {
                 code.push(Opcode::EnterScope);
                 self.scope_depth += 1;
+                let outer_loop_scope_depth = self.scope_depth;
 
                 if let Some(initializer) = initializer {
                     match initializer {
@@ -701,6 +734,29 @@ impl Compiler {
                         }
                     }
                 }
+
+                let for_lexical_bindings =
+                    Self::for_initializer_lexical_bindings(initializer.as_ref());
+                let needs_per_iteration_scope = !for_lexical_bindings.is_empty();
+                let mut carry_temps = Vec::new();
+                if needs_per_iteration_scope {
+                    for (name, mutable) in &for_lexical_bindings {
+                        if !*mutable {
+                            continue;
+                        }
+                        let temp_name = self.next_loop_completion_temp_name();
+                        code.push(Opcode::LoadUndefined);
+                        code.push(Opcode::DefineVariable {
+                            name: temp_name.clone(),
+                            mutable: true,
+                        });
+                        code.push(Opcode::ResolveIdentifierReference(temp_name.clone()));
+                        self.compile_expr(&Expr::Identifier(Identifier(name.clone())), code);
+                        code.push(Opcode::StoreReferenceValue);
+                        code.push(Opcode::Pop);
+                        carry_temps.push((name.clone(), temp_name));
+                    }
+                }
                 let completion_name = if keep_value {
                     let name = self.next_loop_completion_temp_name();
                     code.push(Opcode::LoadUndefined);
@@ -714,6 +770,29 @@ impl Compiler {
                 };
 
                 let loop_start = code.len();
+                if needs_per_iteration_scope {
+                    code.push(Opcode::EnterScope);
+                    self.scope_depth += 1;
+                    for (name, mutable) in &for_lexical_bindings {
+                        if let Some(temp_name) =
+                            carry_temps.iter().find_map(|(binding_name, temp_name)| {
+                                if binding_name == name {
+                                    Some(temp_name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        {
+                            self.compile_expr(&Expr::Identifier(Identifier(temp_name)), code);
+                        } else {
+                            self.compile_expr(&Expr::Identifier(Identifier(name.clone())), code);
+                        }
+                        code.push(Opcode::DefineVariable {
+                            name: name.clone(),
+                            mutable: *mutable,
+                        });
+                    }
+                }
                 let jump_to_end_pos = if let Some(condition) = condition {
                     self.compile_expr(condition, code);
                     let jump_to_end_pos = code.len();
@@ -729,7 +808,11 @@ impl Compiler {
                 }
 
                 self.break_contexts.push(BreakContext {
-                    scope_depth: self.scope_depth,
+                    scope_depth: if needs_per_iteration_scope {
+                        outer_loop_scope_depth
+                    } else {
+                        self.scope_depth
+                    },
                     handler_depth: self.handler_depth,
                     break_jumps: Vec::new(),
                 });
@@ -749,15 +832,77 @@ impl Compiler {
                         .expect("loop completion target should exist");
                 }
                 let continue_target = code.len();
-                if let Some(update) = update {
+                if needs_per_iteration_scope {
+                    for (name, temp_name) in &carry_temps {
+                        code.push(Opcode::ResolveIdentifierReference(temp_name.clone()));
+                        self.compile_expr(&Expr::Identifier(Identifier(name.clone())), code);
+                        code.push(Opcode::StoreReferenceValue);
+                        code.push(Opcode::Pop);
+                    }
+                    code.push(Opcode::ExitScope);
+                    self.scope_depth = self.scope_depth.saturating_sub(1);
+                    if let Some(update) = update {
+                        code.push(Opcode::EnterScope);
+                        self.scope_depth += 1;
+                        for (name, mutable) in &for_lexical_bindings {
+                            if let Some(temp_name) =
+                                carry_temps.iter().find_map(|(binding_name, temp_name)| {
+                                    if binding_name == name {
+                                        Some(temp_name.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            {
+                                self.compile_expr(&Expr::Identifier(Identifier(temp_name)), code);
+                            } else {
+                                self.compile_expr(
+                                    &Expr::Identifier(Identifier(name.clone())),
+                                    code,
+                                );
+                            }
+                            code.push(Opcode::DefineVariable {
+                                name: name.clone(),
+                                mutable: *mutable,
+                            });
+                        }
+                        self.compile_expr(update, code);
+                        code.push(Opcode::Pop);
+                        for (name, temp_name) in &carry_temps {
+                            code.push(Opcode::ResolveIdentifierReference(temp_name.clone()));
+                            self.compile_expr(&Expr::Identifier(Identifier(name.clone())), code);
+                            code.push(Opcode::StoreReferenceValue);
+                            code.push(Opcode::Pop);
+                        }
+                        code.push(Opcode::ExitScope);
+                        self.scope_depth = self.scope_depth.saturating_sub(1);
+                    }
+                } else if let Some(update) = update {
                     self.compile_expr(update, code);
                     code.push(Opcode::Pop);
                 }
                 code.push(Opcode::Jump(loop_start));
 
+                let mut condition_false_jump = None;
+                let condition_false_target =
+                    if needs_per_iteration_scope && jump_to_end_pos.is_some() {
+                        let target = code.len();
+                        code.push(Opcode::ExitScope);
+                        let jump_pos = code.len();
+                        code.push(Opcode::Jump(usize::MAX));
+                        condition_false_jump = Some(jump_pos);
+                        Some(target)
+                    } else {
+                        None
+                    };
+
                 let loop_end = code.len();
                 if let Some(jump_to_end_pos) = jump_to_end_pos {
-                    code[jump_to_end_pos] = Opcode::JumpIfFalse(loop_end);
+                    code[jump_to_end_pos] =
+                        Opcode::JumpIfFalse(condition_false_target.unwrap_or(loop_end));
+                }
+                if let Some(jump_pos) = condition_false_jump {
+                    code[jump_pos] = Opcode::Jump(loop_end);
                 }
                 let break_context = self
                     .break_contexts
@@ -1402,6 +1547,30 @@ impl Compiler {
             Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => true,
             Stmt::Labeled { body, .. } => Self::statement_allows_continue_label(body),
             _ => false,
+        }
+    }
+
+    fn for_initializer_lexical_bindings(
+        initializer: Option<&ForInitializer>,
+    ) -> Vec<(String, bool)> {
+        let Some(initializer) = initializer else {
+            return Vec::new();
+        };
+        match initializer {
+            ForInitializer::VariableDeclaration(declaration) => match declaration.kind {
+                BindingKind::Let => vec![(declaration.name.0.clone(), true)],
+                BindingKind::Const => vec![(declaration.name.0.clone(), false)],
+                BindingKind::Var => Vec::new(),
+            },
+            ForInitializer::VariableDeclarations(declarations) => declarations
+                .iter()
+                .filter_map(|declaration| match declaration.kind {
+                    BindingKind::Let => Some((declaration.name.0.clone(), true)),
+                    BindingKind::Const => Some((declaration.name.0.clone(), false)),
+                    BindingKind::Var => None,
+                })
+                .collect(),
+            ForInitializer::Expression(_) => Vec::new(),
         }
     }
 
@@ -2628,6 +2797,11 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUninitialized,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(1.0),
                 Opcode::DefineVariable {
                     name: "x".to_string(),
@@ -2697,12 +2871,22 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUninitialized,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(1.0),
                 Opcode::DefineVariable {
                     name: "x".to_string(),
                     mutable: true,
                 },
                 Opcode::EnterScope,
+                Opcode::LoadUninitialized,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(2.0),
                 Opcode::DefineVariable {
                     name: "x".to_string(),
@@ -2882,6 +3066,11 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUninitialized,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(0.0),
                 Opcode::DefineVariable {
                     name: "x".to_string(),
@@ -2890,12 +3079,12 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(11),
+                Opcode::JumpIfFalse(13),
                 Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(15),
+                Opcode::Jump(17),
                 Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::StoreReferenceValue,
@@ -2940,6 +3129,11 @@ mod tests {
         let chunk = compile_script(&script);
         let expected = Chunk {
             code: vec![
+                Opcode::LoadUninitialized,
+                Opcode::DefineVariable {
+                    name: "x".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadNumber(0.0),
                 Opcode::DefineVariable {
                     name: "x".to_string(),
@@ -2948,14 +3142,14 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(3.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(13),
+                Opcode::JumpIfFalse(15),
                 Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
                 Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(2),
+                Opcode::Jump(4),
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
@@ -3066,24 +3260,57 @@ mod tests {
                     name: "$__loop_completion_0".to_string(),
                     mutable: true,
                 },
+                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::StoreReferenceValue,
+                Opcode::Pop,
+                Opcode::LoadUndefined,
+                Opcode::DefineVariable {
+                    name: "$__loop_completion_1".to_string(),
+                    mutable: true,
+                },
+                Opcode::EnterScope,
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
+                Opcode::DefineVariable {
+                    name: "i".to_string(),
+                    mutable: true,
+                },
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(22),
+                Opcode::JumpIfFalse(44),
                 Opcode::LoadUndefined,
-                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
                 Opcode::LoadIdentifier("i".to_string()),
-                Opcode::StoreVariable("$__loop_completion_0".to_string()),
+                Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
+                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::StoreReferenceValue,
+                Opcode::Pop,
+                Opcode::ExitScope,
+                Opcode::EnterScope,
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
+                Opcode::DefineVariable {
+                    name: "i".to_string(),
+                    mutable: true,
+                },
                 Opcode::ResolveIdentifierReference("i".to_string()),
                 Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
                 Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::Jump(5),
-                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
+                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
+                Opcode::LoadIdentifier("i".to_string()),
+                Opcode::StoreReferenceValue,
+                Opcode::Pop,
+                Opcode::ExitScope,
+                Opcode::Jump(11),
+                Opcode::ExitScope,
+                Opcode::Jump(46),
+                Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
                 Opcode::ExitScope,
                 Opcode::Halt,
             ],

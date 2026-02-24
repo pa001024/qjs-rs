@@ -888,6 +888,7 @@ impl Vm {
                 Opcode::LoadNull => self.stack.push(JsValue::Null),
                 Opcode::LoadString(value) => self.stack.push(JsValue::String(value.clone())),
                 Opcode::LoadUndefined => self.stack.push(JsValue::Undefined),
+                Opcode::LoadUninitialized => self.stack.push(JsValue::Uninitialized),
                 Opcode::CreateObject => {
                     let object = self.create_object_value();
                     self.stack.push(object);
@@ -998,7 +999,10 @@ impl Vm {
                         let should_reset_undefined = name.starts_with("$__loop_completion_")
                             || name.starts_with("$__switch_tmp_")
                             || name.starts_with("$__class_ctor_");
-                        if value != JsValue::Undefined || should_reset_undefined {
+                        if matches!(existing_binding.value, JsValue::Uninitialized)
+                            || value != JsValue::Undefined
+                            || should_reset_undefined
+                        {
                             existing_binding.value = value;
                         }
                     } else {
@@ -9139,7 +9143,8 @@ impl Vm {
         }
         while cursor + 1 < code.len() {
             match (&code[cursor], &code[cursor + 1]) {
-                (Opcode::LoadUndefined, Opcode::DefineVariable { .. }) => cursor += 2,
+                (Opcode::LoadUndefined, Opcode::DefineVariable { .. })
+                | (Opcode::LoadUninitialized, Opcode::DefineVariable { .. }) => cursor += 2,
                 _ => break,
             }
         }
@@ -12610,6 +12615,17 @@ mod tests {
             vm.execute(&chunk),
             Ok(JsValue::String("function".to_string()))
         );
+    }
+
+    #[test]
+    fn for_let_closure_uses_fresh_binding_per_iteration() {
+        let script = parse_script(
+            "let a = []; for (let i = 0; i < 3; ++i) { a.push(function () { return i; }); } '' + a[0]() + ',' + a[1]() + ',' + a[2]();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::String("0,1,2".to_string())));
     }
 
     #[test]
