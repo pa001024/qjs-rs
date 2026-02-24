@@ -79,6 +79,22 @@ pub fn install_baseline(realm: &mut Realm) {
         "parseFloat",
         JsValue::NativeFunction(NativeFunction::ParseFloat),
     );
+    realm.define_global(
+        "decodeURI",
+        JsValue::NativeFunction(NativeFunction::DecodeURI),
+    );
+    realm.define_global(
+        "decodeURIComponent",
+        JsValue::NativeFunction(NativeFunction::DecodeURIComponent),
+    );
+    realm.define_global(
+        "encodeURI",
+        JsValue::NativeFunction(NativeFunction::EncodeURI),
+    );
+    realm.define_global(
+        "encodeURIComponent",
+        JsValue::NativeFunction(NativeFunction::EncodeURIComponent),
+    );
     realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
     realm.define_global(
         "Test262Error",

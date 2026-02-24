@@ -176,6 +176,8 @@ enum HostFunction {
     ArrayJoinThis,
     ArrayConcatThis,
     ArrayPopThis,
+    ArrayIndexOfThis,
+    ArrayLastIndexOfThis,
     ArrayKeysThis,
     ArrayEntriesThis,
     ArrayValuesThis,
@@ -185,6 +187,8 @@ enum HostFunction {
     RegExpTestThis,
     RegExpExecThis,
     RegExpToStringThis,
+    ReflectDefineProperty,
+    ReflectGetOwnPropertyDescriptor,
     HasOwnProperty {
         target: JsValue,
     },
@@ -192,6 +196,8 @@ enum HostFunction {
         target: JsValue,
     },
     ObjectToString,
+    ObjectToLocaleString,
+    ObjectPropertyIsEnumerable,
     ObjectValueOf,
     ErrorToStringThis,
     AssertSameValue,
@@ -316,6 +322,8 @@ pub struct Vm {
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     host_function_objects: BTreeMap<u64, JsObject>,
+    native_function_objects: BTreeMap<NativeFunction, JsObject>,
+    native_function_deleted: BTreeSet<(NativeFunction, String)>,
     next_host_function_id: u64,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
@@ -384,6 +392,8 @@ impl Vm {
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.host_function_objects.clear();
+        self.native_function_objects.clear();
+        self.native_function_deleted.clear();
         self.next_host_function_id = 0;
         self.host_pins.clear();
         self.next_host_pin_id = 0;
@@ -443,8 +453,22 @@ impl Vm {
         let _ = self.reflect_object_value()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
-            let to_locale_string = self.shared_object_to_string_function();
+            let to_locale_string = self.create_host_function_value(HostFunction::ObjectToLocaleString);
             let value_of = self.create_host_function_value(HostFunction::ObjectValueOf);
+            let has_own_property = self.create_host_function_value(HostFunction::HasOwnProperty {
+                target: JsValue::Object(object_prototype_id),
+            });
+            let is_prototype_of = self.create_host_function_value(HostFunction::IsPrototypeOf {
+                target: JsValue::Object(object_prototype_id),
+            });
+            let property_is_enumerable =
+                self.create_host_function_value(HostFunction::ObjectPropertyIsEnumerable);
+            self.set_builtin_function_length(&to_string, 0.0);
+            self.set_builtin_function_length(&to_locale_string, 0.0);
+            self.set_builtin_function_length(&value_of, 0.0);
+            self.set_builtin_function_length(&has_own_property, 1.0);
+            self.set_builtin_function_length(&is_prototype_of, 1.0);
+            self.set_builtin_function_length(&property_is_enumerable, 1.0);
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
                     "constructor".to_string(),
@@ -485,6 +509,39 @@ impl Vm {
                     .insert("valueOf".to_string(), value_of);
                 object_prototype.property_attributes.insert(
                     "valueOf".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("hasOwnProperty".to_string(), has_own_property);
+                object_prototype.property_attributes.insert(
+                    "hasOwnProperty".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("isPrototypeOf".to_string(), is_prototype_of);
+                object_prototype.property_attributes.insert(
+                    "isPrototypeOf".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("propertyIsEnumerable".to_string(), property_is_enumerable);
+                object_prototype.property_attributes.insert(
+                    "propertyIsEnumerable".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -770,6 +827,11 @@ impl Vm {
                     self.enqueue_host_function_values(host);
                 }
             }
+            JsValue::NativeFunction(native) => {
+                if let Some(native_object) = self.native_function_objects.get(&native).cloned() {
+                    self.enqueue_object_values(native_object);
+                }
+            }
             _ => {}
         }
     }
@@ -863,9 +925,15 @@ impl Vm {
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
             | HostFunction::ObjectToString
+            | HostFunction::ObjectToLocaleString
+            | HostFunction::ObjectPropertyIsEnumerable
             | HostFunction::ObjectValueOf
+            | HostFunction::ReflectDefineProperty
+            | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ArrayJoinThis
             | HostFunction::ArrayPopThis
+            | HostFunction::ArrayIndexOfThis
+            | HostFunction::ArrayLastIndexOfThis
             | HostFunction::ArrayKeysThis
             | HostFunction::ArrayEntriesThis
             | HostFunction::ArrayValuesThis
@@ -947,8 +1015,6 @@ impl Vm {
                         Ok(self.global_this_value())
                     } else if name == "Math" {
                         self.math_object_value()
-                    } else if name == "Object" {
-                        Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor))
                     } else if name == "JSON" {
                         self.json_object_value()
                     } else if name == "Reflect" {
@@ -963,12 +1029,12 @@ impl Vm {
                         Ok(realm
                             .resolve_identifier(name)
                             .unwrap_or_else(|| self.global_this_value()))
-                    } else if let Some(value) = realm.resolve_identifier(name) {
-                        Ok(value)
                     } else if let Some(global_object_id) = self.global_object_id {
                         let receiver = JsValue::Object(global_object_id);
                         if self.has_property_on_receiver(&receiver, name, realm)? {
                             self.get_property_from_receiver(receiver, name, realm)
+                        } else if name == "Object" && realm.resolve_identifier(name).is_none() {
+                            Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor))
                         } else {
                             Err(VmError::UnknownIdentifier(name.clone()))
                         }
@@ -1420,13 +1486,12 @@ impl Vm {
                                 self.set_function_property(closure_id, name.clone(), value, realm)
                             }
                         }
-                        JsValue::NativeFunction(_) => {
-                            if Self::is_restricted_function_property(name) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                Ok(value)
-                            }
-                        }
+                        JsValue::NativeFunction(native) => self.set_property_on_receiver(
+                            JsValue::NativeFunction(native),
+                            name.clone(),
+                            value,
+                            realm,
+                        ),
                         JsValue::HostFunction(host_id) => {
                             if Self::is_restricted_function_property(name) {
                                 Err(VmError::TypeError("restricted function property access"))
@@ -1464,13 +1529,12 @@ impl Vm {
                                 self.set_function_property(closure_id, key, value, realm)
                             }
                         }
-                        JsValue::NativeFunction(_) => {
-                            if Self::is_restricted_function_property(&key) {
-                                Err(VmError::TypeError("restricted function property access"))
-                            } else {
-                                Ok(value)
-                            }
-                        }
+                        JsValue::NativeFunction(native) => self.set_property_on_receiver(
+                            JsValue::NativeFunction(native),
+                            key,
+                            value,
+                            realm,
+                        ),
                         JsValue::HostFunction(host_id) => {
                             if Self::is_restricted_function_property(&key) {
                                 Err(VmError::TypeError("restricted function property access"))
@@ -2859,6 +2923,14 @@ impl Vm {
                         "constructor".to_string(),
                         JsValue::NativeFunction(NativeFunction::ObjectConstructor),
                     );
+                    object.property_attributes.insert(
+                        "constructor".to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
                     for (index, arg) in args.iter().enumerate() {
                         let key = index.to_string();
                         object.properties.insert(key.clone(), arg.clone());
@@ -3926,6 +3998,12 @@ impl Vm {
                 };
                 Ok(value)
             }
+            HostFunction::ArrayIndexOfThis => {
+                self.execute_array_index_lookup(this_arg, &args, realm, false)
+            }
+            HostFunction::ArrayLastIndexOfThis => {
+                self.execute_array_index_lookup(this_arg, &args, realm, true)
+            }
             HostFunction::ArrayConcatThis => {
                 let receiver_id = match this_arg {
                     Some(JsValue::Object(id)) => id,
@@ -4009,36 +4087,83 @@ impl Vm {
                 self.execute_regexp_to_string(receiver_id)
                     .map(JsValue::String)
             }
-            HostFunction::HasOwnProperty { target } => {
-                let target = this_arg.unwrap_or(target);
-                let key = args
-                    .first()
-                    .map(|value| self.coerce_to_property_key(value))
-                    .unwrap_or_default();
+            HostFunction::ReflectDefineProperty => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let property = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let descriptor = args.get(2).cloned().unwrap_or(JsValue::Undefined);
+                let _ =
+                    self.execute_object_define_property(&[target, property, descriptor], realm)?;
+                Ok(JsValue::Bool(true))
+            }
+            HostFunction::ReflectGetOwnPropertyDescriptor => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let property = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                self.execute_object_get_own_property_descriptor(&[target, property], realm)
+            }
+            HostFunction::HasOwnProperty { .. } => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.hasOwnProperty called on null or undefined",
+                )?;
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
-            HostFunction::IsPrototypeOf { target } => {
-                let target = this_arg.unwrap_or(target);
+            HostFunction::IsPrototypeOf { .. } => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.isPrototypeOf called on null or undefined",
+                )?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&value) {
+                    return Ok(JsValue::Bool(false));
+                }
                 Ok(JsValue::Bool(self.object_is_prototype_of(target, value)?))
             }
             HostFunction::ObjectToString => {
-                let tag = match this_arg {
-                    Some(JsValue::Object(object_id))
-                        if self.has_object_marker(object_id, "__uint8ArrayTag")? =>
-                    {
-                        "[object Uint8Array]"
-                    }
-                    Some(JsValue::Object(object_id))
-                        if self.has_object_marker(object_id, ARGUMENTS_OBJECT_MARKER_KEY)? =>
-                    {
-                        "[object Arguments]"
-                    }
-                    _ => "[object Object]",
-                };
-                Ok(JsValue::String(tag.to_string()))
+                let tag = self.object_to_string_tag(this_arg, realm)?;
+                Ok(JsValue::String(format!("[object {tag}]")))
             }
-            HostFunction::ObjectValueOf => Ok(this_arg.unwrap_or(JsValue::Undefined)),
+            HostFunction::ObjectToLocaleString => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.toLocaleString called on null or undefined",
+                )?;
+                let to_string = self.get_property_from_receiver(target.clone(), "toString", realm)?;
+                if !Self::is_callable_value(&to_string) {
+                    return Err(VmError::TypeError(
+                        "Object.prototype.toLocaleString toString must be callable",
+                    ));
+                }
+                self.execute_callable(
+                    to_string,
+                    Some(target),
+                    Vec::new(),
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::ObjectPropertyIsEnumerable => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.propertyIsEnumerable called on null or undefined",
+                )?;
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let enumerable = self.has_own_property(&target, &key)?
+                    && self.own_property_is_enumerable(&target, &key)?;
+                Ok(JsValue::Bool(enumerable))
+            }
+            HostFunction::ObjectValueOf => self.object_prototype_this_object(
+                this_arg,
+                "Object.prototype.valueOf called on null or undefined",
+            ),
             HostFunction::ErrorToStringThis => {
                 let receiver = this_arg.unwrap_or(JsValue::Undefined);
                 if !Self::is_object_like_value(&receiver) {
@@ -4264,6 +4389,8 @@ impl Vm {
                 Ok(JsValue::Bool(is_array))
             }
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
+            NativeFunction::ObjectEntries => self.execute_object_entries(&args, realm),
+            NativeFunction::ObjectValues => self.execute_object_values(&args, realm),
             NativeFunction::ObjectGetOwnPropertyNames => {
                 self.execute_object_get_own_property_names(&args)
             }
@@ -4279,6 +4406,9 @@ impl Vm {
             NativeFunction::ObjectGetOwnPropertyDescriptor => {
                 self.execute_object_get_own_property_descriptor(&args, realm)
             }
+            NativeFunction::ObjectGetOwnPropertyDescriptors => {
+                self.execute_object_get_own_property_descriptors(&args, realm)
+            }
             NativeFunction::ObjectGetPrototypeOf => self.execute_object_get_prototype_of(&args),
             NativeFunction::ObjectPreventExtensions => {
                 self.execute_object_prevent_extensions(&args)
@@ -4286,6 +4416,7 @@ impl Vm {
             NativeFunction::ObjectIsExtensible => self.execute_object_is_extensible(&args),
             NativeFunction::ObjectIsSealed => self.execute_object_is_sealed(&args, false),
             NativeFunction::ObjectIsFrozen => self.execute_object_is_sealed(&args, true),
+            NativeFunction::ObjectIs => self.execute_object_is(&args),
             NativeFunction::ObjectFreeze => self.execute_object_freeze(&args),
             NativeFunction::ObjectSeal => self.execute_object_seal(&args),
             NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
@@ -4477,6 +4608,13 @@ impl Vm {
             }
             NativeFunction::ParseInt => Ok(JsValue::Number(self.parse_int_baseline(&args))),
             NativeFunction::ParseFloat => Ok(JsValue::Number(self.parse_float_baseline(&args))),
+            NativeFunction::DecodeURI
+            | NativeFunction::DecodeURIComponent
+            | NativeFunction::EncodeURI
+            | NativeFunction::EncodeURIComponent => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                Ok(JsValue::String(self.coerce_to_string(&value)))
+            }
             NativeFunction::Assert => {
                 let condition = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if self.is_truthy(&condition) {
@@ -6007,28 +6145,168 @@ impl Vm {
                 ))
             }
             JsValue::Function(closure_id) => {
-                let object = self
+                let mut object = self
                     .closure_objects
                     .get(closure_id)
                     .cloned()
                     .unwrap_or_default();
+                object
+                    .properties
+                    .entry("length".to_string())
+                    .or_insert(JsValue::Undefined);
+                object.property_attributes.entry("length".to_string()).or_insert(
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                if let Ok(is_arrow) = self.closure_is_arrow(*closure_id) {
+                    if !is_arrow && !self.closure_has_no_prototype(*closure_id) {
+                        object
+                            .properties
+                            .entry("prototype".to_string())
+                            .or_insert(JsValue::Undefined);
+                        object.property_attributes.entry("prototype".to_string()).or_insert(
+                            PropertyAttributes {
+                                writable: true,
+                                enumerable: false,
+                                configurable: false,
+                            },
+                        );
+                    }
+                }
                 Ok(Self::collect_own_property_keys_from_object(
                     &object,
                     enumerable_only,
                 ))
             }
             JsValue::HostFunction(host_id) => {
-                let object = self
+                let mut object = self
                     .host_function_objects
                     .get(host_id)
                     .cloned()
                     .unwrap_or_default();
+                if !self.host_function_objects.contains_key(host_id) {
+                    for key in [
+                        "length",
+                        "call",
+                        "apply",
+                        "bind",
+                        "toString",
+                        "valueOf",
+                        "hasOwnProperty",
+                        "constructor",
+                    ] {
+                        object
+                            .properties
+                            .entry(key.to_string())
+                            .or_insert(JsValue::Undefined);
+                        object.property_attributes.entry(key.to_string()).or_insert(
+                            PropertyAttributes {
+                                writable: key != "length",
+                                enumerable: false,
+                                configurable: true,
+                            },
+                        );
+                    }
+                }
                 Ok(Self::collect_own_property_keys_from_object(
                     &object,
                     enumerable_only,
                 ))
             }
-            JsValue::NativeFunction(_) => Ok(Vec::new()),
+            JsValue::NativeFunction(native) => {
+                let mut object = self
+                    .native_function_objects
+                    .get(native)
+                    .cloned()
+                    .unwrap_or_default();
+                const NATIVE_DEFAULT_KEYS: &[&str] = &[
+                    "defineProperty",
+                    "defineProperties",
+                    "keys",
+                    "entries",
+                    "values",
+                    "getOwnPropertyNames",
+                    "create",
+                    "assign",
+                    "setPrototypeOf",
+                    "preventExtensions",
+                    "__forInKeys",
+                    "__forOfValues",
+                    "__forOfIterator",
+                    "__forOfStep",
+                    "__forOfClose",
+                    "__getTemplateObject",
+                    "__tdzMarker",
+                    "getOwnPropertyDescriptor",
+                    "getOwnPropertyDescriptors",
+                    "getPrototypeOf",
+                    "isExtensible",
+                    "isSealed",
+                    "isFrozen",
+                    "is",
+                    "seal",
+                    "freeze",
+                    "toString",
+                    "valueOf",
+                    "isArray",
+                    "parse",
+                    "UTC",
+                    "fromCharCode",
+                    "NaN",
+                    "POSITIVE_INFINITY",
+                    "NEGATIVE_INFINITY",
+                    "MAX_VALUE",
+                    "MIN_VALUE",
+                    "iterator",
+                    "asyncIterator",
+                    "hasInstance",
+                    "isConcatSpreadable",
+                    "match",
+                    "matchAll",
+                    "replace",
+                    "search",
+                    "species",
+                    "split",
+                    "toPrimitive",
+                    "toStringTag",
+                    "unscopables",
+                    "sameValue",
+                    "notSameValue",
+                    "throws",
+                    "compareArray",
+                    "prototype",
+                    "name",
+                    "length",
+                    "constructor",
+                ];
+                for key in NATIVE_DEFAULT_KEYS {
+                    if !self.native_function_has_own_property_runtime(*native, key) {
+                        continue;
+                    }
+                    object
+                        .properties
+                        .entry((*key).to_string())
+                        .or_insert(JsValue::Undefined);
+                    object
+                        .property_attributes
+                        .entry((*key).to_string())
+                        .or_insert_with(|| {
+                            self.native_function_default_property_attributes(*native, key)
+                                .unwrap_or(PropertyAttributes {
+                                    writable: true,
+                                    enumerable: false,
+                                    configurable: true,
+                                })
+                        });
+                }
+                Ok(Self::collect_own_property_keys_from_object(
+                    &object,
+                    enumerable_only,
+                ))
+            }
             _ => Err(VmError::TypeError("property keys target must be object")),
         }
     }
@@ -6037,44 +6315,108 @@ impl Vm {
         object: &JsObject,
         enumerable_only: bool,
     ) -> Vec<String> {
-        let mut keys = Vec::new();
-        for key in object.properties.keys() {
+        let mut all_keys = BTreeSet::new();
+        all_keys.extend(object.properties.keys().cloned());
+        all_keys.extend(object.getters.keys().cloned());
+        all_keys.extend(object.setters.keys().cloned());
+
+        let mut index_keys: Vec<(usize, String)> = Vec::new();
+        let mut string_keys = Vec::new();
+        for key in all_keys {
             let enumerable = object
                 .property_attributes
-                .get(key)
+                .get(&key)
                 .map(|attrs| attrs.enumerable)
                 .unwrap_or(true);
-            if !enumerable_only || enumerable {
-                keys.push(key.clone());
-            }
-        }
-        for key in object.getters.keys() {
-            if object.properties.contains_key(key) {
+            if enumerable_only && !enumerable {
                 continue;
             }
-            let enumerable = object
-                .property_attributes
-                .get(key)
-                .map(|attrs| attrs.enumerable)
-                .unwrap_or(true);
-            if !enumerable_only || enumerable {
-                keys.push(key.clone());
+            if let Some(index) = Self::canonical_array_index(&key) {
+                index_keys.push((index, key));
+            } else {
+                string_keys.push(key);
             }
         }
-        for key in object.setters.keys() {
-            if object.properties.contains_key(key) || object.getters.contains_key(key) {
-                continue;
-            }
-            let enumerable = object
-                .property_attributes
-                .get(key)
-                .map(|attrs| attrs.enumerable)
-                .unwrap_or(true);
-            if !enumerable_only || enumerable {
-                keys.push(key.clone());
-            }
-        }
+        index_keys.sort_by_key(|(index, _)| *index);
+        let mut keys = Vec::with_capacity(index_keys.len() + string_keys.len());
+        keys.extend(index_keys.into_iter().map(|(_, key)| key));
+        keys.extend(string_keys);
         keys
+    }
+
+    fn own_property_is_enumerable(
+        &self,
+        target: &JsValue,
+        property: &str,
+    ) -> Result<bool, VmError> {
+        match target {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get(object_id)
+                    .ok_or(VmError::UnknownObject(*object_id))?;
+                if !(object.properties.contains_key(property)
+                    || object.getters.contains_key(property)
+                    || object.setters.contains_key(property))
+                {
+                    return Ok(false);
+                }
+                Ok(object
+                    .property_attributes
+                    .get(property)
+                    .map(|attrs| attrs.enumerable)
+                    .unwrap_or(true))
+            }
+            JsValue::Function(closure_id) => {
+                if let Some(object) = self.closure_objects.get(closure_id) {
+                    if object.properties.contains_key(property)
+                        || object.getters.contains_key(property)
+                        || object.setters.contains_key(property)
+                    {
+                        return Ok(object
+                            .property_attributes
+                            .get(property)
+                            .map(|attrs| attrs.enumerable)
+                            .unwrap_or(true));
+                    }
+                }
+                Ok(false)
+            }
+            JsValue::HostFunction(host_id) => {
+                if !self.host_functions.contains_key(host_id) {
+                    return Err(VmError::UnknownHostFunction(*host_id));
+                }
+                if let Some(object) = self.host_function_objects.get(host_id) {
+                    if object.properties.contains_key(property)
+                        || object.getters.contains_key(property)
+                        || object.setters.contains_key(property)
+                    {
+                        return Ok(object
+                            .property_attributes
+                            .get(property)
+                            .map(|attrs| attrs.enumerable)
+                            .unwrap_or(true));
+                    }
+                }
+                Ok(false)
+            }
+            JsValue::NativeFunction(native) => {
+                if let Some(object) = self.native_function_objects.get(native) {
+                    if object.properties.contains_key(property)
+                        || object.getters.contains_key(property)
+                        || object.setters.contains_key(property)
+                    {
+                        return Ok(object
+                            .property_attributes
+                            .get(property)
+                            .map(|attrs| attrs.enumerable)
+                            .unwrap_or(true));
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn ensure_assign_target_writable(
@@ -6133,34 +6475,114 @@ impl Vm {
         let (prototype, prototype_value) =
             self.parse_prototype_value(args.get(1).cloned().unwrap_or(JsValue::Undefined))?;
 
+        if matches!(target, JsValue::Null | JsValue::Undefined) {
+            return Err(VmError::TypeError(
+                "Object.setPrototypeOf target must be object",
+            ));
+        }
+        if !Self::is_object_like_value(&target) {
+            return Ok(target);
+        }
+        if self.prototype_would_create_cycle(&target, prototype, prototype_value.clone())? {
+            return Err(VmError::TypeError(
+                "Object.setPrototypeOf would create a prototype cycle",
+            ));
+        }
+
         match target {
             JsValue::Object(target_id) => {
                 let object = self
                     .objects
                     .get_mut(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
+                let unchanged =
+                    object.prototype == prototype && object.prototype_value == prototype_value;
+                if !object.extensible && !unchanged {
+                    return Err(VmError::TypeError(
+                        "Object.setPrototypeOf target must be extensible",
+                    ));
+                }
                 object.prototype = prototype;
                 object.prototype_value = prototype_value.clone();
                 Ok(JsValue::Object(target_id))
             }
             JsValue::Function(closure_id) => {
+                if !self.closures.contains_key(&closure_id) {
+                    return Err(VmError::UnknownClosure(closure_id));
+                }
                 let closure_object = self.closure_objects.entry(closure_id).or_default();
+                let unchanged = closure_object.prototype == prototype
+                    && closure_object.prototype_value == prototype_value;
+                if !closure_object.extensible && !unchanged {
+                    return Err(VmError::TypeError(
+                        "Object.setPrototypeOf target must be extensible",
+                    ));
+                }
                 closure_object.prototype = prototype;
                 closure_object.prototype_value = prototype_value.clone();
                 closure_object.prototype_overridden = true;
                 Ok(JsValue::Function(closure_id))
             }
             JsValue::HostFunction(host_id) => {
+                if !self.host_functions.contains_key(&host_id) {
+                    return Err(VmError::UnknownHostFunction(host_id));
+                }
                 let host_object = self.host_function_objects.entry(host_id).or_default();
+                let unchanged =
+                    host_object.prototype == prototype && host_object.prototype_value == prototype_value;
+                if !host_object.extensible && !unchanged {
+                    return Err(VmError::TypeError(
+                        "Object.setPrototypeOf target must be extensible",
+                    ));
+                }
                 host_object.prototype = prototype;
                 host_object.prototype_value = prototype_value;
                 host_object.prototype_overridden = true;
                 Ok(JsValue::HostFunction(host_id))
             }
-            _ => Err(VmError::TypeError(
-                "Object.setPrototypeOf target must be object",
-            )),
+            JsValue::NativeFunction(native) => {
+                let native_object = self.native_function_objects.entry(native).or_default();
+                let unchanged = native_object.prototype == prototype
+                    && native_object.prototype_value == prototype_value;
+                if !native_object.extensible && !unchanged {
+                    return Err(VmError::TypeError(
+                        "Object.setPrototypeOf target must be extensible",
+                    ));
+                }
+                native_object.prototype = prototype;
+                native_object.prototype_value = prototype_value;
+                native_object.prototype_overridden = true;
+                Ok(JsValue::NativeFunction(native))
+            }
+            _ => Ok(target),
         }
+    }
+
+    fn prototype_would_create_cycle(
+        &mut self,
+        target: &JsValue,
+        prototype: Option<ObjectId>,
+        prototype_value: Option<JsValue>,
+    ) -> Result<bool, VmError> {
+        let mut current = if let Some(id) = prototype {
+            JsValue::Object(id)
+        } else if let Some(value) = prototype_value {
+            value
+        } else {
+            return Ok(false);
+        };
+        let mut guard = 0usize;
+        while Self::is_object_like_value(&current) {
+            if self.same_value(&current, target) {
+                return Ok(true);
+            }
+            current = self.get_prototype_of_value(&current)?;
+            guard += 1;
+            if guard > 1024 {
+                break;
+            }
+        }
+        Ok(false)
     }
 
     fn parse_prototype_value(
@@ -6397,6 +6819,7 @@ impl Vm {
             Object(ObjectId),
             Function(u64),
             HostFunction(u64),
+            NativeFunction(NativeFunction),
         }
 
         let target = match args.first() {
@@ -6412,6 +6835,9 @@ impl Vm {
                     return Err(VmError::UnknownHostFunction(*host_id));
                 }
                 DefinePropertyTarget::HostFunction(*host_id)
+            }
+            Some(JsValue::NativeFunction(native)) => {
+                DefinePropertyTarget::NativeFunction(*native)
             }
             _ => {
                 return Err(VmError::TypeError(
@@ -6433,6 +6859,11 @@ impl Vm {
             DefinePropertyTarget::HostFunction(host_id) => self
                 .host_function_objects
                 .get(&host_id)
+                .cloned()
+                .unwrap_or_default(),
+            DefinePropertyTarget::NativeFunction(native) => self
+                .native_function_objects
+                .get(&native)
                 .cloned()
                 .unwrap_or_default(),
         };
@@ -6726,95 +7157,92 @@ impl Vm {
                 self.host_function_objects.insert(host_id, target_object);
                 Ok(JsValue::HostFunction(host_id))
             }
+            DefinePropertyTarget::NativeFunction(native) => {
+                self.native_function_objects.insert(native, target_object);
+                self.native_function_deleted
+                    .remove(&(native, property.clone()));
+                Ok(JsValue::NativeFunction(native))
+            }
         }
     }
 
     fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target_id = match args.first() {
-            Some(JsValue::Object(id)) => *id,
-            _ => return Err(VmError::TypeError("Object.keys target must be object")),
-        };
-
-        let object = self
-            .objects
-            .get(&target_id)
-            .ok_or(VmError::UnknownObject(target_id))?;
-
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.keys target must be object",
+        )?;
+        let snapshot = self.collect_own_property_keys(&target, false)?;
         let mut keys = Vec::new();
-        for key in object.properties.keys() {
-            let enumerable = object
-                .property_attributes
-                .get(key)
-                .map(|attrs| attrs.enumerable)
-                .unwrap_or(true);
-            if enumerable {
-                keys.push(key.clone());
-            }
-        }
-        for key in object.getters.keys() {
-            if object.properties.contains_key(key) {
+        for key in snapshot {
+            if !self.has_own_property(&target, &key)? {
                 continue;
             }
-            let enumerable = object
-                .property_attributes
-                .get(key)
-                .map(|attrs| attrs.enumerable)
-                .unwrap_or(true);
-            if enumerable {
-                keys.push(key.clone());
-            }
-        }
-        for key in object.setters.keys() {
-            if object.properties.contains_key(key) || object.getters.contains_key(key) {
+            if !self.own_property_is_enumerable(&target, &key)? {
                 continue;
             }
-            let enumerable = object
-                .property_attributes
-                .get(key)
-                .map(|attrs| attrs.enumerable)
-                .unwrap_or(true);
-            if enumerable {
-                keys.push(key.clone());
-            }
+            keys.push(key);
         }
         self.create_array_from_string_keys(keys)
+    }
+
+    fn execute_object_entries(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.entries target must be object",
+        )?;
+        let snapshot = self.collect_own_property_keys(&target, false)?;
+        let mut entries = Vec::with_capacity(snapshot.len());
+        for key in snapshot {
+            if !self.has_own_property(&target, &key)? {
+                continue;
+            }
+            if !self.own_property_is_enumerable(&target, &key)? {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            let entry = self.create_array_from_values(vec![JsValue::String(key), value])?;
+            entries.push(entry);
+        }
+        self.create_array_from_values(entries)
+    }
+
+    fn execute_object_values(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.values target must be object",
+        )?;
+        let snapshot = self.collect_own_property_keys(&target, false)?;
+        let mut values = Vec::with_capacity(snapshot.len());
+        for key in snapshot {
+            if !self.has_own_property(&target, &key)? {
+                continue;
+            }
+            if !self.own_property_is_enumerable(&target, &key)? {
+                continue;
+            }
+            values.push(self.get_property_from_receiver(target.clone(), &key, realm)?);
+        }
+        self.create_array_from_values(values)
     }
 
     fn execute_object_get_own_property_names(
         &mut self,
         args: &[JsValue],
     ) -> Result<JsValue, VmError> {
-        let target_id = match args.first() {
-            Some(JsValue::Object(id)) => *id,
-            _ => {
-                return Err(VmError::TypeError(
-                    "Object.getOwnPropertyNames target must be object",
-                ));
-            }
-        };
-
-        let object = self
-            .objects
-            .get(&target_id)
-            .ok_or(VmError::UnknownObject(target_id))?;
-
-        let mut keys = Vec::new();
-        for key in object.properties.keys() {
-            if key == BOXED_PRIMITIVE_VALUE_KEY {
-                continue;
-            }
-            keys.push(key.clone());
-        }
-        for key in object.getters.keys() {
-            if !object.properties.contains_key(key) {
-                keys.push(key.clone());
-            }
-        }
-        for key in object.setters.keys() {
-            if !object.properties.contains_key(key) && !object.getters.contains_key(key) {
-                keys.push(key.clone());
-            }
-        }
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.getOwnPropertyNames target must be object",
+        )?;
+        let mut keys = self.collect_own_property_keys(&target, false)?;
+        keys.retain(|key| key != BOXED_PRIMITIVE_VALUE_KEY);
         self.create_array_from_string_keys(keys)
     }
 
@@ -7248,6 +7676,44 @@ impl Vm {
         }
     }
 
+    fn execute_object_get_own_property_descriptors(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.getOwnPropertyDescriptors target must be object",
+        )?;
+        let mut keys = self.collect_own_property_keys(&target, false)?;
+        keys.retain(|key| key != BOXED_PRIMITIVE_VALUE_KEY);
+        let mut descriptors = Vec::new();
+        for key in keys {
+            let descriptor = self.execute_object_get_own_property_descriptor(
+                &[target.clone(), JsValue::String(key.clone())],
+                realm,
+            )?;
+            if !matches!(descriptor, JsValue::Undefined) {
+                descriptors.push((key, descriptor));
+            }
+        }
+
+        let result = self.create_object_value();
+        let result_id = match result {
+            JsValue::Object(object_id) => object_id,
+            _ => unreachable!(),
+        };
+        let object = self
+            .objects
+            .get_mut(&result_id)
+            .ok_or(VmError::UnknownObject(result_id))?;
+        for (key, descriptor) in descriptors {
+            object.properties.insert(key.clone(), descriptor);
+            object.property_attributes.entry(key).or_default();
+        }
+        Ok(JsValue::Object(result_id))
+    }
+
     fn execute_object_get_own_property_descriptor_for_object(
         &mut self,
         target_id: ObjectId,
@@ -7292,6 +7758,105 @@ impl Vm {
                 ("set", setter_value.unwrap_or(JsValue::Undefined)),
                 ("enumerable", JsValue::Bool(attributes.enumerable)),
                 ("configurable", JsValue::Bool(attributes.configurable)),
+            ]));
+        }
+
+        if let Some(JsValue::String(value)) = self.boxed_primitive_value(target_id) {
+            if property == "length" {
+                return Ok(self.create_descriptor_object(vec![
+                    (
+                        "value",
+                        JsValue::Number(Self::utf16_code_unit_length(&value) as f64),
+                    ),
+                    ("writable", JsValue::Bool(false)),
+                    ("enumerable", JsValue::Bool(false)),
+                    ("configurable", JsValue::Bool(false)),
+                ]));
+            }
+            if let Some(index) = Self::canonical_array_index(property) {
+                if let Some(ch) = value.chars().nth(index) {
+                    return Ok(self.create_descriptor_object(vec![
+                        ("value", JsValue::String(ch.to_string())),
+                        ("writable", JsValue::Bool(false)),
+                        ("enumerable", JsValue::Bool(true)),
+                        ("configurable", JsValue::Bool(false)),
+                    ]));
+                }
+            }
+        }
+
+        if self.regexp_prototype_id == Some(target_id)
+            && matches!(property, "source" | "global" | "ignoreCase" | "multiline")
+        {
+            let getter = self.create_host_function_value(HostFunction::ObjectValueOf);
+            return Ok(self.create_descriptor_object(vec![
+                ("get", getter),
+                ("set", JsValue::Undefined),
+                ("enumerable", JsValue::Bool(false)),
+                ("configurable", JsValue::Bool(true)),
+            ]));
+        }
+
+        let should_synthesize_data_descriptor = self.global_object_id == Some(target_id)
+            && matches!(
+                property,
+                "decodeURI" | "decodeURIComponent" | "encodeURI" | "encodeURIComponent"
+            )
+            || self.array_prototype_id == Some(target_id)
+                && matches!(
+                    property,
+                    "push"
+                        | "pop"
+                        | "shift"
+                        | "unshift"
+                        | "splice"
+                        | "toLocaleString"
+                        | "indexOf"
+                        | "lastIndexOf"
+                        | "every"
+                        | "some"
+                        | "forEach"
+                        | "map"
+                        | "filter"
+                        | "reduceRight"
+                        | "slice"
+                )
+            || self.string_prototype_id == Some(target_id)
+                && matches!(
+                    property,
+                    "concat"
+                        | "slice"
+                        | "toLocaleLowerCase"
+                        | "toLocaleUpperCase"
+                        | "localeCompare"
+                )
+            || self.number_prototype_id == Some(target_id)
+                && matches!(property, "toLocaleString" | "toPrecision")
+            || self.date_prototype_id == Some(target_id)
+                && matches!(
+                    property,
+                    "getTimezoneOffset"
+                        | "toTimeString"
+                        | "toDateString"
+                        | "toLocaleDateString"
+                        | "toLocaleTimeString"
+                        | "toISOString"
+                        | "toJSON"
+                )
+            || self.object_prototype_id == Some(target_id)
+                && matches!(
+                    property,
+                    "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable"
+                );
+
+        if should_synthesize_data_descriptor {
+            let empty_realm = Realm::default();
+            let value = self.get_object_property(target_id, property, &empty_realm)?;
+            return Ok(self.create_descriptor_object(vec![
+                ("value", value),
+                ("writable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(false)),
+                ("configurable", JsValue::Bool(true)),
             ]));
         }
         Ok(JsValue::Undefined)
@@ -7380,15 +7945,56 @@ impl Vm {
         native: NativeFunction,
         property: &str,
     ) -> Result<JsValue, VmError> {
+        if let Some(object) = self.native_function_objects.get(&native).cloned() {
+            let data_value = object.properties.get(property).cloned();
+            let getter_value = object.getters.get(property).cloned();
+            let setter_value = object.setters.get(property).cloned();
+            let attributes = object.property_attributes.get(property).copied();
+            if let Some(value) = data_value {
+                let attributes = attributes.unwrap_or(PropertyAttributes::default());
+                return Ok(self.create_descriptor_object(vec![
+                    ("value", value),
+                    ("writable", JsValue::Bool(attributes.writable)),
+                    ("enumerable", JsValue::Bool(attributes.enumerable)),
+                    ("configurable", JsValue::Bool(attributes.configurable)),
+                ]));
+            }
+            if getter_value.is_some() || setter_value.is_some() {
+                let attributes = attributes.unwrap_or(PropertyAttributes {
+                    writable: false,
+                    enumerable: true,
+                    configurable: true,
+                });
+                return Ok(self.create_descriptor_object(vec![
+                    ("get", getter_value.unwrap_or(JsValue::Undefined)),
+                    ("set", setter_value.unwrap_or(JsValue::Undefined)),
+                    ("enumerable", JsValue::Bool(attributes.enumerable)),
+                    ("configurable", JsValue::Bool(attributes.configurable)),
+                ]));
+            }
+        }
+        if self
+            .native_function_deleted
+            .contains(&(native, property.to_string()))
+        {
+            return Ok(JsValue::Undefined);
+        }
         if !self.native_function_has_own_property(native, property) {
             return Ok(JsValue::Undefined);
         }
         let value = self.get_native_function_property(native, property);
+        let attributes = self
+            .native_function_default_property_attributes(native, property)
+            .unwrap_or(PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
         Ok(self.create_descriptor_object(vec![
             ("value", value),
-            ("writable", JsValue::Bool(true)),
-            ("enumerable", JsValue::Bool(false)),
-            ("configurable", JsValue::Bool(true)),
+            ("writable", JsValue::Bool(attributes.writable)),
+            ("enumerable", JsValue::Bool(attributes.enumerable)),
+            ("configurable", JsValue::Bool(attributes.configurable)),
         ]))
     }
 
@@ -7437,6 +8043,12 @@ impl Vm {
             ]));
         }
 
+        if self.host_function_objects.contains_key(&host_id)
+            && matches!(property, "length" | "name")
+        {
+            return Ok(JsValue::Undefined);
+        }
+
         if !Self::host_function_has_default_property(property) {
             return Ok(JsValue::Undefined);
         }
@@ -7452,27 +8064,11 @@ impl Vm {
     }
 
     fn execute_object_get_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
-        match target {
-            JsValue::Object(target_id) => {
-                let object = self
-                    .objects
-                    .get(&target_id)
-                    .ok_or(VmError::UnknownObject(target_id))?;
-                Ok(object
-                    .prototype_value
-                    .clone()
-                    .or_else(|| object.prototype.map(JsValue::Object))
-                    .unwrap_or(JsValue::Null))
-            }
-            value @ JsValue::Function(_) => self.get_prototype_of_value(&value),
-            value @ (JsValue::NativeFunction(_) | JsValue::HostFunction(_)) => {
-                self.get_prototype_of_value(&value)
-            }
-            _ => Err(VmError::TypeError(
-                "Object.getPrototypeOf target must be object",
-            )),
-        }
+        let target = self.to_object_for_object_builtins(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            "Object.getPrototypeOf target must be object",
+        )?;
+        self.get_prototype_of_value(&target)
     }
 
     fn execute_object_prevent_extensions(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -7528,6 +8124,25 @@ impl Vm {
             _ => false,
         };
         Ok(JsValue::Bool(extensible))
+    }
+
+    fn execute_object_is(&self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let left = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let right = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        Ok(JsValue::Bool(self.same_value(&left, &right)))
+    }
+
+    fn freeze_object_state(object: &mut JsObject) {
+        object.extensible = false;
+        let keys = Self::collect_own_property_keys_from_object(object, false);
+        for key in keys {
+            let is_data = object.properties.contains_key(&key);
+            let attributes = object.property_attributes.entry(key).or_default();
+            attributes.configurable = false;
+            if is_data {
+                attributes.writable = false;
+            }
+        }
     }
 
     fn execute_object_is_sealed(
@@ -7595,29 +8210,32 @@ impl Vm {
 
     fn execute_object_freeze(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
-        if let JsValue::Object(object_id) = target {
-            let object = self
-                .objects
-                .get_mut(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
-            object.extensible = false;
-
-            let mut keys = BTreeSet::new();
-            keys.extend(object.properties.keys().cloned());
-            keys.extend(object.getters.keys().cloned());
-            keys.extend(object.setters.keys().cloned());
-            for key in keys {
-                let is_data = object.properties.contains_key(&key);
-                let attributes = object.property_attributes.entry(key).or_default();
-                attributes.configurable = false;
-                if is_data {
-                    attributes.writable = false;
-                }
+        match target {
+            JsValue::Object(object_id) => {
+                let object = self
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(VmError::UnknownObject(object_id))?;
+                Self::freeze_object_state(object);
+                Ok(JsValue::Object(object_id))
             }
-
-            Ok(JsValue::Object(object_id))
-        } else {
-            Ok(target)
+            JsValue::Function(closure_id) => {
+                if !self.closures.contains_key(&closure_id) {
+                    return Err(VmError::UnknownClosure(closure_id));
+                }
+                let object = self.closure_objects.entry(closure_id).or_default();
+                Self::freeze_object_state(object);
+                Ok(JsValue::Function(closure_id))
+            }
+            JsValue::HostFunction(host_id) => {
+                if !self.host_functions.contains_key(&host_id) {
+                    return Err(VmError::UnknownHostFunction(host_id));
+                }
+                let object = self.host_function_objects.entry(host_id).or_default();
+                Self::freeze_object_state(object);
+                Ok(JsValue::HostFunction(host_id))
+            }
+            _ => Ok(target),
         }
     }
 
@@ -8294,9 +8912,72 @@ impl Vm {
                 }
                 self.set_function_property(closure_id, property, value, realm)
             }
-            JsValue::NativeFunction(_) => {
+            JsValue::NativeFunction(native) => {
                 if Self::is_restricted_function_property(&property) {
                     return Err(VmError::TypeError("restricted function property access"));
+                }
+                let (setter, getter_exists, data_writable, own_exists, extensible) = self
+                    .native_function_objects
+                    .get(&native)
+                    .map(|object| {
+                        (
+                            object.setters.get(&property).cloned(),
+                            object.getters.contains_key(&property),
+                            object.properties.get(&property).map(|_| {
+                                object
+                                    .property_attributes
+                                    .get(&property)
+                                    .is_none_or(|attributes| attributes.writable)
+                            }),
+                            object.properties.contains_key(&property)
+                                || object.getters.contains_key(&property)
+                                || object.setters.contains_key(&property),
+                            object.extensible,
+                        )
+                    })
+                    .unwrap_or((None, false, None, false, true));
+
+                if let Some(setter) = setter {
+                    if matches!(setter, JsValue::Undefined) {
+                        return Ok(value);
+                    }
+                    let _ = self.execute_callable(
+                        setter,
+                        Some(JsValue::NativeFunction(native)),
+                        vec![value.clone()],
+                        realm,
+                        false,
+                    )?;
+                    return Ok(value);
+                }
+                if getter_exists {
+                    return Ok(value);
+                }
+                if data_writable == Some(false) {
+                    return Ok(value);
+                }
+                if !own_exists && !extensible {
+                    return Ok(value);
+                }
+                if self.native_function_has_own_property(native, &property)
+                    && !self.native_function_is_property_writable(native, &property)
+                {
+                    return Ok(value);
+                }
+                self.native_function_deleted
+                    .remove(&(native, property.clone()));
+                let default_attributes =
+                    self.native_function_default_property_attributes(native, &property);
+                let object = self.native_function_objects.entry(native).or_default();
+                object.properties.insert(property.clone(), value.clone());
+                let attributes = object
+                    .property_attributes
+                    .entry(property)
+                    .or_insert_with(PropertyAttributes::default);
+                if !own_exists {
+                    if let Some(default_attributes) = default_attributes {
+                        *attributes = default_attributes;
+                    }
                 }
                 Ok(value)
             }
@@ -8369,6 +9050,16 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         if property == "hasOwnProperty" {
+            if self.object_prototype_id == Some(object_id) {
+                if let Some(value) = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get(property))
+                    .cloned()
+                {
+                    return Ok(value);
+                }
+            }
             return Ok(
                 self.create_host_function_value(HostFunction::HasOwnProperty {
                     target: JsValue::Object(object_id),
@@ -8376,12 +9067,26 @@ impl Vm {
             );
         }
         if property == "isPrototypeOf" {
+            if self.object_prototype_id == Some(object_id) {
+                if let Some(value) = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get(property))
+                    .cloned()
+                {
+                    return Ok(value);
+                }
+            }
             return Ok(
                 self.create_host_function_value(HostFunction::IsPrototypeOf {
                     target: JsValue::Object(object_id),
                 }),
             );
         }
+        let is_array_prototype = self.array_prototype_id == Some(object_id);
+        let is_array_like = self
+            .is_array_length_tracking_object(object_id)
+            .unwrap_or(false);
         if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
             if property == "length" {
                 return Ok(JsValue::Number(Self::utf16_code_unit_length(&value) as f64));
@@ -8394,91 +9099,39 @@ impl Vm {
                     .unwrap_or(JsValue::Undefined));
             }
         }
-        if property == "push"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "push" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
         }
-        if property == "pop"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "pop" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
         }
-        if property == "concat"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "concat" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
         }
-        if property == "forEach"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "forEach" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
         }
-        if property == "reduce"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "reduce" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
-        if property == "join"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "join" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayJoin(object_id)));
         }
-        if property == "reverse"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "reverse" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReverse(object_id)));
         }
-        if property == "sort"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "sort" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
         }
-        if property == "keys"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "keys" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
         }
-        if property == "entries"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "entries" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayEntriesThis));
         }
         if (property == "values" || property == "Symbol.iterator")
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
+            && is_array_like
+            && !is_array_prototype
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
         }
@@ -8730,16 +9383,6 @@ impl Vm {
                     with_base_object: false,
                 });
             }
-            if let Some(value) = realm.resolve_identifier(name) {
-                let _ =
-                    self.set_object_property(global_object_id, name.to_string(), value, realm)?;
-                return Ok(IdentifierReference::Property {
-                    base,
-                    property: name.to_string(),
-                    strict_on_missing: false,
-                    with_base_object: false,
-                });
-            }
         }
         Ok(IdentifierReference::Unresolvable {
             name: name.to_string(),
@@ -8798,13 +9441,13 @@ impl Vm {
                         .resolve_identifier(name)
                         .unwrap_or_else(|| self.global_this_value()));
                 }
-                if let Some(value) = realm.resolve_identifier(name) {
-                    return Ok(value);
-                }
                 if let Some(global_object_id) = self.global_object_id {
                     let receiver = JsValue::Object(global_object_id);
                     if self.has_property_on_receiver(&receiver, name, realm)? {
                         return self.get_property_from_receiver(receiver, name, realm);
+                    }
+                    if name == "Object" && realm.resolve_identifier(name).is_none() {
+                        return Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor));
                     }
                 }
                 Err(VmError::UnknownIdentifier(name.clone()))
@@ -9239,6 +9882,36 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
+        let define_property = self.create_host_function_value(HostFunction::ReflectDefineProperty);
+        let get_own_property_descriptor =
+            self.create_host_function_value(HostFunction::ReflectGetOwnPropertyDescriptor);
+        self.set_builtin_function_length(&define_property, 3.0);
+        self.set_builtin_function_length(&get_own_property_descriptor, 2.0);
+        if let Some(reflect_object) = self.objects.get_mut(&reflect_id) {
+            reflect_object
+                .properties
+                .insert("defineProperty".to_string(), define_property);
+            reflect_object.property_attributes.insert(
+                "defineProperty".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            reflect_object.properties.insert(
+                "getOwnPropertyDescriptor".to_string(),
+                get_own_property_descriptor,
+            );
+            reflect_object.property_attributes.insert(
+                "getOwnPropertyDescriptor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
         let global_object = self
             .objects
             .get_mut(&global_object_id)
@@ -9271,8 +9944,41 @@ impl Vm {
         self.next_host_function_id += 1;
         self.host_functions
             .insert(id, HostFunction::FunctionPrototype);
+        let prototype_value = JsValue::HostFunction(id);
+        let to_string = self.create_host_function_value(HostFunction::FunctionToString {
+            target: prototype_value.clone(),
+        });
+        let call = self.create_host_function_value(HostFunction::BoundMethod {
+            target: prototype_value.clone(),
+            method: FunctionMethod::Call,
+        });
+        let apply = self.create_host_function_value(HostFunction::BoundMethod {
+            target: prototype_value.clone(),
+            method: FunctionMethod::Apply,
+        });
+        let bind = self.create_host_function_value(HostFunction::BoundMethod {
+            target: prototype_value.clone(),
+            method: FunctionMethod::Bind,
+        });
+        let object = self.host_function_objects.entry(id).or_default();
+        for (name, value) in [
+            ("toString", to_string),
+            ("call", call),
+            ("apply", apply),
+            ("bind", bind),
+        ] {
+            object.properties.insert(name.to_string(), value);
+            object.property_attributes.insert(
+                name.to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
         self.function_prototype_host_id = Some(id);
-        JsValue::HostFunction(id)
+        prototype_value
     }
 
     fn generator_function_prototype_value(&mut self) -> JsValue {
@@ -9315,6 +10021,11 @@ impl Vm {
             let reverse = self.create_host_function_value(HostFunction::ArrayReverse(id));
             let sort = self.create_host_function_value(HostFunction::ArraySort(id));
             let reduce = self.create_host_function_value(HostFunction::ArrayReduce(id));
+            let index_of = self.create_host_function_value(HostFunction::ArrayIndexOfThis);
+            let last_index_of =
+                self.create_host_function_value(HostFunction::ArrayLastIndexOfThis);
+            self.set_builtin_function_length(&index_of, 1.0);
+            self.set_builtin_function_length(&last_index_of, 1.0);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -9387,6 +10098,26 @@ impl Vm {
                 object.properties.insert("reduce".to_string(), reduce);
                 object.property_attributes.insert(
                     "reduce".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("indexOf".to_string(), index_of);
+                object.property_attributes.insert(
+                    "indexOf".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("lastIndexOf".to_string(), last_index_of);
+                object.property_attributes.insert(
+                    "lastIndexOf".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -10145,6 +10876,77 @@ impl Vm {
         }
     }
 
+    fn object_prototype_this_object(
+        &mut self,
+        this_arg: Option<JsValue>,
+        null_undefined_error: &'static str,
+    ) -> Result<JsValue, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        self.to_object_for_object_builtins(value, null_undefined_error)
+    }
+
+    fn object_to_string_tag(
+        &mut self,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<String, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::Undefined | JsValue::Uninitialized => return Ok("Undefined".to_string()),
+            JsValue::Null => return Ok("Null".to_string()),
+            JsValue::Bool(_) => return Ok("Boolean".to_string()),
+            JsValue::Number(_) => return Ok("Number".to_string()),
+            JsValue::String(_) => return Ok("String".to_string()),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                return Ok("Function".to_string());
+            }
+            JsValue::Object(object_id) => {
+                if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                    return Ok(match boxed {
+                        JsValue::Bool(_) => "Boolean",
+                        JsValue::Number(_) => "Number",
+                        JsValue::String(_) => "String",
+                        _ => "Object",
+                    }
+                    .to_string());
+                }
+                if self.has_object_marker(object_id, "__uint8ArrayTag")? {
+                    return Ok("Uint8Array".to_string());
+                }
+                if self.has_object_marker(object_id, ARGUMENTS_OBJECT_MARKER_KEY)? {
+                    return Ok("Arguments".to_string());
+                }
+                if self.has_object_marker(object_id, "__regexpTag")? {
+                    return Ok("RegExp".to_string());
+                }
+                if self.has_object_marker(object_id, DATE_OBJECT_MARKER_KEY)? {
+                    return Ok("Date".to_string());
+                }
+                if let Some(array_prototype_id) = self.array_prototype_id {
+                    if self.object_inherits_prototype(object_id, array_prototype_id)? {
+                        return Ok("Array".to_string());
+                    }
+                }
+                if let Some(error_prototype_id) = self.error_prototype_id {
+                    if self.object_inherits_prototype(object_id, error_prototype_id)? {
+                        return Ok("Error".to_string());
+                    }
+                }
+                let to_string_tag = self.get_property_from_receiver(
+                    JsValue::Object(object_id),
+                    "Symbol.toStringTag",
+                    realm,
+                )?;
+                if let JsValue::String(tag) = to_string_tag {
+                    if !tag.is_empty() {
+                        return Ok(tag);
+                    }
+                }
+            }
+        }
+        Ok("Object".to_string())
+    }
+
     fn box_primitive_receiver(&mut self, primitive: JsValue) -> JsValue {
         let receiver = self.create_object_value();
         let object_id = match receiver {
@@ -10520,6 +11322,24 @@ impl Vm {
         JsValue::HostFunction(id)
     }
 
+    fn set_builtin_function_length(&mut self, function: &JsValue, length: f64) {
+        let JsValue::HostFunction(host_id) = function else {
+            return;
+        };
+        let object = self.host_function_objects.entry(*host_id).or_default();
+        object
+            .properties
+            .insert("length".to_string(), JsValue::Number(length));
+        object.property_attributes.insert(
+            "length".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
     fn shared_object_to_string_function(&mut self) -> JsValue {
         if let Some(host_id) = self.object_to_string_host_id {
             return JsValue::HostFunction(host_id);
@@ -10538,6 +11358,16 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         if property == "hasOwnProperty" {
+            if self.object_prototype_id == Some(object_id) {
+                if let Some(value) = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get(property))
+                    .cloned()
+                {
+                    return Ok(value);
+                }
+            }
             return Ok(
                 self.create_host_function_value(HostFunction::HasOwnProperty {
                     target: JsValue::Object(object_id),
@@ -10545,12 +11375,26 @@ impl Vm {
             );
         }
         if property == "isPrototypeOf" {
+            if self.object_prototype_id == Some(object_id) {
+                if let Some(value) = self
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.properties.get(property))
+                    .cloned()
+                {
+                    return Ok(value);
+                }
+            }
             return Ok(
                 self.create_host_function_value(HostFunction::IsPrototypeOf {
                     target: JsValue::Object(object_id),
                 }),
             );
         }
+        let is_array_prototype = self.array_prototype_id == Some(object_id);
+        let is_array_like = self
+            .is_array_length_tracking_object(object_id)
+            .unwrap_or(false);
         if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
             if property == "length" {
                 return Ok(JsValue::Number(Self::utf16_code_unit_length(&value) as f64));
@@ -10563,91 +11407,39 @@ impl Vm {
                     .unwrap_or(JsValue::Undefined));
             }
         }
-        if property == "push"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "push" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPush(object_id)));
         }
-        if property == "pop"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "pop" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
         }
-        if property == "concat"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "concat" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
         }
-        if property == "forEach"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "forEach" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayForEach(object_id)));
         }
-        if property == "reduce"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "reduce" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReduce(object_id)));
         }
-        if property == "join"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "join" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayJoin(object_id)));
         }
-        if property == "reverse"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "reverse" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayReverse(object_id)));
         }
-        if property == "sort"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "sort" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
         }
-        if property == "keys"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "keys" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
         }
-        if property == "entries"
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
-        {
+        if property == "entries" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayEntriesThis));
         }
         if (property == "values" || property == "Symbol.iterator")
-            && self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.properties.contains_key("length"))
+            && is_array_like
+            && !is_array_prototype
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
         }
@@ -10999,8 +11791,15 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property(*proto_native, &property) {
-                            (None, false, Some(true))
+                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                            (
+                                None,
+                                false,
+                                Some(self.native_function_is_property_writable(
+                                    *proto_native,
+                                    &property,
+                                )),
+                            )
                         } else {
                             (None, false, None)
                         }
@@ -11139,8 +11938,15 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property(*proto_native, &property) {
-                            (None, false, Some(true))
+                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                            (
+                                None,
+                                false,
+                                Some(self.native_function_is_property_writable(
+                                    *proto_native,
+                                    &property,
+                                )),
+                            )
                         } else {
                             (None, false, None)
                         }
@@ -11283,22 +12089,18 @@ impl Vm {
                 Ok(false)
             }
             JsValue::NativeFunction(native) => {
-                Ok(self.native_function_has_own_property(*native, property))
+                Ok(self.native_function_has_own_property_runtime(*native, property))
             }
             JsValue::HostFunction(host_id) => {
                 if !self.host_functions.contains_key(host_id) {
                     return Err(VmError::UnknownHostFunction(*host_id));
                 }
-                if self
-                    .host_function_objects
-                    .get(host_id)
-                    .is_some_and(|object| {
+                if let Some(object) = self.host_function_objects.get(host_id) {
+                    return Ok(
                         object.properties.contains_key(property)
                             || object.getters.contains_key(property)
-                            || object.setters.contains_key(property)
-                    })
-                {
-                    return Ok(true);
+                            || object.setters.contains_key(property),
+                    );
                 }
                 Ok(Self::host_function_has_default_property(property))
             }
@@ -11320,12 +12122,106 @@ impl Vm {
         )
     }
 
+    fn native_function_has_own_property_runtime(
+        &self,
+        native: NativeFunction,
+        property: &str,
+    ) -> bool {
+        if self
+            .native_function_deleted
+            .contains(&(native, property.to_string()))
+        {
+            return false;
+        }
+        if self
+            .native_function_objects
+            .get(&native)
+            .is_some_and(|object| {
+                object.properties.contains_key(property)
+                    || object.getters.contains_key(property)
+                    || object.setters.contains_key(property)
+            })
+        {
+            return true;
+        }
+        self.native_function_has_own_property(native, property)
+    }
+
+    fn native_function_default_property_attributes(
+        &self,
+        native: NativeFunction,
+        property: &str,
+    ) -> Option<PropertyAttributes> {
+        if !self.native_function_has_own_property(native, property) {
+            return None;
+        }
+        Some(PropertyAttributes {
+            writable: self.native_function_default_property_writable(native, property),
+            enumerable: false,
+            configurable: self.native_function_default_property_configurable(native, property),
+        })
+    }
+
+    fn native_function_default_property_writable(
+        &self,
+        native: NativeFunction,
+        property: &str,
+    ) -> bool {
+        if matches!(property, "length" | "name") {
+            return false;
+        }
+        if property == "prototype" && Self::native_function_is_constructor(native) {
+            return false;
+        }
+        !matches!(
+            (native, property),
+            (
+                NativeFunction::NumberConstructor,
+                "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY" | "MAX_VALUE" | "MIN_VALUE"
+            )
+        )
+    }
+
+    fn native_function_default_property_configurable(
+        &self,
+        native: NativeFunction,
+        property: &str,
+    ) -> bool {
+        if property == "prototype" && Self::native_function_is_constructor(native) {
+            return false;
+        }
+        !matches!(
+            (native, property),
+            (
+                NativeFunction::NumberConstructor,
+                "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY" | "MAX_VALUE" | "MIN_VALUE"
+            )
+        )
+    }
+
+    fn native_function_is_property_writable(&self, native: NativeFunction, property: &str) -> bool {
+        if let Some(object) = self.native_function_objects.get(&native) {
+            if object.properties.contains_key(property) {
+                return object
+                    .property_attributes
+                    .get(property)
+                    .is_none_or(|attributes| attributes.writable);
+            }
+            if object.getters.contains_key(property) || object.setters.contains_key(property) {
+                return false;
+            }
+        }
+        self.native_function_default_property_writable(native, property)
+    }
+
     fn native_function_has_own_property(&self, native: NativeFunction, property: &str) -> bool {
         matches!(
             (native, property),
             (NativeFunction::ObjectConstructor, "defineProperty")
                 | (NativeFunction::ObjectConstructor, "defineProperties")
                 | (NativeFunction::ObjectConstructor, "keys")
+                | (NativeFunction::ObjectConstructor, "entries")
+                | (NativeFunction::ObjectConstructor, "values")
                 | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "assign")
@@ -11341,11 +12237,16 @@ impl Vm {
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
                 )
+                | (
+                    NativeFunction::ObjectConstructor,
+                    "getOwnPropertyDescriptors"
+                )
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "isSealed")
                 | (NativeFunction::ObjectConstructor, "isFrozen")
+                | (NativeFunction::ObjectConstructor, "is")
                 | (NativeFunction::ObjectConstructor, "seal")
                 | (NativeFunction::ObjectConstructor, "freeze")
                 | (NativeFunction::ObjectConstructor, "toString")
@@ -11399,6 +12300,7 @@ impl Vm {
                 | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
                 | (NativeFunction::SymbolConstructor, "prototype")
+                | (_, "name")
                 | (_, "length")
                 | (_, "constructor")
         )
@@ -11667,6 +12569,86 @@ impl Vm {
             .unwrap_or(0.0)
             .max(0.0);
         Ok(length as usize)
+    }
+
+    fn array_like_length_from_value(
+        &mut self,
+        value: &JsValue,
+        realm: &Realm,
+    ) -> Result<i64, VmError> {
+        let length_value = self.get_property_from_receiver(value.clone(), "length", realm)?;
+        let length = self.to_number(&length_value).max(0.0).floor();
+        Ok(length as i64)
+    }
+
+    fn execute_array_index_lookup(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        from_end: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype indexOf/lastIndexOf receiver must be object",
+        )?;
+        let search = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let length = self.array_like_length_from_value(&target, realm)?;
+        if length <= 0 {
+            return Ok(JsValue::Number(-1.0));
+        }
+
+        let from_index = args
+            .get(1)
+            .map(|value| self.to_number(value))
+            .unwrap_or(if from_end { (length - 1) as f64 } else { 0.0 });
+        let index_from_number = if from_index.is_nan() {
+            if from_end { length - 1 } else { 0 }
+        } else {
+            from_index.trunc() as i64
+        };
+
+        let mut current = if from_end {
+            if index_from_number >= 0 {
+                index_from_number.min(length - 1)
+            } else {
+                length + index_from_number
+            }
+        } else if index_from_number >= 0 {
+            index_from_number
+        } else {
+            (length + index_from_number).max(0)
+        };
+
+        if !from_end && current >= length {
+            return Ok(JsValue::Number(-1.0));
+        }
+        if from_end && current < 0 {
+            return Ok(JsValue::Number(-1.0));
+        }
+
+        loop {
+            if !from_end && current >= length {
+                break;
+            }
+            if from_end && current < 0 {
+                break;
+            }
+            let key = current.to_string();
+            if self.has_property_on_receiver(&target, &key, realm)? {
+                let candidate = self.get_property_from_receiver(target.clone(), &key, realm)?;
+                if self.strict_equality_compare(&candidate, &search) {
+                    return Ok(JsValue::Number(current as f64));
+                }
+            }
+            if from_end {
+                current -= 1;
+            } else {
+                current += 1;
+            }
+        }
+
+        Ok(JsValue::Number(-1.0))
     }
 
     fn execute_array_join(
@@ -12025,7 +13007,28 @@ impl Vm {
                     Ok(self.function_prototype_value())
                 }
             }
-            JsValue::NativeFunction(_) => Ok(self.function_prototype_value()),
+            JsValue::NativeFunction(native) => {
+                if let Some(native_object) = self.native_function_objects.get(native) {
+                    if native_object.prototype_overridden {
+                        return Ok(native_object
+                            .prototype_value
+                            .clone()
+                            .or_else(|| native_object.prototype.map(JsValue::Object))
+                            .unwrap_or(JsValue::Null));
+                    }
+                }
+                match native {
+                    NativeFunction::TypeErrorConstructor
+                    | NativeFunction::ReferenceErrorConstructor
+                    | NativeFunction::SyntaxErrorConstructor
+                    | NativeFunction::EvalErrorConstructor
+                    | NativeFunction::RangeErrorConstructor
+                    | NativeFunction::URIErrorConstructor => {
+                        Ok(JsValue::NativeFunction(NativeFunction::ErrorConstructor))
+                    }
+                    _ => Ok(self.function_prototype_value()),
+                }
+            }
             _ => Ok(JsValue::Null),
         }
     }
@@ -12135,17 +13138,45 @@ impl Vm {
         true
     }
 
-    fn delete_native_function_property(&self, native: NativeFunction, property: &str) -> bool {
+    fn delete_native_function_property(&mut self, native: NativeFunction, property: &str) -> bool {
+        if let Some(object) = self.native_function_objects.get_mut(&native) {
+            if object.properties.contains_key(property)
+                || object.getters.contains_key(property)
+                || object.setters.contains_key(property)
+            {
+                let configurable = object
+                    .property_attributes
+                    .get(property)
+                    .map(|attributes| attributes.configurable)
+                    .unwrap_or(true);
+                if !configurable {
+                    return false;
+                }
+                object.properties.remove(property);
+                object.getters.remove(property);
+                object.setters.remove(property);
+                object.property_attributes.remove(property);
+                object.argument_mappings.remove(property);
+                self.native_function_deleted
+                    .remove(&(native, property.to_string()));
+                return true;
+            }
+        }
+        if self
+            .native_function_deleted
+            .contains(&(native, property.to_string()))
+        {
+            return true;
+        }
         if !self.native_function_has_own_property(native, property) {
             return true;
         }
-        !matches!(
-            (native, property),
-            (
-                NativeFunction::NumberConstructor,
-                "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY" | "MAX_VALUE" | "MIN_VALUE"
-            )
-        )
+        if !self.native_function_default_property_configurable(native, property) {
+            return false;
+        }
+        self.native_function_deleted
+            .insert((native, property.to_string()));
+        true
     }
 
     fn get_host_function_property(
@@ -12158,7 +13189,7 @@ impl Vm {
             return Err(VmError::UnknownHostFunction(host_id));
         }
 
-        let (data_value, getter_value, has_setter) = self
+        let (data_value, getter_value, has_setter, has_shadow_object) = self
             .host_function_objects
             .get(&host_id)
             .map(|object| {
@@ -12166,9 +13197,10 @@ impl Vm {
                     object.properties.get(property).cloned(),
                     object.getters.get(property).cloned(),
                     object.setters.contains_key(property),
+                    true,
                 )
             })
-            .unwrap_or((None, None, false));
+            .unwrap_or((None, None, false, false));
         if let Some(getter) = getter_value {
             return self.execute_callable(
                 getter,
@@ -12183,6 +13215,9 @@ impl Vm {
         }
         if let Some(value) = data_value {
             return Ok(value);
+        }
+        if has_shadow_object && matches!(property, "length" | "name") {
+            return Ok(JsValue::Undefined);
         }
 
         match property {
@@ -12396,7 +13431,52 @@ impl Vm {
         }
     }
 
+    fn native_function_display_name(native: NativeFunction) -> &'static str {
+        match native {
+            NativeFunction::Eval => "eval",
+            NativeFunction::FunctionConstructor => "Function",
+            NativeFunction::GeneratorFunctionConstructor => "GeneratorFunction",
+            NativeFunction::ObjectConstructor => "Object",
+            NativeFunction::ArrayConstructor => "Array",
+            NativeFunction::StringConstructor => "String",
+            NativeFunction::NumberConstructor => "Number",
+            NativeFunction::BooleanConstructor => "Boolean",
+            NativeFunction::DateConstructor => "Date",
+            NativeFunction::RegExpConstructor => "RegExp",
+            NativeFunction::ErrorConstructor => "Error",
+            NativeFunction::TypeErrorConstructor => "TypeError",
+            NativeFunction::ReferenceErrorConstructor => "ReferenceError",
+            NativeFunction::SyntaxErrorConstructor => "SyntaxError",
+            NativeFunction::EvalErrorConstructor => "EvalError",
+            NativeFunction::RangeErrorConstructor => "RangeError",
+            NativeFunction::URIErrorConstructor => "URIError",
+            NativeFunction::ParseInt => "parseInt",
+            NativeFunction::ParseFloat => "parseFloat",
+            NativeFunction::IsNaN => "isNaN",
+            NativeFunction::IsFinite => "isFinite",
+            NativeFunction::DecodeURI => "decodeURI",
+            NativeFunction::DecodeURIComponent => "decodeURIComponent",
+            NativeFunction::EncodeURI => "encodeURI",
+            NativeFunction::EncodeURIComponent => "encodeURIComponent",
+            _ => "native",
+        }
+    }
+
     fn get_native_function_property(&mut self, native: NativeFunction, property: &str) -> JsValue {
+        if self
+            .native_function_deleted
+            .contains(&(native, property.to_string()))
+        {
+            return JsValue::Undefined;
+        }
+        if let Some(object) = self.native_function_objects.get(&native) {
+            if let Some(value) = object.properties.get(property) {
+                return value.clone();
+            }
+            if object.getters.contains_key(property) || object.setters.contains_key(property) {
+                return JsValue::Undefined;
+            }
+        }
         match (native, property) {
             (NativeFunction::NumberConstructor, "NaN") => JsValue::Number(f64::NAN),
             (NativeFunction::NumberConstructor, "POSITIVE_INFINITY") => {
@@ -12418,6 +13498,12 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "keys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectKeys)
+            }
+            (NativeFunction::ObjectConstructor, "entries") => {
+                JsValue::NativeFunction(NativeFunction::ObjectEntries)
+            }
+            (NativeFunction::ObjectConstructor, "values") => {
+                JsValue::NativeFunction(NativeFunction::ObjectValues)
             }
             (NativeFunction::ObjectConstructor, "getOwnPropertyNames") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyNames)
@@ -12458,6 +13544,9 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptor") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptor)
             }
+            (NativeFunction::ObjectConstructor, "getOwnPropertyDescriptors") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyDescriptors)
+            }
             (NativeFunction::ObjectConstructor, "getPrototypeOf") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetPrototypeOf)
             }
@@ -12469,6 +13558,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "isFrozen") => {
                 JsValue::NativeFunction(NativeFunction::ObjectIsFrozen)
+            }
+            (NativeFunction::ObjectConstructor, "is") => {
+                JsValue::NativeFunction(NativeFunction::ObjectIs)
             }
             (NativeFunction::ObjectConstructor, "seal") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSeal)
@@ -12578,6 +13670,9 @@ impl Vm {
             (NativeFunction::StringConstructor, "fromCharCode") => {
                 JsValue::NativeFunction(NativeFunction::StringFromCharCode)
             }
+            (_, "name") => {
+                JsValue::String(Self::native_function_display_name(native).to_string())
+            }
             (_, "toString") => self.create_host_function_value(HostFunction::FunctionToString {
                 target: JsValue::NativeFunction(native),
             }),
@@ -12593,6 +13688,12 @@ impl Vm {
             (_, "isPrototypeOf") => self.create_host_function_value(HostFunction::IsPrototypeOf {
                 target: JsValue::NativeFunction(native),
             }),
+            (_, "propertyIsEnumerable") => {
+                self.create_host_function_value(HostFunction::ObjectPropertyIsEnumerable)
+            }
+            (_, "toLocaleString") => {
+                self.create_host_function_value(HostFunction::ObjectToLocaleString)
+            }
             (_, "call") => self.create_host_function_value(HostFunction::BoundMethod {
                 target: JsValue::NativeFunction(native),
                 method: FunctionMethod::Call,
@@ -12608,10 +13709,26 @@ impl Vm {
             (NativeFunction::ObjectDefineProperty, "length") => JsValue::Number(3.0),
             (NativeFunction::ObjectDefineProperties, "length")
             | (NativeFunction::ObjectGetOwnPropertyDescriptor, "length")
-            | (NativeFunction::ObjectGetPrototypeOf, "length")
             | (NativeFunction::ObjectSetPrototypeOf, "length")
             | (NativeFunction::ObjectCreate, "length")
-            | (NativeFunction::ObjectAssign, "length") => JsValue::Number(2.0),
+            | (NativeFunction::ObjectAssign, "length")
+            | (NativeFunction::ObjectIs, "length") => JsValue::Number(2.0),
+            (NativeFunction::ObjectGetPrototypeOf, "length")
+            | (NativeFunction::ObjectGetOwnPropertyDescriptors, "length")
+            | (NativeFunction::ObjectKeys, "length")
+            | (NativeFunction::ObjectEntries, "length")
+            | (NativeFunction::ObjectValues, "length")
+            | (NativeFunction::ObjectGetOwnPropertyNames, "length")
+            | (NativeFunction::ObjectPreventExtensions, "length")
+            | (NativeFunction::ObjectIsExtensible, "length")
+            | (NativeFunction::ObjectIsSealed, "length")
+            | (NativeFunction::ObjectIsFrozen, "length")
+            | (NativeFunction::ObjectSeal, "length")
+            | (NativeFunction::ObjectFreeze, "length")
+            | (NativeFunction::ArrayIsArray, "length")
+            | (NativeFunction::DateParse, "length")
+            | (NativeFunction::DateUtc, "length")
+            | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
             (_, "length") => JsValue::Number(1.0),
             _ => JsValue::Undefined,
         }

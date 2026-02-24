@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeFunction {
     Eval,
     FunctionConstructor,
@@ -11,6 +11,8 @@ pub enum NativeFunction {
     ArrayConstructor,
     ArrayIsArray,
     ObjectKeys,
+    ObjectEntries,
+    ObjectValues,
     ObjectGetOwnPropertyNames,
     ObjectCreate,
     ObjectAssign,
@@ -18,11 +20,13 @@ pub enum NativeFunction {
     ObjectDefineProperty,
     ObjectDefineProperties,
     ObjectGetOwnPropertyDescriptor,
+    ObjectGetOwnPropertyDescriptors,
     ObjectGetPrototypeOf,
     ObjectPreventExtensions,
     ObjectIsExtensible,
     ObjectIsSealed,
     ObjectIsFrozen,
+    ObjectIs,
     ObjectFreeze,
     ObjectSeal,
     ObjectForInKeys,
@@ -70,6 +74,10 @@ pub enum NativeFunction {
     IsFinite,
     ParseInt,
     ParseFloat,
+    DecodeURI,
+    DecodeURIComponent,
+    EncodeURI,
+    EncodeURIComponent,
     Assert,
     Test262Error,
     ErrorConstructor,
