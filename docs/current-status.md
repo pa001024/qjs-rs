@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4989`、`failed=11`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v53.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=5000`、`failed=0`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -155,6 +155,10 @@
   - 子集回归（latest+39）：parser 将 tagged template 首参 lowering 切换到 `Object.__getTemplateObject(siteId, cooked, raw)`，VM 增加按 site 缓存与 `Object.freeze` 路径（含 `raw` 子数组冻结）；`language/expressions/tagged-template` 收敛至 `21/0`，`language` 基线提升至 `4984/16`（快照：`target/test262-language-baseline-5000-20260224-v51.json`）。
   - 子集回归（latest+40）：bytecode 在 statement-list completion 候选选择中新增“静态空完成值”判定（含空 block 递归场景），避免 trailing `{}` 覆盖前序表达式完成值；VM 增加 `eval('{length: 3000}{}')` 回归测试。`language` 基线提升至 `4985/15`（快照：`target/test262-language-baseline-5000-20260224-v52.json`）。
   - 子集回归（latest+41）：VM 对齐 QuickJS `js_create_from_ctor(..., JS_CLASS_REGEXP)` 方向：新增稳定 `RegExp.prototype` 缓存对象，`RegExp` 实例原型统一挂接该对象，并补齐原型 `test/exec/toString` 最小路径（`toString => /source/flags`）。`language/statementList` 子集收敛至 `42/0`，`language` 基线提升至 `4989/11`（快照：`target/test262-language-baseline-5000-20260224-v53.json`）。
+  - 子集回归（latest+42）：VM 将字符串 `length` 与 `charCodeAt` 调整为 UTF-16 code-unit 口径（与 QuickJS/ECMAScript 一致），修复 `source-text/6.1.js`。`language` 基线提升至 `4990/10`（快照：`target/test262-language-baseline-5000-20260224-v54.json`）。
+  - 子集回归（latest+43）：lexer 对齐 QuickJS regexp 分流优先级：在允许 regexp 的上下文中，`/=` 优先识别为 regexp literal body 而非 `SlashEqual`。`language` 基线提升至 `4991/9`（快照：`target/test262-language-baseline-5000-20260224-v55.json`）。
+  - 子集回归（latest+44）：VM regex backend 补齐 `u/y` 主路径：`unicode` 标志透传、`sticky` 使用 `lastIndex` 起点、`\0` 归一化；并补齐 `String.prototype.match/search` 最小路径。`language` 基线提升至 `4993/7`（快照：`target/test262-language-baseline-5000-20260224-v56.json`）。
+  - 子集回归（latest+45）：VM regex normalization 增加 `\uXXXX/\u{...}` 解析、surrogate placeholder 编解码与 `u` 模式下输入 UTF-16 对解码，收敛 `literals/regexp/u-*` 剩余簇。`language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
 
 ## 3. 分阶段状态
 
@@ -174,7 +178,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. 当前主失败簇已收敛为 `literals/regexp/*`（主要是 unicode/sticky 语义）与 `source-text/6.1.js`。
+4. `language --max-cases 5000` 已清零（`5000/0`）；下一阶段切换到更大样本与全量 test262 稳定性验证。
 
 ## 5. 下一步执行
 

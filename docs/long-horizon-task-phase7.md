@@ -1,7 +1,7 @@
 # Long Horizon Task Plan (Phase 7 Compatibility Push)
 
 基线日期：2026-02-24
-目标：以 QuickJS 语义对齐为前提，持续压降 test262 language 失败簇（当前 5000 样本：`4989/11`）。
+目标：以 QuickJS 语义对齐为前提，持续推进 test262 兼容性（当前 5000 样本：`5000/0`）。
 预计总时长：`>= 10h`（建议按 5 个 2h 冲刺执行）。
 
 ## 1. 迁移原则（强约束）
@@ -10,19 +10,18 @@
 - 禁止“自创语义捷径”绕过 QuickJS 与 ECMAScript 已知行为。
 - 每个冲刺必须：`cargo fmt`、核心 crate 测试、至少一个 test262 子集回归、一次 git 提交。
 
-## 2. 当前失败簇模块拆分（并行）
+## 2. 下一轮扩容模块拆分（并行）
 
-### Track A: RegExp + 词法边界（2h）
+### Track A: language 样本扩容与回归守护（2h）
 
 - 模块范围：
-  - `literals/regexp/*`
-  - `literals/regexp/u-*`
-  - `literals/regexp/y-*`
-  - `source-text/6.1.js`
-- QuickJS 对照点：regexp literal tokenization 与 flags 处理、line terminator/ASI 边界。
+  - `language --max-cases 10000`
+  - `language` 全量抽样 smoke
+  - `literals/regexp/*` 回归守护
+- QuickJS 对照点：继续以 `quickjs.c` 的 regexp/parser 主路径做行为锚点，防止回归。
 - 目标产物：
-  - 修复 unicode/sticky 正则行为与 code-unit 边界语义
-  - 修复 `source-text/6.1.js` 的 astral code point code-unit 计数偏差
+  - 将 5000 清零结果扩展到更大样本并保持单调不回退
+  - 输出可持续 nightly 基线快照与守护阈值
 
 ### Track B: let 循环作用域与 TDZ（2h）
 
@@ -91,5 +90,5 @@
 ## 5. 验收门槛
 
 - 过程门槛：每 2h 至少 1 次功能提交。
-- 阶段门槛：5000 language 基线继续单调提升，目标先到 `>= 4975`。
+- 阶段门槛：5000 language 基线维持 `5000/0`，并推进 10000 样本通过率。
 - 终局门槛：失败簇集中后切换到全量 test262 计划，并建立 nightly 基线快照。

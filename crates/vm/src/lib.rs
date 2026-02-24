@@ -142,6 +142,8 @@ enum HostFunction {
     },
     GeneratorIteratorNextThis,
     StringReplaceThis,
+    StringMatchThis,
+    StringSearchThis,
     StringIndexOfThis,
     StringSplitThis,
     StringToLowerCaseThis,
@@ -812,6 +814,8 @@ impl Vm {
                 self.gc_mark_stack.push(target);
             }
             HostFunction::StringReplaceThis
+            | HostFunction::StringMatchThis
+            | HostFunction::StringSearchThis
             | HostFunction::StringIndexOfThis
             | HostFunction::StringSplitThis
             | HostFunction::StringToLowerCaseThis
@@ -3356,6 +3360,41 @@ impl Vm {
                 let receiver = self.coerce_this_string(this_arg)?;
                 self.execute_string_replace(receiver, &args, realm, caller_strict)
             }
+            HostFunction::StringMatchThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let matcher = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let exec = self.get_property_from_receiver(matcher.clone(), "exec", realm)?;
+                if !Self::is_callable_value(&exec) {
+                    return Err(VmError::NotCallable);
+                }
+                self.execute_callable(
+                    exec,
+                    Some(matcher),
+                    vec![JsValue::String(receiver)],
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringSearchThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let matcher = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let test = self.get_property_from_receiver(matcher.clone(), "test", realm)?;
+                if !Self::is_callable_value(&test) {
+                    return Err(VmError::NotCallable);
+                }
+                let matched = self.execute_callable(
+                    test,
+                    Some(matcher),
+                    vec![JsValue::String(receiver)],
+                    realm,
+                    caller_strict,
+                )?;
+                Ok(JsValue::Number(if self.is_truthy(&matched) {
+                    0.0
+                } else {
+                    -1.0
+                }))
+            }
             HostFunction::StringIndexOfThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(self.execute_string_index_of(receiver, &args))
@@ -3399,7 +3438,6 @@ impl Vm {
             }
             HostFunction::StringCharCodeAt => {
                 let receiver = self.coerce_this_string(this_arg)?;
-                let receiver_chars: Vec<char> = receiver.chars().collect();
                 let index = args
                     .first()
                     .map(|value| self.to_number(value))
@@ -3409,9 +3447,8 @@ impl Vm {
                 } else {
                     0
                 };
-                Ok(receiver_chars
-                    .get(index)
-                    .map(|ch| JsValue::Number((*ch as u32) as f64))
+                Ok(Self::utf16_code_unit_at(&receiver, index)
+                    .map(|unit| JsValue::Number(unit as f64))
                     .unwrap_or(JsValue::Number(f64::NAN)))
             }
             HostFunction::StringLastIndexOf => {
@@ -4556,21 +4593,212 @@ impl Vm {
             .properties
             .get("flags")
             .map_or_else(String::new, |value| self.coerce_to_string(value));
+        let last_index = object
+            .properties
+            .get("lastIndex")
+            .map(|value| self.to_number(value))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value as usize)
+            .unwrap_or(0usize);
 
         let sticky = flags.contains('y');
-        let mut builder = RegexBuilder::new(&pattern);
+        let unicode = flags.contains('u');
+        let normalized_pattern = Self::normalize_regexp_pattern(&pattern, unicode);
+        let normalized_input = if unicode {
+            Self::normalize_regexp_input_for_unicode(input)
+        } else {
+            input.to_string()
+        };
+        let mut builder = RegexBuilder::new(&normalized_pattern);
         builder.case_insensitive(flags.contains('i'));
         builder.multi_line(flags.contains('m'));
         builder.dot_matches_new_line(flags.contains('s'));
+        builder.unicode(unicode);
         let Ok(regex) = builder.build() else {
             return Ok(false);
         };
 
         if sticky {
-            Ok(regex.find(input).is_some_and(|m| m.start() == 0))
+            Ok(regex
+                .find_at(&normalized_input, last_index)
+                .is_some_and(|m| m.start() == last_index))
         } else {
-            Ok(regex.is_match(input))
+            Ok(regex.is_match(&normalized_input))
         }
+    }
+
+    fn normalize_regexp_pattern(pattern: &str, unicode: bool) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut normalized = String::with_capacity(pattern.len());
+        let mut index = 0usize;
+        let mut in_character_class = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if ch == '\\' && index + 1 < chars.len() {
+                let next = chars[index + 1];
+                if next == '0' {
+                    let has_decimal_follow = chars
+                        .get(index + 2)
+                        .is_some_and(|candidate| candidate.is_ascii_digit());
+                    if !has_decimal_follow {
+                        normalized.push_str("\\x00");
+                        index += 2;
+                        continue;
+                    }
+                }
+                if next == 'u' {
+                    if let Some((code_point, consumed)) =
+                        Self::parse_regex_u_escape(&chars, index)
+                    {
+                        if unicode
+                            && (0xD800..=0xDBFF).contains(&code_point)
+                            && let Some((low_code_point, low_consumed)) =
+                                Self::parse_regex_u_escape(&chars, index + consumed)
+                            && (0xDC00..=0xDFFF).contains(&low_code_point)
+                        {
+                                let combined = 0x10000
+                                    + (((code_point - 0xD800) << 10) | (low_code_point - 0xDC00));
+                                if let Some(value) = char::from_u32(combined) {
+                                    Self::push_regex_literal_char(
+                                        &mut normalized,
+                                        value,
+                                        in_character_class,
+                                    );
+                                    index += consumed + low_consumed;
+                                    continue;
+                                }
+                            }
+                        if let Some(value) = char::from_u32(code_point) {
+                            Self::push_regex_literal_char(
+                                &mut normalized,
+                                value,
+                                in_character_class,
+                            );
+                        } else if let Some(placeholder) =
+                            Self::surrogate_placeholder_from_code_unit(code_point)
+                        {
+                            Self::push_regex_literal_char(
+                                &mut normalized,
+                                placeholder,
+                                in_character_class,
+                            );
+                        } else {
+                            normalized.push('\\');
+                            normalized.push('u');
+                        }
+                        index += consumed;
+                        continue;
+                    }
+                }
+                normalized.push('\\');
+                normalized.push(next);
+                index += 2;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                normalized.push(ch);
+                index += 1;
+                continue;
+            }
+            if ch == ']' {
+                in_character_class = false;
+                normalized.push(ch);
+                index += 1;
+                continue;
+            }
+            normalized.push(ch);
+            index += 1;
+        }
+        normalized
+    }
+
+    fn push_regex_literal_char(target: &mut String, ch: char, in_character_class: bool) {
+        let needs_escape = if in_character_class {
+            matches!(ch, '\\' | ']' | '-' | '^')
+        } else {
+            matches!(
+                ch,
+                '\\' | '.' | '^' | '$' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?'
+            )
+        };
+        if needs_escape {
+            target.push('\\');
+        }
+        target.push(ch);
+    }
+
+    fn normalize_regexp_input_for_unicode(input: &str) -> String {
+        let mut normalized = String::with_capacity(input.len());
+        let chars: Vec<char> = input.chars().collect();
+        let mut index = 0usize;
+        while index < chars.len() {
+            let current = chars[index];
+            if let Some(high) = Self::surrogate_code_unit_from_placeholder(current)
+                && (0xD800..=0xDBFF).contains(&high)
+                && let Some(next_char) = chars.get(index + 1).copied()
+                && let Some(low) = Self::surrogate_code_unit_from_placeholder(next_char)
+                && (0xDC00..=0xDFFF).contains(&low)
+            {
+                let combined = 0x10000 + (((high - 0xD800) << 10) | (low - 0xDC00));
+                if let Some(value) = char::from_u32(combined) {
+                    normalized.push(value);
+                    index += 2;
+                    continue;
+                }
+            }
+            normalized.push(current);
+            index += 1;
+        }
+        normalized
+    }
+
+    fn parse_regex_u_escape(chars: &[char], start: usize) -> Option<(u32, usize)> {
+        if chars.get(start) != Some(&'\\') || chars.get(start + 1) != Some(&'u') {
+            return None;
+        }
+        if chars.get(start + 2) == Some(&'{') {
+            let mut end = start + 3;
+            while end < chars.len() && chars[end] != '}' {
+                end += 1;
+            }
+            if end >= chars.len() || chars[end] != '}' || end == start + 3 {
+                return None;
+            }
+            let hex: String = chars[start + 3..end].iter().collect();
+            if !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return None;
+            }
+            let value = u32::from_str_radix(&hex, 16).ok()?;
+            if value > 0x10FFFF {
+                return None;
+            }
+            return Some((value, end + 1 - start));
+        }
+        if start + 5 >= chars.len() {
+            return None;
+        }
+        let hex: String = chars[start + 2..start + 6].iter().collect();
+        if !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(&hex, 16).ok()?;
+        Some((value, 6))
+    }
+
+    fn surrogate_placeholder_from_code_unit(code_unit: u32) -> Option<char> {
+        if !(0xD800..=0xDFFF).contains(&code_unit) {
+            return None;
+        }
+        char::from_u32(0xE000 + (code_unit - 0xD800))
+    }
+
+    fn surrogate_code_unit_from_placeholder(ch: char) -> Option<u32> {
+        let code = ch as u32;
+        if !(0xE000..=0xE7FF).contains(&code) {
+            return None;
+        }
+        Some(0xD800 + (code - 0xE000))
     }
 
     fn execute_boxed_primitive_constructor(
@@ -7400,6 +7628,8 @@ impl Vm {
                 Ok(matches!(
                     property,
                     "replace"
+                        | "match"
+                        | "search"
                         | "split"
                         | "indexOf"
                         | "lastIndexOf"
@@ -7587,7 +7817,7 @@ impl Vm {
         }
         if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
             if property == "length" {
-                return Ok(JsValue::Number(value.chars().count() as f64));
+                return Ok(JsValue::Number(Self::utf16_code_unit_length(&value) as f64));
             }
             if let Ok(index) = property.parse::<usize>() {
                 return Ok(value
@@ -8599,6 +8829,8 @@ impl Vm {
             let to_upper_case = self.create_host_function_value(HostFunction::StringToUpperCase);
             let trim = self.create_host_function_value(HostFunction::StringTrim);
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
+            let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
+            let search = self.create_host_function_value(HostFunction::StringSearchThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -8636,6 +8868,8 @@ impl Vm {
                     ("toUpperCase", to_upper_case),
                     ("trim", trim),
                     ("replace", replace),
+                    ("match", match_fn),
+                    ("search", search),
                 ] {
                     object.properties.insert(name.to_string(), value);
                     object.property_attributes.insert(
@@ -9723,7 +9957,7 @@ impl Vm {
         }
         if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
             if property == "length" {
-                return Ok(JsValue::Number(value.chars().count() as f64));
+                return Ok(JsValue::Number(Self::utf16_code_unit_length(&value) as f64));
             }
             if let Ok(index) = property.parse::<usize>() {
                 return Ok(value
@@ -11115,8 +11349,10 @@ impl Vm {
 
     fn get_string_property(&mut self, receiver: &str, property: &str) -> JsValue {
         match property {
-            "length" => JsValue::Number(receiver.chars().count() as f64),
+            "length" => JsValue::Number(Self::utf16_code_unit_length(receiver) as f64),
             "replace" => self.create_host_function_value(HostFunction::StringReplaceThis),
+            "match" => self.create_host_function_value(HostFunction::StringMatchThis),
+            "search" => self.create_host_function_value(HostFunction::StringSearchThis),
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
             "split" => self.create_host_function_value(HostFunction::StringSplitThis),
             "toLowerCase" => self.create_host_function_value(HostFunction::StringToLowerCaseThis),
@@ -11137,6 +11373,14 @@ impl Vm {
                 Err(_) => JsValue::Undefined,
             },
         }
+    }
+
+    fn utf16_code_unit_length(value: &str) -> usize {
+        value.encode_utf16().count()
+    }
+
+    fn utf16_code_unit_at(value: &str, index: usize) -> Option<u16> {
+        value.encode_utf16().nth(index)
     }
 
     fn get_function_property(
@@ -13427,6 +13671,17 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn string_length_and_char_code_at_follow_utf16_code_units() {
+        let script = parse_script(
+            "var chars = '𐒠'; chars.length === 2 && chars.charCodeAt(0) === 0xD801 && chars.charCodeAt(1) === 0xDCA0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]

@@ -89,6 +89,10 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+68)`: discovered=23882, executed=5000, skipped=18579, passed=4984, failed=16
 - `language max-cases=5000 (latest+69)`: discovered=23882, executed=5000, skipped=18579, passed=4985, failed=15
 - `language max-cases=5000 (latest+70)`: discovered=23882, executed=5000, skipped=18579, passed=4989, failed=11
+- `language max-cases=5000 (latest+71)`: discovered=23882, executed=5000, skipped=18579, passed=4990, failed=10
+- `language max-cases=5000 (latest+72)`: discovered=23882, executed=5000, skipped=18579, passed=4991, failed=9
+- `language max-cases=5000 (latest+73)`: discovered=23882, executed=5000, skipped=18579, passed=4993, failed=7
+- `language max-cases=5000 (latest+74)`: discovered=23882, executed=5000, skipped=18579, passed=5000, failed=0
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -301,4 +305,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - parser 将 tagged template 首参 lowering 切换到 `Object.__getTemplateObject(siteId, cooked, raw)`，VM 新增模板对象按站点缓存与冻结链路（含 `raw` 子数组），`language/expressions/tagged-template` 子集收敛至 `21/0`，整体 `language` 基线提升至 `4984/16`（快照：`target/test262-language-baseline-5000-20260224-v51.json`）。
 - bytecode 调整 statement-list completion 候选选择：新增“静态空完成值”判定（含空 block 递归），避免 trailing `{}` 覆盖前序表达式 completion；VM 新增 `eval('{length: 3000}{}')` 回归测试。整体 `language` 基线提升至 `4985/15`（快照：`target/test262-language-baseline-5000-20260224-v52.json`）。
 - VM 对齐 QuickJS `js_regexp_constructor_internal + js_create_from_ctor` 路径：RegExp 构造器 `prototype` 改为稳定缓存对象，regex 实例原型统一挂接 `RegExp.prototype`，并补齐原型 `test/exec/toString`（最小实现）。`language/statementList` 子集收敛至 `42/0`，整体 `language` 基线提升至 `4989/11`（快照：`target/test262-language-baseline-5000-20260224-v53.json`）。
-- 当前失败主簇集中在 `literals/regexp/*`（unicode/sticky 语义）与少量语义边角（`source-text/6.1.js`）。
+- VM 将字符串 `length`/`charCodeAt` 收敛到 UTF-16 code-unit 语义，修复 `source-text/6.1.js`；整体 `language` 基线提升至 `4990/10`（快照：`target/test262-language-baseline-5000-20260224-v54.json`）。
+- lexer 对齐 QuickJS regexp 分流顺序：在 regexp 上下文优先按 regexp literal 扫描，再回落 `/=` token，修复 `S7.8.5_A1.1_T2.js`；整体 `language` 基线提升至 `4991/9`（快照：`target/test262-language-baseline-5000-20260224-v55.json`）。
+- VM regex 扩展 `u/y` 行为：`unicode` 标志透传、`sticky` 使用 `lastIndex` 起点、`\0` 归一化，并新增 `String.prototype.match/search` 最小链路；整体 `language` 基线提升至 `4993/7`（快照：`target/test262-language-baseline-5000-20260224-v56.json`）。
+- VM regex normalization 新增 `\uXXXX/\u{...}` 转换、surrogate placeholder 编解码与 `u` 模式输入 UTF-16 对解码，`literals/regexp/u-*` 收敛至 `0`；整体 `language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。

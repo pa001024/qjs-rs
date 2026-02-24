@@ -671,17 +671,6 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 }
                 continue;
             }
-            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
-                tokens.push(Token {
-                    kind: TokenKind::SlashEqual,
-                    span: Span {
-                        start: pos,
-                        end: pos + 2,
-                    },
-                });
-                pos += 2;
-                continue;
-            }
             let token_start = pos;
             if is_regexp_allowed_after(tokens.last().map(|token| &token.kind)) {
                 let regex_end = lex_regexp_literal_end(source, token_start)?;
@@ -693,6 +682,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     },
                 });
                 pos = regex_end;
+                continue;
+            }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::SlashEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
                 continue;
             }
             tokens.push(Token {
@@ -1968,6 +1968,24 @@ mod tests {
         assert_eq!(tokens[0].span.start, 0);
         assert_eq!(tokens[0].span.end, 5);
         assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_regex_literal_equal_body_before_slash_equal_tokenization() {
+        let tokens = lex("/=/").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Slash);
+        assert_eq!(tokens[0].span.start, 0);
+        assert_eq!(tokens[0].span.end, 3);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_slash_equal_in_expression_context() {
+        let tokens = lex("a /= b").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::SlashEqual);
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("b".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
     }
 
     #[test]
