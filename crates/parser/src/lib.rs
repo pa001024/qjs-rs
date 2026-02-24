@@ -1190,12 +1190,7 @@ impl Parser {
         end_error: &str,
         allow_super_reference: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
-        self.parse_function_body_with_context(
-            start_error,
-            end_error,
-            allow_super_reference,
-            false,
-        )
+        self.parse_function_body_with_context(start_error, end_error, allow_super_reference, false)
     }
 
     fn parse_function_body_with_context(
@@ -1344,10 +1339,7 @@ impl Parser {
         *body = prefix;
     }
 
-    fn parse_function_declaration_statement(
-        &mut self,
-        is_async: bool,
-    ) -> Result<Stmt, ParseError> {
+    fn parse_function_declaration_statement(&mut self, is_async: bool) -> Result<Stmt, ParseError> {
         let is_generator = self.matches(&TokenKind::Star);
         let name = Identifier(self.expect_binding_identifier("expected function name")?);
         self.expect(TokenKind::LParen, "expected '(' after function name")?;
@@ -3114,8 +3106,8 @@ impl Parser {
                     });
                 }
             };
-            let Some((target_expr, default_initializer)) = self
-                .extract_assignment_pattern_target(property.value, true, assignment_position)?
+            let Some((target_expr, default_initializer)) =
+                self.extract_assignment_pattern_target(property.value, true, assignment_position)?
             else {
                 return Err(ParseError {
                     message: "invalid assignment target".to_string(),
@@ -3175,7 +3167,9 @@ impl Parser {
                         name: step_name.clone(),
                         initializer: Some(Expr::Call {
                             callee: Box::new(Expr::Member {
-                                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                                object: Box::new(Expr::Identifier(Identifier(
+                                    "Object".to_string(),
+                                ))),
                                 property: "__forOfStep".to_string(),
                             }),
                             arguments: vec![Expr::Identifier(record_name.clone())],
@@ -3296,9 +3290,7 @@ impl Parser {
             Expr::Identifier(_) | Expr::Member { .. } | Expr::MemberComputed { .. } => {
                 Ok(Some((expr, None)))
             }
-            Expr::Assign { target, value } => {
-                Ok(Some((Expr::Identifier(target), Some(*value))))
-            }
+            Expr::Assign { target, value } => Ok(Some((Expr::Identifier(target), Some(*value)))),
             Expr::AssignMember {
                 object,
                 property,

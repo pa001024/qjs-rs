@@ -24,6 +24,7 @@ const ASYNC_FUNCTION_MARKER: &str = "$__qjs_async_function__$";
 const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
+const ARGUMENTS_OBJECT_MARKER_KEY: &str = "$__qjs_arguments_object__$";
 const DATE_OBJECT_MARKER_KEY: &str = "$__qjs_date_object__$";
 const DATE_VALUE_KEY: &str = "$__qjs_date_value__$";
 const GENERATOR_VALUES_KEY: &str = "$__qjs_generator_values__$";
@@ -2829,6 +2830,9 @@ impl Vm {
                     object
                         .properties
                         .insert("length".to_string(), JsValue::Number(args.len() as f64));
+                    object
+                        .properties
+                        .insert(ARGUMENTS_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
                     if let Some(thrower) = throw_type_error {
                         object.getters.insert("callee".to_string(), thrower.clone());
                         object.setters.insert("callee".to_string(), thrower);
@@ -2860,6 +2864,14 @@ impl Vm {
                             writable: true,
                             enumerable: false,
                             configurable: true,
+                        },
+                    );
+                    object.property_attributes.insert(
+                        ARGUMENTS_OBJECT_MARKER_KEY.to_string(),
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: false,
+                            configurable: false,
                         },
                     );
                     object.property_attributes.insert(
@@ -4003,6 +4015,11 @@ impl Vm {
                     {
                         "[object Uint8Array]"
                     }
+                    Some(JsValue::Object(object_id))
+                        if self.has_object_marker(object_id, ARGUMENTS_OBJECT_MARKER_KEY)? =>
+                    {
+                        "[object Arguments]"
+                    }
                     _ => "[object Object]",
                 };
                 Ok(JsValue::String(tag.to_string()))
@@ -4253,6 +4270,8 @@ impl Vm {
                 self.execute_object_prevent_extensions(&args)
             }
             NativeFunction::ObjectIsExtensible => self.execute_object_is_extensible(&args),
+            NativeFunction::ObjectIsSealed => self.execute_object_is_sealed(&args, false),
+            NativeFunction::ObjectIsFrozen => self.execute_object_is_sealed(&args, true),
             NativeFunction::ObjectFreeze => self.execute_object_freeze(&args),
             NativeFunction::ObjectSeal => self.execute_object_seal(&args),
             NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
@@ -5533,8 +5552,12 @@ impl Vm {
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
         match args.first().cloned() {
             None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.create_object_value(),
-            Some(value @ (JsValue::Object(_) | JsValue::Function(_) | JsValue::NativeFunction(_)
-            | JsValue::HostFunction(_))) => value,
+            Some(
+                value @ (JsValue::Object(_)
+                | JsValue::Function(_)
+                | JsValue::NativeFunction(_)
+                | JsValue::HostFunction(_)),
+            ) => value,
             Some(primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_))) => {
                 self.box_primitive_receiver(primitive)
             }
@@ -5878,7 +5901,11 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn execute_object_create(&mut self, args: &[JsValue], realm: &Realm) -> Result<JsValue, VmError> {
+    fn execute_object_create(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
         let (prototype, prototype_value) =
             self.parse_prototype_value(args.first().cloned().unwrap_or(JsValue::Undefined))?;
 
@@ -5904,7 +5931,11 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn execute_object_assign(&mut self, args: &[JsValue], realm: &Realm) -> Result<JsValue, VmError> {
+    fn execute_object_assign(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
         let target = self.to_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.assign target must be coercible",
@@ -5914,10 +5945,8 @@ impl Vm {
             if matches!(source, JsValue::Null | JsValue::Undefined) {
                 continue;
             }
-            let source_object = self.to_object_for_object_builtins(
-                source,
-                "Object.assign source must be coercible",
-            )?;
+            let source_object = self
+                .to_object_for_object_builtins(source, "Object.assign source must be coercible")?;
             let keys = self.collect_own_property_keys(&source_object, true)?;
 
             for key in keys {
@@ -6058,8 +6087,11 @@ impl Vm {
             _ => return Ok(()),
         };
 
-        if target_object.setters.contains_key(property) {
-            return Ok(());
+        if let Some(setter) = target_object.setters.get(property) {
+            if !matches!(setter, JsValue::Undefined) {
+                return Ok(());
+            }
+            return Err(VmError::TypeError("cannot assign to readonly property"));
         }
         if target_object.getters.contains_key(property) {
             return Err(VmError::TypeError("cannot assign to readonly property"));
@@ -6070,7 +6102,7 @@ impl Vm {
                 .get(property)
                 .map(|attrs| attrs.writable)
                 .unwrap_or(true);
-            if !writable && !target_object.setters.contains_key(property) {
+            if !writable {
                 return Err(VmError::TypeError("cannot assign to readonly property"));
             }
             return Ok(());
@@ -6306,7 +6338,8 @@ impl Vm {
             return Err(VmError::TypeError("setter must be callable or undefined"));
         }
         let desc_writable = if self.has_property_on_receiver(&descriptor, "writable", realm)? {
-            let writable = self.get_property_from_receiver(descriptor.clone(), "writable", realm)?;
+            let writable =
+                self.get_property_from_receiver(descriptor.clone(), "writable", realm)?;
             Some(self.is_truthy(&writable))
         } else {
             None
@@ -6334,11 +6367,12 @@ impl Vm {
         if let Some(JsValue::HostFunction(host_id)) = args.first() {
             if Some(*host_id) == self.function_prototype_host_id && property == "prototype" {
                 if has_get {
-                    self.function_prototype_prototype_getter = if matches!(desc_get, JsValue::Undefined) {
-                        None
-                    } else {
-                        Some(desc_get)
-                    };
+                    self.function_prototype_prototype_getter =
+                        if matches!(desc_get, JsValue::Undefined) {
+                            None
+                        } else {
+                            Some(desc_get)
+                        };
                 }
                 return Ok(JsValue::HostFunction(*host_id));
             }
@@ -6392,8 +6426,14 @@ impl Vm {
                 .cloned()
                 .unwrap_or_default(),
         };
+        let target_is_array = match &target {
+            DefinePropertyTarget::Object(target_id) => {
+                self.is_array_length_tracking_object(*target_id)?
+            }
+            _ => false,
+        };
+        let mut pending_array_length_update: Option<(JsValue, Option<bool>)> = None;
         {
-
             let (
                 current_data_value,
                 current_get,
@@ -6421,6 +6461,32 @@ impl Vm {
             } else {
                 PropertyAttributes::default()
             });
+            if !target_object.extensible && !current_is_data && !current_is_accessor {
+                return Err(VmError::TypeError(
+                    "cannot define property on non-extensible object",
+                ));
+            }
+            if target_is_array {
+                if let Some(index) = Self::canonical_array_index(&property) {
+                    let current_length = target_object
+                        .properties
+                        .get("length")
+                        .map(|value| self.to_number(value))
+                        .unwrap_or(0.0)
+                        .max(0.0) as usize;
+                    if index >= current_length {
+                        let length_writable = target_object
+                            .property_attributes
+                            .get("length")
+                            .is_none_or(|attributes| attributes.writable);
+                        if !length_writable {
+                            return Err(VmError::TypeError(
+                                "cannot define array index when length is non-writable",
+                            ));
+                        }
+                    }
+                }
+            }
 
             if (current_is_data || current_is_accessor) && !current_attributes.configurable {
                 if desc_configurable == Some(true) {
@@ -6487,18 +6553,14 @@ impl Vm {
             if has_get || has_set {
                 target_object.properties.remove(&property);
                 if has_get {
-                    if matches!(desc_get, JsValue::Undefined) {
-                        target_object.getters.remove(&property);
-                    } else {
-                        target_object.getters.insert(property.clone(), desc_get);
-                    }
+                    target_object
+                        .getters
+                        .insert(property.clone(), desc_get.clone());
                 }
                 if has_set {
-                    if matches!(desc_set, JsValue::Undefined) {
-                        target_object.setters.remove(&property);
-                    } else {
-                        target_object.setters.insert(property.clone(), desc_set);
-                    }
+                    target_object
+                        .setters
+                        .insert(property.clone(), desc_set.clone());
                 }
                 let attributes = target_object
                     .property_attributes
@@ -6524,9 +6586,13 @@ impl Vm {
                 target_object.getters.remove(&property);
                 target_object.setters.remove(&property);
                 if has_value {
-                    target_object
-                        .properties
-                        .insert(property.clone(), desc_value.clone());
+                    if property == "length" && target_is_array {
+                        pending_array_length_update = Some((desc_value.clone(), desc_writable));
+                    } else {
+                        target_object
+                            .properties
+                            .insert(property.clone(), desc_value.clone());
+                    }
                 } else if !current_is_data && !current_is_accessor {
                     target_object
                         .properties
@@ -6585,8 +6651,8 @@ impl Vm {
 
         match target {
             DefinePropertyTarget::Object(target_id) => {
-                if target_object.properties.contains_key("length") {
-                    if let Ok(index) = property.parse::<usize>() {
+                if target_is_array {
+                    if let Some(index) = Self::canonical_array_index(&property) {
                         let current_length = target_object
                             .properties
                             .get("length")
@@ -6605,6 +6671,34 @@ impl Vm {
                     .get_mut(&target_id)
                     .ok_or(VmError::UnknownObject(target_id))?;
                 *object = target_object;
+                if let Some((array_length_value, length_writable)) = pending_array_length_update {
+                    let requested_length =
+                        self.to_valid_array_length_or_throw(array_length_value, realm, false)?;
+                    if length_writable == Some(false) {
+                        if let Some(object) = self.objects.get_mut(&target_id) {
+                            let attributes = object
+                                .property_attributes
+                                .entry("length".to_string())
+                                .or_default();
+                            attributes.writable = true;
+                        }
+                    }
+                    let result = self.set_array_length_property(target_id, requested_length, true);
+                    if let Some(length_writable) = length_writable {
+                        let apply_descriptor_writable =
+                            result.is_ok() || matches!(&result, Err(VmError::TypeError(_)));
+                        if let Some(object) = self.objects.get_mut(&target_id) {
+                            if apply_descriptor_writable {
+                                let attributes = object
+                                    .property_attributes
+                                    .entry("length".to_string())
+                                    .or_default();
+                                attributes.writable = length_writable;
+                            }
+                        }
+                    }
+                    result?;
+                }
                 Ok(JsValue::Object(target_id))
             }
             DefinePropertyTarget::Function(closure_id) => {
@@ -7428,6 +7522,69 @@ impl Vm {
             _ => false,
         };
         Ok(JsValue::Bool(extensible))
+    }
+
+    fn execute_object_is_sealed(
+        &mut self,
+        args: &[JsValue],
+        is_frozen: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let (object, extensible) = match target {
+            JsValue::Object(object_id) => (
+                self.objects
+                    .get(&object_id)
+                    .cloned()
+                    .ok_or(VmError::UnknownObject(object_id))?,
+                self.objects
+                    .get(&object_id)
+                    .map(|object| object.extensible)
+                    .unwrap_or(true),
+            ),
+            JsValue::Function(closure_id) => {
+                if !self.closures.contains_key(&closure_id) {
+                    return Err(VmError::UnknownClosure(closure_id));
+                }
+                let object = self
+                    .closure_objects
+                    .get(&closure_id)
+                    .cloned()
+                    .unwrap_or_default();
+                (object.clone(), object.extensible)
+            }
+            JsValue::HostFunction(host_id) => {
+                if !self.host_functions.contains_key(&host_id) {
+                    return Err(VmError::UnknownHostFunction(host_id));
+                }
+                let object = self
+                    .host_function_objects
+                    .get(&host_id)
+                    .cloned()
+                    .unwrap_or_default();
+                (object.clone(), object.extensible)
+            }
+            JsValue::NativeFunction(_) => {
+                return Ok(JsValue::Bool(false));
+            }
+            _ => {
+                return Ok(JsValue::Bool(true));
+            }
+        };
+        let keys = Self::collect_own_property_keys_from_object(&object, false);
+        for key in keys {
+            let attributes = object
+                .property_attributes
+                .get(&key)
+                .copied()
+                .unwrap_or_default();
+            if attributes.configurable {
+                return Ok(JsValue::Bool(false));
+            }
+            if is_frozen && object.properties.contains_key(&key) && attributes.writable {
+                return Ok(JsValue::Bool(false));
+            }
+        }
+        Ok(JsValue::Bool(!extensible))
     }
 
     fn execute_object_freeze(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -8315,6 +8472,9 @@ impl Vm {
                 )
             };
             if let Some(getter) = getter {
+                if matches!(getter, JsValue::Undefined) {
+                    return Ok(JsValue::Undefined);
+                }
                 return self.execute_callable(
                     getter,
                     Some(receiver.clone()),
@@ -8373,6 +8533,9 @@ impl Vm {
         };
 
         if let Some(setter) = own_setter {
+            if matches!(setter, JsValue::Undefined) {
+                return Ok(value);
+            }
             let _ =
                 self.execute_callable(setter, Some(receiver), vec![value.clone()], realm, false)?;
             return Ok(value);
@@ -8406,6 +8569,9 @@ impl Vm {
                 };
 
                 if let Some(setter) = setter {
+                    if matches!(setter, JsValue::Undefined) {
+                        return Ok(value);
+                    }
                     let _ = self.execute_callable(
                         setter,
                         Some(receiver),
@@ -9972,9 +10138,10 @@ impl Vm {
             let primitive_for_properties = primitive.clone();
             object.prototype = prototype_id;
             object.prototype_value = None;
-            object
-                .properties
-                .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive_for_properties.clone());
+            object.properties.insert(
+                BOXED_PRIMITIVE_VALUE_KEY.to_string(),
+                primitive_for_properties.clone(),
+            );
             object.property_attributes.insert(
                 BOXED_PRIMITIVE_VALUE_KEY.to_string(),
                 PropertyAttributes {
@@ -9998,7 +10165,9 @@ impl Vm {
                 );
                 for (index, ch) in value.chars().enumerate() {
                     let key = index.to_string();
-                    object.properties.insert(key.clone(), JsValue::String(ch.to_string()));
+                    object
+                        .properties
+                        .insert(key.clone(), JsValue::String(ch.to_string()));
                     object.property_attributes.insert(
                         key,
                         PropertyAttributes {
@@ -10462,16 +10631,20 @@ impl Vm {
         let receiver = JsValue::Object(object_id);
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
-            let (getter, value, next, prototype_value) = {
+            let (getter, setter_exists, value, next, prototype_value) = {
                 let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
                 (
                     object.getters.get(property).cloned(),
+                    object.setters.contains_key(property),
                     object.properties.get(property).cloned(),
                     object.prototype,
                     object.prototype_value.clone(),
                 )
             };
             if let Some(getter) = getter {
+                if matches!(getter, JsValue::Undefined) {
+                    return Ok(JsValue::Undefined);
+                }
                 return self.execute_callable(
                     getter,
                     Some(receiver.clone()),
@@ -10479,6 +10652,9 @@ impl Vm {
                     realm,
                     false,
                 );
+            }
+            if setter_exists {
+                return Ok(JsValue::Undefined);
             }
             if let Some(value) = value {
                 return Ok(value);
@@ -10527,6 +10703,9 @@ impl Vm {
         };
 
         if let Some(setter) = own_setter {
+            if matches!(setter, JsValue::Undefined) {
+                return Ok(value);
+            }
             let _ = self.execute_callable(
                 setter,
                 Some(JsValue::Object(object_id)),
@@ -10565,6 +10744,9 @@ impl Vm {
                 };
 
                 if let Some(setter) = setter {
+                    if matches!(setter, JsValue::Undefined) {
+                        return Ok(value);
+                    }
                     let _ = self.execute_callable(
                         setter,
                         Some(JsValue::Object(object_id)),
@@ -10616,7 +10798,9 @@ impl Vm {
         }
         if self.is_array_length_tracking_object(object_id)? {
             if property == "length" {
-                self.set_array_length_property(object_id, &value)?;
+                let requested_length =
+                    self.to_valid_array_length_or_throw(value.clone(), realm, false)?;
+                self.set_array_length_property(object_id, requested_length, false)?;
                 return Ok(value);
             }
             if let Some(index) = Self::canonical_array_index(&property) {
@@ -10898,6 +11082,8 @@ impl Vm {
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
+                | (NativeFunction::ObjectConstructor, "isSealed")
+                | (NativeFunction::ObjectConstructor, "isFrozen")
                 | (NativeFunction::ObjectConstructor, "seal")
                 | (NativeFunction::ObjectConstructor, "freeze")
                 | (NativeFunction::ObjectConstructor, "toString")
@@ -11012,25 +11198,30 @@ impl Vm {
         Some(index as usize)
     }
 
-    fn to_valid_array_length_or_throw(&mut self, value: &JsValue) -> Result<usize, VmError> {
-        let number = self.to_number(value);
-        let integer = number.trunc();
-        if !number.is_finite() || number < 0.0 || integer != number || number > u32::MAX as f64 {
+    fn to_valid_array_length_or_throw(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<usize, VmError> {
+        let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+        let uint = Self::to_uint32_number(number) as f64;
+        if !number.is_finite() || number < 0.0 || number != uint {
             return Err(VmError::UncaughtException(self.create_error_exception(
                 NativeFunction::RangeErrorConstructor,
                 "RangeError",
                 "Invalid array length".to_string(),
             )));
         }
-        Ok(integer as usize)
+        Ok(uint as usize)
     }
 
     fn set_array_length_property(
         &mut self,
         object_id: ObjectId,
-        value: &JsValue,
+        requested_length: usize,
+        throw_on_failure: bool,
     ) -> Result<(), VmError> {
-        let requested_length = self.to_valid_array_length_or_throw(value)?;
         let current_length = self.array_length(object_id)?;
         {
             let object = self
@@ -11042,6 +11233,12 @@ impl Vm {
                 .get("length")
                 .is_some_and(|attributes| !attributes.writable)
             {
+                if requested_length == current_length {
+                    return Ok(());
+                }
+                if throw_on_failure {
+                    return Err(VmError::TypeError("array length is non-writable"));
+                }
                 return Ok(());
             }
             object.properties.insert(
@@ -11074,6 +11271,11 @@ impl Vm {
                 object
                     .properties
                     .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+                if throw_on_failure {
+                    return Err(VmError::TypeError(
+                        "cannot delete non-configurable array element",
+                    ));
+                }
                 return Ok(());
             }
             object.properties.remove(&key);
@@ -11976,6 +12178,12 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "isExtensible") => {
                 JsValue::NativeFunction(NativeFunction::ObjectIsExtensible)
             }
+            (NativeFunction::ObjectConstructor, "isSealed") => {
+                JsValue::NativeFunction(NativeFunction::ObjectIsSealed)
+            }
+            (NativeFunction::ObjectConstructor, "isFrozen") => {
+                JsValue::NativeFunction(NativeFunction::ObjectIsFrozen)
+            }
             (NativeFunction::ObjectConstructor, "seal") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSeal)
             }
@@ -12117,9 +12325,7 @@ impl Vm {
             | (NativeFunction::ObjectGetPrototypeOf, "length")
             | (NativeFunction::ObjectSetPrototypeOf, "length")
             | (NativeFunction::ObjectCreate, "length")
-            | (NativeFunction::ObjectAssign, "length") => {
-                JsValue::Number(2.0)
-            }
+            | (NativeFunction::ObjectAssign, "length") => JsValue::Number(2.0),
             (_, "length") => JsValue::Number(1.0),
             _ => JsValue::Undefined,
         }

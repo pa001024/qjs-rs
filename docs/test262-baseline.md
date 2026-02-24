@@ -104,6 +104,10 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `built-ins/Object/create (v72)`: discovered=320, executed=280, skipped=40, passed=269, failed=11
 - `built-ins/Object/seal (v72)`: discovered=94, executed=62, skipped=32, passed=35, failed=27
 - `built-ins/Object/defineProperties (v71)`: discovered=632, executed=361, skipped=271, passed=304, failed=57
+- `built-ins/Object (v76)`: discovered=3411, executed=2255, skipped=1156, passed=2019, failed=236
+- `built-ins/Object/create (v76)`: discovered=320, executed=280, skipped=40, passed=280, failed=0
+- `built-ins/Object/seal (v76)`: discovered=94, executed=62, skipped=32, passed=47, failed=15
+- `built-ins/Object/defineProperties (v76)`: discovered=632, executed=361, skipped=271, passed=361, failed=0
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -323,3 +327,4 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 扩容到 `language --max-cases 10000` 后出现 8 个失败簇：`with` 空完成值、`Object.preventExtensions` 缺失、`delete Number.NaN` 可配置性、string primitive `constructor`、`U+FEFF` whitespace、eval global var 可声明性；先收敛至 `5263/2`（快照：`target/test262-language-baseline-10000-20260224-v59.json`）。
 - VM 对齐 QuickJS `CanDeclareGlobalVar` 行为：non-extensible global object 上 eval `var` 新声明抛 `TypeError`（direct/indirect），`language --max-cases 10000` 收敛至 `5265/0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
 - 对齐 QuickJS `js_object_assign/js_object_create/js_object_seal` 主路径：`Object.assign` 接入 `CopyDataProperties` 方向（含 string source 索引属性复制与 readonly target 抛错）、`Object.create(proto, properties)` 接入 `ObjectDefineProperties`、新增 `Object.seal`（`preventExtensions + configurable=false`），并修复 Date/RegExp 内部槽属性对 descriptor 解析的污染（`value`/regexp flags 改为内部非枚举键）。`built-ins/Object` 从 `1274/981` 提升至 `1749/506`（快照：`target/test262-builtins-object-20260224-v72.json`）。
+- 继续对齐 QuickJS `js_obj_to_desc` / `JS_ObjectDefineProperties` / `set_array_length`：补齐数组 `length` 的 ToPrimitive+ToUint32、`length` 收缩阻塞抛错与边界索引语义，`Object.defineProperties` 收敛至 `361/0`、`Object/create` 收敛至 `280/0`，`Object/seal` 提升至 `47/15`；`built-ins/Object` 进一步提升至 `2019/236`（快照：`target/test262-builtins-object-20260224-v76.json`）。
