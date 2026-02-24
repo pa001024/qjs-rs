@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4908`、`failed=92`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v35.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4911`、`failed=89`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -135,6 +135,8 @@
   - bytecode 对齐 `TryStatement` completion 传播：循环 completion 在每次迭代开始重置，finally 作用域引入“旧 completion 暂存+正常路径恢复”机制，并修正 unwind finally 的 handler pop 顺序（按上下文深度弹栈）。
   - VM 补齐 `Array.prototype.concat` 最小语义与 `Error.prototype.toString`，并将 `ReferenceError/SyntaxError/EvalError/RangeError/URIError` 的实例原型回退到 `Error.prototype`，修复 `try` 目录内的 `NotCallable` 与错误字符串化偏差。
   - 子集回归（latest+24）：`language/statements/try` 收敛至 `91/0`，`language` 基线提升至 `4908/92`（快照：`target/test262-language-baseline-5000-20260224-v35.json`）。
+  - bytecode 在 `if` 语句进入分支前重置当前 completion target（仅在 loop/switch completion 聚合上下文），对齐 `UpdateEmpty(..., undefined)`，修复 `if` 分支 `break/continue` 的空完成值污染问题。
+  - 子集回归（latest+25）：`language/statements/if` 收敛至 `47/0`，`language` 基线提升至 `4911/89`（快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
 
 ## 3. 分阶段状态
 

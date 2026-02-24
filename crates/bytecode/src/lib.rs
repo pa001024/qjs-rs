@@ -510,6 +510,13 @@ impl Compiler {
                 consequent,
                 alternate,
             } => {
+                if !keep_value {
+                    if let Some(name) = self.loop_completion_targets.last() {
+                        code.push(Opcode::LoadUndefined);
+                        code.push(Opcode::StoreVariable(name.clone()));
+                        code.push(Opcode::Pop);
+                    }
+                }
                 self.compile_expr(condition, code);
                 let jump_to_alternate_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
