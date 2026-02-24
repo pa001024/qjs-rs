@@ -137,6 +137,9 @@ enum HostFunction {
     NumberValueOf,
     NumberToFixed,
     NumberToExponential,
+    ArrayBufferSliceThis,
+    MapSetThis,
+    SetAddThis,
     BooleanToString,
     BooleanValueOf,
     FunctionPrototype,
@@ -286,6 +289,12 @@ pub struct Vm {
     error_prototype_id: Option<ObjectId>,
     type_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
+    array_buffer_prototype_id: Option<ObjectId>,
+    data_view_prototype_id: Option<ObjectId>,
+    map_prototype_id: Option<ObjectId>,
+    set_prototype_id: Option<ObjectId>,
+    promise_prototype_id: Option<ObjectId>,
+    uint8_array_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
     exception_handlers: Vec<ExceptionHandler>,
@@ -345,6 +354,12 @@ impl Vm {
         self.error_prototype_id = None;
         self.type_error_prototype_id = None;
         self.date_prototype_id = None;
+        self.array_buffer_prototype_id = None;
+        self.data_view_prototype_id = None;
+        self.map_prototype_id = None;
+        self.set_prototype_id = None;
+        self.promise_prototype_id = None;
+        self.uint8_array_prototype_id = None;
         self.with_objects.clear();
         self.identifier_references.clear();
         self.exception_handlers.clear();
@@ -577,6 +592,12 @@ impl Vm {
             self.error_prototype_id,
             self.type_error_prototype_id,
             self.date_prototype_id,
+            self.array_buffer_prototype_id,
+            self.data_view_prototype_id,
+            self.map_prototype_id,
+            self.set_prototype_id,
+            self.promise_prototype_id,
+            self.uint8_array_prototype_id,
         ]
         .into_iter()
         .flatten()
@@ -750,6 +771,9 @@ impl Vm {
             | HostFunction::NumberValueOf
             | HostFunction::NumberToFixed
             | HostFunction::NumberToExponential
+            | HostFunction::ArrayBufferSliceThis
+            | HostFunction::MapSetThis
+            | HostFunction::SetAddThis
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
             | HostFunction::ThrowTypeError
@@ -2862,6 +2886,55 @@ impl Vm {
         }
     }
 
+    fn has_object_marker(&self, object_id: ObjectId, marker: &str) -> Result<bool, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        Ok(matches!(object.properties.get(marker), Some(JsValue::Bool(true))))
+    }
+
+    fn strict_this_array_buffer(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__arrayBufferTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError("ArrayBuffer.prototype method called on incompatible")),
+        }
+    }
+
+    fn strict_this_map(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__mapTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError("Map.prototype method called on incompatible")),
+        }
+    }
+
+    fn strict_this_set(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__setTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError("Set.prototype method called on incompatible")),
+        }
+    }
+
+    fn array_buffer_length(&self, object_id: ObjectId) -> Result<usize, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let length = object
+            .properties
+            .get("byteLength")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0);
+        Ok(length as usize)
+    }
+
     fn execute_string_replace(
         &mut self,
         receiver: String,
@@ -3178,6 +3251,75 @@ impl Vm {
                 };
                 Ok(JsValue::String(Self::normalize_exponent_string(raw)))
             }
+            HostFunction::ArrayBufferSliceThis => {
+                let receiver_id = self.strict_this_array_buffer(this_arg)?;
+                let byte_length = self.array_buffer_length(receiver_id)?;
+                let start = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value as usize)
+                    .unwrap_or(0)
+                    .min(byte_length);
+                let end = args
+                    .get(1)
+                    .map(|value| self.to_number(value))
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value as usize)
+                    .unwrap_or(byte_length)
+                    .min(byte_length);
+                let sliced_length = end.saturating_sub(start) as f64;
+                let constructor =
+                    self.get_property_from_receiver(JsValue::Object(receiver_id), "constructor", realm)?;
+                self.execute_construct_value(
+                    constructor,
+                    vec![JsValue::Number(sliced_length)],
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::MapSetThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let size = self
+                    .objects
+                    .get(&receiver_id)
+                    .and_then(|object| object.properties.get("__mapSize"))
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    + 1.0;
+                let object = self
+                    .objects
+                    .get_mut(&receiver_id)
+                    .ok_or(VmError::UnknownObject(receiver_id))?;
+                object
+                    .properties
+                    .insert("__mapSize".to_string(), JsValue::Number(size));
+                object
+                    .properties
+                    .insert("size".to_string(), JsValue::Number(size));
+                Ok(JsValue::Object(receiver_id))
+            }
+            HostFunction::SetAddThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                let size = self
+                    .objects
+                    .get(&receiver_id)
+                    .and_then(|object| object.properties.get("__setSize"))
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    + 1.0;
+                let object = self
+                    .objects
+                    .get_mut(&receiver_id)
+                    .ok_or(VmError::UnknownObject(receiver_id))?;
+                object
+                    .properties
+                    .insert("__setSize".to_string(), JsValue::Number(size));
+                object
+                    .properties
+                    .insert("size".to_string(), JsValue::Number(size));
+                Ok(JsValue::Object(receiver_id))
+            }
             HostFunction::BooleanToString => {
                 let value = self.strict_this_boolean(this_arg)?;
                 Ok(JsValue::String(if value { "true" } else { "false" }.to_string()))
@@ -3384,7 +3526,17 @@ impl Vm {
                     .unwrap_or_default();
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
-            HostFunction::ObjectToString => Ok(JsValue::String("[object Object]".to_string())),
+            HostFunction::ObjectToString => {
+                let tag = match this_arg {
+                    Some(JsValue::Object(object_id))
+                        if self.has_object_marker(object_id, "__uint8ArrayTag")? =>
+                    {
+                        "[object Uint8Array]"
+                    }
+                    _ => "[object Object]",
+                };
+                Ok(JsValue::String(tag.to_string()))
+            }
             HostFunction::ObjectValueOf => Ok(this_arg.unwrap_or(JsValue::Undefined)),
             HostFunction::DateToString(object_id) => {
                 let timestamp = self
@@ -3581,6 +3733,18 @@ impl Vm {
             NativeFunction::BooleanConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Bool(false));
                 Ok(JsValue::Bool(self.is_truthy(&value)))
+            }
+            NativeFunction::ArrayBufferConstructor => {
+                self.execute_array_buffer_constructor(&args)
+            }
+            NativeFunction::DataViewConstructor => self.execute_data_view_constructor(&args),
+            NativeFunction::MapConstructor => self.execute_map_constructor(&args, realm),
+            NativeFunction::SetConstructor => self.execute_set_constructor(&args, realm),
+            NativeFunction::PromiseConstructor => {
+                self.execute_promise_constructor(&args, realm, caller_strict)
+            }
+            NativeFunction::Uint8ArrayConstructor => {
+                self.execute_uint8_array_constructor(&args)
             }
             NativeFunction::DateConstructor => {
                 let timestamp = args
@@ -4173,6 +4337,263 @@ impl Vm {
             .properties
             .insert("length".to_string(), JsValue::Number(args.len() as f64));
         JsValue::Object(object_id)
+    }
+
+    fn execute_array_buffer_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let length = args
+            .first()
+            .map(|value| self.to_number(value))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0)
+            .floor() as usize;
+        if self.array_buffer_prototype_id.is_none() {
+            let _ = self.array_buffer_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.array_buffer_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__arrayBufferTag".to_string(), JsValue::Bool(true));
+        target
+            .properties
+            .insert("byteLength".to_string(), JsValue::Number(length as f64));
+        target.property_attributes.insert(
+            "byteLength".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_data_view_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let buffer = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let JsValue::Object(buffer_id) = buffer.clone() else {
+            return Err(VmError::TypeError("DataView constructor requires ArrayBuffer"));
+        };
+        if !self.has_object_marker(buffer_id, "__arrayBufferTag")? {
+            return Err(VmError::TypeError("DataView constructor requires ArrayBuffer"));
+        }
+        if self.data_view_prototype_id.is_none() {
+            let _ = self.data_view_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.data_view_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__dataViewTag".to_string(), JsValue::Bool(true));
+        target.properties.insert("buffer".to_string(), buffer);
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_map_constructor(
+        &mut self,
+        args: &[JsValue],
+        _realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let initial_size = match args.first() {
+            None | Some(JsValue::Undefined) | Some(JsValue::Null) => 0.0,
+            Some(JsValue::Object(object_id)) => self.array_length(*object_id)? as f64,
+            Some(_) => 0.0,
+        };
+        if self.map_prototype_id.is_none() {
+            let _ = self.map_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.map_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__mapTag".to_string(), JsValue::Bool(true));
+        target
+            .properties
+            .insert("__mapSize".to_string(), JsValue::Number(initial_size));
+        target
+            .properties
+            .insert("size".to_string(), JsValue::Number(initial_size));
+        target.property_attributes.insert(
+            "size".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_set_constructor(
+        &mut self,
+        args: &[JsValue],
+        _realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let initial_size = match args.first() {
+            None | Some(JsValue::Undefined) | Some(JsValue::Null) => 0.0,
+            Some(JsValue::Object(object_id)) => self.array_length(*object_id)? as f64,
+            Some(_) => 0.0,
+        };
+        if self.set_prototype_id.is_none() {
+            let _ = self.set_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.set_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__setTag".to_string(), JsValue::Bool(true));
+        target
+            .properties
+            .insert("__setSize".to_string(), JsValue::Number(initial_size));
+        target
+            .properties
+            .insert("size".to_string(), JsValue::Number(initial_size));
+        target.property_attributes.insert(
+            "size".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_promise_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let executor = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&executor) {
+            return Err(VmError::TypeError("Promise executor must be callable"));
+        }
+        if self.promise_prototype_id.is_none() {
+            let _ = self.promise_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.promise_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__promiseTag".to_string(), JsValue::Bool(true));
+        }
+        let resolve = self.create_host_function_value(HostFunction::FunctionPrototype);
+        let reject = self.create_host_function_value(HostFunction::FunctionPrototype);
+        let _ = self.execute_callable(
+            executor,
+            Some(JsValue::Undefined),
+            vec![resolve, reject],
+            realm,
+            caller_strict,
+        )?;
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_uint8_array_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let length = args
+            .first()
+            .map(|value| self.to_number(value))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0)
+            .floor() as usize;
+        if self.uint8_array_prototype_id.is_none() {
+            let _ = self.uint8_array_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.uint8_array_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__uint8ArrayTag".to_string(), JsValue::Bool(true));
+        target
+            .properties
+            .insert("length".to_string(), JsValue::Number(length as f64));
+        target.property_attributes.insert(
+            "length".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        target
+            .properties
+            .insert("byteLength".to_string(), JsValue::Number(length as f64));
+        target.property_attributes.insert(
+            "byteLength".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        for index in 0..length {
+            let key = index.to_string();
+            target.properties.insert(key.clone(), JsValue::Number(0.0));
+            target.property_attributes.insert(
+                key,
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: true,
+                    configurable: false,
+                },
+            );
+        }
+        Ok(JsValue::Object(object_id))
     }
 
     fn execute_object_create(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -7258,6 +7679,186 @@ impl Vm {
         prototype
     }
 
+    fn array_buffer_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.array_buffer_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let slice = self.create_host_function_value(HostFunction::ArrayBufferSliceThis);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::ArrayBufferConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("slice".to_string(), slice);
+                object.property_attributes.insert(
+                    "slice".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.array_buffer_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn data_view_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.data_view_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::DataViewConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.data_view_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn map_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.map_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let set = self.create_host_function_value(HostFunction::MapSetThis);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::MapConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("set".to_string(), set);
+                object.property_attributes.insert(
+                    "set".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.map_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn set_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.set_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let add = self.create_host_function_value(HostFunction::SetAddThis);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::SetConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("add".to_string(), add);
+                object.property_attributes.insert(
+                    "add".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.set_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn promise_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.promise_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.promise_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn uint8_array_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.uint8_array_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.uint8_array_prototype_id = Some(id);
+        }
+        prototype
+    }
+
     fn boxed_primitive_value(&self, object_id: ObjectId) -> Option<JsValue> {
         self.objects
             .get(&object_id)
@@ -7976,6 +8577,15 @@ impl Vm {
         if !can_write_property {
             return Ok(value);
         }
+        if self.has_object_marker(object_id, "__uint8ArrayTag")? {
+            if let Some(index) = Self::canonical_array_index(&property) {
+                self.set_uint8_array_index_property(object_id, index, &value)?;
+                return Ok(value);
+            }
+            if matches!(property.as_str(), "length" | "byteLength") {
+                return Ok(value);
+            }
+        }
         if self.is_array_length_tracking_object(object_id)? {
             if property == "length" {
                 self.set_array_length_property(object_id, &value)?;
@@ -8290,6 +8900,12 @@ impl Vm {
                 | (NativeFunction::RangeErrorConstructor, "prototype")
                 | (NativeFunction::URIErrorConstructor, "prototype")
                 | (NativeFunction::DateConstructor, "prototype")
+                | (NativeFunction::ArrayBufferConstructor, "prototype")
+                | (NativeFunction::DataViewConstructor, "prototype")
+                | (NativeFunction::MapConstructor, "prototype")
+                | (NativeFunction::SetConstructor, "prototype")
+                | (NativeFunction::PromiseConstructor, "prototype")
+                | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
                 | (NativeFunction::SymbolConstructor, "prototype")
                 | (_, "length")
@@ -8451,6 +9067,47 @@ impl Vm {
                 .properties
                 .insert("length".to_string(), JsValue::Number(next_length as f64));
         }
+        Ok(())
+    }
+
+    fn set_uint8_array_index_property(
+        &mut self,
+        object_id: ObjectId,
+        index: usize,
+        value: &JsValue,
+    ) -> Result<(), VmError> {
+        let length = self
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get("length"))
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        if index >= length {
+            return Ok(());
+        }
+        let numeric = self.to_number(value);
+        let clamped = if !numeric.is_finite() || numeric == 0.0 {
+            0.0
+        } else {
+            let integer = numeric.trunc() as i64;
+            let wrapped = ((integer % 256) + 256) % 256;
+            wrapped as f64
+        };
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let key = index.to_string();
+        object.properties.insert(key.clone(), JsValue::Number(clamped));
+        object
+            .property_attributes
+            .entry(key)
+            .or_insert(PropertyAttributes {
+                writable: true,
+                enumerable: true,
+                configurable: false,
+            });
         Ok(())
     }
 
@@ -9192,6 +9849,16 @@ impl Vm {
             | (NativeFunction::RangeErrorConstructor, "prototype")
             | (NativeFunction::URIErrorConstructor, "prototype") => self.error_prototype_value(),
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
+            (NativeFunction::ArrayBufferConstructor, "prototype") => {
+                self.array_buffer_prototype_value()
+            }
+            (NativeFunction::DataViewConstructor, "prototype") => self.data_view_prototype_value(),
+            (NativeFunction::MapConstructor, "prototype") => self.map_prototype_value(),
+            (NativeFunction::SetConstructor, "prototype") => self.set_prototype_value(),
+            (NativeFunction::PromiseConstructor, "prototype") => self.promise_prototype_value(),
+            (NativeFunction::Uint8ArrayConstructor, "prototype") => {
+                self.uint8_array_prototype_value()
+            }
             (NativeFunction::RegExpConstructor, "prototype")
             | (NativeFunction::SymbolConstructor, "prototype") => self.create_object_value(),
             (NativeFunction::DateConstructor, "parse") => {

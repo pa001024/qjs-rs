@@ -27,6 +27,30 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::BooleanConstructor),
     );
     realm.define_global(
+        "ArrayBuffer",
+        JsValue::NativeFunction(NativeFunction::ArrayBufferConstructor),
+    );
+    realm.define_global(
+        "DataView",
+        JsValue::NativeFunction(NativeFunction::DataViewConstructor),
+    );
+    realm.define_global(
+        "Map",
+        JsValue::NativeFunction(NativeFunction::MapConstructor),
+    );
+    realm.define_global(
+        "Set",
+        JsValue::NativeFunction(NativeFunction::SetConstructor),
+    );
+    realm.define_global(
+        "Promise",
+        JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+    );
+    realm.define_global(
+        "Uint8Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
         "Date",
         JsValue::NativeFunction(NativeFunction::DateConstructor),
     );
