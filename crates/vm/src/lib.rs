@@ -185,6 +185,7 @@ enum HostFunction {
     ArrayIndexOfThis,
     ArrayLastIndexOfThis,
     ArrayFrom,
+    ArrayOf,
     ArrayKeysThis,
     ArrayEntriesThis,
     ArrayValuesThis,
@@ -943,6 +944,7 @@ impl Vm {
             | HostFunction::ArrayIndexOfThis
             | HostFunction::ArrayLastIndexOfThis
             | HostFunction::ArrayFrom
+            | HostFunction::ArrayOf
             | HostFunction::ArrayKeysThis
             | HostFunction::ArrayEntriesThis
             | HostFunction::ArrayValuesThis
@@ -3609,6 +3611,49 @@ impl Vm {
         Ok(result)
     }
 
+    fn execute_array_of_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let constructor = this_arg.unwrap_or(JsValue::Undefined);
+        let use_constructor = match &constructor {
+            JsValue::NativeFunction(native) => Self::native_function_is_constructor(*native),
+            JsValue::Function(closure_id) => {
+                !self.closure_is_arrow(*closure_id)? && !self.closure_has_no_prototype(*closure_id)
+            }
+            _ => false,
+        };
+        let result = if use_constructor {
+            let result = self.execute_construct_value(
+                constructor.clone(),
+                vec![JsValue::Number(args.len() as f64)],
+                realm,
+                caller_strict,
+            )?;
+            if !Self::is_object_like_value(&result) {
+                return Err(VmError::TypeError(
+                    "Array.of constructor must return object",
+                ));
+            }
+            result
+        } else {
+            self.create_array_value()
+        };
+        for (index, value) in args.iter().cloned().enumerate() {
+            self.create_data_property_or_throw(result.clone(), index.to_string(), value, realm)?;
+        }
+        let _ = self.set_property_on_receiver(
+            result.clone(),
+            "length".to_string(),
+            JsValue::Number(args.len() as f64),
+            realm,
+        )?;
+        Ok(result)
+    }
+
     fn execute_host_function_call(
         &mut self,
         host_id: u64,
@@ -4254,6 +4299,7 @@ impl Vm {
             HostFunction::ArrayFrom => {
                 self.execute_array_from_this(this_arg, &args, realm, caller_strict)
             }
+            HostFunction::ArrayOf => self.execute_array_of_this(this_arg, &args, realm, caller_strict),
             HostFunction::ArrayConcatThis => {
                 let receiver_id = match this_arg {
                     Some(JsValue::Object(id)) => id,
@@ -12816,6 +12862,7 @@ impl Vm {
                 )
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ArrayConstructor, "from")
+                | (NativeFunction::ArrayConstructor, "of")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "isSealed")
@@ -12995,12 +13042,32 @@ impl Vm {
         if requested_length >= current_length {
             return Ok(());
         }
-        let object = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
-        for index in (requested_length..current_length).rev() {
+        let mut array_indices_to_delete: BTreeSet<usize> = BTreeSet::new();
+        {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            for key in object
+                .properties
+                .keys()
+                .chain(object.getters.keys())
+                .chain(object.setters.keys())
+                .chain(object.property_attributes.keys())
+            {
+                if let Some(index) = Self::canonical_array_index(key) {
+                    if index >= requested_length && index < current_length {
+                        array_indices_to_delete.insert(index);
+                    }
+                }
+            }
+        }
+        for index in array_indices_to_delete.into_iter().rev() {
             let key = index.to_string();
+            let object = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
             if object
                 .property_attributes
                 .get(&key)
@@ -14074,6 +14141,11 @@ impl Vm {
                 let from = self.create_host_function_value(HostFunction::ArrayFrom);
                 self.set_builtin_function_length(&from, 1.0);
                 from
+            }
+            (NativeFunction::ArrayConstructor, "of") => {
+                let of = self.create_host_function_value(HostFunction::ArrayOf);
+                self.set_builtin_function_length(&of, 0.0);
+                of
             }
             (NativeFunction::ObjectConstructor, "keys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectKeys)
@@ -16336,6 +16408,26 @@ mod tests {
     fn array_length_shrink_deletes_elements_for_subclass_instances() {
         let script = parse_script(
             "class Ar extends Array {} let arr = new Ar('foo', 'bar'); arr.length = 1; arr[0] === 'foo' && arr[1] === undefined && arr.length === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_length_shrink_handles_sparse_high_indices() {
+        let script = parse_script(
+            "let x = [0, 1, 2]; x[4294967294] = 4294967294; x.length = 2; x[0] === 0 && x[1] === 1 && x[2] === undefined && x[4294967294] === undefined;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);

@@ -18,9 +18,14 @@
 - `test262 language --max-cases 10000` 最新快照：`executed=5265`、`passed=5265`、`failed=0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
 - `test262 built-ins/Object` 最新快照：`executed=2255`、`passed=2255`、`failed=0`（快照：`target/test262-builtins-object-20260224-v96.json`）。
 - `test262 built-ins/Array --max-cases 100` 最新采样：`executed=100`、`passed=100`、`failed=0`（快照：`target/test262-builtins-array-20260224-v4-s100.json`）。
+- `test262 built-ins/Array/length` 最新全量：`executed=26`、`passed=26`、`failed=0`（快照：`target/test262-builtins-array-length-20260225-v5-full.json`）。
+- `test262 built-ins/Array/of` 最新全量：`executed=9`、`passed=9`、`failed=0`（快照：`target/test262-builtins-array-of-20260225-v1.json`）。
+- `test262 built-ins/Array --max-cases 300` 最新采样：`executed=300`、`passed=150`、`failed=150`（快照：`target/test262-builtins-array-20260225-v6-s300.json`）。
 - 本轮新增语义收敛：
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `Array` 失败簇首轮收敛：补齐 `Array.from`（迭代器/array-like 双路径 + mapfn + constructor 分派）、`Array(length)` 非法长度 `RangeError`、`Array.isArray`（Array marker）和 `Array.prototype.splice` 最小路径；同时修复 `NativeFunction` 属性读取的原型链回退并补回 `Object.__tdzMarker` 自有属性声明，消除 for-in/for-of 回归。
+  - `Array.length` 收缩语义对齐 QuickJS `set_array_length` 方向：从“全区间删除”改为“仅遍历已存在索引属性”，修复超大稀疏索引（如 `4294967294`）导致的超时；新增 VM 回归测试覆盖。
+  - `Array.of` 新增 host 路径并挂载到 `Array` 构造器：支持 constructor dispatch（`Array.of.call(C, ...)`）、`CreateDataPropertyOrThrow` 风格写入与 `Set(A, "length", len, true)` 行为，`built-ins/Array/of` 子集清零。
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
   - `super` 运行时回退链路在对象方法场景可用（`{ __proto__: proto, m() { return super.x; } }`）。
