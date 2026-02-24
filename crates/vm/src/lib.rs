@@ -13711,6 +13711,40 @@ mod tests {
     }
 
     #[test]
+    fn assert_throws_observes_array_assignment_pattern_throw_path() {
+        let script = parse_script(
+            "function MyError() {}\
+             function thrower() { throw new MyError(); }\
+             var returnGetterCalled = 0;\
+             var iterator = {\
+               [Symbol.iterator]() { return this; },\
+               next() { return {done: false}; },\
+               get return() { returnGetterCalled += 1; throw 'bad'; }\
+             };\
+             var passed = false;\
+             try {\
+               assert.throws(MyError, function() { var a; ([a = thrower()] = iterator); });\
+               passed = true;\
+             } catch (e) {}\
+             passed ? returnGetterCalled : -1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Number(1.0)));
+    }
+
+    #[test]
     fn gc_reclaims_unreachable_objects() {
         let mut vm = Vm::default();
         let realm = Realm::default();

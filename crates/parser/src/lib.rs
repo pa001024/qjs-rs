@@ -3140,6 +3140,7 @@ impl Parser {
         let record_name = self.next_for_in_temp_identifier("array_assign_record");
         let done_name = self.next_for_in_temp_identifier("array_assign_done");
         let close_name = self.next_for_in_temp_identifier("array_assign_close");
+        let caught_error_name = self.next_for_in_temp_identifier("array_assign_error");
 
         let mut try_block = Vec::new();
         for (index, element) in elements.into_iter().enumerate() {
@@ -3232,33 +3233,36 @@ impl Parser {
             }),
             Stmt::Try {
                 try_block,
-                catch_param: None,
-                catch_block: None,
-                finally_block: Some(vec![Stmt::If {
-                    condition: Expr::Unary {
-                        op: UnaryOp::Not,
-                        expr: Box::new(Expr::Identifier(done_name)),
-                    },
-                    consequent: Box::new(Stmt::Try {
-                        try_block: vec![Stmt::VariableDeclaration(VariableDeclaration {
-                            kind: BindingKind::Let,
-                            name: close_name,
-                            initializer: Some(Expr::Call {
-                                callee: Box::new(Expr::Member {
-                                    object: Box::new(Expr::Identifier(Identifier(
-                                        "Object".to_string(),
-                                    ))),
-                                    property: "__forOfClose".to_string(),
+                catch_param: Some(caught_error_name.clone()),
+                catch_block: Some(vec![
+                    Stmt::If {
+                        condition: Expr::Unary {
+                            op: UnaryOp::Not,
+                            expr: Box::new(Expr::Identifier(done_name)),
+                        },
+                        consequent: Box::new(Stmt::Try {
+                            try_block: vec![Stmt::VariableDeclaration(VariableDeclaration {
+                                kind: BindingKind::Let,
+                                name: close_name,
+                                initializer: Some(Expr::Call {
+                                    callee: Box::new(Expr::Member {
+                                        object: Box::new(Expr::Identifier(Identifier(
+                                            "Object".to_string(),
+                                        ))),
+                                        property: "__forOfClose".to_string(),
+                                    }),
+                                    arguments: vec![Expr::Identifier(record_name)],
                                 }),
-                                arguments: vec![Expr::Identifier(record_name)],
-                            }),
-                        })],
-                        catch_param: None,
-                        catch_block: Some(Vec::new()),
-                        finally_block: None,
-                    }),
-                    alternate: None,
-                }]),
+                            })],
+                            catch_param: None,
+                            catch_block: Some(Vec::new()),
+                            finally_block: None,
+                        }),
+                        alternate: None,
+                    },
+                    Stmt::Throw(Expr::Identifier(caught_error_name)),
+                ]),
+                finally_block: None,
             },
             Stmt::Return(Some(Expr::Identifier(source_name.clone()))),
         ];
@@ -7008,6 +7012,21 @@ mod tests {
             .expect("script parsing should succeed");
         parse_script("({ __proto__: x, __proto__: y } = value);")
             .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn lowers_array_assignment_pattern_with_default_initializer() {
+        let parsed = parse_expression("([a = thrower()] = iterator)")
+            .expect("expression parsing should succeed");
+        let debug = format!("{parsed:?}");
+        assert!(
+            debug.contains("thrower"),
+            "lowered assignment should preserve default initializer call"
+        );
+        assert!(
+            debug.contains("__forOfIterator") && debug.contains("__forOfStep"),
+            "lowered assignment should use for-of iterator helpers"
+        );
     }
 
     #[test]
