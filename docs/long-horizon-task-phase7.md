@@ -1,7 +1,7 @@
 # Long Horizon Task Plan (Phase 7 Compatibility Push)
 
 基线日期：2026-02-24
-目标：以 QuickJS 语义对齐为前提，持续压降 test262 language 失败簇（当前 5000 样本：`4985/15`）。
+目标：以 QuickJS 语义对齐为前提，持续压降 test262 language 失败簇（当前 5000 样本：`4989/11`）。
 预计总时长：`>= 10h`（建议按 5 个 2h 冲刺执行）。
 
 ## 1. 迁移原则（强约束）
@@ -16,12 +16,13 @@
 
 - 模块范围：
   - `literals/regexp/*`
-  - `expressions/division/no-magic-asi*`
-  - `statementList/*regexp-literal*`
+  - `literals/regexp/u-*`
+  - `literals/regexp/y-*`
+  - `source-text/6.1.js`
 - QuickJS 对照点：regexp literal tokenization 与 flags 处理、line terminator/ASI 边界。
 - 目标产物：
-  - 修复 regexp literal 与 division 词法切换误判
-  - 修复 `eval` 场景 regexp 对象身份与行为不一致
+  - 修复 unicode/sticky 正则行为与 code-unit 边界语义
+  - 修复 `source-text/6.1.js` 的 astral code point code-unit 计数偏差
 
 ### Track B: let 循环作用域与 TDZ（2h）
 

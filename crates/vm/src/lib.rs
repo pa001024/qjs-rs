@@ -178,8 +178,9 @@ enum HostFunction {
     ArrayIteratorNextThis,
     ArrayReverse(ObjectId),
     ArraySort(ObjectId),
-    RegExpTest(ObjectId),
-    RegExpExec(ObjectId),
+    RegExpTestThis,
+    RegExpExecThis,
+    RegExpToStringThis,
     HasOwnProperty {
         target: JsValue,
     },
@@ -327,6 +328,7 @@ pub struct Vm {
     error_prototype_id: Option<ObjectId>,
     type_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
+    regexp_prototype_id: Option<ObjectId>,
     array_buffer_prototype_id: Option<ObjectId>,
     data_view_prototype_id: Option<ObjectId>,
     map_prototype_id: Option<ObjectId>,
@@ -394,6 +396,7 @@ impl Vm {
         self.error_prototype_id = None;
         self.type_error_prototype_id = None;
         self.date_prototype_id = None;
+        self.regexp_prototype_id = None;
         self.array_buffer_prototype_id = None;
         self.data_view_prototype_id = None;
         self.map_prototype_id = None;
@@ -638,6 +641,7 @@ impl Vm {
             self.error_prototype_id,
             self.type_error_prototype_id,
             self.date_prototype_id,
+            self.regexp_prototype_id,
             self.array_buffer_prototype_id,
             self.data_view_prototype_id,
             self.map_prototype_id,
@@ -797,8 +801,6 @@ impl Vm {
             | HostFunction::ArrayJoin(object_id)
             | HostFunction::ArrayReverse(object_id)
             | HostFunction::ArraySort(object_id)
-            | HostFunction::RegExpTest(object_id)
-            | HostFunction::RegExpExec(object_id)
             | HostFunction::DateToString(object_id)
             | HostFunction::DateValueOf(object_id) => {
                 self.gc_mark_stack.push(JsValue::Object(object_id));
@@ -851,6 +853,9 @@ impl Vm {
             | HostFunction::ArrayValuesThis
             | HostFunction::ArrayIteratorNextThis
             | HostFunction::GeneratorIteratorNextThis
+            | HostFunction::RegExpTestThis
+            | HostFunction::RegExpExecThis
+            | HostFunction::RegExpToStringThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
             | HostFunction::AssertThrows
@@ -3099,6 +3104,17 @@ impl Vm {
         }
     }
 
+    fn strict_this_regexp_object(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__regexpTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError(
+                "RegExp.prototype method called on incompatible",
+            )),
+        }
+    }
+
     fn array_buffer_length(&self, object_id: ObjectId) -> Result<usize, VmError> {
         let object = self
             .objects
@@ -3863,24 +3879,30 @@ impl Vm {
             HostFunction::ArraySort(object_id) => {
                 self.execute_array_sort(object_id, &args, realm, caller_strict)
             }
-            HostFunction::RegExpTest(object_id) => {
+            HostFunction::RegExpTestThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
                 let input = args.first().map_or_else(
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let matched = self.execute_regexp_test(object_id, &input)?;
+                let matched = self.execute_regexp_test(receiver_id, &input)?;
                 Ok(JsValue::Bool(matched))
             }
-            HostFunction::RegExpExec(object_id) => {
+            HostFunction::RegExpExecThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
                 let input = args.first().map_or_else(
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let matched = self.execute_regexp_test(object_id, &input)?;
+                let matched = self.execute_regexp_test(receiver_id, &input)?;
                 if !matched {
                     return Ok(JsValue::Null);
                 }
                 self.create_array_from_values(vec![JsValue::String(input)])
+            }
+            HostFunction::RegExpToStringThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
+                self.execute_regexp_to_string(receiver_id).map(JsValue::String)
             }
             HostFunction::HasOwnProperty { target } => {
                 let target = this_arg.unwrap_or(target);
@@ -4443,13 +4465,14 @@ impl Vm {
     }
 
     fn create_regexp_value(&mut self, pattern: String, flags: String) -> Result<JsValue, VmError> {
+        if self.regexp_prototype_id.is_none() {
+            let _ = self.regexp_prototype_value();
+        }
         let object = self.create_object_value();
         let object_id = match object {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
-        let test_method = self.create_host_function_value(HostFunction::RegExpTest(object_id));
-        let exec_method = self.create_host_function_value(HostFunction::RegExpExec(object_id));
         let global = flags.contains('g');
         let ignore_case = flags.contains('i');
         let multiline = flags.contains('m');
@@ -4461,6 +4484,11 @@ impl Vm {
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = self.regexp_prototype_id;
+        target.prototype_value = None;
+        target
+            .properties
+            .insert("__regexpTag".to_string(), JsValue::Bool(true));
         target
             .properties
             .insert("source".to_string(), JsValue::String(pattern));
@@ -4488,13 +4516,31 @@ impl Vm {
         target
             .properties
             .insert("lastIndex".to_string(), JsValue::Number(0.0));
-        target.properties.insert(
-            "constructor".to_string(),
-            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        target.property_attributes.insert(
+            "lastIndex".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
         );
-        target.properties.insert("test".to_string(), test_method);
-        target.properties.insert("exec".to_string(), exec_method);
         Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_regexp_to_string(&self, object_id: ObjectId) -> Result<String, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let source = object
+            .properties
+            .get("source")
+            .map_or_else(String::new, |value| self.coerce_to_string(value));
+        let flags = object
+            .properties
+            .get("flags")
+            .map_or_else(String::new, |value| self.coerce_to_string(value));
+        Ok(format!("/{source}/{flags}"))
     }
 
     fn execute_regexp_test(&self, object_id: ObjectId, input: &str) -> Result<bool, VmError> {
@@ -8867,6 +8913,61 @@ impl Vm {
         prototype
     }
 
+    fn regexp_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.regexp_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let test = self.create_host_function_value(HostFunction::RegExpTestThis);
+            let exec = self.create_host_function_value(HostFunction::RegExpExecThis);
+            let to_string = self.create_host_function_value(HostFunction::RegExpToStringThis);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("test".to_string(), test);
+                object.property_attributes.insert(
+                    "test".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("exec".to_string(), exec);
+                object.property_attributes.insert(
+                    "exec".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("toString".to_string(), to_string);
+                object.property_attributes.insert(
+                    "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.regexp_prototype_id = Some(id);
+        }
+        prototype
+    }
+
     fn array_buffer_prototype_value(&mut self) -> JsValue {
         if let Some(id) = self.array_buffer_prototype_id {
             return JsValue::Object(id);
@@ -11254,8 +11355,8 @@ impl Vm {
             (NativeFunction::Uint8ArrayConstructor, "prototype") => {
                 self.uint8_array_prototype_value()
             }
-            (NativeFunction::RegExpConstructor, "prototype")
-            | (NativeFunction::SymbolConstructor, "prototype") => self.create_object_value(),
+            (NativeFunction::RegExpConstructor, "prototype") => self.regexp_prototype_value(),
+            (NativeFunction::SymbolConstructor, "prototype") => self.create_object_value(),
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
             }
@@ -13990,6 +14091,27 @@ mod tests {
         realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Number(3000.0)));
+    }
+
+    #[test]
+    fn eval_statement_list_regexp_literal_uses_regexp_prototype() {
+        let script = parse_script(
+            "var result = eval('{}/1/g;'); \
+             Object.getPrototypeOf(result) === RegExp.prototype && \
+             result.flags === 'g' && \
+             result.toString() === '/1/g';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global("RegExp", JsValue::NativeFunction(NativeFunction::RegExpConstructor));
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
