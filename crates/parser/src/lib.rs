@@ -4043,32 +4043,53 @@ impl Parser {
                     String::new()
                 };
 
+                let mut binding_name = None;
                 if self.matches(&TokenKind::Colon) {
                     if self.check_identifier() {
-                        let _ = self.expect_binding_identifier("expected parameter name")?;
+                        binding_name = Some(Identifier(
+                            self.expect_binding_identifier("expected parameter name")?,
+                        ));
                     } else {
                         self.consume_parameter_pattern("expected parameter name")?;
                     }
+                } else if !property_name.is_empty()
+                    && self.identifier_text_can_be_binding_name(&property_name)
+                {
+                    binding_name = Some(Identifier(property_name.clone()));
                 }
-                if self.matches(&TokenKind::Equal) {
-                    let initializer = self.parse_expression_inner()?;
-                    if !property_name.is_empty() {
-                        let condition = Expr::Binary {
-                            op: BinaryOp::StrictEqual,
-                            left: Box::new(Expr::Member {
-                                object: Box::new(Expr::Identifier(synthetic_param.clone())),
-                                property: property_name,
+
+                let default_initializer = if self.matches(&TokenKind::Equal) {
+                    Some(self.parse_expression_inner()?)
+                } else {
+                    None
+                };
+
+                if let Some(binding_name) = binding_name {
+                    let extracted = Expr::Member {
+                        object: Box::new(Expr::Identifier(synthetic_param.clone())),
+                        property: property_name,
+                    };
+                    let value = if let Some(default_initializer) = default_initializer {
+                        Expr::Conditional {
+                            condition: Box::new(Expr::Binary {
+                                op: BinaryOp::StrictEqual,
+                                left: Box::new(extracted.clone()),
+                                right: Box::new(Expr::Identifier(Identifier(
+                                    "undefined".to_string(),
+                                ))),
                             }),
-                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
-                        };
-                        effects.push(Stmt::If {
-                            condition,
-                            consequent: Box::new(Stmt::Expression(initializer)),
-                            alternate: None,
-                        });
+                            consequent: Box::new(default_initializer),
+                            alternate: Box::new(extracted),
+                        }
                     } else {
-                        effects.push(Stmt::Expression(initializer));
-                    }
+                        extracted
+                    };
+                    effects.push(Stmt::Expression(Expr::Assign {
+                        target: binding_name,
+                        value: Box::new(value),
+                    }));
+                } else if let Some(default_initializer) = default_initializer {
+                    effects.push(Stmt::Expression(default_initializer));
                 }
             }
             if self.matches(&TokenKind::Comma) {
@@ -5958,6 +5979,10 @@ impl Parser {
             self.current().map(|token| &token.kind),
             Some(TokenKind::Identifier(_))
         )
+    }
+
+    fn identifier_text_can_be_binding_name(&self, text: &str) -> bool {
+        !is_forbidden_binding_identifier(text)
     }
 
     fn check_template_part(&self) -> bool {
