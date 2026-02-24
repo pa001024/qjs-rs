@@ -80,6 +80,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+59)`: discovered=23882, executed=5000, skipped=18579, passed=4954, failed=46
 - `language max-cases=5000 (latest+60)`: discovered=23882, executed=5000, skipped=18579, passed=4962, failed=38
 - `language max-cases=5000 (latest+61)`: discovered=23882, executed=5000, skipped=18579, passed=4963, failed=37
+- `language max-cases=5000 (latest+62)`: discovered=23882, executed=5000, skipped=18579, passed=4966, failed=34
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -282,4 +283,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 对齐 QuickJS `switch` 分派语义：switch case 比较从 `==` 改为 strict equality（`===`，对应 QuickJS `OP_strict_eq`），并补齐“全局对象属性写入同步全局 `var` 绑定”以对齐全局环境记录别名行为；`language/statements/switch` 收敛至 `64/0`，`language/statements/variable` 收敛至 `34/0`，整体 `language` 基线提升至 `4954/46`（快照：`target/test262-language-baseline-5000-20260224-v41.json`）。
 - `for (let ...)` 语义对齐推进：bytecode 为普通 `for` 引入 per-iteration 词法环境（体环境与 update 环境分离，避免闭包值被 `++i` 污染），并以 carrier 变量传递迭代值；同时在 statement-list 入口对 `let` 注入 `Uninitialized` 预绑定（TDZ）并在 VM `DefineVariable` 路径支持“`Uninitialized -> undefined`”初始化转换。该轮后 `language/statements/let` 收敛至 `43/0`，整体 `language` 基线提升至 `4962/38`（快照：`target/test262-language-baseline-5000-20260224-v42.json`）。
 - lexer 新增 legacy octal number 解析分支（`070 -> 56`，`08/09` 保持十进制）；`language/literals/numeric` 收敛至 `83/0`，整体 `language` 基线提升至 `4963/37`（快照：`target/test262-language-baseline-5000-20260224-v43.json`）。
-- 当前失败主簇集中在 `literals/regexp/*`、`expressions/tagged-template/*`、`expressions/assignment/destructuring/*`、`statements/async-function/*` 与少量 parser 边角（`for` 头部与 division/regexp 词法边界）。
+- parser 对齐 QuickJS `for` 头部 `let` 语法判定：新增词法声明/表达式歧义分流（`for (let; ; )`、`for (let = 3; ; )`、`let = 1;`）、`for` 头数组绑定模式在非 `in/of` 场景的声明降级，以及 `async <id> =>` 形状的最小箭头解析支持。该轮后 `language/statements/for` 收敛至 `89/0`，整体 `language` 基线提升至 `4966/34`（快照：`target/test262-language-baseline-5000-20260224-v44.json`）。
+- 当前失败主簇集中在 `literals/regexp/*`、`expressions/tagged-template/*`、`expressions/assignment/destructuring/*`、`statements/async-function/*` 与少量 parser 边角（destructuring target/async 语法形状、division/regexp 边界）。

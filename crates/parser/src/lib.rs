@@ -1126,7 +1126,8 @@ impl Parser {
         if self.matches_keyword("return") {
             return self.parse_return_statement();
         }
-        if self.matches_keyword("let") {
+        if self.check_keyword("let") && self.statement_starts_with_lexical_let_declaration() {
+            self.advance();
             return self.parse_variable_declaration(BindingKind::Let);
         }
         if self.matches_keyword("const") {
@@ -1393,16 +1394,18 @@ impl Parser {
 
         let initializer = if self.check(&TokenKind::Semicolon) {
             None
-        } else if self.matches_keyword("let") {
+        } else if self.check_keyword("let") && self.for_head_starts_with_lexical_let_declaration() {
+            self.matches_keyword("let");
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
-                return self.parse_for_in_of_array_pattern_statement(BindingKind::Let, elements);
-            }
-            if self.check_keyword("in") || self.check_keyword("of") {
-                Some(ForInitializer::Expression(Expr::Identifier(Identifier(
-                    "let".to_string(),
-                ))))
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self
+                        .parse_for_in_of_array_pattern_statement(BindingKind::Let, elements);
+                }
+                let declarations =
+                    self.parse_for_head_array_pattern_declaration(BindingKind::Let, elements)?;
+                Some(ForInitializer::VariableDeclarations(declarations))
             } else {
                 let declaration = self.parse_variable_declaration(BindingKind::Let)?;
                 let declaration = match declaration {
@@ -1425,46 +1428,60 @@ impl Parser {
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Const)?;
-                return self.parse_for_in_of_array_pattern_statement(BindingKind::Const, elements);
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self
+                        .parse_for_in_of_array_pattern_statement(BindingKind::Const, elements);
+                }
+                let declarations =
+                    self.parse_for_head_array_pattern_declaration(BindingKind::Const, elements)?;
+                Some(ForInitializer::VariableDeclarations(declarations))
+            } else {
+                let declaration = self.parse_variable_declaration(BindingKind::Const)?;
+                let declaration = match declaration {
+                    Stmt::VariableDeclaration(declaration) => {
+                        ForInitializer::VariableDeclaration(declaration)
+                    }
+                    Stmt::VariableDeclarations(declarations) => {
+                        ForInitializer::VariableDeclarations(declarations)
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "invalid for initializer".to_string(),
+                            position: self.current_position(),
+                        });
+                    }
+                };
+                Some(declaration)
             }
-            let declaration = self.parse_variable_declaration(BindingKind::Const)?;
-            let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => {
-                    ForInitializer::VariableDeclaration(declaration)
-                }
-                Stmt::VariableDeclarations(declarations) => {
-                    ForInitializer::VariableDeclarations(declarations)
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "invalid for initializer".to_string(),
-                        position: self.current_position(),
-                    });
-                }
-            };
-            Some(declaration)
         } else if self.matches_keyword("var") {
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Var)?;
-                return self.parse_for_in_of_array_pattern_statement(BindingKind::Var, elements);
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self
+                        .parse_for_in_of_array_pattern_statement(BindingKind::Var, elements);
+                }
+                let declarations =
+                    self.parse_for_head_array_pattern_declaration(BindingKind::Var, elements)?;
+                Some(ForInitializer::VariableDeclarations(declarations))
+            } else {
+                let declaration = self.parse_variable_declaration(BindingKind::Var)?;
+                let declaration = match declaration {
+                    Stmt::VariableDeclaration(declaration) => {
+                        ForInitializer::VariableDeclaration(declaration)
+                    }
+                    Stmt::VariableDeclarations(declarations) => {
+                        ForInitializer::VariableDeclarations(declarations)
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "invalid for initializer".to_string(),
+                            position: self.current_position(),
+                        });
+                    }
+                };
+                Some(declaration)
             }
-            let declaration = self.parse_variable_declaration(BindingKind::Var)?;
-            let declaration = match declaration {
-                Stmt::VariableDeclaration(declaration) => {
-                    ForInitializer::VariableDeclaration(declaration)
-                }
-                Stmt::VariableDeclarations(declarations) => {
-                    ForInitializer::VariableDeclarations(declarations)
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "invalid for initializer".to_string(),
-                        position: self.current_position(),
-                    });
-                }
-            };
-            Some(declaration)
         } else {
             Some(ForInitializer::Expression(self.parse_expression_no_in()?))
         };
@@ -1615,6 +1632,76 @@ impl Parser {
         } else {
             self.lower_for_of_array_pattern_statement(kind, elements, iterable, body)
         }
+    }
+
+    fn parse_for_head_array_pattern_declaration(
+        &mut self,
+        kind: BindingKind,
+        elements: Vec<ForHeadArrayPatternElement>,
+    ) -> Result<Vec<VariableDeclaration>, ParseError> {
+        self.expect(TokenKind::Equal, "expected '=' after array binding pattern")?;
+        let source = self.parse_expression_no_in()?;
+        let source_name = self.next_for_in_temp_identifier("array_head");
+        let mut declarations = vec![VariableDeclaration {
+            kind,
+            name: source_name.clone(),
+            initializer: Some(source),
+        }];
+        for element in elements {
+            let mut read = Expr::MemberComputed {
+                object: Box::new(Expr::Identifier(source_name.clone())),
+                property: Box::new(Expr::Number(element.index as f64)),
+            };
+            if let Some(default_initializer) = element.default_initializer {
+                let condition_read = read.clone();
+                read = Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        op: BinaryOp::StrictEqual,
+                        left: Box::new(condition_read),
+                        right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                    }),
+                    consequent: Box::new(default_initializer),
+                    alternate: Box::new(read),
+                };
+            }
+            declarations.push(VariableDeclaration {
+                kind,
+                name: element.name,
+                initializer: Some(read),
+            });
+        }
+        Ok(declarations)
+    }
+
+    fn for_head_starts_with_lexical_let_declaration(&self) -> bool {
+        if !self.check_keyword("let") {
+            return false;
+        }
+        if self.check_next(&TokenKind::LBracket) {
+            return true;
+        }
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+            Some(TokenKind::Identifier(_))
+        ) {
+            return false;
+        }
+        matches!(
+            self.tokens.get(self.pos + 2).map(|token| &token.kind),
+            Some(TokenKind::Equal | TokenKind::Comma | TokenKind::Semicolon)
+        ) || self.check_nth_keyword(2, "in")
+            || self.check_nth_keyword(2, "of")
+    }
+
+    fn statement_starts_with_lexical_let_declaration(&self) -> bool {
+        if !self.check_keyword("let") {
+            return false;
+        }
+        self.check_next(&TokenKind::LBracket)
+            || matches!(
+                self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier(_))
+            )
     }
 
     fn supports_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
@@ -2940,6 +3027,24 @@ impl Parser {
                 && self.check_next(&TokenKind::Equal)
                 && self.check_nth(2, &TokenKind::Greater)
             {
+                (
+                    vec![Identifier(
+                        self.expect_binding_identifier("expected parameter name")?,
+                    )],
+                    true,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            } else if self.check_keyword("async")
+                && self.check_nth(2, &TokenKind::Equal)
+                && self.check_nth(3, &TokenKind::Greater)
+                && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                    Some(TokenKind::Identifier(_))
+                )
+            {
+                self.matches_keyword("async");
                 (
                     vec![Identifier(
                         self.expect_binding_identifier("expected parameter name")?,
@@ -5514,6 +5619,12 @@ impl Parser {
         )
     }
 
+    fn check_nth_keyword(&self, offset: usize, keyword: &str) -> bool {
+        self.tokens
+            .get(self.pos + offset)
+            .is_some_and(|token| self.identifier_token_matches_keyword(token, keyword))
+    }
+
     fn check(&self, expected: &TokenKind) -> bool {
         matches!(self.current(), Some(token) if &token.kind == expected)
     }
@@ -6753,6 +6864,44 @@ mod tests {
     #[test]
     fn parses_for_in_with_let_identifier_baseline() {
         parse_script("for (let in {}) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_head_let_expression_forms() {
+        parse_script("var let; for (let; ; ) break;").expect("script parsing should succeed");
+        parse_script("var let; for (let = 3; ; ) break;").expect("script parsing should succeed");
+        parse_script("var let; for ([let][0]; ; ) break;").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_head_let_array_destructuring_declaration() {
+        parse_script("for (let [x] = [23]; ; ) { break; }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_head_async_of_arrow_expression() {
+        parse_script("for (async of => {}; i < 10; ++i) { counter = counter + 1; }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_test262_head_lhs_let_shape() {
+        let source = r#"
+var let;
+
+let = 1;
+for ( let; ; )
+  break;
+
+let = 2;
+for ( let = 3; ; )
+  break;
+
+let = 4;
+for ( [let][0]; ; )
+  break;
+"#;
+        parse_script(source).expect("script parsing should succeed");
     }
 
     #[test]
