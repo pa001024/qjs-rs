@@ -1379,6 +1379,13 @@ impl Compiler {
         code: &mut Vec<Opcode>,
         keep_value: bool,
     ) -> bool {
+        if !keep_value {
+            if let Some(name) = self.loop_completion_targets.last() {
+                code.push(Opcode::LoadUndefined);
+                code.push(Opcode::StoreVariable(name.clone()));
+                code.push(Opcode::Pop);
+            }
+        }
         self.compile_expr(object, code);
         code.push(Opcode::EnterWith);
 

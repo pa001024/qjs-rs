@@ -15,6 +15,7 @@
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
 - `test262 language --max-cases 5000` 最新快照：`passed=5000`、`failed=0`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
+- `test262 language --max-cases 10000` 最新快照：`executed=5265`、`passed=5265`、`failed=0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -159,6 +160,8 @@
   - 子集回归（latest+43）：lexer 对齐 QuickJS regexp 分流优先级：在允许 regexp 的上下文中，`/=` 优先识别为 regexp literal body 而非 `SlashEqual`。`language` 基线提升至 `4991/9`（快照：`target/test262-language-baseline-5000-20260224-v55.json`）。
   - 子集回归（latest+44）：VM regex backend 补齐 `u/y` 主路径：`unicode` 标志透传、`sticky` 使用 `lastIndex` 起点、`\0` 归一化；并补齐 `String.prototype.match/search` 最小路径。`language` 基线提升至 `4993/7`（快照：`target/test262-language-baseline-5000-20260224-v56.json`）。
   - 子集回归（latest+45）：VM regex normalization 增加 `\uXXXX/\u{...}` 解析、surrogate placeholder 编解码与 `u` 模式下输入 UTF-16 对解码，收敛 `literals/regexp/u-*` 剩余簇。`language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
+  - 子集回归（latest+46）：bytecode 对齐 `with` 的 `UpdateEmpty(..., undefined)` completion 路径；VM/runtime 补齐 `Object.preventExtensions`、`delete Number.NaN` 非可配置、string primitive `constructor`；lexer 新增 `U+FEFF` whitespace 识别。`language --max-cases 10000` 从 `5257/8` 提升至 `5263/2`（快照：`target/test262-language-baseline-10000-20260224-v59.json`）。
+  - 子集回归（latest+47）：VM 全局 `var` 声明对齐 QuickJS `CanDeclareGlobalVar` 语义：non-extensible global object 上新增 global var 抛 `TypeError`（覆盖 direct/indirect eval），`language --max-cases 10000` 收敛至 `5265/0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
 
 ## 3. 分阶段状态
 
@@ -178,7 +181,7 @@
 1. GC 已落地首版 mark-sweep，但仍缺增量/分代策略与更大规模性能压测。
 2. `eval/with/strict` 与 descriptor 等复杂语义仍需持续压测与修正。
 3. 模块系统与 Promise job queue 尚未启动实现。
-4. `language --max-cases 5000` 已清零（`5000/0`）；下一阶段切换到更大样本与全量 test262 稳定性验证。
+4. `language --max-cases 5000` 与 `10000` 扩容样本已清零（`5000/0`、`5265/0`）；下一阶段切换全量 language 抽样与 nightly 稳定性验证。
 
 ## 5. 下一步执行
 

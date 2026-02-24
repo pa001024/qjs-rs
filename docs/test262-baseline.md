@@ -93,6 +93,10 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=5000 (latest+72)`: discovered=23882, executed=5000, skipped=18579, passed=4991, failed=9
 - `language max-cases=5000 (latest+73)`: discovered=23882, executed=5000, skipped=18579, passed=4993, failed=7
 - `language max-cases=5000 (latest+74)`: discovered=23882, executed=5000, skipped=18579, passed=5000, failed=0
+- `language max-cases=10000 (latest+75)`: discovered=23882, executed=5265, skipped=18617, passed=5257, failed=8
+- `language max-cases=10000 (latest+76)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
+- `language max-cases=10000 (latest+77)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
+- `language max-cases=10000 (latest+78)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -309,3 +313,5 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - lexer 对齐 QuickJS regexp 分流顺序：在 regexp 上下文优先按 regexp literal 扫描，再回落 `/=` token，修复 `S7.8.5_A1.1_T2.js`；整体 `language` 基线提升至 `4991/9`（快照：`target/test262-language-baseline-5000-20260224-v55.json`）。
 - VM regex 扩展 `u/y` 行为：`unicode` 标志透传、`sticky` 使用 `lastIndex` 起点、`\0` 归一化，并新增 `String.prototype.match/search` 最小链路；整体 `language` 基线提升至 `4993/7`（快照：`target/test262-language-baseline-5000-20260224-v56.json`）。
 - VM regex normalization 新增 `\uXXXX/\u{...}` 转换、surrogate placeholder 编解码与 `u` 模式输入 UTF-16 对解码，`literals/regexp/u-*` 收敛至 `0`；整体 `language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
+- 扩容到 `language --max-cases 10000` 后出现 8 个失败簇：`with` 空完成值、`Object.preventExtensions` 缺失、`delete Number.NaN` 可配置性、string primitive `constructor`、`U+FEFF` whitespace、eval global var 可声明性；先收敛至 `5263/2`（快照：`target/test262-language-baseline-10000-20260224-v59.json`）。
+- VM 对齐 QuickJS `CanDeclareGlobalVar` 行为：non-extensible global object 上 eval `var` 新声明抛 `TypeError`（direct/indirect），`language --max-cases 10000` 收敛至 `5265/0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。

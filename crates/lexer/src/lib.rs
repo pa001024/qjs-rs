@@ -110,8 +110,15 @@ fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
     unicode_line_terminator_len(bytes, pos)
 }
 
+fn is_ecmascript_whitespace(ch: char) -> bool {
+    ch == '\u{FEFF}' || ch.is_whitespace()
+}
+
 fn is_identifier_start(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphabetic() || (!ch.is_ascii() && !ch.is_whitespace())
+    ch == '_'
+        || ch == '$'
+        || ch.is_ascii_alphabetic()
+        || (!ch.is_ascii() && !is_ecmascript_whitespace(ch))
 }
 
 fn is_identifier_part(ch: char) -> bool {
@@ -546,7 +553,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
         if let Some((ch, len)) = decode_char(source, pos) {
-            if !ch.is_ascii() && ch.is_whitespace() {
+            if !ch.is_ascii() && is_ecmascript_whitespace(ch) {
                 pos += len;
                 continue;
             }
@@ -1986,6 +1993,16 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::SlashEqual);
         assert_eq!(tokens[2].kind, TokenKind::Identifier("b".to_string()));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn treats_zero_width_no_break_space_as_whitespace_after_regex_literal() {
+        let tokens = lex("/x/g\u{FEFF};").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Slash);
+        assert_eq!(tokens[0].span.start, 0);
+        assert_eq!(tokens[0].span.end, 4);
+        assert_eq!(tokens[1].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
     }
 
     #[test]

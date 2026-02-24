@@ -2671,9 +2671,8 @@ impl Vm {
                     if !self.closure_uses_yield_identifier(closure_id)? {
                         return self.execute_closure_call(closure_id, args, this_arg, realm);
                     }
-                    return self.create_generator_iterator_from_closure_call(
-                        closure_id, args, this_arg,
-                    );
+                    return self
+                        .create_generator_iterator_from_closure_call(closure_id, args, this_arg);
                 }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
@@ -3939,7 +3938,8 @@ impl Vm {
             }
             HostFunction::RegExpToStringThis => {
                 let receiver_id = self.strict_this_regexp_object(this_arg)?;
-                self.execute_regexp_to_string(receiver_id).map(JsValue::String)
+                self.execute_regexp_to_string(receiver_id)
+                    .map(JsValue::String)
             }
             HostFunction::HasOwnProperty { target } => {
                 let target = this_arg.unwrap_or(target);
@@ -4206,6 +4206,9 @@ impl Vm {
                 self.execute_object_get_own_property_descriptor(&args)
             }
             NativeFunction::ObjectGetPrototypeOf => self.execute_object_get_prototype_of(&args),
+            NativeFunction::ObjectPreventExtensions => {
+                self.execute_object_prevent_extensions(&args)
+            }
             NativeFunction::ObjectIsExtensible => self.execute_object_is_extensible(&args),
             NativeFunction::ObjectFreeze => self.execute_object_freeze(&args),
             NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
@@ -4647,8 +4650,7 @@ impl Vm {
                     }
                 }
                 if next == 'u' {
-                    if let Some((code_point, consumed)) =
-                        Self::parse_regex_u_escape(&chars, index)
+                    if let Some((code_point, consumed)) = Self::parse_regex_u_escape(&chars, index)
                     {
                         if unicode
                             && (0xD800..=0xDBFF).contains(&code_point)
@@ -4656,18 +4658,18 @@ impl Vm {
                                 Self::parse_regex_u_escape(&chars, index + consumed)
                             && (0xDC00..=0xDFFF).contains(&low_code_point)
                         {
-                                let combined = 0x10000
-                                    + (((code_point - 0xD800) << 10) | (low_code_point - 0xDC00));
-                                if let Some(value) = char::from_u32(combined) {
-                                    Self::push_regex_literal_char(
-                                        &mut normalized,
-                                        value,
-                                        in_character_class,
-                                    );
-                                    index += consumed + low_consumed;
-                                    continue;
-                                }
+                            let combined = 0x10000
+                                + (((code_point - 0xD800) << 10) | (low_code_point - 0xDC00));
+                            if let Some(value) = char::from_u32(combined) {
+                                Self::push_regex_literal_char(
+                                    &mut normalized,
+                                    value,
+                                    in_character_class,
+                                );
+                                index += consumed + low_consumed;
+                                continue;
                             }
+                        }
                         if let Some(value) = char::from_u32(code_point) {
                             Self::push_regex_literal_char(
                                 &mut normalized,
@@ -5699,7 +5701,9 @@ impl Vm {
             "__asyncState".to_string(),
             JsValue::String(if fulfilled { "fulfilled" } else { "rejected" }.to_string()),
         );
-        target.properties.insert("__asyncResult".to_string(), result);
+        target
+            .properties
+            .insert("__asyncResult".to_string(), result);
         Ok(JsValue::Object(object_id))
     }
 
@@ -7084,6 +7088,20 @@ impl Vm {
         }
     }
 
+    fn execute_object_prevent_extensions(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if let JsValue::Object(object_id) = target {
+            let object = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            object.extensible = false;
+            Ok(JsValue::Object(object_id))
+        } else {
+            Ok(target)
+        }
+    }
+
     fn execute_object_is_extensible(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         let extensible = match target {
@@ -8401,6 +8419,15 @@ impl Vm {
             .is_some_and(|object| object.properties.contains_key(name));
         if already_defined {
             return Ok(());
+        }
+        let is_extensible = self
+            .objects
+            .get(&global_object_id)
+            .is_some_and(|object| object.extensible);
+        if !is_extensible {
+            return Err(VmError::TypeError(
+                "cannot declare global var on non-extensible global object",
+            ));
         }
         self.define_global_property_with_attributes(
             global_object_id,
@@ -10488,6 +10515,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
+                | (NativeFunction::ObjectConstructor, "preventExtensions")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
                 | (NativeFunction::ObjectConstructor, "__forOfValues")
                 | (NativeFunction::ObjectConstructor, "__forOfIterator")
@@ -11192,7 +11220,9 @@ impl Vm {
             JsValue::HostFunction(host_id) => {
                 Ok(self.delete_host_function_property(host_id, &property))
             }
-            JsValue::NativeFunction(_) => Ok(true),
+            JsValue::NativeFunction(native) => {
+                Ok(self.delete_native_function_property(native, &property))
+            }
             JsValue::Null | JsValue::Undefined | JsValue::Uninitialized => {
                 Err(VmError::TypeError("property access expects object"))
             }
@@ -11269,6 +11299,19 @@ impl Vm {
         object.property_attributes.remove(property);
         object.argument_mappings.remove(property);
         true
+    }
+
+    fn delete_native_function_property(&self, native: NativeFunction, property: &str) -> bool {
+        if !self.native_function_has_own_property(native, property) {
+            return true;
+        }
+        !matches!(
+            (native, property),
+            (
+                NativeFunction::NumberConstructor,
+                "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY" | "MAX_VALUE" | "MIN_VALUE"
+            )
+        )
     }
 
     fn get_host_function_property(
@@ -11364,6 +11407,7 @@ impl Vm {
             "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
             "substring" => self.create_host_function_value(HostFunction::StringSubstring),
             "trim" => self.create_host_function_value(HostFunction::StringTrim),
+            "constructor" => JsValue::NativeFunction(NativeFunction::StringConstructor),
             _ => match property.parse::<usize>() {
                 Ok(index) => receiver
                     .chars()
@@ -11525,6 +11569,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "setPrototypeOf") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSetPrototypeOf)
+            }
+            (NativeFunction::ObjectConstructor, "preventExtensions") => {
+                JsValue::NativeFunction(NativeFunction::ObjectPreventExtensions)
             }
             (NativeFunction::ObjectConstructor, "__forInKeys") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForInKeys)
@@ -13059,6 +13106,20 @@ mod tests {
     }
 
     #[test]
+    fn with_statement_abrupt_empty_completion_updates_to_undefined() {
+        let first_script = parse_script("5; do { 6; with({}) { break; } 7; } while (false);")
+            .expect("script should parse");
+        let second_script =
+            parse_script("12; do { 13; with({}) { continue; } 14; } while (false);")
+                .expect("script should parse");
+        let first_chunk = compile_script(&first_script);
+        let second_chunk = compile_script(&second_script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&first_chunk), Ok(JsValue::Undefined));
+        assert_eq!(vm.execute(&second_chunk), Ok(JsValue::Undefined));
+    }
+
+    #[test]
     fn function_call_exposes_arguments_object() {
         let chunk = Chunk {
             code: vec![
@@ -13685,6 +13746,20 @@ mod tests {
     }
 
     #[test]
+    fn string_primitive_exposes_string_constructor_property() {
+        let script =
+            parse_script("'rock\\'n\\'roll'.constructor === String;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn array_length_shrink_deletes_elements_for_subclass_instances() {
         let script = parse_script(
             "class Ar extends Array {} let arr = new Ar('foo', 'bar'); arr.length = 1; arr[0] === 'foo' && arr[1] === undefined && arr.length === 1;",
@@ -13786,6 +13861,39 @@ mod tests {
         let chunk = compile_script(&script);
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_prevent_extensions_blocks_proto_assignment_mutation() {
+        let script = parse_script(
+            "var x = Object.preventExtensions({}); var y = {}; \
+             try { x.__proto__ = y; } catch (e) {} \
+             Object.getPrototypeOf(x) === Object.prototype;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn delete_number_nan_returns_false_and_keeps_property() {
+        let script =
+            parse_script("delete Number.NaN === false && typeof Number.NaN !== 'undefined';")
+                .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -14345,7 +14453,10 @@ mod tests {
         let mut realm = Realm::default();
         realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
         let mut vm = Vm::default();
-        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Number(3000.0)));
+        assert_eq!(
+            vm.execute_in_realm(&chunk, &realm),
+            Ok(JsValue::Number(3000.0))
+        );
     }
 
     #[test]
@@ -14360,7 +14471,10 @@ mod tests {
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
-        realm.define_global("RegExp", JsValue::NativeFunction(NativeFunction::RegExpConstructor));
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
         realm.define_global(
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
@@ -14370,9 +14484,57 @@ mod tests {
     }
 
     #[test]
+    fn eval_throws_type_error_when_global_var_cannot_be_declared_direct() {
+        let script = parse_script(
+            "Object.preventExtensions(this); \
+             var error; \
+             try { eval('var unlikelyVariableName'); } catch (e) { error = e; } \
+             error instanceof TypeError;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn eval_throws_type_error_when_global_var_cannot_be_declared_indirect() {
+        let script = parse_script(
+            "Object.preventExtensions(this); \
+             assert.throws(TypeError, function() { (0, eval)('var unlikelyVariableName;'); });",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Undefined));
+    }
+
+    #[test]
     fn async_function_call_returns_promise_instance() {
-        let script = parse_script("async function f() { return 1; } var p = f(); p instanceof Promise;")
-            .expect("script should parse");
+        let script =
+            parse_script("async function f() { return 1; } var p = f(); p instanceof Promise;")
+                .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(
@@ -14430,7 +14592,10 @@ mod tests {
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
         let mut vm = Vm::default();
-        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Number(1.0)));
+        assert_eq!(
+            vm.execute_in_realm(&chunk, &realm),
+            Ok(JsValue::Number(1.0))
+        );
     }
 
     #[test]
