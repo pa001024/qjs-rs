@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4862`、`failed=138`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v23.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4863`、`failed=137`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v24.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -113,6 +113,8 @@
   - 子集回归（latest+13）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `166/22`，`language/expressions/class` 保持 `47/0`，`language` 基线提升至 `4860/140`。
   - VM 新增 `execute_construct_value` 并将 `BoundCall` 构造路径改为“构造目标函数 + 绑定参数前置（忽略绑定 this）”，修复 class constructor 被 `bind()` 后仍按普通 call 触发 `class constructor cannot be invoked without 'new'` 的偏差。
   - 子集回归（latest+14）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `168/20`，`language/expressions/class` 保持 `47/0`，`language` 基线提升至 `4862/138`。
+  - VM 放宽 derived constructor 返回规则：当显式返回 object-like 值时不再强制要求 `this` 已初始化（`extends null` 显式返回对象语义），修复 `class-definition-null-proto-contains-return-override`。
+  - 子集回归（latest+15）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `169/19`，`language/expressions/class` 保持 `47/0`，`language` 基线提升至 `4863/137`。
 
 ## 3. 分阶段状态
 

@@ -2733,9 +2733,30 @@ impl Vm {
         };
 
         if is_derived_class_constructor {
-            let this_binding_id = match self.resolve_binding_id("this") {
-                Some(binding_id) => binding_id,
-                None => {
+            if matches!(value, JsValue::Undefined) {
+                let this_binding_id = match self.resolve_binding_id("this") {
+                    Some(binding_id) => binding_id,
+                    None => {
+                        self.restore_caller_state(
+                            saved_handlers,
+                            saved_var_scope_stack,
+                            saved_param_init_body_scopes,
+                        );
+                        return Err(VmError::UnknownIdentifier("this".to_string()));
+                    }
+                };
+                let this_value = match self.bindings.get(&this_binding_id) {
+                    Some(binding) => binding.value.clone(),
+                    None => {
+                        self.restore_caller_state(
+                            saved_handlers,
+                            saved_var_scope_stack,
+                            saved_param_init_body_scopes,
+                        );
+                        return Err(VmError::ScopeUnderflow);
+                    }
+                };
+                if matches!(this_value, JsValue::Uninitialized) {
                     self.restore_caller_state(
                         saved_handlers,
                         saved_var_scope_stack,
@@ -2743,27 +2764,6 @@ impl Vm {
                     );
                     return Err(VmError::UnknownIdentifier("this".to_string()));
                 }
-            };
-            let this_value = match self.bindings.get(&this_binding_id) {
-                Some(binding) => binding.value.clone(),
-                None => {
-                    self.restore_caller_state(
-                        saved_handlers,
-                        saved_var_scope_stack,
-                        saved_param_init_body_scopes,
-                    );
-                    return Err(VmError::ScopeUnderflow);
-                }
-            };
-            if matches!(this_value, JsValue::Uninitialized) {
-                self.restore_caller_state(
-                    saved_handlers,
-                    saved_var_scope_stack,
-                    saved_param_init_body_scopes,
-                );
-                return Err(VmError::UnknownIdentifier("this".to_string()));
-            }
-            if matches!(value, JsValue::Undefined) {
                 value = this_value;
             } else if !Self::is_object_like_value(&value) {
                 self.restore_caller_state(
