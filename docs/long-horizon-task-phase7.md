@@ -98,7 +98,8 @@
 - 已完成：
   - `language --max-cases 5000`: `5000/0`
   - `language --max-cases 10000`: `5265/0`
-  - `built-ins/Object`: `2255/0`（`target/test262-builtins-object-20260224-v95.json`）
+  - `built-ins/Object`: `2255/0`（`target/test262-builtins-object-20260224-v96.json`）
+  - `built-ins/Array --max-cases 100`: `100/0`（`target/test262-builtins-array-20260224-v4-s100.json`）
 - 下一轮并行模块拆分（建议 4 条线并行，每线 2~3h）：
   - Track F（Proxy 正式化）：补齐 `get/set/has/deleteProperty/getOwnPropertyDescriptor/defineProperty/ownKeys` trap 与不变量校验，对照 QuickJS `JSProxy` 路径。
   - Track G（TypedArray 扩展）：从当前 alias 过渡到真实 typed-array 家族构造器与 element 读写语义，覆盖 `Int8/Uint8Clamped/Int16/Uint16/Int32/Uint32/Float32/Float64/BigInt64/BigUint64`。
