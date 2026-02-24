@@ -337,6 +337,7 @@ pub struct Vm {
     identifier_references: Vec<IdentifierReference>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
+    template_cache: BTreeMap<u64, JsValue>,
     eval_contexts: Vec<EvalContext>,
     eval_deletable_binding_depth: usize,
     param_init_body_scopes: Vec<ScopeRef>,
@@ -403,6 +404,7 @@ impl Vm {
         self.identifier_references.clear();
         self.exception_handlers.clear();
         self.pending_exception = None;
+        self.template_cache.clear();
         self.eval_contexts.clear();
         self.eval_deletable_binding_depth = 0;
         self.param_init_body_scopes.clear();
@@ -655,6 +657,7 @@ impl Vm {
             roots.push(getter.clone());
         }
         roots.extend(realm.globals_values().cloned());
+        roots.extend(self.template_cache.values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
         roots.extend(
             self.host_functions
@@ -921,6 +924,8 @@ impl Vm {
                         Ok(self.global_this_value())
                     } else if name == "Math" {
                         self.math_object_value()
+                    } else if name == "Object" {
+                        Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor))
                     } else if name == "JSON" {
                         self.json_object_value()
                     } else if name == "Reflect" {
@@ -4151,6 +4156,9 @@ impl Vm {
             }
             NativeFunction::ObjectForOfStep => self.execute_object_for_of_step(&args, realm),
             NativeFunction::ObjectForOfClose => self.execute_object_for_of_close(&args, realm),
+            NativeFunction::ObjectGetTemplateObject => {
+                self.execute_object_get_template_object(&args)
+            }
             NativeFunction::ObjectTdzMarker => Ok(JsValue::Uninitialized),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
@@ -6842,6 +6850,49 @@ impl Vm {
         } else {
             Ok(target)
         }
+    }
+
+    fn execute_object_get_template_object(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let site_id = args
+            .first()
+            .map(|value| self.to_number(value))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0) as u64;
+        if let Some(cached) = self.template_cache.get(&site_id).cloned() {
+            return Ok(cached);
+        }
+
+        let cooked = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let raw = args.get(2).cloned().unwrap_or(JsValue::Undefined);
+        let cooked_id = match cooked {
+            JsValue::Object(object_id) => object_id,
+            _ => return Err(VmError::TypeError("template cooked object must be object")),
+        };
+        let raw_id = match raw {
+            JsValue::Object(object_id) => object_id,
+            _ => return Err(VmError::TypeError("template raw object must be object")),
+        };
+        {
+            let cooked_object = self
+                .objects
+                .get_mut(&cooked_id)
+                .ok_or(VmError::UnknownObject(cooked_id))?;
+            cooked_object
+                .properties
+                .insert("raw".to_string(), JsValue::Object(raw_id));
+            cooked_object.property_attributes.insert(
+                "raw".to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+        }
+        let _ = self.execute_object_freeze(&[JsValue::Object(raw_id)])?;
+        let template_object = self.execute_object_freeze(&[JsValue::Object(cooked_id)])?;
+        self.template_cache.insert(site_id, template_object.clone());
+        Ok(template_object)
     }
 
     fn create_descriptor_object(&mut self, entries: Vec<(&str, JsValue)>) -> JsValue {
@@ -10107,6 +10158,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "__forOfIterator")
                 | (NativeFunction::ObjectConstructor, "__forOfStep")
                 | (NativeFunction::ObjectConstructor, "__forOfClose")
+                | (NativeFunction::ObjectConstructor, "__getTemplateObject")
                 | (
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
@@ -11143,6 +11195,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "__forOfClose") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfClose)
+            }
+            (NativeFunction::ObjectConstructor, "__getTemplateObject") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetTemplateObject)
             }
             (NativeFunction::ObjectConstructor, "__tdzMarker") => {
                 JsValue::NativeFunction(NativeFunction::ObjectTdzMarker)
@@ -13884,6 +13939,41 @@ mod tests {
              first.done === false && first.value === undefined &&\
              second.done === true && second.value === true &&\
              third.done === true && third.value === false;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn tagged_template_reuses_template_object_for_same_site() {
+        let script = parse_script(
+            "var first = null;\
+             var second = null;\
+             function tag(t) {\
+               if (first === null) { first = t; } else { second = t; }\
+             }\
+             function run() { tag`head${1}tail`; }\
+             run();\
+             run();\
+             first === second;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn tagged_template_object_and_raw_are_frozen_in_non_strict_code() {
+        let script = parse_script(
+            "var templateObject = null;\
+             (function(parameter) { templateObject = parameter; })``;\
+             templateObject.test262Prop = true;\
+             templateObject.raw.test262Prop = true;\
+             templateObject.test262Prop === undefined &&\
+             templateObject.raw.test262Prop === undefined;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);

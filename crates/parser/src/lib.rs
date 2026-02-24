@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
@@ -23,8 +26,13 @@ const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
 const ASYNC_FUNCTION_MARKER: &str = "$__qjs_async_function__$";
 const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
 const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
+static NEXT_TAGGED_TEMPLATE_SITE_ID: AtomicU64 = AtomicU64::new(1);
 
 type DefaultParameterInitializer = (Identifier, Expr);
+
+fn next_tagged_template_site_id() -> u64 {
+    NEXT_TAGGED_TEMPLATE_SITE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -5563,8 +5571,14 @@ impl Parser {
         if quasis.len() != expressions.len() + 1 {
             return Err(self.error_current("invalid tagged template literal"));
         }
+        let site_id = next_tagged_template_site_id();
         let mut arguments = Vec::with_capacity(expressions.len() + 1);
-        arguments.push(self.build_tagged_template_object(quasis, raw_quasis, invalid_quasis));
+        arguments.push(self.build_tagged_template_object(
+            site_id,
+            quasis,
+            raw_quasis,
+            invalid_quasis,
+        ));
         arguments.extend(expressions);
         Ok(Expr::Call {
             callee: Box::new(callee),
@@ -5574,11 +5588,11 @@ impl Parser {
 
     fn build_tagged_template_object(
         &self,
+        site_id: u64,
         quasis: Vec<StringLiteral>,
         raw_quasis: Vec<StringLiteral>,
         invalid_quasis: Vec<bool>,
     ) -> Expr {
-        let template_ident = Identifier("$__template_obj".to_string());
         let cooked_quasis = quasis
             .into_iter()
             .zip(invalid_quasis)
@@ -5591,21 +5605,15 @@ impl Parser {
             })
             .collect();
         Expr::Call {
-            callee: Box::new(Expr::Function {
-                name: None,
-                params: vec![template_ident.clone()],
-                body: vec![
-                    Stmt::Expression(Expr::AssignMember {
-                        object: Box::new(Expr::Identifier(template_ident.clone())),
-                        property: "raw".to_string(),
-                        value: Box::new(Expr::ArrayLiteral(
-                            raw_quasis.into_iter().map(Expr::String).collect(),
-                        )),
-                    }),
-                    Stmt::Return(Some(Expr::Identifier(template_ident))),
-                ],
+            callee: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                property: "__getTemplateObject".to_string(),
             }),
-            arguments: vec![Expr::ArrayLiteral(cooked_quasis)],
+            arguments: vec![
+                Expr::Number(site_id as f64),
+                Expr::ArrayLiteral(cooked_quasis),
+                Expr::ArrayLiteral(raw_quasis.into_iter().map(Expr::String).collect()),
+            ],
         }
     }
 
@@ -6637,19 +6645,36 @@ mod tests {
         assert_eq!(arguments[1], Expr::Identifier(Identifier("b".to_string())));
 
         let Expr::Call {
-            callee: factory,
+            callee: object_method,
             arguments: template_args,
         } = &arguments[0]
         else {
-            panic!("expected first tagged template argument to be factory call");
+            panic!("expected first tagged template argument to be object helper call");
         };
-        let Expr::Function { params, .. } = factory.as_ref() else {
-            panic!("expected template factory callee to be function expression");
-        };
-        assert_eq!(params, &vec![Identifier("$__template_obj".to_string())]);
-        assert_eq!(template_args.len(), 1);
         assert_eq!(
-            template_args[0],
+            object_method.as_ref(),
+            &Expr::Member {
+                object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                property: "__getTemplateObject".to_string(),
+            }
+        );
+        assert_eq!(template_args.len(), 3);
+        assert!(matches!(template_args[0], Expr::Number(value) if value >= 1.0));
+        assert_eq!(
+            template_args[1],
+            Expr::ArrayLiteral(vec![
+                Expr::String(StringLiteral {
+                    value: "a".to_string(),
+                    has_escape: false,
+                }),
+                Expr::String(StringLiteral {
+                    value: "".to_string(),
+                    has_escape: false,
+                }),
+            ])
+        );
+        assert_eq!(
+            template_args[2],
             Expr::ArrayLiteral(vec![
                 Expr::String(StringLiteral {
                     value: "a".to_string(),

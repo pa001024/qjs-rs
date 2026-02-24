@@ -25,6 +25,7 @@ pub enum NativeFunction {
     ObjectForOfIterator,
     ObjectForOfStep,
     ObjectForOfClose,
+    ObjectGetTemplateObject,
     ObjectTdzMarker,
     NumberConstructor,
     BooleanConstructor,
