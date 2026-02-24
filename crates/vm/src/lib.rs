@@ -2197,72 +2197,7 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-
-        match callee {
-            JsValue::Function(closure_id) => {
-                if self.closure_is_arrow(closure_id)? || self.closure_has_no_prototype(closure_id) {
-                    return Err(VmError::NotCallable);
-                }
-                let constructed = self.create_object_value();
-                if let (JsValue::Object(instance_id), JsValue::Object(prototype_id)) = (
-                    constructed.clone(),
-                    self.get_or_create_function_prototype_property(closure_id)?,
-                ) {
-                    if let Some(instance) = self.objects.get_mut(&instance_id) {
-                        instance.prototype = Some(prototype_id);
-                        instance.prototype_value = None;
-                    }
-                }
-                let result =
-                    self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
-                if Self::is_object_like_value(&result) {
-                    Ok(result)
-                } else {
-                    Ok(constructed)
-                }
-            }
-            JsValue::Object(object_id) => {
-                if self.is_class_constructor_object(object_id) {
-                    self.construct_from_class_object(object_id, realm)
-                } else {
-                    Err(VmError::NotCallable)
-                }
-            }
-            JsValue::NativeFunction(native) => {
-                if matches!(native, NativeFunction::SymbolConstructor) {
-                    return Err(VmError::NotCallable);
-                }
-                if matches!(native, NativeFunction::DateConstructor) {
-                    return self.execute_date_constructor(&args);
-                }
-                if matches!(
-                    native,
-                    NativeFunction::NumberConstructor
-                        | NativeFunction::BooleanConstructor
-                        | NativeFunction::StringConstructor
-                ) {
-                    return self.execute_boxed_primitive_constructor(
-                        native,
-                        args,
-                        realm,
-                        caller_strict,
-                    );
-                }
-                self.execute_native_call(native, args, realm, caller_strict)
-            }
-            JsValue::HostFunction(host_id) => {
-                let constructed = self.create_object_value();
-                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
-                let result =
-                    self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
-                if Self::is_object_like_value(&result) {
-                    Ok(result)
-                } else {
-                    Ok(constructed)
-                }
-            }
-            _ => Err(VmError::NotCallable),
-        }
+        self.execute_construct_value(callee, args, realm, caller_strict)
     }
 
     fn execute_construct_with_spread(
@@ -2274,7 +2209,16 @@ impl Vm {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         let callee = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        self.execute_construct_value(callee, args, realm, caller_strict)
+    }
 
+    fn execute_construct_value(
+        &mut self,
+        callee: JsValue,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         match callee {
             JsValue::Function(closure_id) => {
                 if self.closure_is_arrow(closure_id)? || self.closure_has_no_prototype(closure_id) {
@@ -2328,6 +2272,15 @@ impl Vm {
                 self.execute_native_call(native, args, realm, caller_strict)
             }
             JsValue::HostFunction(host_id) => {
+                if let Some(HostFunction::BoundCall {
+                    target,
+                    this_arg: _,
+                    mut bound_args,
+                }) = self.host_functions.get(&host_id).cloned()
+                {
+                    bound_args.extend(args);
+                    return self.execute_construct_value(target, bound_args, realm, caller_strict);
+                }
                 let constructed = self.create_object_value();
                 self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
                 let result =

@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4860`、`failed=140`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v22.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4862`、`failed=138`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v23.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -111,6 +111,8 @@
   - parser 调整 class lowering 顺序：类名内部绑定注入延后到 `extends` 计算之后，修复 `class x extends x {}` 在 heritage 阶段应抛 `ReferenceError` 的 name-binding 失败簇。
   - parser/VM 为 class heritage function 注入受限标记，并在 arguments 对象上对受限 `callee` 安装 thrower accessor（`TypeError`），修复 `language/statements/class/strict-mode/arguments-callee.js`。
   - 子集回归（latest+13）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `166/22`，`language/expressions/class` 保持 `47/0`，`language` 基线提升至 `4860/140`。
+  - VM 新增 `execute_construct_value` 并将 `BoundCall` 构造路径改为“构造目标函数 + 绑定参数前置（忽略绑定 this）”，修复 class constructor 被 `bind()` 后仍按普通 call 触发 `class constructor cannot be invoked without 'new'` 的偏差。
+  - 子集回归（latest+14）：`language/statements/class/definition` 保持 `33/0`，`language/statements/class` 提升至 `168/20`，`language/expressions/class` 保持 `47/0`，`language` 基线提升至 `4862/138`。
 
 ## 3. 分阶段状态
 
