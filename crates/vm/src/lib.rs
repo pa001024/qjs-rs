@@ -441,6 +441,7 @@ impl Vm {
         let _ = self.reflect_object_value()?;
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
+            let to_locale_string = self.shared_object_to_string_function();
             let value_of = self.create_host_function_value(HostFunction::ObjectValueOf);
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
@@ -460,6 +461,17 @@ impl Vm {
                     .insert("toString".to_string(), to_string);
                 object_prototype.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("toLocaleString".to_string(), to_locale_string);
+                object_prototype.property_attributes.insert(
+                    "toLocaleString".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -4195,6 +4207,7 @@ impl Vm {
                 self.execute_object_get_own_property_names(&args)
             }
             NativeFunction::ObjectCreate => self.execute_object_create(&args),
+            NativeFunction::ObjectAssign => self.execute_object_assign(&args, realm),
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
@@ -5415,20 +5428,14 @@ impl Vm {
     }
 
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
-        match args.first() {
+        match args.first().cloned() {
             None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.create_object_value(),
-            Some(JsValue::Object(id)) => JsValue::Object(*id),
-            Some(value) => {
-                let object = self.create_object_value();
-                if let JsValue::Object(id) = object {
-                    if let Some(target) = self.objects.get_mut(&id) {
-                        target.properties.insert("value".to_string(), value.clone());
-                    }
-                    JsValue::Object(id)
-                } else {
-                    unreachable!()
-                }
+            Some(value @ (JsValue::Object(_) | JsValue::Function(_) | JsValue::NativeFunction(_)
+            | JsValue::HostFunction(_))) => value,
+            Some(primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_))) => {
+                self.box_primitive_receiver(primitive)
             }
+            Some(_) => self.create_object_value(),
         }
     }
 
@@ -5784,6 +5791,88 @@ impl Vm {
         target.prototype = prototype;
         target.prototype_value = prototype_value;
         Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_object_assign(&mut self, args: &[JsValue], realm: &Realm) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let target = match target {
+            JsValue::Null | JsValue::Undefined => {
+                return Err(VmError::TypeError("Object.assign target must be coercible"));
+            }
+            value @ (JsValue::Object(_)
+            | JsValue::Function(_)
+            | JsValue::NativeFunction(_)
+            | JsValue::HostFunction(_)) => value,
+            primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_)) => {
+                self.box_primitive_receiver(primitive)
+            }
+            _ => self.create_object_value(),
+        };
+
+        for source in args.iter().skip(1).cloned() {
+            let source_id = match source {
+                JsValue::Null | JsValue::Undefined => continue,
+                JsValue::Object(id) => id,
+                primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_)) => {
+                    let JsValue::Object(id) = self.box_primitive_receiver(primitive) else {
+                        unreachable!();
+                    };
+                    id
+                }
+                _ => continue,
+            };
+
+            let keys = {
+                let object = self
+                    .objects
+                    .get(&source_id)
+                    .ok_or(VmError::UnknownObject(source_id))?;
+                let mut keys = Vec::new();
+                for key in object.properties.keys() {
+                    let enumerable = object
+                        .property_attributes
+                        .get(key)
+                        .map(|attrs| attrs.enumerable)
+                        .unwrap_or(true);
+                    if enumerable {
+                        keys.push(key.clone());
+                    }
+                }
+                for key in object.getters.keys() {
+                    if object.properties.contains_key(key) {
+                        continue;
+                    }
+                    let enumerable = object
+                        .property_attributes
+                        .get(key)
+                        .map(|attrs| attrs.enumerable)
+                        .unwrap_or(true);
+                    if enumerable {
+                        keys.push(key.clone());
+                    }
+                }
+                for key in object.setters.keys() {
+                    if object.properties.contains_key(key) || object.getters.contains_key(key) {
+                        continue;
+                    }
+                    let enumerable = object
+                        .property_attributes
+                        .get(key)
+                        .map(|attrs| attrs.enumerable)
+                        .unwrap_or(true);
+                    if enumerable {
+                        keys.push(key.clone());
+                    }
+                }
+                keys
+            };
+
+            for key in keys {
+                let value = self.get_object_property(source_id, &key, realm)?;
+                let _ = self.set_property_on_receiver(target.clone(), key, value, realm)?;
+            }
+        }
+        Ok(target)
     }
 
     fn execute_object_set_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -10514,6 +10603,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "keys")
                 | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
                 | (NativeFunction::ObjectConstructor, "create")
+                | (NativeFunction::ObjectConstructor, "assign")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "preventExtensions")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
@@ -11567,6 +11657,9 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "create") => {
                 JsValue::NativeFunction(NativeFunction::ObjectCreate)
             }
+            (NativeFunction::ObjectConstructor, "assign") => {
+                JsValue::NativeFunction(NativeFunction::ObjectAssign)
+            }
             (NativeFunction::ObjectConstructor, "setPrototypeOf") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSetPrototypeOf)
             }
@@ -11735,6 +11828,9 @@ impl Vm {
                 target: JsValue::NativeFunction(native),
                 method: FunctionMethod::Bind,
             }),
+            (NativeFunction::ObjectCreate, "length") | (NativeFunction::ObjectAssign, "length") => {
+                JsValue::Number(2.0)
+            }
             (_, "length") => JsValue::Number(1.0),
             _ => JsValue::Undefined,
         }
@@ -13891,6 +13987,79 @@ mod tests {
         realm.define_global(
             "Number",
             JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_constructor_boxes_primitives() {
+        let script = parse_script(
+            "Object(true).valueOf() === true && \
+             Object(0).valueOf() === 0 && \
+             Object('abc').valueOf() === 'abc' && \
+             Object(1).constructor === Number && \
+             Object('x').constructor === String && \
+             Object(false).constructor === Boolean;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Number",
+            JsValue::NativeFunction(NativeFunction::NumberConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        realm.define_global(
+            "Boolean",
+            JsValue::NativeFunction(NativeFunction::BooleanConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_prototype_exposes_to_locale_string() {
+        let script = parse_script("typeof ({}).toLocaleString === 'function';")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_assign_copies_enumerable_own_properties() {
+        let script = parse_script(
+            "var target = { a: 1 }; var source = { b: 2 }; \
+             Object.assign(target, source); \
+             target.a === 1 && target.b === 2 && Object.assign.length === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn object_create_length_is_two() {
+        let script = parse_script("Object.create.length === 2;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));

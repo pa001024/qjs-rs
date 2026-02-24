@@ -13,6 +13,7 @@ pub enum NativeFunction {
     ObjectKeys,
     ObjectGetOwnPropertyNames,
     ObjectCreate,
+    ObjectAssign,
     ObjectSetPrototypeOf,
     ObjectDefineProperty,
     ObjectDefineProperties,
