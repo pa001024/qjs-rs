@@ -3363,6 +3363,7 @@ impl Parser {
 
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
         let saved_pos = self.pos;
+        let mut is_async = false;
 
         let (params, simple_parameters, default_initializers, pattern_effects) =
             if self.matches(&TokenKind::LParen) {
@@ -3391,6 +3392,25 @@ impl Parser {
                     Vec::new(),
                 )
             } else if self.check_keyword("async")
+                && self.check_next(&TokenKind::LParen)
+                && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+            {
+                self.matches_keyword("async");
+                self.expect(TokenKind::LParen, "expected '(' after async")?;
+                let params = match self.parse_parameter_list() {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        self.pos = saved_pos;
+                        return Ok(None);
+                    }
+                };
+                if !self.matches(&TokenKind::RParen) {
+                    self.pos = saved_pos;
+                    return Ok(None);
+                }
+                is_async = true;
+                params
+            } else if self.check_keyword("async")
                 && self.check_nth(2, &TokenKind::Equal)
                 && self.check_nth(3, &TokenKind::Greater)
                 && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
@@ -3400,6 +3420,7 @@ impl Parser {
                 )
             {
                 self.matches_keyword("async");
+                is_async = true;
                 (
                     vec![Identifier(
                         self.expect_binding_identifier("expected parameter name")?,
@@ -3424,18 +3445,29 @@ impl Parser {
         }
 
         let mut body = if self.check(&TokenKind::LBrace) {
-            self.parse_function_body(
+            self.parse_function_body_with_context(
                 "expected '{' before function body",
                 "expected '}' after function body",
+                false,
+                is_async,
             )?
         } else {
-            vec![Stmt::Return(Some(self.parse_assignment()?))]
+            let saved_async_function_depth = self.async_function_depth;
+            if is_async {
+                self.async_function_depth = saved_async_function_depth + 1;
+            }
+            let body_expr = self.parse_assignment();
+            self.async_function_depth = saved_async_function_depth;
+            vec![Stmt::Return(Some(body_expr?))]
         };
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
         }
         self.prepend_arrow_function_marker(&mut body);
+        if is_async {
+            self.insert_async_function_marker(&mut body);
+        }
 
         Ok(Some(Expr::Function {
             name: None,
@@ -6511,6 +6543,28 @@ mod tests {
             ],
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_async_arrow_function_with_paren_parameters() {
+        let parsed = parse_expression("async () => await 1").expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected function expression");
+        };
+        assert!(body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Expression(Expr::String(StringLiteral { value, .. }))
+                    if value == "$__qjs_async_function__$"
+            )
+        }));
+        assert!(body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Expression(Expr::String(StringLiteral { value, .. }))
+                    if value == "$__qjs_arrow_function__$"
+            )
+        }));
     }
 
     #[test]

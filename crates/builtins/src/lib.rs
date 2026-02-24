@@ -47,8 +47,62 @@ pub fn install_baseline(realm: &mut Realm) {
         JsValue::NativeFunction(NativeFunction::PromiseConstructor),
     );
     realm.define_global(
+        "Proxy",
+        JsValue::NativeFunction(NativeFunction::ProxyConstructor),
+    );
+    realm.define_global(
         "Uint8Array",
         JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    // Minimal typed array surface: additional constructors are currently aliases
+    // to the existing Uint8Array baseline constructor.
+    realm.define_global(
+        "Int8Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Uint8ClampedArray",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Int16Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Uint16Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Int32Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Uint32Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Float32Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "Float64Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "BigInt64Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "BigUint64Array",
+        JsValue::NativeFunction(NativeFunction::Uint8ArrayConstructor),
+    );
+    realm.define_global(
+        "WeakMap",
+        JsValue::NativeFunction(NativeFunction::MapConstructor),
+    );
+    realm.define_global(
+        "WeakSet",
+        JsValue::NativeFunction(NativeFunction::SetConstructor),
     );
     realm.define_global(
         "Date",

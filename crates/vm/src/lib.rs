@@ -38,6 +38,10 @@ const ARRAY_ITERATOR_TARGET_KEY: &str = "$__qjs_array_iterator_target__$";
 const ARRAY_ITERATOR_INDEX_KEY: &str = "$__qjs_array_iterator_index__$";
 const ARRAY_ITERATOR_KIND_KEY: &str = "$__qjs_array_iterator_kind__$";
 const ARRAY_ITERATOR_MARKER_KEY: &str = "$__qjs_array_iterator__$";
+const PROXY_OBJECT_MARKER_KEY: &str = "$__qjs_proxy_object__$";
+const PROXY_TARGET_KEY: &str = "$__qjs_proxy_target__$";
+const PROXY_HANDLER_KEY: &str = "$__qjs_proxy_handler__$";
+const PROXY_OWN_KEYS_ORDER_KEY: &str = "$__qjs_proxy_own_keys_order__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
 const SURROGATE_PLACEHOLDER_END: u32 = 0xE7FF;
 const SURROGATE_START: u16 = 0xD800;
@@ -2518,6 +2522,7 @@ impl Vm {
                 | NativeFunction::DataViewConstructor
                 | NativeFunction::MapConstructor
                 | NativeFunction::SetConstructor
+                | NativeFunction::ProxyConstructor
                 | NativeFunction::PromiseConstructor
                 | NativeFunction::Uint8ArrayConstructor
                 | NativeFunction::DateConstructor
@@ -4442,6 +4447,7 @@ impl Vm {
             NativeFunction::DataViewConstructor => self.execute_data_view_constructor(&args),
             NativeFunction::MapConstructor => self.execute_map_constructor(&args, realm),
             NativeFunction::SetConstructor => self.execute_set_constructor(&args, realm),
+            NativeFunction::ProxyConstructor => self.execute_proxy_constructor(&args),
             NativeFunction::PromiseConstructor => {
                 self.execute_promise_constructor(&args, realm, caller_strict)
             }
@@ -5919,6 +5925,124 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
+    fn execute_proxy_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_object_like_value(&target) {
+            return Err(VmError::TypeError("Proxy target must be object"));
+        }
+        if !Self::is_object_like_value(&handler) {
+            return Err(VmError::TypeError("Proxy handler must be object"));
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let target_proto = self.get_prototype_of_value(&target)?;
+        let (prototype, prototype_value) = match target_proto {
+            JsValue::Object(proto_id) => (Some(proto_id), None),
+            JsValue::Null => (None, None),
+            other => (None, Some(other)),
+        };
+        {
+            let proxy = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            proxy.prototype = prototype;
+            proxy.prototype_value = prototype_value;
+            proxy
+                .properties
+                .insert(PROXY_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
+            proxy
+                .properties
+                .insert(PROXY_TARGET_KEY.to_string(), target.clone());
+            proxy
+                .properties
+                .insert(PROXY_HANDLER_KEY.to_string(), handler.clone());
+            for key in [PROXY_OBJECT_MARKER_KEY, PROXY_TARGET_KEY, PROXY_HANDLER_KEY] {
+                proxy.property_attributes.insert(
+                    key.to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+            }
+        }
+        // Minimal ownKeys forwarding for Object.assign baseline:
+        // mirror listed keys from the target as own data properties.
+        let empty_realm = Realm::default();
+        let own_keys_trap =
+            self.get_property_from_receiver(handler.clone(), "ownKeys", &empty_realm)?;
+        let (mirrored_keys, own_keys_from_trap) = if matches!(own_keys_trap, JsValue::Undefined) {
+            (self.collect_own_property_keys(&target, false)?, false)
+        } else {
+            if !Self::is_callable_value(&own_keys_trap) {
+                return Err(VmError::TypeError("Proxy ownKeys trap must be callable"));
+            }
+            let trap_result = self.execute_callable(
+                own_keys_trap,
+                Some(handler.clone()),
+                vec![target.clone()],
+                &empty_realm,
+                false,
+            )?;
+            let trap_length = match &trap_result {
+                JsValue::Object(array_id) => self.array_length(*array_id)?,
+                _ => 0usize,
+            };
+            let mut keys = Vec::new();
+            for index in 0..trap_length {
+                let key_value = self.get_property_from_receiver(
+                    trap_result.clone(),
+                    &index.to_string(),
+                    &empty_realm,
+                )?;
+                keys.push(self.coerce_to_string(&key_value));
+            }
+            (keys, true)
+        };
+        let mut mirrored = Vec::new();
+        for key in mirrored_keys.iter().cloned() {
+            if matches!(key.as_str(), PROXY_OBJECT_MARKER_KEY | PROXY_TARGET_KEY | PROXY_HANDLER_KEY)
+            {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, &empty_realm)?;
+            mirrored.push((key, value));
+        }
+        let proxy = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        for (key, value) in mirrored {
+            proxy.properties.insert(key.clone(), value);
+            proxy.property_attributes.entry(key).or_insert(PropertyAttributes {
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
+        }
+        if own_keys_from_trap {
+            proxy.properties.insert(
+                PROXY_OWN_KEYS_ORDER_KEY.to_string(),
+                JsValue::String(mirrored_keys.join("\u{1F}")),
+            );
+            proxy.property_attributes.insert(
+                PROXY_OWN_KEYS_ORDER_KEY.to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+        }
+        Ok(JsValue::Object(object_id))
+    }
+
     fn execute_promise_constructor(
         &mut self,
         args: &[JsValue],
@@ -6139,6 +6263,27 @@ impl Vm {
                     .objects
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
+                if self.has_object_marker(*object_id, PROXY_OBJECT_MARKER_KEY)? {
+                    if let Some(JsValue::String(order)) =
+                        object.properties.get(PROXY_OWN_KEYS_ORDER_KEY)
+                    {
+                        let mut keys = if order.is_empty() {
+                            Vec::new()
+                        } else {
+                            order.split('\u{1F}').map(|key| key.to_string()).collect()
+                        };
+                        if enumerable_only {
+                            keys.retain(|key| {
+                                object
+                                    .property_attributes
+                                    .get(key)
+                                    .map(|attrs| attrs.enumerable)
+                                    .unwrap_or(true)
+                            });
+                        }
+                        return Ok(keys);
+                    }
+                }
                 Ok(Self::collect_own_property_keys_from_object(
                     object,
                     enumerable_only,
@@ -8071,16 +8216,66 @@ impl Vm {
         self.get_prototype_of_value(&target)
     }
 
-    fn execute_object_prevent_extensions(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+    fn object_proxy_slots(&self, object_id: ObjectId) -> Result<Option<(JsValue, JsValue)>, VmError> {
+        if !self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
+            return Ok(None);
+        }
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let target = object
+            .properties
+            .get(PROXY_TARGET_KEY)
+            .cloned()
+            .unwrap_or(JsValue::Undefined);
+        let handler = object
+            .properties
+            .get(PROXY_HANDLER_KEY)
+            .cloned()
+            .unwrap_or(JsValue::Undefined);
+        Ok(Some((target, handler)))
+    }
+
+    fn prevent_extensions_status_on_value(&mut self, target: JsValue) -> Result<bool, VmError> {
         match target {
             JsValue::Object(object_id) => {
+                if let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)? {
+                    if matches!(proxy_target, JsValue::Object(id) if id == object_id) {
+                        return Ok(false);
+                    }
+                    let empty_realm = Realm::default();
+                    let trap = self.get_property_from_receiver(
+                        proxy_handler.clone(),
+                        "preventExtensions",
+                        &empty_realm,
+                    )?;
+                    if matches!(trap, JsValue::Undefined) {
+                        return self.prevent_extensions_status_on_value(proxy_target);
+                    }
+                    if !Self::is_callable_value(&trap) {
+                        return Err(VmError::TypeError(
+                            "Proxy preventExtensions trap must be callable",
+                        ));
+                    }
+                    let trap_result = self.execute_callable(
+                        trap,
+                        Some(proxy_handler),
+                        vec![proxy_target.clone()],
+                        &empty_realm,
+                        false,
+                    )?;
+                    if !self.is_truthy(&trap_result) {
+                        return Ok(false);
+                    }
+                    return self.prevent_extensions_status_on_value(proxy_target);
+                }
                 let object = self
                     .objects
                     .get_mut(&object_id)
                     .ok_or(VmError::UnknownObject(object_id))?;
                 object.extensible = false;
-                Ok(JsValue::Object(object_id))
+                Ok(true)
             }
             JsValue::Function(closure_id) => {
                 if !self.closures.contains_key(&closure_id) {
@@ -8088,7 +8283,7 @@ impl Vm {
                 }
                 let object = self.closure_objects.entry(closure_id).or_default();
                 object.extensible = false;
-                Ok(JsValue::Function(closure_id))
+                Ok(true)
             }
             JsValue::HostFunction(host_id) => {
                 if !self.host_functions.contains_key(&host_id) {
@@ -8096,10 +8291,21 @@ impl Vm {
                 }
                 let object = self.host_function_objects.entry(host_id).or_default();
                 object.extensible = false;
-                Ok(JsValue::HostFunction(host_id))
+                Ok(true)
             }
-            _ => Ok(target),
+            _ => Ok(true),
         }
+    }
+
+    fn execute_object_prevent_extensions(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let status = self.prevent_extensions_status_on_value(target.clone())?;
+        if !status {
+            return Err(VmError::TypeError(
+                "Object.preventExtensions trap returned false",
+            ));
+        }
+        Ok(target)
     }
 
     fn execute_object_is_extensible(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -8210,8 +8416,14 @@ impl Vm {
 
     fn execute_object_freeze(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !self.prevent_extensions_status_on_value(target.clone())? {
+            return Err(VmError::TypeError("Object.freeze trap returned false"));
+        }
         match target {
             JsValue::Object(object_id) => {
+                if self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
+                    return Ok(JsValue::Object(object_id));
+                }
                 let object = self
                     .objects
                     .get_mut(&object_id)
@@ -8241,8 +8453,14 @@ impl Vm {
 
     fn execute_object_seal(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !self.prevent_extensions_status_on_value(target.clone())? {
+            return Err(VmError::TypeError("Object.seal trap returned false"));
+        }
         match target {
             JsValue::Object(object_id) => {
+                if self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
+                    return Ok(JsValue::Object(object_id));
+                }
                 let object = self
                     .objects
                     .get_mut(&object_id)

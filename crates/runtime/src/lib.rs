@@ -42,6 +42,7 @@ pub enum NativeFunction {
     DataViewConstructor,
     MapConstructor,
     SetConstructor,
+    ProxyConstructor,
     PromiseConstructor,
     Uint8ArrayConstructor,
     DateConstructor,

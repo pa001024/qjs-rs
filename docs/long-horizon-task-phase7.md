@@ -92,3 +92,19 @@
 - 过程门槛：每 2h 至少 1 次功能提交。
 - 阶段门槛：5000 与 10000 样本基线保持清零，并持续推进更大样本通过率。
 - 终局门槛：失败簇集中后切换到全量 test262 计划，并建立 nightly 基线快照。
+
+## 6. 最新进展与下一轮（>=8h）
+
+- 已完成：
+  - `language --max-cases 5000`: `5000/0`
+  - `language --max-cases 10000`: `5265/0`
+  - `built-ins/Object`: `2255/0`（`target/test262-builtins-object-20260224-v95.json`）
+- 下一轮并行模块拆分（建议 4 条线并行，每线 2~3h）：
+  - Track F（Proxy 正式化）：补齐 `get/set/has/deleteProperty/getOwnPropertyDescriptor/defineProperty/ownKeys` trap 与不变量校验，对照 QuickJS `JSProxy` 路径。
+  - Track G（TypedArray 扩展）：从当前 alias 过渡到真实 typed-array 家族构造器与 element 读写语义，覆盖 `Int8/Uint8Clamped/Int16/Uint16/Int32/Uint32/Float32/Float64/BigInt64/BigUint64`。
+  - Track H（WeakMap/WeakSet 语义）：从 Map/Set alias 过渡到最小真实语义（对象键约束、`set/get/has/delete`），并补齐与 GC root 的交互约束。
+  - Track I（全量基线推进）：开启 `test262` 更大样本/全量抽样与 nightly 快照，按失败簇持续回归清理。
+- 每个 Track 必须输出：
+  - QuickJS 对照点（函数名/分支）
+  - 代码提交（最小可验证增量）
+  - 对应 test262 子集快照与文档更新

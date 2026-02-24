@@ -16,8 +16,9 @@
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
 - `test262 language --max-cases 5000` 最新快照：`passed=5000`、`failed=0`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
 - `test262 language --max-cases 10000` 最新快照：`executed=5265`、`passed=5265`、`failed=0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
-- `test262 built-ins/Object` 最新快照：`executed=2255`、`passed=2056`、`failed=199`（快照：`target/test262-builtins-object-20260224-v77.json`，相较 `v76` 的 `2019/236` 持续收敛）。
+- `test262 built-ins/Object` 最新快照：`executed=2255`、`passed=2255`、`failed=0`（快照：`target/test262-builtins-object-20260224-v95.json`）。
 - 本轮新增语义收敛：
+  - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
   - `super` 运行时回退链路在对象方法场景可用（`{ __proto__: proto, m() { return super.x; } }`）。
