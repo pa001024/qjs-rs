@@ -902,7 +902,24 @@ impl Compiler {
                     },
                 });
 
-                let body_value = self.compile_stmt(body, code, keep_value);
+                let completion_name = if keep_value {
+                    let name = self.next_loop_completion_temp_name();
+                    code.push(Opcode::LoadUndefined);
+                    code.push(Opcode::DefineVariable {
+                        name: name.clone(),
+                        mutable: true,
+                    });
+                    self.loop_completion_targets.push(name.clone());
+                    Some(name)
+                } else {
+                    None
+                };
+                let body_value = self.compile_stmt(body, code, keep_value && completion_name.is_none());
+                if completion_name.is_some() {
+                    self.loop_completion_targets
+                        .pop()
+                        .expect("label completion target should exist");
+                }
                 let label_end = code.len();
                 self.label_contexts.pop();
                 let break_context = self
@@ -910,7 +927,12 @@ impl Compiler {
                     .pop()
                     .expect("label break context should exist");
                 self.patch_break_exits(break_context, label_end, code);
-                body_value
+                if let Some(name) = completion_name {
+                    code.push(Opcode::LoadIdentifier(name));
+                    true
+                } else {
+                    body_value
+                }
             }
             Stmt::Break => {
                 let (target_handler_depth, target_scope_depth) = {

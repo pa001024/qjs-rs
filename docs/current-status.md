@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4911`、`failed=89`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4912`、`failed=88`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v37.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -137,6 +137,8 @@
   - 子集回归（latest+24）：`language/statements/try` 收敛至 `91/0`，`language` 基线提升至 `4908/92`（快照：`target/test262-language-baseline-5000-20260224-v35.json`）。
   - bytecode 在 `if` 语句进入分支前重置当前 completion target（仅在 loop/switch completion 聚合上下文），对齐 `UpdateEmpty(..., undefined)`，修复 `if` 分支 `break/continue` 的空完成值污染问题。
   - 子集回归（latest+25）：`language/statements/if` 收敛至 `47/0`，`language` 基线提升至 `4911/89`（快照：`target/test262-language-baseline-5000-20260224-v36.json`）。
+  - bytecode 为 `LabelledStatement` 的 keep-value 路径接入独立 completion temp（走与 loop/switch 一致的 completion 聚合策略），修复 `label: { 5; break label; ... }` 的值传播和 `StackUnderflow`。
+  - 子集回归（latest+26）：`language/statements/labeled` 收敛至 `14/0`，`language` 基线提升至 `4912/88`（快照：`target/test262-language-baseline-5000-20260224-v37.json`）。
 
 ## 3. 分阶段状态
 
