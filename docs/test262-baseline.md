@@ -97,6 +97,13 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language max-cases=10000 (latest+76)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
 - `language max-cases=10000 (latest+77)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
 - `language max-cases=10000 (latest+78)`: discovered=23882, executed=5265, skipped=18617, passed=5265, failed=0
+- `built-ins/Object (v67)`: discovered=3411, executed=2255, skipped=1156, passed=1225, failed=1030
+- `built-ins/Object (v68)`: discovered=3411, executed=2255, skipped=1156, passed=1274, failed=981
+- `built-ins/Object (v72)`: discovered=3411, executed=2255, skipped=1156, passed=1749, failed=506
+- `built-ins/Object/assign (v72)`: discovered=38, executed=21, skipped=17, passed=21, failed=0
+- `built-ins/Object/create (v72)`: discovered=320, executed=280, skipped=40, passed=269, failed=11
+- `built-ins/Object/seal (v72)`: discovered=94, executed=62, skipped=32, passed=35, failed=27
+- `built-ins/Object/defineProperties (v71)`: discovered=632, executed=361, skipped=271, passed=304, failed=57
 - `language/statements/for-in`: discovered=115, executed=61, skipped=54, passed=61, failed=0
 - `language/expressions/assignment`: discovered=485, executed=92, skipped=393, passed=87, failed=5
 - `language/expressions/super (latest)`: discovered=94, executed=32, skipped=62, passed=32, failed=0
@@ -315,3 +322,4 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - VM regex normalization 新增 `\uXXXX/\u{...}` 转换、surrogate placeholder 编解码与 `u` 模式输入 UTF-16 对解码，`literals/regexp/u-*` 收敛至 `0`；整体 `language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
 - 扩容到 `language --max-cases 10000` 后出现 8 个失败簇：`with` 空完成值、`Object.preventExtensions` 缺失、`delete Number.NaN` 可配置性、string primitive `constructor`、`U+FEFF` whitespace、eval global var 可声明性；先收敛至 `5263/2`（快照：`target/test262-language-baseline-10000-20260224-v59.json`）。
 - VM 对齐 QuickJS `CanDeclareGlobalVar` 行为：non-extensible global object 上 eval `var` 新声明抛 `TypeError`（direct/indirect），`language --max-cases 10000` 收敛至 `5265/0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
+- 对齐 QuickJS `js_object_assign/js_object_create/js_object_seal` 主路径：`Object.assign` 接入 `CopyDataProperties` 方向（含 string source 索引属性复制与 readonly target 抛错）、`Object.create(proto, properties)` 接入 `ObjectDefineProperties`、新增 `Object.seal`（`preventExtensions + configurable=false`），并修复 Date/RegExp 内部槽属性对 descriptor 解析的污染（`value`/regexp flags 改为内部非枚举键）。`built-ins/Object` 从 `1274/981` 提升至 `1749/506`（快照：`target/test262-builtins-object-20260224-v72.json`）。

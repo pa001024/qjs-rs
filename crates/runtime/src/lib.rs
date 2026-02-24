@@ -22,6 +22,7 @@ pub enum NativeFunction {
     ObjectPreventExtensions,
     ObjectIsExtensible,
     ObjectFreeze,
+    ObjectSeal,
     ObjectForInKeys,
     ObjectForOfValues,
     ObjectForOfIterator,

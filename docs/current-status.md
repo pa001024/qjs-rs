@@ -16,6 +16,7 @@
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
 - `test262 language --max-cases 5000` 最新快照：`passed=5000`、`failed=0`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
 - `test262 language --max-cases 10000` 最新快照：`executed=5265`、`passed=5265`、`failed=0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
+- `test262 built-ins/Object` 最新快照：`executed=2255`、`passed=1749`、`failed=506`（快照：`target/test262-builtins-object-20260224-v72.json`，相较 `v68` 的 `1274/981` 显著收敛）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -162,6 +163,7 @@
   - 子集回归（latest+45）：VM regex normalization 增加 `\uXXXX/\u{...}` 解析、surrogate placeholder 编解码与 `u` 模式下输入 UTF-16 对解码，收敛 `literals/regexp/u-*` 剩余簇。`language` 基线提升至 `5000/0`（快照：`target/test262-language-baseline-5000-20260224-v57.json`）。
   - 子集回归（latest+46）：bytecode 对齐 `with` 的 `UpdateEmpty(..., undefined)` completion 路径；VM/runtime 补齐 `Object.preventExtensions`、`delete Number.NaN` 非可配置、string primitive `constructor`；lexer 新增 `U+FEFF` whitespace 识别。`language --max-cases 10000` 从 `5257/8` 提升至 `5263/2`（快照：`target/test262-language-baseline-10000-20260224-v59.json`）。
   - 子集回归（latest+47）：VM 全局 `var` 声明对齐 QuickJS `CanDeclareGlobalVar` 语义：non-extensible global object 上新增 global var 抛 `TypeError`（覆盖 direct/indirect eval），`language --max-cases 10000` 收敛至 `5265/0`（快照：`target/test262-language-baseline-10000-20260224-v62.json`）。
+  - 子集回归（latest+48）：对齐 QuickJS `Object.assign/create/seal` 主路径：`Object.assign` 接入 `CopyDataProperties` 方向（含 string source 索引复制、readonly target 抛错）、`Object.create(proto, properties)` 接入 `ObjectDefineProperties`、`Object.seal` 新增 `preventExtensions + configurable=false`；并修复 Date/RegExp 内部槽泄露对 descriptor 解析的干扰。`built-ins/Object` 从 `1274/981` 提升至 `1749/506`（快照：`target/test262-builtins-object-20260224-v72.json`），其中 `Object/assign` 收敛至 `21/0`、`Object/create` 提升至 `269/11`、`Object/seal` 提升至 `35/27`。
 
 ## 3. 分阶段状态
 
