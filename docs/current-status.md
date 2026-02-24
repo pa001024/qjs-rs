@@ -14,7 +14,7 @@
 - CI 已存在并覆盖格式化/静态检查/测试：`.github/workflows/ci.yml`。
 - CI 已接入 GC guard stress gate（`test262-run --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline`），用于持续监控 runtime/reclaimed 统计回归。
 - 本地复核 `cargo test -q` 全部通过（0 失败）。
-- `test262 language --max-cases 5000` 最新快照：`passed=4868`、`failed=132`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v25.json`）。
+- `test262 language --max-cases 5000` 最新快照：`passed=4871`、`failed=129`（命令见 `docs/test262-baseline.md`，快照：`target/test262-language-baseline-5000-20260224-v27.json`）。
 - 本轮新增语义收敛：
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
   - 标识符调用新增 reference-aware 路径（`CallIdentifier*`），修复 `with (obj) { method(); }` 的 `this` 绑定。
@@ -118,6 +118,8 @@
   - VM 对齐 QuickJS `set_array_length` 关键路径：数组/数组子类写入更小 `length` 时删除尾部索引属性；并补齐 `Number.prototype.toExponential` 与 `String.prototype.trim`，收敛 `subclass/builtin-objects/{Array(length),Number,String}`。
   - parser/bytecode 为派生构造器拆分 `super()` 与 `super.prop` 基对象：保留 `super` 作为父构造函数调用目标，同时注入独立的 `super.prototype` super-property 基绑定，修复 `language/statements/class/super/in-constructor.js`。
   - 子集回归（latest+16）：`language/statements/class/super` 收敛至 `8/0`，`language/statements/class/subclass` 提升至 `62/15`，`language/statements/class` 提升至 `173/15`，`language` 基线提升至 `4868/132`（快照：`target/test262-language-baseline-5000-20260224-v25.json`）。
+  - parser 将 for-of lowering 从“数组快照遍历”升级为“迭代器记录 + `try/finally` 关闭”路径，并在 VM 新增 `Object.__forOfIterator/__forOfStep/__forOfClose` 最小语义；随后通过序列表达式条件保留 completion value，避免 `for-of cptn-*` 回归。
+  - 子集回归（latest+17）：`language/statements/class/subclass` 提升至 `64/13`，`language/statements/for-of` 提升至 `63/13`，`language/statements/class` 提升至 `175/13`，`language` 基线提升至 `4871/129`（快照：`target/test262-language-baseline-5000-20260224-v27.json`）。
 
 ## 3. 分阶段状态
 

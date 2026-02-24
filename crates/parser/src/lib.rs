@@ -1770,8 +1770,9 @@ impl Parser {
         body: Stmt,
     ) -> Result<Stmt, ParseError> {
         let iterable_name = self.next_for_in_temp_identifier("iterable");
-        let values_name = self.next_for_in_temp_identifier("values");
-        let index_name = self.next_for_in_temp_identifier("index");
+        let iterator_name = self.next_for_in_temp_identifier("iterator");
+        let done_name = self.next_for_in_temp_identifier("done");
+        let step_name = self.next_for_in_temp_identifier("step");
         let current_name = self.next_for_in_temp_identifier("current");
 
         let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
@@ -1786,32 +1787,28 @@ impl Parser {
             }),
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
-                name: values_name.clone(),
+                name: iterator_name.clone(),
                 initializer: Some(Expr::Call {
                     callee: Box::new(Expr::Member {
                         object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                        property: "__forOfValues".to_string(),
+                        property: "__forOfIterator".to_string(),
                     }),
                     arguments: vec![Expr::Identifier(iterable_name)],
                 }),
             }),
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
-                name: index_name.clone(),
-                initializer: Some(Expr::Number(0.0)),
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: step_name.clone(),
+                initializer: Some(Expr::Identifier(Identifier("undefined".to_string()))),
             }),
         ]);
 
-        let current_value_expr = Expr::MemberComputed {
-            object: Box::new(Expr::Identifier(values_name.clone())),
-            property: Box::new(Expr::Identifier(index_name.clone())),
-        };
-        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
-            kind: BindingKind::Let,
-            name: current_name.clone(),
-            initializer: Some(current_value_expr),
-        });
-        let current_identifier_expr = Expr::Identifier(current_name);
+        let current_identifier_expr = Expr::Identifier(current_name.clone());
 
         let mut iteration_statements = Vec::new();
         match initializer {
@@ -1855,31 +1852,63 @@ impl Parser {
 
         iteration_statements.push(body);
 
-        let condition = Expr::Binary {
-            op: BinaryOp::Less,
-            left: Box::new(Expr::Identifier(index_name.clone())),
-            right: Box::new(Expr::Member {
-                object: Box::new(Expr::Identifier(values_name)),
-                property: "length".to_string(),
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(Expr::Member {
+                object: Box::new(Expr::Identifier(step_name.clone())),
+                property: "value".to_string(),
             }),
-        };
-        let update = Expr::Assign {
-            target: index_name.clone(),
-            value: Box::new(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(index_name)),
-                right: Box::new(Expr::Number(1.0)),
-            }),
-        };
-
-        statements.push(Stmt::For {
+        });
+        let condition = Expr::Sequence(vec![
+            Expr::Assign {
+                target: step_name.clone(),
+                value: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfStep".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterator_name.clone())],
+                }),
+            },
+            Expr::Assign {
+                target: done_name.clone(),
+                value: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(step_name.clone())),
+                    property: "done".to_string(),
+                }),
+            },
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name.clone())),
+            },
+        ]);
+        let loop_body = Stmt::Block(vec![current_declaration, Stmt::Block(iteration_statements)]);
+        let try_block = vec![Stmt::For {
             initializer: None,
             condition: Some(condition),
-            update: Some(update),
-            body: Box::new(Stmt::Block(vec![
-                current_declaration,
-                Stmt::Block(iteration_statements),
-            ])),
+            update: None,
+            body: Box::new(loop_body),
+        }];
+        let finally_block = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name)),
+            },
+            consequent: Box::new(Stmt::Block(vec![Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "__forOfClose".to_string(),
+                }),
+                arguments: vec![Expr::Identifier(iterator_name)],
+            })])),
+            alternate: None,
+        }];
+        statements.push(Stmt::Try {
+            try_block,
+            catch_param: None,
+            catch_block: None,
+            finally_block: Some(finally_block),
         });
 
         Ok(Stmt::Block(statements))
@@ -2015,8 +2044,9 @@ impl Parser {
         body: Stmt,
     ) -> Result<Stmt, ParseError> {
         let iterable_name = self.next_for_in_temp_identifier("iterable");
-        let values_name = self.next_for_in_temp_identifier("values");
-        let index_name = self.next_for_in_temp_identifier("index");
+        let iterator_name = self.next_for_in_temp_identifier("iterator");
+        let done_name = self.next_for_in_temp_identifier("done");
+        let step_name = self.next_for_in_temp_identifier("step");
         let current_name = self.next_for_in_temp_identifier("current");
 
         let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
@@ -2035,30 +2065,34 @@ impl Parser {
             }),
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
-                name: values_name.clone(),
+                name: iterator_name.clone(),
                 initializer: Some(Expr::Call {
                     callee: Box::new(Expr::Member {
                         object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
-                        property: "__forOfValues".to_string(),
+                        property: "__forOfIterator".to_string(),
                     }),
                     arguments: vec![Expr::Identifier(iterable_name)],
                 }),
             }),
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
-                name: index_name.clone(),
-                initializer: Some(Expr::Number(0.0)),
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: step_name.clone(),
+                initializer: Some(Expr::Identifier(Identifier("undefined".to_string()))),
             }),
         ]);
 
-        let current_value_expr = Expr::MemberComputed {
-            object: Box::new(Expr::Identifier(values_name.clone())),
-            property: Box::new(Expr::Identifier(index_name.clone())),
-        };
         let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
             kind: BindingKind::Let,
             name: current_name.clone(),
-            initializer: Some(current_value_expr),
+            initializer: Some(Expr::Member {
+                object: Box::new(Expr::Identifier(step_name.clone())),
+                property: "value".to_string(),
+            }),
         });
         let current_identifier_expr = Expr::Identifier(current_name);
 
@@ -2072,31 +2106,55 @@ impl Parser {
         );
         iteration_statements.push(body);
 
-        let condition = Expr::Binary {
-            op: BinaryOp::Less,
-            left: Box::new(Expr::Identifier(index_name.clone())),
-            right: Box::new(Expr::Member {
-                object: Box::new(Expr::Identifier(values_name)),
-                property: "length".to_string(),
-            }),
-        };
-        let update = Expr::Assign {
-            target: index_name.clone(),
-            value: Box::new(Expr::Binary {
-                op: BinaryOp::Add,
-                left: Box::new(Expr::Identifier(index_name)),
-                right: Box::new(Expr::Number(1.0)),
-            }),
-        };
-
-        statements.push(Stmt::For {
+        let condition = Expr::Sequence(vec![
+            Expr::Assign {
+                target: step_name.clone(),
+                value: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfStep".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterator_name.clone())],
+                }),
+            },
+            Expr::Assign {
+                target: done_name.clone(),
+                value: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(step_name.clone())),
+                    property: "done".to_string(),
+                }),
+            },
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name.clone())),
+            },
+        ]);
+        let loop_body = Stmt::Block(vec![current_declaration, Stmt::Block(iteration_statements)]);
+        let try_block = vec![Stmt::For {
             initializer: None,
             condition: Some(condition),
-            update: Some(update),
-            body: Box::new(Stmt::Block(vec![
-                current_declaration,
-                Stmt::Block(iteration_statements),
-            ])),
+            update: None,
+            body: Box::new(loop_body),
+        }];
+        let finally_block = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name)),
+            },
+            consequent: Box::new(Stmt::Block(vec![Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                    property: "__forOfClose".to_string(),
+                }),
+                arguments: vec![Expr::Identifier(iterator_name)],
+            })])),
+            alternate: None,
+        }];
+        statements.push(Stmt::Try {
+            try_block,
+            catch_param: None,
+            catch_block: None,
+            finally_block: Some(finally_block),
         });
 
         Ok(Stmt::Block(statements))

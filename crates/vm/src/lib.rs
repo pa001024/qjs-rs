@@ -3568,6 +3568,11 @@ impl Vm {
             NativeFunction::ObjectFreeze => self.execute_object_freeze(&args),
             NativeFunction::ObjectForInKeys => self.execute_object_for_in_keys(&args),
             NativeFunction::ObjectForOfValues => self.execute_object_for_of_values(&args, realm),
+            NativeFunction::ObjectForOfIterator => {
+                self.execute_object_for_of_iterator(&args, realm)
+            }
+            NativeFunction::ObjectForOfStep => self.execute_object_for_of_step(&args, realm),
+            NativeFunction::ObjectForOfClose => self.execute_object_for_of_close(&args, realm),
             NativeFunction::ObjectTdzMarker => Ok(JsValue::Uninitialized),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
@@ -4830,6 +4835,240 @@ impl Vm {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         let values = self.collect_for_of_values(target, realm)?;
         self.create_array_from_values(values)
+    }
+
+    fn execute_object_for_of_iterator(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        match target {
+            JsValue::String(value) => self.create_for_of_snapshot_record(
+                value
+                    .chars()
+                    .map(|ch| JsValue::String(ch.to_string()))
+                    .collect(),
+            ),
+            JsValue::Object(object_id) => {
+                if self
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| object.properties.contains_key("length"))
+                {
+                    let values = self.collect_for_of_values(JsValue::Object(object_id), realm)?;
+                    return self.create_for_of_snapshot_record(values);
+                }
+                self.create_for_of_runtime_iterator_record(JsValue::Object(object_id), realm)
+            }
+            JsValue::Null | JsValue::Undefined => Err(VmError::TypeError("for-of expects iterable")),
+            primitive => {
+                let boxed = self.box_primitive_receiver(primitive);
+                self.create_for_of_runtime_iterator_record(boxed, realm)
+            }
+        }
+    }
+
+    fn execute_object_for_of_step(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let record = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let record_id = match record {
+            JsValue::Object(id) => id,
+            _ => return Err(VmError::TypeError("for-of step expects iterator record object")),
+        };
+        let is_snapshot = self
+            .objects
+            .get(&record_id)
+            .and_then(|object| object.properties.get("__forOfSnapshot"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+        if is_snapshot {
+            let (values_id, index) = {
+                let object = self
+                    .objects
+                    .get(&record_id)
+                    .ok_or(VmError::UnknownObject(record_id))?;
+                let values_id = match object.properties.get("__forOfValues") {
+                    Some(JsValue::Object(id)) => *id,
+                    _ => return self.create_for_of_step_result(true, JsValue::Undefined),
+                };
+                let index = object
+                    .properties
+                    .get("__forOfIndex")
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0)
+                    .max(0.0) as usize;
+                (values_id, index)
+            };
+            let length = self.array_length(values_id)?;
+            if index >= length {
+                return self.create_for_of_step_result(true, JsValue::Undefined);
+            }
+            let value = self.get_object_property(values_id, &index.to_string(), realm)?;
+            let object = self
+                .objects
+                .get_mut(&record_id)
+                .ok_or(VmError::UnknownObject(record_id))?;
+            object
+                .properties
+                .insert("__forOfIndex".to_string(), JsValue::Number((index + 1) as f64));
+            return self.create_for_of_step_result(false, value);
+        }
+
+        let (iterator, next_method) = {
+            let object = self
+                .objects
+                .get(&record_id)
+                .ok_or(VmError::UnknownObject(record_id))?;
+            let iterator = object
+                .properties
+                .get("__forOfIterator")
+                .cloned()
+                .ok_or(VmError::TypeError("for-of iterator record missing iterator"))?;
+            let next_method = object
+                .properties
+                .get("__forOfNext")
+                .cloned()
+                .ok_or(VmError::TypeError("for-of iterator record missing next"))?;
+            (iterator, next_method)
+        };
+        let step_value = self.execute_callable(next_method, Some(iterator.clone()), Vec::new(), realm, false)?;
+        if !Self::is_object_like_value(&step_value) {
+            return Err(VmError::TypeError("for-of iterator next must return object"));
+        }
+        let done = self
+            .get_property_from_receiver(step_value.clone(), "done", realm)
+            .map(|value| self.is_truthy(&value))?;
+        if done {
+            return self.create_for_of_step_result(true, JsValue::Undefined);
+        }
+        let value = self.get_property_from_receiver(step_value, "value", realm)?;
+        self.create_for_of_step_result(false, value)
+    }
+
+    fn execute_object_for_of_close(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let record = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let record_id = match record {
+            JsValue::Object(id) => id,
+            _ => return Err(VmError::TypeError("for-of close expects iterator record object")),
+        };
+        let is_snapshot = self
+            .objects
+            .get(&record_id)
+            .and_then(|object| object.properties.get("__forOfSnapshot"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+        if is_snapshot {
+            return Ok(JsValue::Undefined);
+        }
+        let iterator = self
+            .objects
+            .get(&record_id)
+            .and_then(|object| object.properties.get("__forOfIterator"))
+            .cloned()
+            .ok_or(VmError::TypeError("for-of iterator record missing iterator"))?;
+        let return_method = self.get_property_from_receiver(iterator.clone(), "return", realm)?;
+        if matches!(return_method, JsValue::Undefined | JsValue::Null) {
+            return Ok(JsValue::Undefined);
+        }
+        if !Self::is_callable_value(&return_method) {
+            return Err(VmError::TypeError("for-of iterator return must be callable"));
+        }
+        let result = self.execute_callable(return_method, Some(iterator), Vec::new(), realm, false)?;
+        if !matches!(result, JsValue::Undefined) && !Self::is_object_like_value(&result) {
+            return Err(VmError::TypeError(
+                "for-of iterator return must return object",
+            ));
+        }
+        Ok(JsValue::Undefined)
+    }
+
+    fn create_for_of_runtime_iterator_record(
+        &mut self,
+        target: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let iterator_method = self.get_property_from_receiver(target.clone(), "Symbol.iterator", realm)?;
+        if matches!(iterator_method, JsValue::Undefined | JsValue::Null) {
+            return Err(VmError::TypeError("for-of expects iterable"));
+        }
+        if !Self::is_callable_value(&iterator_method) {
+            return Err(VmError::TypeError("for-of expects iterable"));
+        }
+        let iterator = self.execute_callable(iterator_method, Some(target), Vec::new(), realm, false)?;
+        if !Self::is_object_like_value(&iterator) {
+            return Err(VmError::TypeError("for-of iterator must return object"));
+        }
+        let next_method = self.get_property_from_receiver(iterator.clone(), "next", realm)?;
+        if !Self::is_callable_value(&next_method) {
+            return Err(VmError::TypeError("for-of iterator next must be callable"));
+        }
+        let record = self.create_object_value();
+        let record_id = match record {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let object = self
+            .objects
+            .get_mut(&record_id)
+            .ok_or(VmError::UnknownObject(record_id))?;
+        object
+            .properties
+            .insert("__forOfSnapshot".to_string(), JsValue::Bool(false));
+        object
+            .properties
+            .insert("__forOfIterator".to_string(), iterator);
+        object
+            .properties
+            .insert("__forOfNext".to_string(), next_method);
+        Ok(JsValue::Object(record_id))
+    }
+
+    fn create_for_of_snapshot_record(&mut self, values: Vec<JsValue>) -> Result<JsValue, VmError> {
+        let values_array = self.create_array_from_values(values)?;
+        let record = self.create_object_value();
+        let record_id = match record {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let object = self
+            .objects
+            .get_mut(&record_id)
+            .ok_or(VmError::UnknownObject(record_id))?;
+        object
+            .properties
+            .insert("__forOfSnapshot".to_string(), JsValue::Bool(true));
+        object
+            .properties
+            .insert("__forOfValues".to_string(), values_array);
+        object
+            .properties
+            .insert("__forOfIndex".to_string(), JsValue::Number(0.0));
+        Ok(JsValue::Object(record_id))
+    }
+
+    fn create_for_of_step_result(
+        &mut self,
+        done: bool,
+        value: JsValue,
+    ) -> Result<JsValue, VmError> {
+        let step = self.create_object_value();
+        let step_id = match step {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let object = self
+            .objects
+            .get_mut(&step_id)
+            .ok_or(VmError::UnknownObject(step_id))?;
+        object.properties.insert("done".to_string(), JsValue::Bool(done));
+        object.properties.insert("value".to_string(), value);
+        Ok(JsValue::Object(step_id))
     }
 
     fn collect_for_in_keys(&self, start_id: ObjectId) -> Result<Vec<String>, VmError> {
@@ -7998,6 +8237,9 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
                 | (NativeFunction::ObjectConstructor, "__forOfValues")
+                | (NativeFunction::ObjectConstructor, "__forOfIterator")
+                | (NativeFunction::ObjectConstructor, "__forOfStep")
+                | (NativeFunction::ObjectConstructor, "__forOfClose")
                 | (
                     NativeFunction::ObjectConstructor,
                     "getOwnPropertyDescriptor"
@@ -8898,6 +9140,15 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "__forOfValues") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfValues)
+            }
+            (NativeFunction::ObjectConstructor, "__forOfIterator") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForOfIterator)
+            }
+            (NativeFunction::ObjectConstructor, "__forOfStep") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForOfStep)
+            }
+            (NativeFunction::ObjectConstructor, "__forOfClose") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForOfClose)
             }
             (NativeFunction::ObjectConstructor, "__tdzMarker") => {
                 JsValue::NativeFunction(NativeFunction::ObjectTdzMarker)
