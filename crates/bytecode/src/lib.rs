@@ -808,7 +808,7 @@ impl Compiler {
                     if let Some(test) = &case.test {
                         self.compile_expr(&Expr::Identifier(Identifier(temp_name.clone())), code);
                         self.compile_expr(test, code);
-                        code.push(Opcode::Eq);
+                        code.push(Opcode::StrictEq);
 
                         let jump_if_false_pos = code.len();
                         code.push(Opcode::JumpIfFalse(usize::MAX));
@@ -3180,7 +3180,7 @@ mod tests {
                 },
                 Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
                 Opcode::LoadNumber(1.0),
-                Opcode::Eq,
+                Opcode::StrictEq,
                 Opcode::JumpIfFalse(10),
                 Opcode::Jump(11),
                 Opcode::Jump(17),
@@ -3233,7 +3233,7 @@ mod tests {
                 },
                 Opcode::LoadIdentifier("$__switch_tmp_0".to_string()),
                 Opcode::LoadNumber(1.0),
-                Opcode::Eq,
+                Opcode::StrictEq,
                 Opcode::JumpIfFalse(10),
                 Opcode::Jump(11),
                 Opcode::Jump(15),
