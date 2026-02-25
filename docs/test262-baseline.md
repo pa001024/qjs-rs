@@ -151,6 +151,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `annexB/built-ins/escape (v1)`: discovered=16, executed=8, skipped=8, passed=8, failed=0
 - `annexB/built-ins/unescape (v1)`: discovered=19, executed=11, skipped=8, passed=11, failed=0
 - `annexB/built-ins/String/prototype (v5)`: discovered=111, executed=39, skipped=72, passed=39, failed=0
+- `annexB/built-ins/RegExp/prototype/compile (v3)`: discovered=23, executed=14, skipped=9, passed=14, failed=0
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -189,7 +190,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/literals/numeric (latest)`: discovered=157, executed=83, skipped=74, passed=83, failed=0
 
 备注：
-- 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），并补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），同时将 HostFunction 构造限制为 `bind` 产物；相关 6 个 Annex B 目录当前快照均为 `failed=0`。
+- 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），并新增 `RegExp.prototype.compile`（含 `lastIndex` throw=true 回写路径与 RegExp-pattern 分支）；同时将 HostFunction 构造限制为 `bind` 产物；相关 7 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。
 - runner 目前仅对明显依赖 `$262` host API 的用例做保守跳过；`assert` / `Test262Error` 已接入 baseline 运行路径。

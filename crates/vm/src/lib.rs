@@ -43,6 +43,8 @@ const PROXY_OBJECT_MARKER_KEY: &str = "$__qjs_proxy_object__$";
 const PROXY_TARGET_KEY: &str = "$__qjs_proxy_target__$";
 const PROXY_HANDLER_KEY: &str = "$__qjs_proxy_handler__$";
 const PROXY_OWN_KEYS_ORDER_KEY: &str = "$__qjs_proxy_own_keys_order__$";
+const REGEXP_SOURCE_SLOT_KEY: &str = "$__qjs_regexp_source_slot__$";
+const REGEXP_FLAGS_SLOT_KEY: &str = "$__qjs_regexp_flags_slot__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
 const SURROGATE_PLACEHOLDER_END: u32 = 0xE7FF;
 const SURROGATE_START: u16 = 0xD800;
@@ -222,6 +224,7 @@ enum HostFunction {
     ArraySortThis,
     RegExpTestThis,
     RegExpExecThis,
+    RegExpCompileThis,
     RegExpToStringThis,
     ReflectDefineProperty,
     ReflectGetOwnPropertyDescriptor,
@@ -1015,6 +1018,7 @@ impl Vm {
             | HostFunction::GeneratorIteratorNextThis
             | HostFunction::RegExpTestThis
             | HostFunction::RegExpExecThis
+            | HostFunction::RegExpCompileThis
             | HostFunction::RegExpToStringThis
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
@@ -5679,6 +5683,10 @@ impl Vm {
                 }
                 self.create_array_from_values(vec![JsValue::String(input)])
             }
+            HostFunction::RegExpCompileThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
+                self.execute_regexp_compile_this(receiver_id, &args, realm, caller_strict)
+            }
             HostFunction::RegExpToStringThis => {
                 let receiver_id = self.strict_this_regexp_object(this_arg)?;
                 self.execute_regexp_to_string(receiver_id)
@@ -6367,123 +6375,36 @@ impl Vm {
         if self.regexp_prototype_id.is_none() {
             let _ = self.regexp_prototype_value();
         }
+        self.validate_regexp_compile_inputs(&pattern, &flags)?;
         let object = self.create_object_value();
         let object_id = match object {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
-        let global = flags.contains('g');
-        let ignore_case = flags.contains('i');
-        let multiline = flags.contains('m');
-        let dot_all = flags.contains('s');
-        let unicode = flags.contains('u');
-        let sticky = flags.contains('y');
-
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.regexp_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__regexpTag".to_string(), JsValue::Bool(true));
+            target.property_attributes.insert(
+                "__regexpTag".to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+        }
+        self.apply_regexp_slots_and_surface(object_id, &pattern, &flags);
         let target = self
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        target.prototype = self.regexp_prototype_id;
-        target.prototype_value = None;
-        target
-            .properties
-            .insert("__regexpTag".to_string(), JsValue::Bool(true));
-        target.property_attributes.insert(
-            "__regexpTag".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("source".to_string(), JsValue::String(pattern));
-        target.property_attributes.insert(
-            "source".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("flags".to_string(), JsValue::String(flags));
-        target.property_attributes.insert(
-            "flags".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("global".to_string(), JsValue::Bool(global));
-        target.property_attributes.insert(
-            "global".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("ignoreCase".to_string(), JsValue::Bool(ignore_case));
-        target.property_attributes.insert(
-            "ignoreCase".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("multiline".to_string(), JsValue::Bool(multiline));
-        target.property_attributes.insert(
-            "multiline".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("dotAll".to_string(), JsValue::Bool(dot_all));
-        target.property_attributes.insert(
-            "dotAll".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("unicode".to_string(), JsValue::Bool(unicode));
-        target.property_attributes.insert(
-            "unicode".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
-        target
-            .properties
-            .insert("sticky".to_string(), JsValue::Bool(sticky));
-        target.property_attributes.insert(
-            "sticky".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        );
         target
             .properties
             .insert("lastIndex".to_string(), JsValue::Number(0.0));
@@ -6498,19 +6419,244 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn execute_regexp_to_string(&self, object_id: ObjectId) -> Result<String, VmError> {
+    fn regexp_slot_strings(&self, object_id: ObjectId) -> Result<(String, String), VmError> {
         let object = self
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         let source = object
             .properties
-            .get("source")
+            .get(REGEXP_SOURCE_SLOT_KEY)
+            .or_else(|| object.properties.get("source"))
             .map_or_else(String::new, |value| self.coerce_to_string(value));
         let flags = object
             .properties
-            .get("flags")
+            .get(REGEXP_FLAGS_SLOT_KEY)
+            .or_else(|| object.properties.get("flags"))
             .map_or_else(String::new, |value| self.coerce_to_string(value));
+        Ok((source, flags))
+    }
+
+    fn apply_regexp_slots_and_surface(&mut self, object_id: ObjectId, source: &str, flags: &str) {
+        let global = flags.contains('g');
+        let ignore_case = flags.contains('i');
+        let multiline = flags.contains('m');
+        let dot_all = flags.contains('s');
+        let unicode = flags.contains('u');
+        let sticky = flags.contains('y');
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .expect("regexp object should exist");
+
+        target.properties.insert(
+            REGEXP_SOURCE_SLOT_KEY.to_string(),
+            JsValue::String(source.to_string()),
+        );
+        target.property_attributes.insert(
+            REGEXP_SOURCE_SLOT_KEY.to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        target.properties.insert(
+            REGEXP_FLAGS_SLOT_KEY.to_string(),
+            JsValue::String(flags.to_string()),
+        );
+        target.property_attributes.insert(
+            REGEXP_FLAGS_SLOT_KEY.to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+
+        target
+            .properties
+            .insert("source".to_string(), JsValue::String(source.to_string()));
+        target.property_attributes.insert(
+            "source".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("flags".to_string(), JsValue::String(flags.to_string()));
+        target.property_attributes.insert(
+            "flags".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("global".to_string(), JsValue::Bool(global));
+        target.property_attributes.insert(
+            "global".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("ignoreCase".to_string(), JsValue::Bool(ignore_case));
+        target.property_attributes.insert(
+            "ignoreCase".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("multiline".to_string(), JsValue::Bool(multiline));
+        target.property_attributes.insert(
+            "multiline".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("dotAll".to_string(), JsValue::Bool(dot_all));
+        target.property_attributes.insert(
+            "dotAll".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("unicode".to_string(), JsValue::Bool(unicode));
+        target.property_attributes.insert(
+            "unicode".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        target
+            .properties
+            .insert("sticky".to_string(), JsValue::Bool(sticky));
+        target.property_attributes.insert(
+            "sticky".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
+    fn validate_regexp_flags(&mut self, flags: &str) -> Result<(), VmError> {
+        let mut seen = BTreeSet::new();
+        for flag in flags.chars() {
+            if !matches!(flag, 'g' | 'i' | 'm' | 's' | 'u' | 'y') || !seen.insert(flag) {
+                return Err(VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::SyntaxErrorConstructor,
+                    "SyntaxError",
+                    "invalid regular expression flags".to_string(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_regexp_compile_inputs(
+        &mut self,
+        pattern: &str,
+        flags: &str,
+    ) -> Result<(), VmError> {
+        self.validate_regexp_flags(flags)?;
+        let unicode = flags.contains('u');
+        let normalized_pattern = Self::normalize_regexp_pattern(pattern, unicode);
+        let mut builder = RegexBuilder::new(&normalized_pattern);
+        builder.case_insensitive(flags.contains('i'));
+        builder.multi_line(flags.contains('m'));
+        builder.dot_matches_new_line(flags.contains('s'));
+        if builder.build().is_err() {
+            return Err(VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn execute_regexp_compile_this(
+        &mut self,
+        receiver_id: ObjectId,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let pattern_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let flags_arg = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+
+        let (pattern, flags) = if let JsValue::Object(pattern_id) = pattern_arg.clone() {
+            if self.has_object_marker(pattern_id, "__regexpTag")? {
+                if !matches!(flags_arg, JsValue::Undefined) {
+                    return Err(VmError::TypeError("flags must be undefined"));
+                }
+                self.regexp_slot_strings(pattern_id)?
+            } else {
+                let pattern = if matches!(pattern_arg, JsValue::Undefined) {
+                    String::new()
+                } else {
+                    self.coerce_to_string_runtime(pattern_arg, realm, caller_strict)?
+                };
+                let flags = if matches!(flags_arg, JsValue::Undefined) {
+                    String::new()
+                } else {
+                    self.coerce_to_string_runtime(flags_arg, realm, caller_strict)?
+                };
+                (pattern, flags)
+            }
+        } else {
+            let pattern = if matches!(pattern_arg, JsValue::Undefined) {
+                String::new()
+            } else {
+                self.coerce_to_string_runtime(pattern_arg, realm, caller_strict)?
+            };
+            let flags = if matches!(flags_arg, JsValue::Undefined) {
+                String::new()
+            } else {
+                self.coerce_to_string_runtime(flags_arg, realm, caller_strict)?
+            };
+            (pattern, flags)
+        };
+
+        self.validate_regexp_compile_inputs(&pattern, &flags)?;
+        self.apply_regexp_slots_and_surface(receiver_id, &pattern, &flags);
+        self.ensure_assign_target_writable(&JsValue::Object(receiver_id), "lastIndex")?;
+        self.set_object_property(
+            receiver_id,
+            "lastIndex".to_string(),
+            JsValue::Number(0.0),
+            realm,
+        )?;
+        Ok(JsValue::Object(receiver_id))
+    }
+
+    fn execute_regexp_to_string(&self, object_id: ObjectId) -> Result<String, VmError> {
+        let (source, flags) = self.regexp_slot_strings(object_id)?;
         Ok(format!("/{source}/{flags}"))
     }
 
@@ -6519,14 +6665,7 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        let pattern = object
-            .properties
-            .get("source")
-            .map_or_else(String::new, |value| self.coerce_to_string(value));
-        let flags = object
-            .properties
-            .get("flags")
-            .map_or_else(String::new, |value| self.coerce_to_string(value));
+        let (pattern, flags) = self.regexp_slot_strings(object_id)?;
         let last_index = object
             .properties
             .get("lastIndex")
@@ -6639,6 +6778,20 @@ impl Vm {
                 normalized.push(ch);
                 index += 1;
                 continue;
+            }
+            if unicode
+                && let Some(high) = Self::surrogate_code_unit_from_placeholder(ch)
+                && (0xD800..=0xDBFF).contains(&high)
+                && let Some(next_char) = chars.get(index + 1).copied()
+                && let Some(low) = Self::surrogate_code_unit_from_placeholder(next_char)
+                && (0xDC00..=0xDFFF).contains(&low)
+            {
+                let combined = 0x10000 + (((high - 0xD800) << 10) | (low - 0xDC00));
+                if let Some(value) = char::from_u32(combined) {
+                    Self::push_regex_literal_char(&mut normalized, value, in_character_class);
+                    index += 2;
+                    continue;
+                }
             }
             normalized.push(ch);
             index += 1;
@@ -12901,6 +13054,9 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             let test = self.create_host_function_value(HostFunction::RegExpTestThis);
             let exec = self.create_host_function_value(HostFunction::RegExpExecThis);
+            let compile = self.create_host_function_value(HostFunction::RegExpCompileThis);
+            self.set_builtin_function_length(&compile, 2.0);
+            self.set_builtin_function_name(&compile, "compile");
             let to_string = self.create_host_function_value(HostFunction::RegExpToStringThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -12927,6 +13083,15 @@ impl Vm {
                 object.properties.insert("exec".to_string(), exec);
                 object.property_attributes.insert(
                     "exec".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("compile".to_string(), compile);
+                object.property_attributes.insert(
+                    "compile".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -19876,6 +20041,53 @@ mod tests {
         realm.define_global(
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_compile_reinitializes_existing_instance() {
+        let script = parse_script(
+            "var r = /abc/gim; \
+             var p = /def/i; \
+             var out = r.compile(p); \
+             out === r && r.toString() === '/def/i' && r.lastIndex === 0 && r.test('DEF') && !r.test('abc');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_compile_throws_for_non_writable_last_index_after_slot_update() {
+        let script = parse_script(
+            "var r = /initial/; \
+             Object.defineProperty(r, 'lastIndex', { value: 45, writable: false }); \
+             var threw = false; \
+             try { r.compile(/updated/gi); } catch (e) { threw = e instanceof TypeError; } \
+             threw && r.toString() === '/updated/gi' && r.lastIndex === 45;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));

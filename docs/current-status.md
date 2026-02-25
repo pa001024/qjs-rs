@@ -44,8 +44,10 @@
 - `test262 annexB/built-ins/escape` 最新全量：`executed=8`、`passed=8`、`failed=0`（快照：`target/test262-annexb-escape-20260225-v1.json`）。
 - `test262 annexB/built-ins/unescape` 最新全量：`executed=11`、`passed=11`、`failed=0`（快照：`target/test262-annexb-unescape-20260225-v1.json`）。
 - `test262 annexB/built-ins/String/prototype` 最新全量：`executed=39`、`passed=39`、`failed=0`（快照：`target/test262-annexb-string-prototype-20260225-v5.json`）。
+- `test262 annexB/built-ins/RegExp/prototype/compile` 最新全量：`executed=14`、`passed=14`、`failed=0`（快照：`target/test262-annexb-regexp-prototype-compile-20260225-v3.json`）。
 - `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2329`、`failed=0`（快照：`target/test262-builtins-array-20260225-v27-s3000.json`）。
 - 本轮新增语义收敛：
+  - Annex B RegExp 收敛：新增 `RegExp.prototype.compile`（对齐 QuickJS `js_regexp_compile` 主路径），补齐 `pattern` 为 RegExp 时的 flags 限制、`lastIndex` 回写语义（含 non-writable 抛错后仍保留已更新内部槽）、`length/name` 元数据，并修正 `u` 标志下 surrogate pair 模式归一化；`annexB/built-ins/RegExp/prototype/compile` 子集清零（`14/0`）。
   - Annex B String 收敛：按 QuickJS `js_string_substr/js_string_CreateHTML` 方向补齐 `String.prototype.substr` 与 13 个 HTML 包装方法（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），覆盖 `length/name` 元数据、非构造器约束、属性值 `\" -> &quot;` 转义、UTF-16 code-unit `substr` 行为，并为 `Math.trunc`/`Number.isNaN` 补最小支撑路径，`annexB/built-ins/String/prototype` 子集清零（`39/0`）。
   - Annex B Date/Global 收敛：新增 `escape/unescape` native 算法（按 QuickJS `js_global_escape/js_global_unescape` 的 code-unit 规则）、补齐 `Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 同一函数对象），并修复 HostFunction 构造语义（仅 `bind` 产物可构造），对应 5 个 Annex B 目录全部清零。
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
