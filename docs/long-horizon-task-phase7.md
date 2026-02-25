@@ -137,8 +137,8 @@
   - `annexB/built-ins/RegExp`: `22/0`（`target/test262-annexb-builtins-regexp-20260225-v6.json`）
   - `annexB/language/comments`: `8/0`（`target/test262-annexb-language-comments-20260225-v3.json`）
   - `annexB/built-ins/Function`: `6/0`（`target/test262-annexb-builtins-function-20260225-v2.json`）
-  - `annexB/language/eval-code/direct`: `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v6.json`；`catch ({ f })` 解析已打通，下一步聚焦 B.3.3 绑定语义）
-  - `annexB` 全目录：`577/248`（`target/test262-annexb-baseline-20260225-v3.json`，失败簇主要集中在 `annexB/language/eval-code/direct`）
+  - `annexB/language/eval-code/direct`: `276/0`（`target/test262-annexb-language-eval-code-direct-20260225-v10.json`；B.3.3 direct eval block function declaration 绑定语义已对齐）
+  - `annexB` 全目录：`628/197`（`target/test262-annexb-baseline-20260225-v4.json`，失败簇主要集中在 `annexB/language/eval-code/indirect`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
@@ -151,7 +151,7 @@
   - Track H（WeakMap/WeakSet 语义）：从 Map/Set alias 过渡到最小真实语义（对象键约束、`set/get/has/delete`），并补齐与 GC root 的交互约束。
   - Track I（全量基线推进）：开启 `test262` 更大样本/全量抽样与 nightly 快照，按失败簇持续回归清理。
   - Track K（Annex B String 后续）：在 `substr/CreateHTML` 已清零基础上，继续对齐 Annex B 其余字符串遗留方法（如 `trimLeft/trimRight`）并扩展回归快照。
-  - Track L（Annex B Function/Comments 后续）：在 `annexB/language/comments` 与 `annexB/built-ins/Function` 清零后，继续对齐 block-level function declaration 与 `annexB/language/eval-code/direct` 剩余失败簇。
+  - Track L（Annex B Eval 后续）：在 `annexB/language/eval-code/direct` 清零后，继续对齐 `annexB/language/eval-code/indirect` 的 block-level function declaration 绑定语义失败簇。
 - 每个 Track 必须输出：
   - QuickJS 对照点（函数名/分支）
   - 代码提交（最小可验证增量）

@@ -48,12 +48,12 @@
 - `test262 annexB/built-ins/RegExp` 最新全量：`executed=22`、`passed=22`、`failed=0`（快照：`target/test262-annexb-builtins-regexp-20260225-v6.json`）。
 - `test262 annexB/language/comments` 最新全量：`executed=8`、`passed=8`、`failed=0`（快照：`target/test262-annexb-language-comments-20260225-v3.json`）。
 - `test262 annexB/built-ins/Function` 最新全量：`executed=6`、`passed=6`、`failed=0`（快照：`target/test262-annexb-builtins-function-20260225-v2.json`）。
-- `test262 annexB/language/eval-code/direct` 最新全量：`executed=276`、`passed=185`、`failed=91`（快照：`target/test262-annexb-language-eval-code-direct-20260225-v6.json`）。
-- `test262 annexB` 最新全量：`executed=825`、`passed=577`、`failed=248`（快照：`target/test262-annexb-baseline-20260225-v3.json`）。
+- `test262 annexB/language/eval-code/direct` 最新全量：`executed=276`、`passed=276`、`failed=0`（快照：`target/test262-annexb-language-eval-code-direct-20260225-v10.json`）。
+- `test262 annexB` 最新全量：`executed=825`、`passed=628`、`failed=197`（快照：`target/test262-annexb-baseline-20260225-v4.json`）。
 - `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2329`、`failed=0`（快照：`target/test262-builtins-array-20260225-v27-s3000.json`）。
 - 本轮新增语义收敛：
   - Annex B Function/Comments 收敛：lexer 对齐 QuickJS `next_token` 路径补齐 `<!--` 与“行首/line-terminator 后生效”的 `-->` HTML 注释；`Function` 构造器拼接对齐 `CreateDynamicFunction`（参数串后插入换行），并收紧 parser 参数列表非法 token 分支（`-->` 无前置换行时抛 `SyntaxError`）。对应 `annexB/language/comments`（`8/0`）与 `annexB/built-ins/Function`（`6/0`）子集清零。
-  - Annex B eval direct 再收敛：在 `catch` 参数路径补齐 object pattern（`catch ({ f })`）解析并降级为 catch block 前置 `let` 绑定，修复 `skip-early-err-try` 系列 parse fail；`annexB/language/eval-code/direct` 提升到 `185/91`，剩余失败继续集中在 B.3.3 block-level function declaration 的 var/binding 运行时语义。
+  - Annex B eval direct 已清零：parser 将 embedded function declaration 降级为 block 语义，VM 在 direct non-strict eval 对齐 QuickJS `create_func_var + scope_put_var` 路径（预创建 var binding + FunctionDeclaration 执行时同步 varEnv），`annexB/language/eval-code/direct` 收敛到 `276/0`；`annexB` 总体提升到 `628/197`，剩余失败主要集中到 `annexB/language/eval-code/indirect`。
   - Annex B RegExp 再收敛：对齐 QuickJS `lre_parse_escape` 方向补齐 non-`u` identity escape 与 legacy decimal/octal fallback（覆盖 `\x/\u` 不完整逃逸、leading/trailing escape、`[\12-\14]` 区间），并补齐 `RegExp.prototype.exec` 返回数组的 `index/input` 字段；`annexB/built-ins/RegExp` 收敛至 `22/0`，`annexB/built-ins/RegExp/prototype/compile` 维持 `14/0`。
   - Annex B String 收敛：按 QuickJS `js_string_substr/js_string_CreateHTML` 方向补齐 `String.prototype.substr` 与 13 个 HTML 包装方法（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），覆盖 `length/name` 元数据、非构造器约束、属性值 `\" -> &quot;` 转义、UTF-16 code-unit `substr` 行为，并为 `Math.trunc`/`Number.isNaN` 补最小支撑路径，`annexB/built-ins/String/prototype` 子集清零（`39/0`）。
   - Annex B Date/Global 收敛：新增 `escape/unescape` native 算法（按 QuickJS `js_global_escape/js_global_unescape` 的 code-unit 规则）、补齐 `Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 同一函数对象），并修复 HostFunction 构造语义（仅 `bind` 产物可构造），对应 5 个 Annex B 目录全部清零。

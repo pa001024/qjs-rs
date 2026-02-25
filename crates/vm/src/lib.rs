@@ -321,6 +321,12 @@ struct EvalContext {
     has_arguments_param: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AnnexBEvalVarFunctionContext {
+    names: BTreeSet<String>,
+    var_scope: ScopeRef,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvalCallKind {
     Direct,
@@ -397,6 +403,7 @@ pub struct Vm {
     template_cache: BTreeMap<u64, JsValue>,
     eval_contexts: Vec<EvalContext>,
     eval_deletable_binding_depth: usize,
+    annex_b_eval_var_function_contexts: Vec<AnnexBEvalVarFunctionContext>,
     param_init_body_scopes: Vec<ScopeRef>,
     var_scope_stack: Vec<usize>,
     gc_mark_stack: Vec<JsValue>,
@@ -467,6 +474,7 @@ impl Vm {
         self.template_cache.clear();
         self.eval_contexts.clear();
         self.eval_deletable_binding_depth = 0;
+        self.annex_b_eval_var_function_contexts.clear();
         self.param_init_body_scopes.clear();
         self.var_scope_stack.clear();
         self.gc_mark_stack.clear();
@@ -1197,6 +1205,7 @@ impl Vm {
                 Opcode::DefineFunction { name, function_id } => {
                     let function_value =
                         self.instantiate_function(*function_id, functions, strict)?;
+                    let function_value_for_annex_b = function_value.clone();
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
@@ -1225,6 +1234,7 @@ impl Vm {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                     }
+                    self.sync_annex_b_eval_var_function_binding(name, function_value_for_annex_b)?;
                 }
                 Opcode::StoreVariable(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -7168,6 +7178,12 @@ impl Vm {
         }
         let chunk = compile_script(&script);
         let eval_strict = self.code_is_strict(&chunk.code);
+        let annex_b_eval_var_function_names =
+            if matches!(call_kind, EvalCallKind::Direct) && !eval_strict {
+                Self::script_annex_b_eval_var_function_names(&script)
+            } else {
+                BTreeSet::new()
+            };
         if !eval_strict
             && Self::script_declares_restricted_global_function(&script)
             && self.eval_targets_global_var_scope(call_kind)
@@ -7209,7 +7225,25 @@ impl Vm {
         if deletable_eval_bindings {
             self.eval_deletable_binding_depth = self.eval_deletable_binding_depth.saturating_add(1);
         }
-        let result = self.execute_inline_chunk(&chunk, realm, false);
+        let mut pushed_annex_b_eval_context = false;
+        let result = (|| {
+            if !annex_b_eval_var_function_names.is_empty() {
+                for name in &annex_b_eval_var_function_names {
+                    self.ensure_annex_b_eval_var_binding(name)?;
+                }
+                let var_scope = self.current_var_scope_ref()?;
+                self.annex_b_eval_var_function_contexts
+                    .push(AnnexBEvalVarFunctionContext {
+                        names: annex_b_eval_var_function_names.clone(),
+                        var_scope,
+                    });
+                pushed_annex_b_eval_context = true;
+            }
+            self.execute_inline_chunk(&chunk, realm, false)
+        })();
+        if pushed_annex_b_eval_context {
+            self.annex_b_eval_var_function_contexts.pop();
+        }
         if deletable_eval_bindings {
             self.eval_deletable_binding_depth = self.eval_deletable_binding_depth.saturating_sub(1);
         }
@@ -11000,6 +11034,66 @@ impl Vm {
             .ok_or(VmError::ScopeUnderflow)
     }
 
+    fn ensure_annex_b_eval_var_binding(&mut self, name: &str) -> Result<(), VmError> {
+        let var_scope = self.current_var_scope_ref()?;
+        let existing_binding_id = var_scope.borrow().get(name).copied();
+        if existing_binding_id.is_none() {
+            let binding_id = self.create_binding_with_flags(
+                JsValue::Undefined,
+                true,
+                self.eval_deletable_binding_depth > 0,
+            );
+            var_scope.borrow_mut().insert(name.to_string(), binding_id);
+        }
+        self.define_global_var_property(name)?;
+        Ok(())
+    }
+
+    fn sync_annex_b_eval_var_function_binding(
+        &mut self,
+        name: &str,
+        function_value: JsValue,
+    ) -> Result<(), VmError> {
+        let Some(var_scope) = self.active_annex_b_eval_var_scope_for_name(name)? else {
+            return Ok(());
+        };
+        self.maybe_set_inferred_function_name(&function_value, name);
+        let existing_binding_id = var_scope.borrow().get(name).copied();
+        if let Some(binding_id) = existing_binding_id {
+            let binding = self
+                .bindings
+                .get_mut(&binding_id)
+                .ok_or(VmError::ScopeUnderflow)?;
+            if !binding.mutable {
+                return Err(VmError::ImmutableBinding(name.to_string()));
+            }
+            binding.value = function_value;
+            self.sync_global_property_from_binding(name, binding_id)?;
+            return Ok(());
+        }
+        let binding_id = self.create_binding_with_flags(
+            function_value,
+            true,
+            self.eval_deletable_binding_depth > 0,
+        );
+        var_scope.borrow_mut().insert(name.to_string(), binding_id);
+        self.define_global_var_property(name)?;
+        Ok(())
+    }
+
+    fn active_annex_b_eval_var_scope_for_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<ScopeRef>, VmError> {
+        let current_var_scope = self.current_var_scope_ref()?;
+        for context in self.annex_b_eval_var_function_contexts.iter().rev() {
+            if context.names.contains(name) && Rc::ptr_eq(&context.var_scope, &current_var_scope) {
+                return Ok(Some(context.var_scope.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
         for scope_ref in self.scopes.iter().rev() {
             if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
@@ -14019,6 +14113,223 @@ impl Vm {
             .statements
             .iter()
             .any(Self::statement_declares_arguments_binding)
+    }
+
+    fn script_annex_b_eval_var_function_names(script: &Script) -> BTreeSet<String> {
+        let lexical_names = Self::script_lexical_declaration_names(script);
+        let mut candidate_names = BTreeSet::new();
+        for statement in &script.statements {
+            Self::collect_annex_b_eval_var_function_names_from_statement(
+                statement,
+                true,
+                &mut candidate_names,
+            );
+        }
+        candidate_names.retain(|name| !lexical_names.contains(name));
+        candidate_names
+    }
+
+    fn collect_annex_b_eval_var_function_names_from_statement(
+        statement: &Stmt,
+        in_script_or_function_statement_list: bool,
+        names: &mut BTreeSet<String>,
+    ) {
+        match statement {
+            Stmt::FunctionDeclaration(declaration) => {
+                if !in_script_or_function_statement_list {
+                    names.insert(declaration.name.0.clone());
+                }
+            }
+            Stmt::Block(statements) => {
+                for statement in statements {
+                    Self::collect_annex_b_eval_var_function_names_from_statement(
+                        statement, false, names,
+                    );
+                }
+            }
+            Stmt::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                Self::collect_annex_b_eval_var_function_names_from_statement(
+                    consequent, false, names,
+                );
+                if let Some(alternate) = alternate {
+                    Self::collect_annex_b_eval_var_function_names_from_statement(
+                        alternate, false, names,
+                    );
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Labeled { body, .. } => {
+                Self::collect_annex_b_eval_var_function_names_from_statement(body, false, names)
+            }
+            Stmt::For { body, .. } => {
+                Self::collect_annex_b_eval_var_function_names_from_statement(body, false, names);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    for statement in &case.consequent {
+                        Self::collect_annex_b_eval_var_function_names_from_statement(
+                            statement, false, names,
+                        );
+                    }
+                }
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                for statement in try_block {
+                    Self::collect_annex_b_eval_var_function_names_from_statement(
+                        statement, false, names,
+                    );
+                }
+                if let Some(catch_block) = catch_block {
+                    for statement in catch_block {
+                        Self::collect_annex_b_eval_var_function_names_from_statement(
+                            statement, false, names,
+                        );
+                    }
+                }
+                if let Some(finally_block) = finally_block {
+                    for statement in finally_block {
+                        Self::collect_annex_b_eval_var_function_names_from_statement(
+                            statement, false, names,
+                        );
+                    }
+                }
+            }
+            Stmt::VariableDeclaration(_)
+            | Stmt::VariableDeclarations(_)
+            | Stmt::Empty
+            | Stmt::Return(_)
+            | Stmt::Expression(_)
+            | Stmt::Throw(_)
+            | Stmt::Break
+            | Stmt::BreakLabel(_)
+            | Stmt::Continue
+            | Stmt::ContinueLabel(_) => {}
+        }
+    }
+
+    fn script_lexical_declaration_names(script: &Script) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for statement in &script.statements {
+            Self::collect_lexical_declaration_names_from_statement(statement, &mut names);
+        }
+        names
+    }
+
+    fn collect_lexical_declaration_names_from_statement(
+        statement: &Stmt,
+        names: &mut BTreeSet<String>,
+    ) {
+        match statement {
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let | BindingKind::Const,
+                name: Identifier(name),
+                ..
+            }) => {
+                names.insert(name.clone());
+            }
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Var,
+                ..
+            }) => {}
+            Stmt::VariableDeclarations(declarations) => {
+                for declaration in declarations {
+                    if matches!(declaration.kind, BindingKind::Let | BindingKind::Const) {
+                        names.insert(declaration.name.0.clone());
+                    }
+                }
+            }
+            Stmt::FunctionDeclaration(_) => {}
+            Stmt::Block(statements) => {
+                for statement in statements {
+                    Self::collect_lexical_declaration_names_from_statement(statement, names);
+                }
+            }
+            Stmt::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                Self::collect_lexical_declaration_names_from_statement(consequent, names);
+                if let Some(alternate) = alternate {
+                    Self::collect_lexical_declaration_names_from_statement(alternate, names);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Labeled { body, .. } => {
+                Self::collect_lexical_declaration_names_from_statement(body, names);
+            }
+            Stmt::For {
+                initializer, body, ..
+            } => {
+                if let Some(initializer) = initializer {
+                    match initializer {
+                        ForInitializer::VariableDeclaration(declaration) => {
+                            if matches!(declaration.kind, BindingKind::Let | BindingKind::Const) {
+                                names.insert(declaration.name.0.clone());
+                            }
+                        }
+                        ForInitializer::VariableDeclarations(declarations) => {
+                            for declaration in declarations {
+                                if matches!(declaration.kind, BindingKind::Let | BindingKind::Const)
+                                {
+                                    names.insert(declaration.name.0.clone());
+                                }
+                            }
+                        }
+                        ForInitializer::Expression(_) => {}
+                    }
+                }
+                Self::collect_lexical_declaration_names_from_statement(body, names);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    for statement in &case.consequent {
+                        Self::collect_lexical_declaration_names_from_statement(statement, names);
+                    }
+                }
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                for statement in try_block {
+                    Self::collect_lexical_declaration_names_from_statement(statement, names);
+                }
+                if let Some(catch_block) = catch_block {
+                    for statement in catch_block {
+                        Self::collect_lexical_declaration_names_from_statement(statement, names);
+                    }
+                }
+                if let Some(finally_block) = finally_block {
+                    for statement in finally_block {
+                        Self::collect_lexical_declaration_names_from_statement(statement, names);
+                    }
+                }
+            }
+            Stmt::Empty
+            | Stmt::Return(_)
+            | Stmt::Expression(_)
+            | Stmt::Throw(_)
+            | Stmt::Break
+            | Stmt::BreakLabel(_)
+            | Stmt::Continue
+            | Stmt::ContinueLabel(_) => {}
+        }
     }
 
     fn statement_declares_arguments_binding(statement: &Stmt) -> bool {
@@ -20229,6 +20540,54 @@ mod tests {
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_eval_block_function_initializes_and_updates_var_binding() {
+        let script = parse_script(
+            "var beforeType, beforeValue, afterType, afterValue; \
+             (function() { \
+               eval('beforeType = typeof f; beforeValue = f; { function f() { return 7; } } afterType = typeof f; afterValue = f();'); \
+             }()); \
+             beforeType === 'undefined' && beforeValue === undefined && afterType === 'function' && afterValue === 7;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_eval_embedded_if_function_keeps_block_binding_independent() {
+        let script = parse_script(
+            "var initialBV, currentBV; \
+             eval('if (true) function f() { initialBV = f; f = 123; currentBV = f; return \"decl\"; } else function _f() {}'); \
+             f(); \
+             initialBV() === 'decl' && currentBV === 123 && f() === 'decl';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_eval_skips_var_binding_extension_when_lexical_conflicts() {
+        let script = parse_script(
+            "var after; \
+             (function() { eval('let f = 123; { function f() {} } after = f;'); }()); \
+             after === 123;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }

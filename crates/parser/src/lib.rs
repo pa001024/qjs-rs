@@ -823,16 +823,24 @@ fn collect_var_declared_names(
             alternate,
             ..
         } => {
-            collect_var_declared_names(consequent, var_declared_names, kind);
+            collect_var_declared_names(
+                consequent,
+                var_declared_names,
+                StatementListKind::BlockLike,
+            );
             if let Some(alternate) = alternate {
-                collect_var_declared_names(alternate, var_declared_names, kind);
+                collect_var_declared_names(
+                    alternate,
+                    var_declared_names,
+                    StatementListKind::BlockLike,
+                );
             }
         }
         Stmt::While { body, .. }
         | Stmt::With { body, .. }
         | Stmt::DoWhile { body, .. }
         | Stmt::Labeled { body, .. } => {
-            collect_var_declared_names(body, var_declared_names, kind);
+            collect_var_declared_names(body, var_declared_names, StatementListKind::BlockLike);
         }
         Stmt::For {
             initializer, body, ..
@@ -840,7 +848,7 @@ fn collect_var_declared_names(
             if let Some(initializer) = initializer {
                 collect_var_declared_names_from_for_initializer(initializer, var_declared_names);
             }
-            collect_var_declared_names(body, var_declared_names, kind);
+            collect_var_declared_names(body, var_declared_names, StatementListKind::BlockLike);
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
@@ -2622,22 +2630,20 @@ impl Parser {
                     let temp_name = self.next_catch_temp_identifier();
                     let elements =
                         self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
-                    catch_parameter_effects
-                        .extend(Self::lower_catch_array_pattern_bindings(&temp_name, &elements));
+                    catch_parameter_effects.extend(Self::lower_catch_array_pattern_bindings(
+                        &temp_name, &elements,
+                    ));
                     catch_param = Some(temp_name);
                 } else if self.check(&TokenKind::LBrace) {
                     let temp_name = self.next_catch_temp_identifier();
                     let effects = self.parse_object_parameter_pattern_effects(&temp_name)?;
-                    catch_parameter_effects.extend(Self::lower_catch_object_pattern_bindings(
-                        effects,
-                    ));
+                    catch_parameter_effects
+                        .extend(Self::lower_catch_object_pattern_bindings(effects));
                     catch_param = Some(temp_name);
                 } else {
-                    return Err(
-                        self.error_current(
-                            "expected catch binding identifier, array pattern, or object pattern",
-                        )
-                    );
+                    return Err(self.error_current(
+                        "expected catch binding identifier, array pattern, or object pattern",
+                    ));
                 }
                 self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
             }
@@ -2809,16 +2815,20 @@ impl Parser {
         if self.check_keyword("class") {
             return Err(self.error_current("class declaration not allowed in statement position"));
         }
-        let statement = if self.check_keyword("let") && !self.check_next(&TokenKind::Colon) {
+        let mut statement = if self.check_keyword("let") && !self.check_next(&TokenKind::Colon) {
             Stmt::Expression(self.parse_expression_with_commas()?)
         } else {
             self.parse_statement()?
         };
+        if matches!(statement, Stmt::FunctionDeclaration(_)) {
+            // Annex B declaration forms in embedded statement positions should
+            // still execute with block-scoped function bindings.
+            statement = Stmt::Block(vec![statement]);
+        }
         let needs_separator = !matches!(
             statement,
             Stmt::Block(_)
                 | Stmt::Empty
-                | Stmt::FunctionDeclaration(_)
                 | Stmt::If { .. }
                 | Stmt::While { .. }
                 | Stmt::With { .. }
@@ -7675,6 +7685,34 @@ for ( [let][0]; ; )
     #[test]
     fn allows_function_declaration_in_embedded_statement_annex_b() {
         assert!(parse_script("while (1) function f() {}").is_ok());
+    }
+
+    #[test]
+    fn lowers_embedded_function_declaration_to_block_annex_b() {
+        let parsed =
+            parse_script("if (true) function f() {} else ;").expect("parser should succeed");
+        let Script { statements } = parsed;
+        let [
+            Stmt::If {
+                consequent,
+                alternate,
+                ..
+            },
+        ] = statements.as_slice()
+        else {
+            panic!("expected single if statement");
+        };
+        let Stmt::Block(consequent_body) = consequent.as_ref() else {
+            panic!("expected embedded declaration to be wrapped in block");
+        };
+        assert!(matches!(
+            consequent_body.as_slice(),
+            [Stmt::FunctionDeclaration(FunctionDeclaration {
+                name: Identifier(name),
+                ..
+            })] if name == "f"
+        ));
+        assert!(matches!(alternate.as_deref(), Some(Stmt::Empty)));
     }
 
     #[test]
