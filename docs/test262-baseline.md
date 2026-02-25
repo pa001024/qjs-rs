@@ -18,6 +18,9 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `max-cases=1000`: discovered=53162, executed=1000, skipped=553, passed=5, failed=995
 - `max-cases=5000`: discovered=53162, executed=5000, skipped=4208, passed=5, failed=4995
 - `language max-cases=5000`: discovered=23882, executed=5000, skipped=18579, passed=4320, failed=680
+- `built-ins/WeakMap (latest)`: discovered=141, executed=37, skipped=104, passed=37, failed=0
+- `built-ins/WeakSet (latest)`: discovered=85, executed=41, skipped=44, passed=41, failed=0
+- `built-ins/Proxy (latest)`: discovered=311, executed=1, skipped=310, passed=1, failed=0
 - `language max-cases=5000 (latest)`: discovered=23882, executed=5000, skipped=18579, passed=4440, failed=560
 - `language max-cases=5000 (latest+1)`: discovered=23882, executed=5000, skipped=18579, passed=4462, failed=538
 - `language max-cases=5000 (latest+2)`: discovered=23882, executed=5000, skipped=18579, passed=4470, failed=530

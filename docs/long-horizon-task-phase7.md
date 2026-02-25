@@ -140,6 +140,9 @@
   - `annexB/language/eval-code/direct`: `276/0`（`target/test262-annexb-language-eval-code-direct-20260225-v11.json`；B.3.3 direct eval block function declaration 绑定语义已对齐）
   - `annexB/language/eval-code/indirect`: `128/0`（`target/test262-annexb-language-eval-code-indirect-20260225-v1.json`；B.3.3 indirect eval 路径已对齐）
   - `annexB` 全目录：`825/0`（`target/test262-annexb-baseline-20260226-v14.log`，`assignmenttargettype/function-code/regexp/for-in` 残余簇已全部清零）
+  - `built-ins/WeakMap`：`37/0`（`new.target` 检查 + iterable 初始化链路已接通）
+  - `built-ins/WeakSet`：`41/0`（`new.target` 检查 + `add/delete/has` 最小语义已接通）
+  - `built-ins/Proxy`：`1/0`（`Proxy.revocable` 与 revoke 函数属性顺序已对齐）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
