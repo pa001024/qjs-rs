@@ -134,6 +134,8 @@
   - `annexB/built-ins/unescape`: `11/0`（`target/test262-annexb-unescape-20260225-v1.json`）
   - `annexB/built-ins/String/prototype`: `39/0`（`target/test262-annexb-string-prototype-20260225-v5.json`）
   - `annexB/built-ins/RegExp/prototype/compile`: `14/0`（`target/test262-annexb-regexp-prototype-compile-20260225-v3.json`）
+  - `annexB/language/comments`: `8/0`（`target/test262-annexb-language-comments-20260225-v3.json`）
+  - `annexB/built-ins/Function`: `6/0`（`target/test262-annexb-builtins-function-20260225-v2.json`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
@@ -146,7 +148,7 @@
   - Track H（WeakMap/WeakSet 语义）：从 Map/Set alias 过渡到最小真实语义（对象键约束、`set/get/has/delete`），并补齐与 GC root 的交互约束。
   - Track I（全量基线推进）：开启 `test262` 更大样本/全量抽样与 nightly 快照，按失败簇持续回归清理。
   - Track K（Annex B String 后续）：在 `substr/CreateHTML` 已清零基础上，继续对齐 Annex B 其余字符串遗留方法（如 `trimLeft/trimRight`）并扩展回归快照。
-  - Track L（Annex B Function/Comments）：对齐 QuickJS HTML 注释兼容与 block-level function declaration 语义，压降 `annexB/language/comments` 与 `annexB/language/eval-code/direct` 失败簇。
+  - Track L（Annex B Function/Comments 后续）：在 `annexB/language/comments` 与 `annexB/built-ins/Function` 清零后，继续对齐 block-level function declaration 与 `annexB/language/eval-code/direct` 剩余失败簇。
 - 每个 Track 必须输出：
   - QuickJS 对照点（函数名/分支）
   - 代码提交（最小可验证增量）

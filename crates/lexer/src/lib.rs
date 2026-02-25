@@ -110,6 +110,13 @@ fn line_terminator_len_at(bytes: &[u8], pos: usize) -> Option<usize> {
     unicode_line_terminator_len(bytes, pos)
 }
 
+fn skip_line_comment_payload(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && line_terminator_len_at(bytes, pos).is_none() {
+        pos += 1;
+    }
+    pos
+}
+
 fn is_ecmascript_whitespace(ch: char) -> bool {
     ch == '\u{FEFF}' || ch.is_whitespace()
 }
@@ -539,17 +546,19 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
     let mut pos = 0usize;
+    let mut line_start = true;
     let mut brace_depth = 0usize;
     let mut template_expr_brace_targets = Vec::new();
 
     while pos < bytes.len() {
+        if let Some(length) = line_terminator_len_at(bytes, pos) {
+            pos += length;
+            line_start = true;
+            continue;
+        }
         let byte = bytes[pos];
         if byte.is_ascii_whitespace() || byte == 0x0B {
             pos += 1;
-            continue;
-        }
-        if let Some(length) = unicode_line_terminator_len(bytes, pos) {
-            pos += length;
             continue;
         }
         if let Some((ch, len)) = decode_char(source, pos) {
@@ -558,6 +567,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 continue;
             }
         }
+
+        if pos + 3 < bytes.len() && &bytes[pos..pos + 4] == b"<!--" {
+            pos = skip_line_comment_payload(bytes, pos + 4);
+            line_start = true;
+            continue;
+        }
+
+        let previous_line_start = line_start;
+        if previous_line_start && pos + 2 < bytes.len() && &bytes[pos..pos + 3] == b"-->" {
+            pos = skip_line_comment_payload(bytes, pos + 3);
+            line_start = true;
+            continue;
+        }
+
+        line_start = false;
 
         if byte == b'+' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'+' {
@@ -652,17 +676,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte == b'/' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'/' {
-                pos += 2;
-                while pos < bytes.len() && line_terminator_len_at(bytes, pos).is_none() {
-                    pos += 1;
-                }
+                pos = skip_line_comment_payload(bytes, pos + 2);
+                line_start = true;
                 continue;
             }
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'*' {
                 let start = pos;
                 pos += 2;
                 let mut terminated = false;
+                let mut saw_line_terminator = false;
                 while pos + 1 < bytes.len() {
+                    if let Some(length) = line_terminator_len_at(bytes, pos) {
+                        saw_line_terminator = true;
+                        pos += length;
+                        continue;
+                    }
                     if bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
                         pos += 2;
                         terminated = true;
@@ -676,6 +704,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         position: start,
                     });
                 }
+                line_start = saw_line_terminator || previous_line_start;
                 continue;
             }
             let token_start = pos;
@@ -1904,6 +1933,60 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Plus);
         assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
         assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn skips_annex_b_html_open_comment() {
+        let tokens = lex("1<!--x\n+2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn skips_annex_b_html_close_comment_at_line_start() {
+        let tokens = lex("1\n-->x\n+2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn skips_annex_b_html_close_comment_after_unicode_line_separator() {
+        let tokens = lex("1\u{2028}-->x\u{2029}+2").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_html_close_comment_sequence_as_tokens_when_not_line_start() {
+        let tokens = lex("x-->1").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("x".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::MinusMinus);
+        assert_eq!(tokens[2].kind, TokenKind::Greater);
+        assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[4].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn allows_html_close_comment_after_leading_block_comment() {
+        let tokens = lex("/*lead*/-->x\n1").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_html_close_comment_sequence_after_non_line_start_block_comment() {
+        let tokens = lex("a/*mid*/-->1").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::MinusMinus);
+        assert_eq!(tokens[2].kind, TokenKind::Greater);
+        assert_eq!(tokens[3].kind, TokenKind::Number(1.0));
+        assert_eq!(tokens[4].kind, TokenKind::Eof);
     }
 
     #[test]

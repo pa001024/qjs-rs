@@ -7057,7 +7057,9 @@ impl Vm {
         } else {
             (String::new(), String::new())
         };
-        let source = format!("(function({params}) {{\n{body}\n}})");
+        // Align CreateDynamicFunction source assembly with QuickJS/spec:
+        // insert a line feed between parameter text and ')'.
+        let source = format!("(function({params}\n) {{\n{body}\n}})");
         let expr = parse_expression(&source).map_err(|err| {
             VmError::UncaughtException(JsValue::String(format!("SyntaxError: {}", err.message)))
         })?;
@@ -20411,6 +20413,52 @@ mod tests {
         realm.define_global(
             "String",
             JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_function_constructor_accepts_html_open_comment_params() {
+        let script = parse_script("typeof Function('<!--', '') === 'function';")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_function_constructor_accepts_html_close_comment_params_with_lf() {
+        let script = parse_script("typeof Function('\\n-->', '') === 'function';")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_function_constructor_rejects_html_close_comment_params_without_lf() {
+        let script = parse_script(
+            "var threw = false; \
+             try { Function('-->', ''); } catch (e) { threw = true; } \
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
         );
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }

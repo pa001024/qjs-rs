@@ -3973,8 +3973,7 @@ impl Parser {
                 } else if self.check(&TokenKind::LBracket) {
                     self.parse_array_parameter_pattern_effects(&generated_identifier)?
                 } else {
-                    self.consume_parameter_pattern("expected parameter name")?;
-                    Vec::new()
+                    return Err(self.error_current("expected parameter name"));
                 };
                 pattern_effects.extend(effects);
                 generated_identifier
