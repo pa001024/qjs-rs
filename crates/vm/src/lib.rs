@@ -323,7 +323,7 @@ struct EvalContext {
 
 #[derive(Debug, Clone)]
 struct AnnexBEvalVarFunctionContext {
-    names: BTreeSet<String>,
+    pending_syncs: BTreeMap<String, usize>,
     var_scope: ScopeRef,
 }
 
@@ -3102,11 +3102,15 @@ impl Vm {
             has_arguments_param,
         });
 
+        let mut annex_b_excluded_names = function.params.clone();
+        if !is_arrow_function && !has_arguments_param {
+            annex_b_excluded_names.push("arguments".to_string());
+        }
         let pushed_annex_b_context =
             match self.push_annex_b_var_function_context_for_code(
                 &function.code,
                 closure.strict,
-                &function.params,
+                &annex_b_excluded_names,
             ) {
                 Ok(pushed) => pushed,
                 Err(err) => {
@@ -7262,9 +7266,13 @@ impl Vm {
                     self.ensure_annex_b_eval_var_binding(name)?;
                 }
                 let var_scope = self.current_var_scope_ref()?;
+                let pending_syncs = annex_b_eval_var_function_names
+                    .iter()
+                    .map(|name| (name.clone(), usize::MAX))
+                    .collect();
                 self.annex_b_eval_var_function_contexts
                     .push(AnnexBEvalVarFunctionContext {
-                        names: annex_b_eval_var_function_names.clone(),
+                        pending_syncs,
                         var_scope,
                     });
                 pushed_annex_b_eval_context = true;
@@ -11088,19 +11096,21 @@ impl Vm {
         if strict {
             return Ok(false);
         }
-        let mut names = Self::annex_b_var_function_names_from_code(code);
+        let mut pending_syncs = Self::annex_b_var_function_sync_counts_from_code(code);
         for name in excluded_names {
-            names.remove(name);
+            pending_syncs.remove(name);
         }
-        if names.is_empty() {
+        if pending_syncs.is_empty() {
             return Ok(false);
         }
-        for name in &names {
+        for name in pending_syncs.keys() {
             self.ensure_annex_b_eval_var_binding(name)?;
         }
         let var_scope = self.current_var_scope_ref()?;
-        self.annex_b_eval_var_function_contexts
-            .push(AnnexBEvalVarFunctionContext { names, var_scope });
+        self.annex_b_eval_var_function_contexts.push(AnnexBEvalVarFunctionContext {
+            pending_syncs,
+            var_scope,
+        });
         Ok(true)
     }
 
@@ -11109,7 +11119,12 @@ impl Vm {
         name: &str,
         function_value: JsValue,
     ) -> Result<(), VmError> {
-        let Some(var_scope) = self.active_annex_b_eval_var_scope_for_name(name)? else {
+        let current_scope = self.current_scope_ref()?;
+        let current_var_scope = self.current_var_scope_ref()?;
+        if Rc::ptr_eq(&current_scope, &current_var_scope) {
+            return Ok(());
+        }
+        let Some(var_scope) = self.consume_annex_b_eval_var_sync_slot(name)? else {
             return Ok(());
         };
         self.maybe_set_inferred_function_name(&function_value, name);
@@ -11136,15 +11151,26 @@ impl Vm {
         Ok(())
     }
 
-    fn active_annex_b_eval_var_scope_for_name(
-        &self,
-        name: &str,
-    ) -> Result<Option<ScopeRef>, VmError> {
+    fn consume_annex_b_eval_var_sync_slot(&mut self, name: &str) -> Result<Option<ScopeRef>, VmError> {
         let current_var_scope = self.current_var_scope_ref()?;
-        for context in self.annex_b_eval_var_function_contexts.iter().rev() {
-            if context.names.contains(name) && Rc::ptr_eq(&context.var_scope, &current_var_scope) {
-                return Ok(Some(context.var_scope.clone()));
+        for context in self.annex_b_eval_var_function_contexts.iter_mut().rev() {
+            if !Rc::ptr_eq(&context.var_scope, &current_var_scope) {
+                continue;
             }
+            let remove_slot = {
+                let Some(remaining) = context.pending_syncs.get_mut(name) else {
+                    continue;
+                };
+                if *remaining == 0 {
+                    continue;
+                }
+                *remaining = remaining.saturating_sub(1);
+                *remaining == 0
+            };
+            if remove_slot {
+                context.pending_syncs.remove(name);
+            }
+            return Ok(Some(context.var_scope.clone()));
         }
         Ok(None)
     }
@@ -14156,33 +14182,58 @@ impl Vm {
         cursor
     }
 
-    fn annex_b_var_function_names_from_code(code: &[Opcode]) -> BTreeSet<String> {
-        let mut candidate_names = BTreeSet::new();
-        let mut lexical_names = BTreeSet::new();
+    fn annex_b_var_function_sync_counts_from_code(code: &[Opcode]) -> BTreeMap<String, usize> {
+        let mut candidate_sync_counts = BTreeMap::new();
+        let mut lexical_scopes: Vec<BTreeSet<String>> = vec![BTreeSet::new()];
         let mut scope_depth = 0usize;
         for (index, opcode) in code.iter().enumerate() {
             match opcode {
-                Opcode::EnterScope => scope_depth = scope_depth.saturating_add(1),
-                Opcode::ExitScope => scope_depth = scope_depth.saturating_sub(1),
-                Opcode::EnterParamInitScope => scope_depth = scope_depth.saturating_sub(1),
-                Opcode::ExitParamInitScope => scope_depth = scope_depth.saturating_add(1),
+                Opcode::EnterScope => {
+                    scope_depth = scope_depth.saturating_add(1);
+                    lexical_scopes.push(BTreeSet::new());
+                }
+                Opcode::ExitScope => {
+                    scope_depth = scope_depth.saturating_sub(1);
+                    if lexical_scopes.len() > 1 {
+                        lexical_scopes.pop();
+                    }
+                }
+                Opcode::EnterParamInitScope => {
+                    scope_depth = scope_depth.saturating_sub(1);
+                    if lexical_scopes.len() > 1 {
+                        lexical_scopes.pop();
+                    }
+                }
+                Opcode::ExitParamInitScope => {
+                    scope_depth = scope_depth.saturating_add(1);
+                    lexical_scopes.push(BTreeSet::new());
+                }
                 Opcode::DefineVariable { name, .. } => {
                     let is_catch_binding_identifier = index > 0
                         && matches!(code.get(index - 1), Some(Opcode::LoadException));
                     if !is_catch_binding_identifier {
-                        lexical_names.insert(name.clone());
+                        if let Some(current_scope) = lexical_scopes.last_mut() {
+                            current_scope.insert(name.clone());
+                        }
                     }
                 }
                 Opcode::DefineFunction { name, .. } => {
                     if scope_depth > 0 {
-                        candidate_names.insert(name.clone());
+                        let has_conflict = lexical_scopes
+                            .iter()
+                            .any(|lexical_names| lexical_names.contains(name));
+                        if !has_conflict {
+                            *candidate_sync_counts.entry(name.clone()).or_insert(0) += 1;
+                        }
+                        if let Some(current_scope) = lexical_scopes.last_mut() {
+                            current_scope.insert(name.clone());
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        candidate_names.retain(|name| !lexical_names.contains(name));
-        candidate_names
+        candidate_sync_counts
     }
 
     fn current_eval_context_rejects_arguments_declaration(&self) -> bool {

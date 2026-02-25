@@ -163,12 +163,14 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `annexB/language/eval-code/direct (v10)`: discovered=309, executed=276, skipped=33, passed=276, failed=0
 - `annexB/language/eval-code/indirect (v1)`: discovered=160, executed=128, skipped=32, passed=128, failed=0
 - `annexB/language/function-code (v1)`: discovered=159, executed=159, skipped=0, passed=155, failed=4
+- `annexB/language/function-code (v2)`: discovered=159, executed=159, skipped=0, passed=157, failed=2
 - `annexB/language/global-code (v1)`: discovered=153, executed=128, skipped=25, passed=128, failed=0
 - `annexB (v3)`: discovered=1086, executed=825, skipped=261, passed=577, failed=248
 - `annexB (v4)`: discovered=1086, executed=825, skipped=261, passed=628, failed=197
 - `annexB (v5)`: discovered=1086, executed=825, skipped=261, passed=684, failed=141
 - `annexB (v6)`: discovered=1086, executed=825, skipped=261, passed=774, failed=51
 - `annexB (v7)`: discovered=1086, executed=825, skipped=261, passed=806, failed=19
+- `annexB (v11)`: discovered=1086, executed=825, skipped=261, passed=808, failed=17
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -212,6 +214,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 本轮 Annex B eval direct 清零：parser 将 embedded function declaration 统一降级为 block 语义；VM 在 direct non-strict eval 对齐 QuickJS `create_func_var/OP_scope_put_var` 路径，新增“候选 block function 名称筛选 + varEnv 预创建 + DefineFunction 时同步 varEnv”机制，并补齐 lexical 冲突跳过条件。`annexB/language/eval-code/direct` 达到 `276/0`（`target/test262-annexb-language-eval-code-direct-20260225-v10.json`），`annexB` 全目录提升至 `628/197`（`target/test262-annexb-baseline-20260225-v4.json`），剩余失败簇转移到 `annexB/language/eval-code/indirect`。
 - 本轮 Annex B eval indirect 清零：将同一套 B.3.3 绑定同步机制扩展到 non-strict indirect eval，`annexB/language/eval-code/indirect` 达到 `128/0`（`target/test262-annexb-language-eval-code-indirect-20260225-v1.json`），`annexB` 全目录进一步提升至 `684/141`（`target/test262-annexb-baseline-20260225-v5.json`），主失败簇转移到 `annexB/language/function-code` 与 `annexB/language/global-code`。
 - 本轮 Annex B function/global 主簇清理：VM 将 B.3.3 varEnv 同步机制扩展到 non-strict script/function 执行（非 eval）路径，并补齐“catch BindingIdentifier 不触发 lexical 冲突过滤”与“参数名排除（含默认参数）”条件，消除 `function-code/global-code` 的 block-level function declaration 大簇；`annexB` 提升到 `806/19`（`target/test262-annexb-baseline-20260225-v7.json`），剩余失败集中在 `assignmenttargettype` 与少量 parse-negative 边角。
+- 本轮 Annex B function/global 细化收敛：在上述机制上补齐 `arguments` 排除与“按候选声明计数同步”（避免同名非候选声明错误覆盖），`function-code` 进一步收敛到 `157/2`（`target/test262-annexb-language-function-code-20260225-v2.json`），`annexB` 提升到 `808/17`（`target/test262-annexb-baseline-20260225-v11.json`）。
 - 本轮 Annex B RegExp 再收敛：对齐 QuickJS `lre_parse_escape` 的 legacy 规则，补齐 non-`u` identity escape、decimal/octal fallback 与 `\x/\u` 不完整逃逸回退；同时 `RegExp.prototype.exec` 返回值补齐 `index/input` 字段。`annexB/built-ins/RegExp` 达到 `22/0`（`target/test262-annexb-builtins-regexp-20260225-v6.json`）。
 - 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），并新增 `RegExp.prototype.compile`（含 `lastIndex` throw=true 回写路径与 RegExp-pattern 分支）；同时将 HostFunction 构造限制为 `bind` 产物；相关 7 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
