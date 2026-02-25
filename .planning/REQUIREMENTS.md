@@ -75,32 +75,32 @@ Roadmap mapping table. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SEM-01 | TBD | Pending |
-| SEM-02 | TBD | Pending |
-| SEM-03 | TBD | Pending |
-| SEM-04 | TBD | Pending |
-| MEM-01 | TBD | Pending |
-| MEM-02 | TBD | Pending |
-| MEM-03 | TBD | Pending |
-| ASY-01 | TBD | Pending |
-| ASY-02 | TBD | Pending |
-| MOD-01 | TBD | Pending |
-| MOD-02 | TBD | Pending |
-| BUI-01 | TBD | Pending |
-| BUI-02 | TBD | Pending |
-| BUI-03 | TBD | Pending |
-| BUI-04 | TBD | Pending |
-| BUI-05 | TBD | Pending |
-| TST-01 | TBD | Pending |
-| TST-02 | TBD | Pending |
-| TST-03 | TBD | Pending |
-| TST-04 | TBD | Pending |
+| SEM-01 | Phase 1 | Pending |
+| SEM-02 | Phase 1 | Pending |
+| SEM-03 | Phase 1 | Pending |
+| SEM-04 | Phase 1 | Pending |
+| MEM-01 | Phase 2 | Pending |
+| MEM-02 | Phase 2 | Pending |
+| MEM-03 | Phase 7 | Pending |
+| ASY-01 | Phase 3 | Pending |
+| ASY-02 | Phase 3 | Pending |
+| MOD-01 | Phase 4 | Pending |
+| MOD-02 | Phase 4 | Pending |
+| BUI-01 | Phase 5 | Pending |
+| BUI-02 | Phase 5 | Pending |
+| BUI-03 | Phase 5 | Pending |
+| BUI-04 | Phase 6 | Pending |
+| BUI-05 | Phase 6 | Pending |
+| TST-01 | Phase 7 | Pending |
+| TST-02 | Phase 7 | Pending |
+| TST-03 | Phase 7 | Pending |
+| TST-04 | Phase 7 | Pending |
 
 **Coverage:**
 - v1 requirements: 20 total
-- Mapped to phases: 0
-- Unmapped: 20 ⚠️
+- Mapped to phases: 20
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-02-25*
-*Last updated: 2026-02-25 after initialization*
+*Last updated: 2026-02-25 after roadmap mapping*
