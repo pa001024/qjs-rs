@@ -605,7 +605,18 @@ impl Vm {
 
         let strict = self.code_is_strict(&chunk.code);
         self.var_scope_stack.push(0);
+        let pushed_annex_b_context =
+            match self.push_annex_b_var_function_context_for_code(&chunk.code, strict, &[]) {
+                Ok(pushed) => pushed,
+                Err(err) => {
+                    let _ = self.var_scope_stack.pop();
+                    return Err(err);
+                }
+            };
         let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
+        if pushed_annex_b_context {
+            self.annex_b_eval_var_function_contexts.pop();
+        }
         let _ = self.var_scope_stack.pop();
         if signal.is_ok() {
             self.collect_garbage_if_needed(realm, false);
@@ -3091,6 +3102,23 @@ impl Vm {
             has_arguments_param,
         });
 
+        let pushed_annex_b_context =
+            match self.push_annex_b_var_function_context_for_code(
+                &function.code,
+                closure.strict,
+                &function.params,
+            ) {
+                Ok(pushed) => pushed,
+                Err(err) => {
+                    let _ = self.eval_contexts.pop();
+                    self.restore_caller_state(
+                        saved_handlers,
+                        saved_var_scope_stack,
+                        saved_param_init_body_scopes,
+                    );
+                    return Err(err);
+                }
+            };
         let signal = self.execute_code(
             &function.code,
             closure.functions.as_ref(),
@@ -3098,6 +3126,9 @@ impl Vm {
             true,
             closure.strict,
         );
+        if pushed_annex_b_context {
+            self.annex_b_eval_var_function_contexts.pop();
+        }
         let _ = self.eval_contexts.pop();
         let mut async_rejection: Option<JsValue> = None;
         let mut value = match signal {
@@ -11048,6 +11079,31 @@ impl Vm {
         Ok(())
     }
 
+    fn push_annex_b_var_function_context_for_code(
+        &mut self,
+        code: &[Opcode],
+        strict: bool,
+        excluded_names: &[String],
+    ) -> Result<bool, VmError> {
+        if strict {
+            return Ok(false);
+        }
+        let mut names = Self::annex_b_var_function_names_from_code(code);
+        for name in excluded_names {
+            names.remove(name);
+        }
+        if names.is_empty() {
+            return Ok(false);
+        }
+        for name in &names {
+            self.ensure_annex_b_eval_var_binding(name)?;
+        }
+        let var_scope = self.current_var_scope_ref()?;
+        self.annex_b_eval_var_function_contexts
+            .push(AnnexBEvalVarFunctionContext { names, var_scope });
+        Ok(true)
+    }
+
     fn sync_annex_b_eval_var_function_binding(
         &mut self,
         name: &str,
@@ -14098,6 +14154,35 @@ impl Vm {
             }
         }
         cursor
+    }
+
+    fn annex_b_var_function_names_from_code(code: &[Opcode]) -> BTreeSet<String> {
+        let mut candidate_names = BTreeSet::new();
+        let mut lexical_names = BTreeSet::new();
+        let mut scope_depth = 0usize;
+        for (index, opcode) in code.iter().enumerate() {
+            match opcode {
+                Opcode::EnterScope => scope_depth = scope_depth.saturating_add(1),
+                Opcode::ExitScope => scope_depth = scope_depth.saturating_sub(1),
+                Opcode::EnterParamInitScope => scope_depth = scope_depth.saturating_sub(1),
+                Opcode::ExitParamInitScope => scope_depth = scope_depth.saturating_add(1),
+                Opcode::DefineVariable { name, .. } => {
+                    let is_catch_binding_identifier = index > 0
+                        && matches!(code.get(index - 1), Some(Opcode::LoadException));
+                    if !is_catch_binding_identifier {
+                        lexical_names.insert(name.clone());
+                    }
+                }
+                Opcode::DefineFunction { name, .. } => {
+                    if scope_depth > 0 {
+                        candidate_names.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        candidate_names.retain(|name| !lexical_names.contains(name));
+        candidate_names
     }
 
     fn current_eval_context_rejects_arguments_declaration(&self) -> bool {
