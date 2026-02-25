@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -75,7 +75,7 @@ pub fn parse_script_with_super(
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
     validate_label_control_targets(statements)?;
-    validate_statement_list_early_errors(statements, StatementListKind::ScriptOrFunction)
+    validate_statement_list_early_errors(statements, StatementListKind::ScriptOrFunction, false)
 }
 
 fn validate_statement_list_strict_mode(
@@ -355,6 +355,15 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
                 validate_expression_strict_mode(property, strict)
             }
         },
+        Expr::AnnexBCallAssignmentTarget { target } => {
+            if strict {
+                return Err(ParseError {
+                    message: "invalid assignment target".to_string(),
+                    position: 0,
+                });
+            }
+            validate_expression_strict_mode(target, strict)
+        }
         Expr::SpreadArgument(expr) => validate_expression_strict_mode(expr, strict),
     }
 }
@@ -563,6 +572,12 @@ enum StatementListKind {
     BlockLike,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LexicalDeclarationKind {
+    FunctionDeclaration,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum ClassMethodKey {
     Static(String),
@@ -593,10 +608,15 @@ struct ParsedClassTail {
 fn validate_statement_list_early_errors(
     statements: &[Stmt],
     kind: StatementListKind,
+    inherited_strict: bool,
 ) -> Result<(), ParseError> {
-    let mut lexical_names = BTreeSet::new();
+    let strict = inherited_strict
+        || (kind == StatementListKind::ScriptOrFunction
+            && statement_list_has_use_strict_directive(statements));
+
+    let mut lexical_names = BTreeMap::new();
     for statement in statements {
-        collect_direct_lexical_names(statement, &mut lexical_names, kind)?;
+        collect_direct_lexical_names(statement, &mut lexical_names, kind, strict)?;
     }
 
     let mut var_declared_names = BTreeSet::new();
@@ -605,7 +625,7 @@ fn validate_statement_list_early_errors(
     }
 
     if let Some(name) = lexical_names
-        .iter()
+        .keys()
         .find(|candidate| var_declared_names.contains(*candidate))
     {
         return Err(ParseError {
@@ -615,29 +635,33 @@ fn validate_statement_list_early_errors(
     }
 
     for statement in statements {
-        validate_nested_statement_early_errors(statement)?;
+        validate_nested_statement_early_errors(statement, strict)?;
     }
 
     Ok(())
 }
 
-fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseError> {
+fn validate_nested_statement_early_errors(
+    statement: &Stmt,
+    strict: bool,
+) -> Result<(), ParseError> {
     match statement {
         Stmt::Block(statements) => {
-            validate_statement_list_early_errors(statements, StatementListKind::BlockLike)
+            validate_statement_list_early_errors(statements, StatementListKind::BlockLike, strict)
         }
         Stmt::FunctionDeclaration(declaration) => validate_statement_list_early_errors(
             &declaration.body,
             StatementListKind::ScriptOrFunction,
+            strict,
         ),
         Stmt::If {
             consequent,
             alternate,
             ..
         } => {
-            validate_nested_statement_early_errors(consequent)?;
+            validate_nested_statement_early_errors(consequent, strict)?;
             if let Some(alternate) = alternate {
-                validate_nested_statement_early_errors(alternate)?;
+                validate_nested_statement_early_errors(alternate, strict)?;
             }
             Ok(())
         }
@@ -645,20 +669,24 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
         | Stmt::With { body, .. }
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
-        | Stmt::Labeled { body, .. } => validate_nested_statement_early_errors(body),
-        Stmt::Switch { cases, .. } => validate_switch_case_early_errors(cases),
+        | Stmt::Labeled { body, .. } => validate_nested_statement_early_errors(body, strict),
+        Stmt::Switch { cases, .. } => validate_switch_case_early_errors(cases, strict),
         Stmt::Try {
             try_block,
             catch_param,
             catch_block,
             finally_block,
         } => {
-            validate_statement_list_early_errors(try_block, StatementListKind::BlockLike)?;
+            validate_statement_list_early_errors(try_block, StatementListKind::BlockLike, strict)?;
             if let Some(catch_block) = catch_block {
-                validate_catch_block_early_errors(catch_param.as_ref(), catch_block)?;
+                validate_catch_block_early_errors(catch_param.as_ref(), catch_block, strict)?;
             }
             if let Some(finally_block) = finally_block {
-                validate_statement_list_early_errors(finally_block, StatementListKind::BlockLike)?;
+                validate_statement_list_early_errors(
+                    finally_block,
+                    StatementListKind::BlockLike,
+                    strict,
+                )?;
             }
             Ok(())
         }
@@ -675,14 +703,15 @@ fn validate_nested_statement_early_errors(statement: &Stmt) -> Result<(), ParseE
     }
 }
 
-fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseError> {
-    let mut lexical_names = BTreeSet::new();
+fn validate_switch_case_early_errors(cases: &[SwitchCase], strict: bool) -> Result<(), ParseError> {
+    let mut lexical_names = BTreeMap::new();
     for case in cases {
         for statement in &case.consequent {
             collect_direct_lexical_names(
                 statement,
                 &mut lexical_names,
                 StatementListKind::BlockLike,
+                strict,
             )?;
         }
     }
@@ -699,7 +728,7 @@ fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseEr
     }
 
     if let Some(name) = lexical_names
-        .iter()
+        .keys()
         .find(|candidate| var_declared_names.contains(*candidate))
     {
         return Err(ParseError {
@@ -710,7 +739,7 @@ fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseEr
 
     for case in cases {
         for statement in &case.consequent {
-            validate_nested_statement_early_errors(statement)?;
+            validate_nested_statement_early_errors(statement, strict)?;
         }
     }
 
@@ -720,19 +749,21 @@ fn validate_switch_case_early_errors(cases: &[SwitchCase]) -> Result<(), ParseEr
 fn validate_catch_block_early_errors(
     catch_param: Option<&Identifier>,
     catch_block: &[Stmt],
+    strict: bool,
 ) -> Result<(), ParseError> {
-    validate_statement_list_early_errors(catch_block, StatementListKind::BlockLike)?;
+    validate_statement_list_early_errors(catch_block, StatementListKind::BlockLike, strict)?;
 
     if let Some(catch_param) = catch_param {
-        let mut lexical_names = BTreeSet::new();
+        let mut lexical_names = BTreeMap::new();
         for statement in catch_block {
             collect_direct_lexical_names(
                 statement,
                 &mut lexical_names,
                 StatementListKind::BlockLike,
+                strict,
             )?;
         }
-        if lexical_names.contains(&catch_param.0) {
+        if lexical_names.contains_key(&catch_param.0) {
             return Err(ParseError {
                 message: format!(
                     "catch parameter conflicts with lexical declaration: {}",
@@ -748,21 +779,27 @@ fn validate_catch_block_early_errors(
 
 fn collect_direct_lexical_names(
     statement: &Stmt,
-    lexical_names: &mut BTreeSet<String>,
+    lexical_names: &mut BTreeMap<String, LexicalDeclarationKind>,
     kind: StatementListKind,
+    strict: bool,
 ) -> Result<(), ParseError> {
     match statement {
         Stmt::VariableDeclaration(declaration) => {
-            add_lexical_name_if_needed(lexical_names, declaration)?;
+            add_lexical_name_if_needed(lexical_names, declaration, strict)?;
         }
         Stmt::VariableDeclarations(declarations) => {
             for declaration in declarations {
-                add_lexical_name_if_needed(lexical_names, declaration)?;
+                add_lexical_name_if_needed(lexical_names, declaration, strict)?;
             }
         }
         Stmt::FunctionDeclaration(declaration) => {
             if kind == StatementListKind::BlockLike {
-                add_lexical_name(lexical_names, &declaration.name.0)?;
+                add_lexical_name(
+                    lexical_names,
+                    &declaration.name.0,
+                    LexicalDeclarationKind::FunctionDeclaration,
+                    strict,
+                )?;
             }
         }
         _ => {}
@@ -771,22 +808,40 @@ fn collect_direct_lexical_names(
 }
 
 fn add_lexical_name_if_needed(
-    lexical_names: &mut BTreeSet<String>,
+    lexical_names: &mut BTreeMap<String, LexicalDeclarationKind>,
     declaration: &VariableDeclaration,
+    strict: bool,
 ) -> Result<(), ParseError> {
     if !matches!(declaration.kind, BindingKind::Let | BindingKind::Const) {
         return Ok(());
     }
-    add_lexical_name(lexical_names, &declaration.name.0)
+    add_lexical_name(
+        lexical_names,
+        &declaration.name.0,
+        LexicalDeclarationKind::Other,
+        strict,
+    )
 }
 
-fn add_lexical_name(lexical_names: &mut BTreeSet<String>, name: &str) -> Result<(), ParseError> {
-    if !lexical_names.insert(name.to_string()) {
+fn add_lexical_name(
+    lexical_names: &mut BTreeMap<String, LexicalDeclarationKind>,
+    name: &str,
+    kind: LexicalDeclarationKind,
+    strict: bool,
+) -> Result<(), ParseError> {
+    if let Some(existing_kind) = lexical_names.get(name) {
+        if !strict
+            && *existing_kind == LexicalDeclarationKind::FunctionDeclaration
+            && kind == LexicalDeclarationKind::FunctionDeclaration
+        {
+            return Ok(());
+        }
         return Err(ParseError {
             message: format!("duplicate lexical declaration: {name}"),
             position: 0,
         });
     }
+    lexical_names.insert(name.to_string(), kind);
     Ok(())
 }
 
@@ -1464,22 +1519,7 @@ impl Parser {
                     self.parse_for_head_array_pattern_declaration(BindingKind::Let, elements)?;
                 Some(ForInitializer::VariableDeclarations(declarations))
             } else {
-                let declaration = self.parse_variable_declaration(BindingKind::Let)?;
-                let declaration = match declaration {
-                    Stmt::VariableDeclaration(declaration) => {
-                        ForInitializer::VariableDeclaration(declaration)
-                    }
-                    Stmt::VariableDeclarations(declarations) => {
-                        ForInitializer::VariableDeclarations(declarations)
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "invalid for initializer".to_string(),
-                            position: self.current_position(),
-                        });
-                    }
-                };
-                Some(declaration)
+                Some(self.parse_for_head_variable_declaration(BindingKind::Let)?)
             }
         } else if self.matches_keyword("const") {
             if self.matches(&TokenKind::LBracket) {
@@ -1493,22 +1533,7 @@ impl Parser {
                     self.parse_for_head_array_pattern_declaration(BindingKind::Const, elements)?;
                 Some(ForInitializer::VariableDeclarations(declarations))
             } else {
-                let declaration = self.parse_variable_declaration(BindingKind::Const)?;
-                let declaration = match declaration {
-                    Stmt::VariableDeclaration(declaration) => {
-                        ForInitializer::VariableDeclaration(declaration)
-                    }
-                    Stmt::VariableDeclarations(declarations) => {
-                        ForInitializer::VariableDeclarations(declarations)
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "invalid for initializer".to_string(),
-                            position: self.current_position(),
-                        });
-                    }
-                };
-                Some(declaration)
+                Some(self.parse_for_head_variable_declaration(BindingKind::Const)?)
             }
         } else if self.matches_keyword("var") {
             if self.matches(&TokenKind::LBracket) {
@@ -1522,22 +1547,7 @@ impl Parser {
                     self.parse_for_head_array_pattern_declaration(BindingKind::Var, elements)?;
                 Some(ForInitializer::VariableDeclarations(declarations))
             } else {
-                let declaration = self.parse_variable_declaration(BindingKind::Var)?;
-                let declaration = match declaration {
-                    Stmt::VariableDeclaration(declaration) => {
-                        ForInitializer::VariableDeclaration(declaration)
-                    }
-                    Stmt::VariableDeclarations(declarations) => {
-                        ForInitializer::VariableDeclarations(declarations)
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "invalid for initializer".to_string(),
-                            position: self.current_position(),
-                        });
-                    }
-                };
-                Some(declaration)
+                Some(self.parse_for_head_variable_declaration(BindingKind::Var)?)
             }
         } else {
             Some(ForInitializer::Expression(self.parse_expression_no_in()?))
@@ -1603,6 +1613,29 @@ impl Parser {
             update,
             body: Box::new(body),
         })
+    }
+
+    fn parse_for_head_variable_declaration(
+        &mut self,
+        kind: BindingKind,
+    ) -> Result<ForInitializer, ParseError> {
+        let saved_allow_in = self.allow_in;
+        self.allow_in = false;
+        let declaration = self.parse_variable_declaration(kind);
+        self.allow_in = saved_allow_in;
+        let declaration = declaration?;
+        match declaration {
+            Stmt::VariableDeclaration(declaration) => {
+                Ok(ForInitializer::VariableDeclaration(declaration))
+            }
+            Stmt::VariableDeclarations(declarations) => {
+                Ok(ForInitializer::VariableDeclarations(declarations))
+            }
+            _ => Err(ParseError {
+                message: "invalid for initializer".to_string(),
+                position: self.current_position(),
+            }),
+        }
     }
 
     fn parse_for_in_of_rhs_expression(&mut self) -> Result<Expr, ParseError> {
@@ -1763,14 +1796,17 @@ impl Parser {
 
     fn supports_for_in_lowering(initializer: Option<&ForInitializer>) -> bool {
         match initializer {
-            Some(ForInitializer::VariableDeclaration(VariableDeclaration {
-                initializer, ..
-            })) => initializer.is_none(),
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                declaration.kind == BindingKind::Var || declaration.initializer.is_none()
+            }
             Some(ForInitializer::VariableDeclarations(declarations)) => {
-                declarations.len() == 1 && declarations[0].initializer.is_none()
+                declarations.len() == 1
+                    && (declarations[0].kind == BindingKind::Var
+                        || declarations[0].initializer.is_none())
             }
             Some(ForInitializer::Expression(target)) => {
                 Self::is_simple_assignment_target_expression(target)
+                    || Self::is_annex_b_call_assignment_target(target)
             }
             None => false,
         }
@@ -1786,6 +1822,7 @@ impl Parser {
             }
             Some(ForInitializer::Expression(target)) => {
                 Self::is_simple_assignment_target_expression(target)
+                    || Self::is_annex_b_call_assignment_target(target)
             }
             None => false,
         }
@@ -1796,6 +1833,10 @@ impl Parser {
             expression,
             Expr::Identifier(_) | Expr::Member { .. } | Expr::MemberComputed { .. }
         )
+    }
+
+    fn is_annex_b_call_assignment_target(expression: &Expr) -> bool {
+        matches!(expression, Expr::Call { .. })
     }
 
     fn lower_for_in_statement(
@@ -1809,11 +1850,54 @@ impl Parser {
         let index_name = self.next_for_in_temp_identifier("index");
         let current_name = self.next_for_in_temp_identifier("current");
         let iterable_identifier = Expr::Identifier(iterable_name.clone());
+        let current_key_value_expr = Expr::Identifier(current_name.clone());
 
         let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
             .into_iter()
             .map(Self::tdz_marker_declaration)
             .collect::<Vec<_>>();
+        let mut initializer_prelude = Vec::new();
+        let mut iteration_statements = Vec::new();
+        match initializer {
+            None => {}
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_key_value_expr,
+                    &mut initializer_prelude,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                if declarations.len() != 1 {
+                    return Err(self.error_current("invalid for-in initializer"));
+                }
+                let declaration = declarations
+                    .into_iter()
+                    .next()
+                    .expect("for-in declaration should exist");
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_key_value_expr,
+                    &mut initializer_prelude,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::Expression(target)) => {
+                let assignment = self.rewrite_assignment_target(
+                    target,
+                    current_key_value_expr.clone(),
+                    None,
+                    self.current_position(),
+                )?;
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(assignment),
+                }));
+            }
+        }
+
+        statements.extend(initializer_prelude);
         statements.extend(vec![
             Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Let,
@@ -1858,52 +1942,12 @@ impl Parser {
             object: Box::new(Expr::Identifier(keys_name.clone())),
             property: Box::new(Expr::Identifier(index_name.clone())),
         };
-        let current_key_value_expr = Expr::Identifier(current_name.clone());
 
         let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
             kind: BindingKind::Let,
             name: current_name,
             initializer: Some(current_key_expr),
         });
-        let mut iteration_statements = Vec::new();
-        match initializer {
-            None => {}
-            Some(ForInitializer::VariableDeclaration(declaration)) => {
-                self.lower_for_in_initializer_declaration(
-                    declaration,
-                    &current_key_value_expr,
-                    &mut statements,
-                    &mut iteration_statements,
-                )?;
-            }
-            Some(ForInitializer::VariableDeclarations(declarations)) => {
-                if declarations.len() != 1 {
-                    return Err(self.error_current("invalid for-in initializer"));
-                }
-                let declaration = declarations
-                    .into_iter()
-                    .next()
-                    .expect("for-in declaration should exist");
-                self.lower_for_in_initializer_declaration(
-                    declaration,
-                    &current_key_value_expr,
-                    &mut statements,
-                    &mut iteration_statements,
-                )?;
-            }
-            Some(ForInitializer::Expression(target)) => {
-                let assignment = self.rewrite_assignment_target(
-                    target,
-                    current_key_value_expr.clone(),
-                    None,
-                    self.current_position(),
-                )?;
-                iteration_statements.push(Stmt::Expression(Expr::Unary {
-                    op: UnaryOp::Void,
-                    expr: Box::new(assignment),
-                }));
-            }
-        }
 
         iteration_statements.push(body);
         let guarded_iteration_body = Stmt::If {
@@ -2428,14 +2472,11 @@ impl Parser {
         outer_statements: &mut Vec<Stmt>,
         loop_statements: &mut Vec<Stmt>,
     ) -> Result<(), ParseError> {
-        if declaration.initializer.is_some() {
-            return Err(self.error_current("invalid for-in initializer"));
-        }
         if declaration.kind == BindingKind::Var {
             outer_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
                 kind: BindingKind::Var,
                 name: declaration.name.clone(),
-                initializer: None,
+                initializer: declaration.initializer,
             }));
             loop_statements.push(Stmt::Expression(Expr::Unary {
                 op: UnaryOp::Void,
@@ -2445,6 +2486,9 @@ impl Parser {
                 }),
             }));
             return Ok(());
+        }
+        if declaration.initializer.is_some() {
+            return Err(self.error_current("invalid for-in initializer"));
         }
         loop_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
             kind: declaration.kind,
@@ -3077,6 +3121,13 @@ impl Parser {
                     });
                 }
                 self.lower_object_assignment_pattern(properties, right, assignment_position)
+            }
+            other if Self::is_annex_b_call_assignment_target(&other) => {
+                let _ = right;
+                let _ = binary_op;
+                Ok(Expr::AnnexBCallAssignmentTarget {
+                    target: Box::new(other),
+                })
             }
             _ => Err(ParseError {
                 message: "invalid assignment target".to_string(),
@@ -3797,6 +3848,11 @@ impl Parser {
                 increment,
                 prefix,
             }),
+            other if Self::is_annex_b_call_assignment_target(&other) => {
+                Ok(Expr::AnnexBCallAssignmentTarget {
+                    target: Box::new(other),
+                })
+            }
             _ => Err(ParseError {
                 message: "invalid update target".to_string(),
                 position: self.current_position(),
@@ -5252,6 +5308,9 @@ impl Parser {
                 },
                 increment,
                 prefix,
+            },
+            Expr::AnnexBCallAssignmentTarget { target } => Expr::AnnexBCallAssignmentTarget {
+                target: Box::new(Self::rewrite_constructor_super_property_expr(*target)),
             },
             Expr::SpreadArgument(value) => Expr::SpreadArgument(Box::new(
                 Self::rewrite_constructor_super_property_expr(*value),

@@ -130,6 +130,9 @@ pub enum Expr {
         increment: bool,
         prefix: bool,
     },
+    AnnexBCallAssignmentTarget {
+        target: Box<Expr>,
+    },
     SpreadArgument(Box<Expr>),
 }
 

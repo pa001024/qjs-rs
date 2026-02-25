@@ -2237,6 +2237,16 @@ impl Vm {
                     pc = target;
                     continue;
                 }
+                Opcode::ThrowReferenceError => {
+                    let target = self.route_runtime_error_to_handler(
+                        VmError::UnknownIdentifier(
+                            "$__annexb_call_assignment_target__$".to_string(),
+                        ),
+                        code.len(),
+                    )?;
+                    pc = target;
+                    continue;
+                }
                 Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm, strict) {
                     Ok(result) => self.stack.push(result),
                     Err(err) => {
@@ -3106,23 +3116,22 @@ impl Vm {
         if !is_arrow_function && !has_arguments_param {
             annex_b_excluded_names.push("arguments".to_string());
         }
-        let pushed_annex_b_context =
-            match self.push_annex_b_var_function_context_for_code(
-                &function.code,
-                closure.strict,
-                &annex_b_excluded_names,
-            ) {
-                Ok(pushed) => pushed,
-                Err(err) => {
-                    let _ = self.eval_contexts.pop();
-                    self.restore_caller_state(
-                        saved_handlers,
-                        saved_var_scope_stack,
-                        saved_param_init_body_scopes,
-                    );
-                    return Err(err);
-                }
-            };
+        let pushed_annex_b_context = match self.push_annex_b_var_function_context_for_code(
+            &function.code,
+            closure.strict,
+            &annex_b_excluded_names,
+        ) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                let _ = self.eval_contexts.pop();
+                self.restore_caller_state(
+                    saved_handlers,
+                    saved_var_scope_stack,
+                    saved_param_init_body_scopes,
+                );
+                return Err(err);
+            }
+        };
         let signal = self.execute_code(
             &function.code,
             closure.functions.as_ref(),
@@ -11107,10 +11116,11 @@ impl Vm {
             self.ensure_annex_b_eval_var_binding(name)?;
         }
         let var_scope = self.current_var_scope_ref()?;
-        self.annex_b_eval_var_function_contexts.push(AnnexBEvalVarFunctionContext {
-            pending_syncs,
-            var_scope,
-        });
+        self.annex_b_eval_var_function_contexts
+            .push(AnnexBEvalVarFunctionContext {
+                pending_syncs,
+                var_scope,
+            });
         Ok(true)
     }
 
@@ -11151,7 +11161,10 @@ impl Vm {
         Ok(())
     }
 
-    fn consume_annex_b_eval_var_sync_slot(&mut self, name: &str) -> Result<Option<ScopeRef>, VmError> {
+    fn consume_annex_b_eval_var_sync_slot(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<ScopeRef>, VmError> {
         let current_var_scope = self.current_var_scope_ref()?;
         for context in self.annex_b_eval_var_function_contexts.iter_mut().rev() {
             if !Rc::ptr_eq(&context.var_scope, &current_var_scope) {
@@ -14209,8 +14222,8 @@ impl Vm {
                     lexical_scopes.push(BTreeSet::new());
                 }
                 Opcode::DefineVariable { name, .. } => {
-                    let is_catch_binding_identifier = index > 0
-                        && matches!(code.get(index - 1), Some(Opcode::LoadException));
+                    let is_catch_binding_identifier =
+                        index > 0 && matches!(code.get(index - 1), Some(Opcode::LoadException));
                     if !is_catch_binding_identifier {
                         if let Some(current_scope) = lexical_scopes.last_mut() {
                             current_scope.insert(name.clone());

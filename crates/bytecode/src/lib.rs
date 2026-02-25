@@ -109,6 +109,7 @@ pub enum Opcode {
     LoadException,
     RethrowIfException,
     Throw,
+    ThrowReferenceError,
     Call(usize),
     CallWithSpread(Vec<bool>),
     CallIdentifier {
@@ -2173,6 +2174,11 @@ impl Compiler {
                 self.compile_expr(left, code);
                 self.compile_expr(right, code);
                 code.push(Self::binary_opcode(*op));
+            }
+            Expr::AnnexBCallAssignmentTarget { target } => {
+                self.compile_expr(target, code);
+                code.push(Opcode::Pop);
+                code.push(Opcode::ThrowReferenceError);
             }
             Expr::SpreadArgument(inner) => {
                 // Spread arguments are lowered at call/construct sites.
