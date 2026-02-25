@@ -65,6 +65,7 @@ pub enum NativeFunction {
     MathPow,
     MathRandom,
     MathRound,
+    MathTrunc,
     MathSin,
     MathSqrt,
     MathTan,

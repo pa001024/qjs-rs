@@ -43,8 +43,10 @@
 - `test262 annexB/built-ins/Date/prototype/toGMTString` 最新全量：`executed=1`、`passed=1`、`failed=0`（快照：`target/test262-annexb-date-toGMTString-20260225-v1.json`）。
 - `test262 annexB/built-ins/escape` 最新全量：`executed=8`、`passed=8`、`failed=0`（快照：`target/test262-annexb-escape-20260225-v1.json`）。
 - `test262 annexB/built-ins/unescape` 最新全量：`executed=11`、`passed=11`、`failed=0`（快照：`target/test262-annexb-unescape-20260225-v1.json`）。
+- `test262 annexB/built-ins/String/prototype` 最新全量：`executed=39`、`passed=39`、`failed=0`（快照：`target/test262-annexb-string-prototype-20260225-v5.json`）。
 - `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2329`、`failed=0`（快照：`target/test262-builtins-array-20260225-v27-s3000.json`）。
 - 本轮新增语义收敛：
+  - Annex B String 收敛：按 QuickJS `js_string_substr/js_string_CreateHTML` 方向补齐 `String.prototype.substr` 与 13 个 HTML 包装方法（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），覆盖 `length/name` 元数据、非构造器约束、属性值 `\" -> &quot;` 转义、UTF-16 code-unit `substr` 行为，并为 `Math.trunc`/`Number.isNaN` 补最小支撑路径，`annexB/built-ins/String/prototype` 子集清零（`39/0`）。
   - Annex B Date/Global 收敛：新增 `escape/unescape` native 算法（按 QuickJS `js_global_escape/js_global_unescape` 的 code-unit 规则）、补齐 `Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 同一函数对象），并修复 HostFunction 构造语义（仅 `bind` 产物可构造），对应 5 个 Annex B 目录全部清零。
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `Array` 失败簇首轮收敛：补齐 `Array.from`（迭代器/array-like 双路径 + mapfn + constructor 分派）、`Array(length)` 非法长度 `RangeError`、`Array.isArray`（Array marker）和 `Array.prototype.splice` 最小路径；同时修复 `NativeFunction` 属性读取的原型链回退并补回 `Object.__tdzMarker` 自有属性声明，消除 for-in/for-of 回归。

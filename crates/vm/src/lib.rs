@@ -163,6 +163,20 @@ enum HostFunction {
     StringCharCodeAt,
     StringLastIndexOf,
     StringSubstring,
+    StringSubstr,
+    StringAnchor,
+    StringBig,
+    StringBlink,
+    StringBold,
+    StringFixed,
+    StringFontColor,
+    StringFontSize,
+    StringItalics,
+    StringLink,
+    StringSmall,
+    StringStrike,
+    StringSub,
+    StringSup,
     NumberToString,
     NumberValueOf,
     NumberToFixed,
@@ -923,6 +937,20 @@ impl Vm {
             | HostFunction::StringCharCodeAt
             | HostFunction::StringLastIndexOf
             | HostFunction::StringSubstring
+            | HostFunction::StringSubstr
+            | HostFunction::StringAnchor
+            | HostFunction::StringBig
+            | HostFunction::StringBlink
+            | HostFunction::StringBold
+            | HostFunction::StringFixed
+            | HostFunction::StringFontColor
+            | HostFunction::StringFontSize
+            | HostFunction::StringItalics
+            | HostFunction::StringLink
+            | HostFunction::StringSmall
+            | HostFunction::StringStrike
+            | HostFunction::StringSub
+            | HostFunction::StringSup
             | HostFunction::NumberToString
             | HostFunction::NumberValueOf
             | HostFunction::NumberToFixed
@@ -3210,6 +3238,21 @@ impl Vm {
         }
     }
 
+    fn coerce_this_string_runtime(
+        &mut self,
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<String, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        if matches!(value, JsValue::Null | JsValue::Undefined) {
+            return Err(VmError::TypeError(
+                "String method called on null or undefined",
+            ));
+        }
+        self.coerce_to_string_runtime(value, realm, caller_strict)
+    }
+
     fn strict_this_number(&self, this_arg: Option<JsValue>) -> Result<f64, VmError> {
         let value = this_arg.unwrap_or(JsValue::Undefined);
         match value {
@@ -5193,6 +5236,111 @@ impl Vm {
                 };
                 Ok(JsValue::String(chars[from..to].iter().collect()))
             }
+            HostFunction::StringSubstr => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                Ok(self.execute_string_substr(receiver, &args))
+            }
+            HostFunction::StringAnchor => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "a",
+                    Some("name"),
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringBig => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "big", None, realm, caller_strict)
+            }
+            HostFunction::StringBlink => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "blink",
+                    None,
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringBold => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "b", None, realm, caller_strict)
+            }
+            HostFunction::StringFixed => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "tt", None, realm, caller_strict)
+            }
+            HostFunction::StringFontColor => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "font",
+                    Some("color"),
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringFontSize => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "font",
+                    Some("size"),
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringItalics => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "i", None, realm, caller_strict)
+            }
+            HostFunction::StringLink => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "a",
+                    Some("href"),
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringSmall => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "small",
+                    None,
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringStrike => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(
+                    receiver,
+                    &args,
+                    "strike",
+                    None,
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringSub => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "sub", None, realm, caller_strict)
+            }
+            HostFunction::StringSup => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_create_html(receiver, &args, "sup", None, realm, caller_strict)
+            }
             HostFunction::NumberToString => {
                 let number = self.strict_this_number(this_arg)?;
                 Ok(JsValue::String(Self::coerce_number_to_string(number)))
@@ -6042,6 +6190,10 @@ impl Vm {
             NativeFunction::MathRound => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).round()))
+            }
+            NativeFunction::MathTrunc => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).trunc()))
             }
             NativeFunction::MathSin => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -10702,9 +10854,23 @@ impl Vm {
                         | "indexOf"
                         | "lastIndexOf"
                         | "substring"
+                        | "substr"
                         | "toLowerCase"
                         | "toUpperCase"
                         | "trim"
+                        | "anchor"
+                        | "big"
+                        | "blink"
+                        | "bold"
+                        | "fixed"
+                        | "fontcolor"
+                        | "fontsize"
+                        | "italics"
+                        | "link"
+                        | "small"
+                        | "strike"
+                        | "sub"
+                        | "sup"
                         | "toString"
                         | "valueOf"
                         | "charAt"
@@ -11722,6 +11888,7 @@ impl Vm {
                 ("pow", NativeFunction::MathPow),
                 ("random", NativeFunction::MathRandom),
                 ("round", NativeFunction::MathRound),
+                ("trunc", NativeFunction::MathTrunc),
                 ("sin", NativeFunction::MathSin),
                 ("sqrt", NativeFunction::MathSqrt),
                 ("tan", NativeFunction::MathTan),
@@ -12337,6 +12504,48 @@ impl Vm {
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
             let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
             let search = self.create_host_function_value(HostFunction::StringSearchThis);
+            let substr = self.create_host_function_value(HostFunction::StringSubstr);
+            let anchor = self.create_host_function_value(HostFunction::StringAnchor);
+            let big = self.create_host_function_value(HostFunction::StringBig);
+            let blink = self.create_host_function_value(HostFunction::StringBlink);
+            let bold = self.create_host_function_value(HostFunction::StringBold);
+            let fixed = self.create_host_function_value(HostFunction::StringFixed);
+            let fontcolor = self.create_host_function_value(HostFunction::StringFontColor);
+            let fontsize = self.create_host_function_value(HostFunction::StringFontSize);
+            let italics = self.create_host_function_value(HostFunction::StringItalics);
+            let link = self.create_host_function_value(HostFunction::StringLink);
+            let small = self.create_host_function_value(HostFunction::StringSmall);
+            let strike = self.create_host_function_value(HostFunction::StringStrike);
+            let sub = self.create_host_function_value(HostFunction::StringSub);
+            let sup = self.create_host_function_value(HostFunction::StringSup);
+            self.set_builtin_function_length(&substr, 2.0);
+            self.set_builtin_function_name(&substr, "substr");
+            self.set_builtin_function_length(&anchor, 1.0);
+            self.set_builtin_function_name(&anchor, "anchor");
+            self.set_builtin_function_length(&big, 0.0);
+            self.set_builtin_function_name(&big, "big");
+            self.set_builtin_function_length(&blink, 0.0);
+            self.set_builtin_function_name(&blink, "blink");
+            self.set_builtin_function_length(&bold, 0.0);
+            self.set_builtin_function_name(&bold, "bold");
+            self.set_builtin_function_length(&fixed, 0.0);
+            self.set_builtin_function_name(&fixed, "fixed");
+            self.set_builtin_function_length(&fontcolor, 1.0);
+            self.set_builtin_function_name(&fontcolor, "fontcolor");
+            self.set_builtin_function_length(&fontsize, 1.0);
+            self.set_builtin_function_name(&fontsize, "fontsize");
+            self.set_builtin_function_length(&italics, 0.0);
+            self.set_builtin_function_name(&italics, "italics");
+            self.set_builtin_function_length(&link, 1.0);
+            self.set_builtin_function_name(&link, "link");
+            self.set_builtin_function_length(&small, 0.0);
+            self.set_builtin_function_name(&small, "small");
+            self.set_builtin_function_length(&strike, 0.0);
+            self.set_builtin_function_name(&strike, "strike");
+            self.set_builtin_function_length(&sub, 0.0);
+            self.set_builtin_function_name(&sub, "sub");
+            self.set_builtin_function_length(&sup, 0.0);
+            self.set_builtin_function_name(&sup, "sup");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -12376,6 +12585,20 @@ impl Vm {
                     ("replace", replace),
                     ("match", match_fn),
                     ("search", search),
+                    ("substr", substr),
+                    ("anchor", anchor),
+                    ("big", big),
+                    ("blink", blink),
+                    ("bold", bold),
+                    ("fixed", fixed),
+                    ("fontcolor", fontcolor),
+                    ("fontsize", fontsize),
+                    ("italics", italics),
+                    ("link", link),
+                    ("small", small),
+                    ("strike", strike),
+                    ("sub", sub),
+                    ("sup", sup),
                 ] {
                     object.properties.insert(name.to_string(), value);
                     object.property_attributes.insert(
@@ -14571,6 +14794,7 @@ impl Vm {
                 | (NativeFunction::NumberConstructor, "MIN_VALUE")
                 | (NativeFunction::NumberConstructor, "MAX_SAFE_INTEGER")
                 | (NativeFunction::NumberConstructor, "MIN_SAFE_INTEGER")
+                | (NativeFunction::NumberConstructor, "isNaN")
                 | (NativeFunction::SymbolConstructor, "iterator")
                 | (NativeFunction::SymbolConstructor, "asyncIterator")
                 | (NativeFunction::SymbolConstructor, "hasInstance")
@@ -15770,7 +15994,21 @@ impl Vm {
             "charCodeAt" => self.create_host_function_value(HostFunction::StringCharCodeAt),
             "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
             "substring" => self.create_host_function_value(HostFunction::StringSubstring),
+            "substr" => self.create_host_function_value(HostFunction::StringSubstr),
             "trim" => self.create_host_function_value(HostFunction::StringTrim),
+            "anchor" => self.create_host_function_value(HostFunction::StringAnchor),
+            "big" => self.create_host_function_value(HostFunction::StringBig),
+            "blink" => self.create_host_function_value(HostFunction::StringBlink),
+            "bold" => self.create_host_function_value(HostFunction::StringBold),
+            "fixed" => self.create_host_function_value(HostFunction::StringFixed),
+            "fontcolor" => self.create_host_function_value(HostFunction::StringFontColor),
+            "fontsize" => self.create_host_function_value(HostFunction::StringFontSize),
+            "italics" => self.create_host_function_value(HostFunction::StringItalics),
+            "link" => self.create_host_function_value(HostFunction::StringLink),
+            "small" => self.create_host_function_value(HostFunction::StringSmall),
+            "strike" => self.create_host_function_value(HostFunction::StringStrike),
+            "sub" => self.create_host_function_value(HostFunction::StringSub),
+            "sup" => self.create_host_function_value(HostFunction::StringSup),
             "constructor" => JsValue::NativeFunction(NativeFunction::StringConstructor),
             _ => match property.parse::<usize>() {
                 Ok(index) => receiver
@@ -15977,6 +16215,9 @@ impl Vm {
             }
             (NativeFunction::NumberConstructor, "MIN_SAFE_INTEGER") => {
                 JsValue::Number(-9007199254740991.0)
+            }
+            (NativeFunction::NumberConstructor, "isNaN") => {
+                JsValue::NativeFunction(NativeFunction::IsNaN)
             }
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)
@@ -16701,6 +16942,86 @@ impl Vm {
         escaped
     }
 
+    fn to_integer_or_infinity_i64(number: f64) -> i64 {
+        if number.is_nan() || number == 0.0 {
+            0
+        } else if number.is_infinite() {
+            if number.is_sign_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        } else {
+            number.trunc() as i64
+        }
+    }
+
+    fn execute_string_substr(&self, receiver: String, args: &[JsValue]) -> JsValue {
+        let code_units = self.string_to_js_code_units(&receiver);
+        let size = code_units.len() as i64;
+        let start_number = args
+            .first()
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
+        let mut int_start = Self::to_integer_or_infinity_i64(start_number);
+        if int_start < 0 {
+            int_start = size.saturating_add(int_start).max(0);
+        } else {
+            int_start = int_start.min(size);
+        }
+
+        let mut int_length = match args.get(1) {
+            None | Some(JsValue::Undefined) => size,
+            Some(value) => Self::to_integer_or_infinity_i64(self.to_number(value)),
+        };
+        int_length = int_length.max(0).min(size);
+
+        let int_end = int_start.saturating_add(int_length).min(size);
+        let start = int_start as usize;
+        let end = int_end as usize;
+        JsValue::String(Self::string_from_js_code_units_preserving_surrogates(
+            &code_units[start..end],
+        ))
+    }
+
+    fn execute_string_create_html(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        tag: &str,
+        attr: Option<&str>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let mut output = String::new();
+        output.push('<');
+        output.push_str(tag);
+        if let Some(attr_name) = attr {
+            output.push(' ');
+            output.push_str(attr_name);
+            output.push_str("=\"");
+            let attr_value = self.coerce_to_string_runtime(
+                args.first().cloned().unwrap_or(JsValue::Undefined),
+                realm,
+                caller_strict,
+            )?;
+            for code_unit in self.string_to_js_code_units(&attr_value) {
+                if code_unit == b'"' as u16 {
+                    output.push_str("&quot;");
+                } else {
+                    output.push_str(&Self::string_from_js_code_units(&[code_unit]));
+                }
+            }
+            output.push('"');
+        }
+        output.push('>');
+        output.push_str(&receiver);
+        output.push_str("</");
+        output.push_str(tag);
+        output.push('>');
+        Ok(JsValue::String(output))
+    }
+
     fn execute_escape(
         &mut self,
         args: &[JsValue],
@@ -16825,6 +17146,21 @@ impl Vm {
                 output.push('\u{FFFD}');
             }
             index += 1;
+        }
+        output
+    }
+
+    fn string_from_js_code_units_preserving_surrogates(code_units: &[u16]) -> String {
+        let mut output = String::new();
+        for code_unit in code_units {
+            let code_unit = *code_unit as u32;
+            if let Some(placeholder) = Self::surrogate_placeholder_from_code_unit(code_unit) {
+                output.push(placeholder);
+            } else if let Some(ch) = char::from_u32(code_unit) {
+                output.push(ch);
+            } else {
+                output.push('\u{FFFD}');
+            }
         }
         output
     }
@@ -19799,6 +20135,70 @@ mod tests {
         realm.define_global(
             "Date",
             JsValue::NativeFunction(NativeFunction::DateConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_string_substr_and_html_methods_follow_quickjs_behavior() {
+        let script = parse_script(
+            "var s = '\\uD834\\uDF06'; \
+             var ok1 = 'abc'.substr(-2) === 'bc'; \
+             var ok2 = 'abc'.substr(1, 9) === 'bc'; \
+             var ok3 = s.substr(0, 1) === '\\uD834'; \
+             var ok4 = '_'.anchor('\"') === '<a name=\"&quot;\">_</a>'; \
+             var ok5 = '_'.fontcolor('\"') === '<font color=\"&quot;\">_</font>'; \
+             var ok6 = String.prototype.link.call(0x2A, 0x2A) === '<a href=\"42\">42</a>'; \
+             ok1 && ok2 && ok3 && ok4 && ok5 && ok6;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_string_methods_are_not_constructors() {
+        let script = parse_script(
+            "var names = ['substr', 'anchor', 'big', 'blink', 'bold', 'fixed', 'fontcolor', 'fontsize', 'italics', 'link', 'small', 'strike', 'sub', 'sup']; \
+             var all = true; \
+             for (var i = 0; i < names.length; i = i + 1) { \
+               try { new String.prototype[names[i]](); all = false; } catch (e) {} \
+             } \
+             all;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_string_method_name_and_length_match_spec() {
+        let script = parse_script(
+            "String.prototype.substr.length === 2 && String.prototype.substr.name === 'substr' && \
+             String.prototype.anchor.length === 1 && String.prototype.anchor.name === 'anchor' && \
+             String.prototype.big.length === 0 && String.prototype.big.name === 'big' && \
+             String.prototype.fontcolor.length === 1 && String.prototype.fontcolor.name === 'fontcolor' && \
+             String.prototype.sup.length === 0 && String.prototype.sup.name === 'sup';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
         );
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
