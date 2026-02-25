@@ -143,6 +143,8 @@
   - `built-ins/WeakMap`：`37/0`（`new.target` 检查 + iterable 初始化链路已接通）
   - `built-ins/WeakSet`：`41/0`（`new.target` 检查 + `add/delete/has` 最小语义已接通）
   - `built-ins/Proxy`：`1/0`（`Proxy.revocable` 与 revoke 函数属性顺序已对齐）
+  - `built-ins/Map --max-cases 200`：`53/0`（`target/test262-builtins-map-20260226-v2-s200.json`；`v1-s200=49/4` -> `v2-s200=53/0`，已对齐 QuickJS `delete/clear/forEach/iterator/size` 主路径）
+  - `built-ins/Set --max-cases 200`：`126/0`（`target/test262-builtins-set-20260226-v2-s200.json`；`v1-s200=123/3` -> `v2-s200=126/0`，已对齐 tombstone 迭代语义与 `keys===values`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
@@ -156,6 +158,7 @@
   - Track I（全量基线推进）：开启 `test262` 更大样本/全量抽样与 nightly 快照，按失败簇持续回归清理。
   - Track K（Annex B String 后续）：在 `substr/CreateHTML` 已清零基础上，继续对齐 Annex B 其余字符串遗留方法（如 `trimLeft/trimRight`）并扩展回归快照。
   - Track L（Annex B 回归守护）：当前已达 `annexB 825/0`，后续仅做 nightly 回归守护与新增 test262 case 漂移跟踪。
+  - Track M（Map/Set 扩容）：将当前 `--max-cases 200` 采样推进到更大样本与目录级全量，优先处理 iterator helper 细项与 accessor 元数据角落用例。
 - 每个 Track 必须输出：
   - QuickJS 对照点（函数名/分支）
   - 代码提交（最小可验证增量）

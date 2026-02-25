@@ -21,6 +21,10 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `built-ins/WeakMap (latest)`: discovered=141, executed=37, skipped=104, passed=37, failed=0
 - `built-ins/WeakSet (latest)`: discovered=85, executed=41, skipped=44, passed=41, failed=0
 - `built-ins/Proxy (latest)`: discovered=311, executed=1, skipped=310, passed=1, failed=0
+- `built-ins/Map --max-cases 200 (v1-s200)`: discovered=204, executed=53, skipped=151, passed=49, failed=4
+- `built-ins/Map --max-cases 200 (v2-s200)`: discovered=204, executed=53, skipped=151, passed=53, failed=0
+- `built-ins/Set --max-cases 200 (v1-s200)`: discovered=383, executed=126, skipped=257, passed=123, failed=3
+- `built-ins/Set --max-cases 200 (v2-s200)`: discovered=383, executed=126, skipped=257, passed=126, failed=0
 - `language max-cases=5000 (latest)`: discovered=23882, executed=5000, skipped=18579, passed=4440, failed=560
 - `language max-cases=5000 (latest+1)`: discovered=23882, executed=5000, skipped=18579, passed=4462, failed=538
 - `language max-cases=5000 (latest+2)`: discovered=23882, executed=5000, skipped=18579, passed=4470, failed=530
@@ -213,6 +217,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/literals/numeric (latest)`: discovered=157, executed=83, skipped=74, passed=83, failed=0
 
 备注：
+- 本轮 built-ins/Map/Set 采样清零：对照 QuickJS `js_map_delete/js_map_clear/js_map_forEach/js_map_iterator_next/js_map_get_size` 路径，Map/Set 存储改为 tombstone + live iterator 语义，`delete/clear` 不再破坏已创建迭代器，`forEach` 在 delete+re-add 场景可重访新条目，`Map/Set.prototype.size` 改为 accessor brand check，且 `Set.prototype.keys === Set.prototype.values`。结果：`Map v1-s200 49/4 -> v2-s200 53/0`、`Set v1-s200 123/3 -> v2-s200 126/0`（快照：`target/test262-builtins-map-20260226-v2-s200.json`、`target/test262-builtins-set-20260226-v2-s200.json`）。
 - 本轮对齐 QuickJS Annex B comments/CreateDynamicFunction：lexer 新增 `<!--` 与“行首（含换行后）`-->`”HTML 注释词法路径；`Function` 构造器 source 拼接增加参数段后换行，并收紧 parser 参数列表非法 token 处理，修复 `createdynfn-html-*` 参数用例。对应 `annexB/language/comments` 达到 `8/0`，`annexB/built-ins/Function` 达到 `6/0`。
 - 本轮 Annex B eval direct 再收敛：parser 在 `catch` 参数路径补齐 object pattern（`catch ({ f })`）并降级为 catch block 前置 `let` 绑定，清理 `skip-early-err-try` 相关 parse fail；当前快照 `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v6.json`），剩余失败集中在 B.3.3 block function declaration 的运行时绑定语义。
 - 本轮 Annex B eval direct 清零：parser 将 embedded function declaration 统一降级为 block 语义；VM 在 direct non-strict eval 对齐 QuickJS `create_func_var/OP_scope_put_var` 路径，新增“候选 block function 名称筛选 + varEnv 预创建 + DefineFunction 时同步 varEnv”机制，并补齐 lexical 冲突跳过条件。`annexB/language/eval-code/direct` 达到 `276/0`（`target/test262-annexb-language-eval-code-direct-20260225-v10.json`），`annexB` 全目录提升至 `628/197`（`target/test262-annexb-baseline-20260225-v4.json`），剩余失败簇转移到 `annexB/language/eval-code/indirect`。

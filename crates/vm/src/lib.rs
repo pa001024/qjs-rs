@@ -44,7 +44,16 @@ const PROXY_TARGET_KEY: &str = "$__qjs_proxy_target__$";
 const PROXY_HANDLER_KEY: &str = "$__qjs_proxy_handler__$";
 const PROXY_OWN_KEYS_ORDER_KEY: &str = "$__qjs_proxy_own_keys_order__$";
 const PROXY_REVOKED_KEY: &str = "$__qjs_proxy_revoked__$";
+const MAP_ENTRIES_KEY: &str = "$__qjs_map_entries__$";
 const SET_ENTRIES_KEY: &str = "$__qjs_set_entries__$";
+const MAP_ITERATOR_TARGET_KEY: &str = "$__qjs_map_iterator_target__$";
+const MAP_ITERATOR_INDEX_KEY: &str = "$__qjs_map_iterator_index__$";
+const MAP_ITERATOR_KIND_KEY: &str = "$__qjs_map_iterator_kind__$";
+const MAP_ITERATOR_MARKER_KEY: &str = "$__qjs_map_iterator__$";
+const SET_ITERATOR_TARGET_KEY: &str = "$__qjs_set_iterator_target__$";
+const SET_ITERATOR_INDEX_KEY: &str = "$__qjs_set_iterator_index__$";
+const SET_ITERATOR_KIND_KEY: &str = "$__qjs_set_iterator_kind__$";
+const SET_ITERATOR_MARKER_KEY: &str = "$__qjs_set_iterator__$";
 const REGEXP_SOURCE_SLOT_KEY: &str = "$__qjs_regexp_source_slot__$";
 const REGEXP_FLAGS_SLOT_KEY: &str = "$__qjs_regexp_flags_slot__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
@@ -187,9 +196,25 @@ enum HostFunction {
     NumberToExponential,
     ArrayBufferSliceThis,
     MapSetThis,
+    MapGetThis,
+    MapHasThis,
+    MapDeleteThis,
+    MapClearThis,
+    MapEntriesThis,
+    MapKeysThis,
+    MapValuesThis,
+    MapForEachThis,
+    MapSizeGetterThis,
+    MapIteratorNextThis,
     SetAddThis,
     SetDeleteThis,
     SetHasThis,
+    SetClearThis,
+    SetEntriesThis,
+    SetValuesThis,
+    SetForEachThis,
+    SetSizeGetterThis,
+    SetIteratorNextThis,
     ProxyRevocable,
     ProxyRevoke {
         proxy: JsValue,
@@ -990,9 +1015,25 @@ impl Vm {
             | HostFunction::NumberToExponential
             | HostFunction::ArrayBufferSliceThis
             | HostFunction::MapSetThis
+            | HostFunction::MapGetThis
+            | HostFunction::MapHasThis
+            | HostFunction::MapDeleteThis
+            | HostFunction::MapClearThis
+            | HostFunction::MapEntriesThis
+            | HostFunction::MapKeysThis
+            | HostFunction::MapValuesThis
+            | HostFunction::MapForEachThis
+            | HostFunction::MapSizeGetterThis
+            | HostFunction::MapIteratorNextThis
             | HostFunction::SetAddThis
             | HostFunction::SetDeleteThis
             | HostFunction::SetHasThis
+            | HostFunction::SetClearThis
+            | HostFunction::SetEntriesThis
+            | HostFunction::SetValuesThis
+            | HostFunction::SetForEachThis
+            | HostFunction::SetSizeGetterThis
+            | HostFunction::SetIteratorNextThis
             | HostFunction::ProxyRevocable
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
@@ -3392,18 +3433,129 @@ impl Vm {
         }
     }
 
-    fn strict_this_set(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
-        match this_arg.unwrap_or(JsValue::Undefined) {
-            JsValue::Object(object_id) if self.has_object_marker(object_id, "__setTag")? => {
-                Ok(object_id)
-            }
-            _ => Err(VmError::TypeError(
-                "Set.prototype method called on incompatible",
-            )),
+    fn read_map_entries(
+        &self,
+        map_id: ObjectId,
+    ) -> Result<Vec<Option<(JsValue, JsValue)>>, VmError> {
+        let entries_id = self
+            .objects
+            .get(&map_id)
+            .and_then(|object| object.properties.get(MAP_ENTRIES_KEY))
+            .and_then(|value| match value {
+                JsValue::Object(object_id) => Some(*object_id),
+                _ => None,
+            });
+        let Some(entries_id) = entries_id else {
+            return Ok(Vec::new());
+        };
+        let entries_object = self
+            .objects
+            .get(&entries_id)
+            .ok_or(VmError::UnknownObject(entries_id))?;
+        let length = entries_object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        let mut entries = Vec::with_capacity(length);
+        for index in 0..length {
+            let pair = entries_object
+                .properties
+                .get(&index.to_string())
+                .cloned()
+                .unwrap_or(JsValue::Uninitialized);
+            let entry = match pair {
+                JsValue::Uninitialized => None,
+                JsValue::Object(pair_id) => {
+                    let pair_object = self
+                        .objects
+                        .get(&pair_id)
+                        .ok_or(VmError::UnknownObject(pair_id))?;
+                    Some((
+                        pair_object
+                            .properties
+                            .get("0")
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined),
+                        pair_object
+                            .properties
+                            .get("1")
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined),
+                    ))
+                }
+                _ => None,
+            };
+            entries.push(entry);
         }
+        Ok(entries)
     }
 
-    fn read_set_entries(&self, set_id: ObjectId) -> Result<Vec<JsValue>, VmError> {
+    fn write_map_entries(
+        &mut self,
+        map_id: ObjectId,
+        entries: Vec<Option<(JsValue, JsValue)>>,
+    ) -> Result<(), VmError> {
+        let mut pair_values = Vec::with_capacity(entries.len());
+        let mut size = 0usize;
+        for entry in entries.iter().cloned() {
+            if let Some((key, value)) = entry {
+                size += 1;
+                pair_values.push(self.create_array_from_values(vec![key, value])?);
+            } else {
+                pair_values.push(JsValue::Uninitialized);
+            }
+        }
+        let entries_array = self.create_array_from_values(pair_values)?;
+        let map_object = self
+            .objects
+            .get_mut(&map_id)
+            .ok_or(VmError::UnknownObject(map_id))?;
+        map_object
+            .properties
+            .insert(MAP_ENTRIES_KEY.to_string(), entries_array);
+        map_object.property_attributes.insert(
+            MAP_ENTRIES_KEY.to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        map_object
+            .properties
+            .insert("__mapSize".to_string(), JsValue::Number(size as f64));
+        Ok(())
+    }
+
+    fn map_size_for_object(&self, map_id: ObjectId) -> Result<f64, VmError> {
+        let map_object = self
+            .objects
+            .get(&map_id)
+            .ok_or(VmError::UnknownObject(map_id))?;
+        let size = map_object
+            .properties
+            .get("__mapSize")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
+        Ok(size.max(0.0))
+    }
+
+    fn set_size_for_object(&self, set_id: ObjectId) -> Result<f64, VmError> {
+        let set_object = self
+            .objects
+            .get(&set_id)
+            .ok_or(VmError::UnknownObject(set_id))?;
+        let size = set_object
+            .properties
+            .get("__setSize")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
+        Ok(size.max(0.0))
+    }
+
+    fn read_set_entries(&self, set_id: ObjectId) -> Result<Vec<Option<JsValue>>, VmError> {
         let entries_id = self
             .objects
             .get(&set_id)
@@ -3427,13 +3579,16 @@ impl Vm {
             .max(0.0) as usize;
         let mut entries = Vec::with_capacity(length);
         for index in 0..length {
-            entries.push(
-                entries_object
-                    .properties
-                    .get(&index.to_string())
-                    .cloned()
-                    .unwrap_or(JsValue::Undefined),
-            );
+            let value = entries_object
+                .properties
+                .get(&index.to_string())
+                .cloned()
+                .unwrap_or(JsValue::Uninitialized);
+            if matches!(value, JsValue::Uninitialized) {
+                entries.push(None);
+            } else {
+                entries.push(Some(value));
+            }
         }
         Ok(entries)
     }
@@ -3441,10 +3596,19 @@ impl Vm {
     fn write_set_entries(
         &mut self,
         set_id: ObjectId,
-        entries: Vec<JsValue>,
+        entries: Vec<Option<JsValue>>,
     ) -> Result<(), VmError> {
-        let entries_array = self.create_array_from_values(entries.clone())?;
-        let size = entries.len() as f64;
+        let mut values = Vec::with_capacity(entries.len());
+        let mut size = 0usize;
+        for entry in entries.iter().cloned() {
+            if let Some(value) = entry {
+                size += 1;
+                values.push(value);
+            } else {
+                values.push(JsValue::Uninitialized);
+            }
+        }
+        let entries_array = self.create_array_from_values(values)?;
         let set_object = self
             .objects
             .get_mut(&set_id)
@@ -3462,11 +3626,19 @@ impl Vm {
         );
         set_object
             .properties
-            .insert("__setSize".to_string(), JsValue::Number(size));
-        set_object
-            .properties
-            .insert("size".to_string(), JsValue::Number(size));
+            .insert("__setSize".to_string(), JsValue::Number(size as f64));
         Ok(())
+    }
+
+    fn strict_this_set(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__setTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError(
+                "Set.prototype method called on incompatible",
+            )),
+        }
     }
 
     fn strict_this_regexp_object(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
@@ -5578,34 +5750,124 @@ impl Vm {
             }
             HostFunction::MapSetThis => {
                 let receiver_id = self.strict_this_map(this_arg)?;
-                let size = self
-                    .objects
-                    .get(&receiver_id)
-                    .and_then(|object| object.properties.get("__mapSize"))
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0)
-                    + 1.0;
-                let object = self
-                    .objects
-                    .get_mut(&receiver_id)
-                    .ok_or(VmError::UnknownObject(receiver_id))?;
-                object
-                    .properties
-                    .insert("__mapSize".to_string(), JsValue::Number(size));
-                object
-                    .properties
-                    .insert("size".to_string(), JsValue::Number(size));
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let value = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let mut entries = self.read_map_entries(receiver_id)?;
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                }) {
+                    entries[index] = Some((key, value));
+                } else {
+                    entries.push(Some((key, value)));
+                }
+                self.write_map_entries(receiver_id, entries)?;
                 Ok(JsValue::Object(receiver_id))
             }
+            HostFunction::MapGetThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let entries = self.read_map_entries(receiver_id)?;
+                for entry in entries {
+                    if let Some((current_key, current_value)) = entry {
+                        if self.same_value_zero(&current_key, &key) {
+                            return Ok(current_value);
+                        }
+                    }
+                }
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::MapHasThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let entries = self.read_map_entries(receiver_id)?;
+                Ok(JsValue::Bool(entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                })))
+            }
+            HostFunction::MapDeleteThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let mut entries = self.read_map_entries(receiver_id)?;
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                }) {
+                    entries[index] = None;
+                    self.write_map_entries(receiver_id, entries)?;
+                    Ok(JsValue::Bool(true))
+                } else {
+                    Ok(JsValue::Bool(false))
+                }
+            }
+            HostFunction::MapClearThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let mut entries = self.read_map_entries(receiver_id)?;
+                for entry in &mut entries {
+                    *entry = None;
+                }
+                self.write_map_entries(receiver_id, entries)?;
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::MapEntriesThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                self.create_map_iterator_from_this(receiver_id, "entries")
+            }
+            HostFunction::MapKeysThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                self.create_map_iterator_from_this(receiver_id, "keys")
+            }
+            HostFunction::MapValuesThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                self.create_map_iterator_from_this(receiver_id, "values")
+            }
+            HostFunction::MapForEachThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_callable_value(&callback) {
+                    return Err(VmError::NotCallable);
+                }
+                let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let mut index = 0usize;
+                loop {
+                    let entries = self.read_map_entries(receiver_id)?;
+                    if index >= entries.len() {
+                        break;
+                    }
+                    let current = entries[index].clone();
+                    index += 1;
+                    let Some((key, value)) = current else {
+                        continue;
+                    };
+                    let _ = self.execute_callable(
+                        callback.clone(),
+                        Some(callback_this.clone()),
+                        vec![value, key, JsValue::Object(receiver_id)],
+                        realm,
+                        caller_strict,
+                    )?;
+                }
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::MapSizeGetterThis => {
+                let receiver_id = self.strict_this_map(this_arg)?;
+                Ok(JsValue::Number(self.map_size_for_object(receiver_id)?))
+            }
+            HostFunction::MapIteratorNextThis => self.execute_map_iterator_next(this_arg),
             HostFunction::SetAddThis => {
                 let receiver_id = self.strict_this_set(this_arg)?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let mut entries = self.read_set_entries(receiver_id)?;
-                if !entries
-                    .iter()
-                    .any(|entry| self.same_value_zero(entry, &value))
-                {
-                    entries.push(value);
+                if !entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                }) {
+                    entries.push(Some(value));
                     self.write_set_entries(receiver_id, entries)?;
                 }
                 Ok(JsValue::Object(receiver_id))
@@ -5614,11 +5876,12 @@ impl Vm {
                 let receiver_id = self.strict_this_set(this_arg)?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let mut entries = self.read_set_entries(receiver_id)?;
-                if let Some(index) = entries
-                    .iter()
-                    .position(|entry| self.same_value_zero(entry, &value))
-                {
-                    entries.remove(index);
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                }) {
+                    entries[index] = None;
                     self.write_set_entries(receiver_id, entries)?;
                     Ok(JsValue::Bool(true))
                 } else {
@@ -5629,12 +5892,62 @@ impl Vm {
                 let receiver_id = self.strict_this_set(this_arg)?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let entries = self.read_set_entries(receiver_id)?;
-                Ok(JsValue::Bool(
-                    entries
-                        .iter()
-                        .any(|entry| self.same_value_zero(entry, &value)),
-                ))
+                Ok(JsValue::Bool(entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                })))
             }
+            HostFunction::SetClearThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                let mut entries = self.read_set_entries(receiver_id)?;
+                for entry in &mut entries {
+                    *entry = None;
+                }
+                self.write_set_entries(receiver_id, entries)?;
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::SetEntriesThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                self.create_set_iterator_from_this(receiver_id, "entries")
+            }
+            HostFunction::SetValuesThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                self.create_set_iterator_from_this(receiver_id, "values")
+            }
+            HostFunction::SetForEachThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_callable_value(&callback) {
+                    return Err(VmError::NotCallable);
+                }
+                let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let mut index = 0usize;
+                loop {
+                    let entries = self.read_set_entries(receiver_id)?;
+                    if index >= entries.len() {
+                        break;
+                    }
+                    let current = entries[index].clone();
+                    index += 1;
+                    let Some(value) = current else {
+                        continue;
+                    };
+                    let _ = self.execute_callable(
+                        callback.clone(),
+                        Some(callback_this.clone()),
+                        vec![value.clone(), value, JsValue::Object(receiver_id)],
+                        realm,
+                        caller_strict,
+                    )?;
+                }
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::SetSizeGetterThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                Ok(JsValue::Number(self.set_size_for_object(receiver_id)?))
+            }
+            HostFunction::SetIteratorNextThis => self.execute_set_iterator_next(this_arg),
             HostFunction::ProxyRevocable => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -8024,6 +8337,250 @@ impl Vm {
         self.create_for_of_step_result(done, value)
     }
 
+    fn create_map_iterator_from_this(
+        &mut self,
+        map_id: ObjectId,
+        kind: &str,
+    ) -> Result<JsValue, VmError> {
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let next = self.create_host_function_value(HostFunction::MapIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        object
+            .properties
+            .insert(MAP_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object
+            .properties
+            .insert(MAP_ITERATOR_TARGET_KEY.to_string(), JsValue::Object(map_id));
+        object
+            .properties
+            .insert(MAP_ITERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert(
+            MAP_ITERATOR_KIND_KEY.to_string(),
+            JsValue::String(kind.to_string()),
+        );
+        object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
+    fn execute_map_iterator_next(&mut self, this_arg: Option<JsValue>) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Map iterator next receiver must be object",
+                ));
+            }
+        };
+        let (target_id, mut index, kind, is_map_iterator) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_map_iterator = iterator
+                .properties
+                .get(MAP_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let target_id = match iterator.properties.get(MAP_ITERATOR_TARGET_KEY) {
+                Some(JsValue::Object(object_id)) => *object_id,
+                _ => return self.create_for_of_step_result(true, JsValue::Undefined),
+            };
+            let index = iterator
+                .properties
+                .get(MAP_ITERATOR_INDEX_KEY)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
+                .max(0.0) as usize;
+            let kind = iterator
+                .properties
+                .get(MAP_ITERATOR_KIND_KEY)
+                .map(|value| self.coerce_to_string(value))
+                .unwrap_or_else(|| "entries".to_string());
+            (target_id, index, kind, is_map_iterator)
+        };
+        if !is_map_iterator {
+            return Err(VmError::TypeError("incompatible Map iterator"));
+        }
+
+        let entries = self.read_map_entries(target_id)?;
+        while index < entries.len() {
+            if let Some((key, value)) = entries[index].clone() {
+                index += 1;
+                let step_value = match kind.as_str() {
+                    "keys" => key,
+                    "values" => value,
+                    _ => self.create_array_from_values(vec![key, value])?,
+                };
+                if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+                    iterator.properties.insert(
+                        MAP_ITERATOR_INDEX_KEY.to_string(),
+                        JsValue::Number(index as f64),
+                    );
+                }
+                return self.create_for_of_step_result(false, step_value);
+            }
+            index += 1;
+        }
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator
+                .properties
+                .insert(MAP_ITERATOR_TARGET_KEY.to_string(), JsValue::Undefined);
+            iterator.properties.insert(
+                MAP_ITERATOR_INDEX_KEY.to_string(),
+                JsValue::Number(index as f64),
+            );
+        }
+        self.create_for_of_step_result(true, JsValue::Undefined)
+    }
+
+    fn create_set_iterator_from_this(
+        &mut self,
+        set_id: ObjectId,
+        kind: &str,
+    ) -> Result<JsValue, VmError> {
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let next = self.create_host_function_value(HostFunction::SetIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        object
+            .properties
+            .insert(SET_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object
+            .properties
+            .insert(SET_ITERATOR_TARGET_KEY.to_string(), JsValue::Object(set_id));
+        object
+            .properties
+            .insert(SET_ITERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert(
+            SET_ITERATOR_KIND_KEY.to_string(),
+            JsValue::String(kind.to_string()),
+        );
+        object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
+    fn execute_set_iterator_next(&mut self, this_arg: Option<JsValue>) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "Set iterator next receiver must be object",
+                ));
+            }
+        };
+        let (target_id, mut index, kind, is_set_iterator) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_set_iterator = iterator
+                .properties
+                .get(SET_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let target_id = match iterator.properties.get(SET_ITERATOR_TARGET_KEY) {
+                Some(JsValue::Object(object_id)) => *object_id,
+                _ => return self.create_for_of_step_result(true, JsValue::Undefined),
+            };
+            let index = iterator
+                .properties
+                .get(SET_ITERATOR_INDEX_KEY)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
+                .max(0.0) as usize;
+            let kind = iterator
+                .properties
+                .get(SET_ITERATOR_KIND_KEY)
+                .map(|value| self.coerce_to_string(value))
+                .unwrap_or_else(|| "values".to_string());
+            (target_id, index, kind, is_set_iterator)
+        };
+        if !is_set_iterator {
+            return Err(VmError::TypeError("incompatible Set iterator"));
+        }
+
+        let entries = self.read_set_entries(target_id)?;
+        while index < entries.len() {
+            if let Some(value) = entries[index].clone() {
+                index += 1;
+                let step_value = if kind == "entries" {
+                    self.create_array_from_values(vec![value.clone(), value])?
+                } else {
+                    value
+                };
+                if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+                    iterator.properties.insert(
+                        SET_ITERATOR_INDEX_KEY.to_string(),
+                        JsValue::Number(index as f64),
+                    );
+                }
+                return self.create_for_of_step_result(false, step_value);
+            }
+            index += 1;
+        }
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator
+                .properties
+                .insert(SET_ITERATOR_TARGET_KEY.to_string(), JsValue::Undefined);
+            iterator.properties.insert(
+                SET_ITERATOR_INDEX_KEY.to_string(),
+                JsValue::Number(index as f64),
+            );
+        }
+        self.create_for_of_step_result(true, JsValue::Undefined)
+    }
+
     fn create_array_iterator_from_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -8324,18 +8881,8 @@ impl Vm {
             target
                 .properties
                 .insert("__mapSize".to_string(), JsValue::Number(0.0));
-            target
-                .properties
-                .insert("size".to_string(), JsValue::Number(0.0));
-            target.property_attributes.insert(
-                "size".to_string(),
-                PropertyAttributes {
-                    writable: false,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
         }
+        self.write_map_entries(object_id, Vec::new())?;
 
         let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
         if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
@@ -8380,17 +8927,6 @@ impl Vm {
             target
                 .properties
                 .insert("__setSize".to_string(), JsValue::Number(0.0));
-            target
-                .properties
-                .insert("size".to_string(), JsValue::Number(0.0));
-            target.property_attributes.insert(
-                "size".to_string(),
-                PropertyAttributes {
-                    writable: false,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
         }
         self.write_set_entries(object_id, Vec::new())?;
 
@@ -14052,6 +14588,36 @@ impl Vm {
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             let set = self.create_host_function_value(HostFunction::MapSetThis);
+            let get = self.create_host_function_value(HostFunction::MapGetThis);
+            let has = self.create_host_function_value(HostFunction::MapHasThis);
+            let delete = self.create_host_function_value(HostFunction::MapDeleteThis);
+            let clear = self.create_host_function_value(HostFunction::MapClearThis);
+            let entries = self.create_host_function_value(HostFunction::MapEntriesThis);
+            let keys = self.create_host_function_value(HostFunction::MapKeysThis);
+            let values = self.create_host_function_value(HostFunction::MapValuesThis);
+            let for_each = self.create_host_function_value(HostFunction::MapForEachThis);
+            let size_getter = self.create_host_function_value(HostFunction::MapSizeGetterThis);
+            let map_iterator = entries.clone();
+            self.set_builtin_function_length(&set, 2.0);
+            self.set_builtin_function_name(&set, "set");
+            self.set_builtin_function_length(&get, 1.0);
+            self.set_builtin_function_name(&get, "get");
+            self.set_builtin_function_length(&has, 1.0);
+            self.set_builtin_function_name(&has, "has");
+            self.set_builtin_function_length(&delete, 1.0);
+            self.set_builtin_function_name(&delete, "delete");
+            self.set_builtin_function_length(&clear, 0.0);
+            self.set_builtin_function_name(&clear, "clear");
+            self.set_builtin_function_length(&entries, 0.0);
+            self.set_builtin_function_name(&entries, "entries");
+            self.set_builtin_function_length(&keys, 0.0);
+            self.set_builtin_function_name(&keys, "keys");
+            self.set_builtin_function_length(&values, 0.0);
+            self.set_builtin_function_name(&values, "values");
+            self.set_builtin_function_length(&for_each, 1.0);
+            self.set_builtin_function_name(&for_each, "forEach");
+            self.set_builtin_function_length(&size_getter, 0.0);
+            self.set_builtin_function_name(&size_getter, "get size");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -14074,6 +14640,39 @@ impl Vm {
                         configurable: true,
                     },
                 );
+                for (name, value) in [
+                    ("get", get),
+                    ("has", has),
+                    ("delete", delete),
+                    ("clear", clear),
+                    ("entries", entries),
+                    ("keys", keys),
+                    ("values", values),
+                    ("forEach", for_each),
+                    ("Symbol.iterator", map_iterator),
+                ] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+                object.getters.insert("size".to_string(), size_getter);
+                object
+                    .setters
+                    .insert("size".to_string(), JsValue::Undefined);
+                object.property_attributes.insert(
+                    "size".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
             }
             self.map_prototype_id = Some(id);
         }
@@ -14089,12 +14688,29 @@ impl Vm {
             let add = self.create_host_function_value(HostFunction::SetAddThis);
             let delete = self.create_host_function_value(HostFunction::SetDeleteThis);
             let has = self.create_host_function_value(HostFunction::SetHasThis);
+            let clear = self.create_host_function_value(HostFunction::SetClearThis);
+            let entries = self.create_host_function_value(HostFunction::SetEntriesThis);
+            let values = self.create_host_function_value(HostFunction::SetValuesThis);
+            let keys = values.clone();
+            let for_each = self.create_host_function_value(HostFunction::SetForEachThis);
+            let size_getter = self.create_host_function_value(HostFunction::SetSizeGetterThis);
+            let set_iterator = values.clone();
             self.set_builtin_function_length(&add, 1.0);
             self.set_builtin_function_name(&add, "add");
             self.set_builtin_function_length(&delete, 1.0);
             self.set_builtin_function_name(&delete, "delete");
             self.set_builtin_function_length(&has, 1.0);
             self.set_builtin_function_name(&has, "has");
+            self.set_builtin_function_length(&clear, 0.0);
+            self.set_builtin_function_name(&clear, "clear");
+            self.set_builtin_function_length(&entries, 0.0);
+            self.set_builtin_function_name(&entries, "entries");
+            self.set_builtin_function_length(&values, 0.0);
+            self.set_builtin_function_name(&values, "values");
+            self.set_builtin_function_length(&for_each, 1.0);
+            self.set_builtin_function_name(&for_each, "forEach");
+            self.set_builtin_function_length(&size_getter, 0.0);
+            self.set_builtin_function_name(&size_getter, "get size");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -14131,6 +14747,36 @@ impl Vm {
                     "has".to_string(),
                     PropertyAttributes {
                         writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for (name, value) in [
+                    ("clear", clear),
+                    ("entries", entries),
+                    ("keys", keys),
+                    ("values", values),
+                    ("forEach", for_each),
+                    ("Symbol.iterator", set_iterator),
+                ] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+                object.getters.insert("size".to_string(), size_getter);
+                object
+                    .setters
+                    .insert("size".to_string(), JsValue::Undefined);
+                object.property_attributes.insert(
+                    "size".to_string(),
+                    PropertyAttributes {
+                        writable: false,
                         enumerable: false,
                         configurable: true,
                     },
@@ -21946,6 +22592,179 @@ slots[1][2].value + slots[2][0].value;
         let mut realm = Realm::default();
         realm.define_global(
             "WeakSet",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn map_clear_preserves_iterator_list_for_live_iterators() {
+        let script = parse_script(
+            "var m = new Map([[1, 1], [2, 2], [3, 3]]); \
+             var it = m.entries(); \
+             var first = it.next(); \
+             m.clear(); \
+             var next = it.next(); \
+             first.value[0] === 1 && first.done === false && next.value === undefined && next.done === true && m.size === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Map",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn map_delete_does_not_break_iterators() {
+        let script = parse_script(
+            "var m = new Map([['a', 1], ['b', 2], ['c', 3]]); \
+             var it = m.entries(); \
+             var first = it.next(); \
+             m.delete('b'); \
+             var next = it.next(); \
+             var done = it.next(); \
+             first.value[0] === 'a' && next.value[0] === 'c' && next.value[1] === 3 && done.done === true;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Map",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn map_for_each_visits_readded_key() {
+        let script = parse_script(
+            "var m = new Map(); \
+             m.set('foo', 0); \
+             m.set('bar', 1); \
+             var seen = []; \
+             var count = 0; \
+             m.forEach(function(value, key) { \
+               if (count === 0) { \
+                 m.delete('foo'); \
+                 m.set('foo', 'baz'); \
+               } \
+               seen.push(key + ':' + value); \
+               count = count + 1; \
+             }); \
+             count === 3 && m.size === 2 && seen[0] === 'foo:0' && seen[1] === 'bar:1' && seen[2] === 'foo:baz';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Map",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn set_values_iterator_tracks_mutation_until_done() {
+        let script = parse_script(
+            "var s = new Set([1, 2]); \
+             var it = s.values(); \
+             var r1 = it.next(); \
+             s.add(3); \
+             var r2 = it.next(); \
+             var r3 = it.next(); \
+             var r4 = it.next(); \
+             s.add(4); \
+             var r5 = it.next(); \
+             r1.value === 1 && r1.done === false && r2.value === 2 && r2.done === false && r3.value === 3 && r3.done === false && r4.value === undefined && r4.done === true && r5.value === undefined && r5.done === true;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Set",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn set_for_each_revisits_value_after_delete_and_readd() {
+        let script = parse_script(
+            "var s = new Set([1, 2, 3]); \
+             var seen = []; \
+             s.forEach(function(value, entry, set) { \
+               seen.push(value); \
+               if (value === 2) { set.delete(1); } \
+               if (value === 3) { set.add(1); } \
+               if (entry !== value || set !== s) { throw new TypeError('bad callback args'); } \
+             }); \
+             seen.length === 4 && seen[0] === 1 && seen[1] === 2 && seen[2] === 3 && seen[3] === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Set",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn map_and_set_size_getter_validate_internal_slots() {
+        let script = parse_script(
+            "var mapDesc = Object.getOwnPropertyDescriptor(Map.prototype, 'size'); \
+             var setDesc = Object.getOwnPropertyDescriptor(Set.prototype, 'size'); \
+             var mapThrows = false; \
+             var setThrows = false; \
+             try { mapDesc.get.call([]); } catch (e) { mapThrows = e instanceof TypeError; } \
+             try { setDesc.get.call({}); } catch (e) { setThrows = e instanceof TypeError; } \
+             mapDesc.get.call(new Map([[1, 1]])) === 1 && setDesc.get.call(new Set([1, 2])) === 2 && mapThrows && setThrows;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Map",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        realm.define_global(
+            "Set",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn set_keys_and_values_share_same_function_object() {
+        let script = parse_script("Set.prototype.keys === Set.prototype.values;")
+            .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Set",
             JsValue::NativeFunction(NativeFunction::SetConstructor),
         );
         let mut vm = Vm::default();
