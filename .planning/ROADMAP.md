@@ -10,7 +10,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 1: Semantic Core Closure** - Close eval/scope/control-flow/descriptor semantic gaps in executable behavior.
+- [x] **Phase 1: Semantic Core Closure** - Close eval/scope/control-flow/descriptor semantic gaps in executable behavior. (completed 2026-02-25)
 - [ ] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees.
 - [ ] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks.
 - [ ] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling.
@@ -29,7 +29,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   2. Nested closures, block scopes, and function boundaries preserve lexical bindings under nested control flow.
   3. Completion values across `if/switch/label/try-finally/loop` paths are consistent and execute without panic paths.
   4. `Object.defineProperty/defineProperties/getOwnPropertyDescriptor` edge cases enforce descriptor invariants with deterministic failures for invalid transitions.
-**Plans**: 3 (01-01 complete, 01-02/01-03 pending)
+**Plans**: 3/3 plans complete
 
 ### Phase 2: Runtime Safety and Root Integrity
 **Goal**: Runtime memory access is safe and deterministic under collection and handle lifecycle changes.
@@ -97,7 +97,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Semantic Core Closure | 2/3 | In Progress | - |
+| 1. Semantic Core Closure | 3/3 | Complete   | 2026-02-25 |
 | 2. Runtime Safety and Root Integrity | 0/TBD | Not started | - |
 | 3. Promise Job Queue Semantics | 0/TBD | Not started | - |
 | 4. ES Module Lifecycle | 0/TBD | Not started | - |

@@ -12,7 +12,7 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 - [x] **SEM-01**: Engine executes direct and indirect `eval` with observable behavior aligned to current target semantics for scope, strict mode, and exception propagation.
 - [x] **SEM-02**: Engine preserves lexical environment correctness for closures, block scopes, and function boundaries under nested control flow.
 - [x] **SEM-03**: Engine implements consistent completion-value behavior across `if/switch/label/try-finally/loop` control flow without panic paths.
-- [ ] **SEM-04**: Engine enforces object/property descriptor invariants for `Object.defineProperty/defineProperties/getOwnPropertyDescriptor` in edge cases.
+- [x] **SEM-04**: Engine enforces object/property descriptor invariants for `Object.defineProperty/defineProperties/getOwnPropertyDescriptor` in edge cases.
 
 ### Runtime and Memory
 
@@ -78,7 +78,7 @@ Roadmap mapping table. Updated during roadmap creation.
 | SEM-01 | Phase 1 | Complete |
 | SEM-02 | Phase 1 | Complete |
 | SEM-03 | Phase 1 | Complete |
-| SEM-04 | Phase 1 | Pending |
+| SEM-04 | Phase 1 | Complete |
 | MEM-01 | Phase 2 | Pending |
 | MEM-02 | Phase 2 | Pending |
 | MEM-03 | Phase 7 | Pending |
