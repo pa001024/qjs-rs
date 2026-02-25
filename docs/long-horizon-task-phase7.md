@@ -136,6 +136,7 @@
   - `annexB/built-ins/RegExp/prototype/compile`: `14/0`（`target/test262-annexb-regexp-prototype-compile-20260225-v3.json`）
   - `annexB/language/comments`: `8/0`（`target/test262-annexb-language-comments-20260225-v3.json`）
   - `annexB/built-ins/Function`: `6/0`（`target/test262-annexb-builtins-function-20260225-v2.json`）
+  - `annexB/language/eval-code/direct`: `169/107`（`target/test262-annexb-language-eval-code-direct-20260225-v3.json`；语法入口已打通，下一步聚焦 B.3.3 绑定语义）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）

@@ -2790,11 +2790,6 @@ impl Parser {
         } else {
             self.parse_statement()?
         };
-        if matches!(statement, Stmt::FunctionDeclaration(_)) {
-            return Err(
-                self.error_current("function declaration not allowed in statement position")
-            );
-        }
         let needs_separator = !matches!(
             statement,
             Stmt::Block(_)
@@ -7626,12 +7621,8 @@ for ( [let][0]; ; )
     }
 
     #[test]
-    fn rejects_function_declaration_in_embedded_statement() {
-        let err = parse_script("while (1) function f() {}").expect_err("parser should fail");
-        assert_eq!(
-            err.message,
-            "function declaration not allowed in statement position"
-        );
+    fn allows_function_declaration_in_embedded_statement_annex_b() {
+        assert!(parse_script("while (1) function f() {}").is_ok());
     }
 
     #[test]

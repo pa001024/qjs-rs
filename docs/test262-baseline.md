@@ -154,6 +154,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `annexB/built-ins/RegExp/prototype/compile (v3)`: discovered=23, executed=14, skipped=9, passed=14, failed=0
 - `annexB/language/comments (v3)`: discovered=8, executed=8, skipped=0, passed=8, failed=0
 - `annexB/built-ins/Function (v2)`: discovered=6, executed=6, skipped=0, passed=6, failed=0
+- `annexB/language/eval-code/direct (v3)`: discovered=309, executed=276, skipped=33, passed=169, failed=107
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -193,6 +194,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 
 备注：
 - 本轮对齐 QuickJS Annex B comments/CreateDynamicFunction：lexer 新增 `<!--` 与“行首（含换行后）`-->`”HTML 注释词法路径；`Function` 构造器 source 拼接增加参数段后换行，并收紧 parser 参数列表非法 token 处理，修复 `createdynfn-html-*` 参数用例。对应 `annexB/language/comments` 达到 `8/0`，`annexB/built-ins/Function` 达到 `6/0`。
+- 本轮新增 Annex B eval 语法入口：parser 放开 embedded statement 上的 `FunctionDeclaration`（如 `if (cond) function f(){}`），使 `annexB/language/eval-code/direct` 从语法拒绝转入运行时绑定语义阶段；当前快照 `169/107`（`target/test262-annexb-language-eval-code-direct-20260225-v3.json`）。
 - 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），并新增 `RegExp.prototype.compile`（含 `lastIndex` throw=true 回写路径与 RegExp-pattern 分支）；同时将 HostFunction 构造限制为 `bind` 产物；相关 7 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。
