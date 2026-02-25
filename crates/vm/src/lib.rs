@@ -180,9 +180,12 @@ enum HostFunction {
     ArrayReduceThis,
     ArrayReduceRightThis,
     ArrayJoinThis,
+    ArrayToStringThis,
+    ArrayToLocaleStringThis,
     ArrayConcatThis,
     ArrayPopThis,
     ArrayShiftThis,
+    ArrayUnshiftThis,
     ArraySpliceThis,
     ArraySliceThis,
     ArrayIndexOfThis,
@@ -202,7 +205,7 @@ enum HostFunction {
     ArrayValuesThis,
     ArrayIteratorNextThis,
     ArrayReverseThis,
-    ArraySort(ObjectId),
+    ArraySortThis,
     RegExpTestThis,
     RegExpExecThis,
     RegExpToStringThis,
@@ -893,9 +896,7 @@ impl Vm {
             HostFunction::GeneratorFactory { producer } => {
                 self.gc_mark_stack.push(producer);
             }
-            HostFunction::ArraySort(object_id)
-            | HostFunction::DateToString(object_id)
-            | HostFunction::DateValueOf(object_id) => {
+            HostFunction::DateToString(object_id) | HostFunction::DateValueOf(object_id) => {
                 self.gc_mark_stack.push(JsValue::Object(object_id));
             }
             HostFunction::HasOwnProperty { target }
@@ -947,14 +948,18 @@ impl Vm {
             | HostFunction::ReflectDefineProperty
             | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ArrayJoinThis
+            | HostFunction::ArrayToStringThis
+            | HostFunction::ArrayToLocaleStringThis
             | HostFunction::ArrayPushThis
             | HostFunction::ArrayPopThis
             | HostFunction::ArrayShiftThis
+            | HostFunction::ArrayUnshiftThis
             | HostFunction::ArrayReduceThis
             | HostFunction::ArrayReduceRightThis
             | HostFunction::ArraySliceThis
             | HostFunction::ArraySpliceThis
             | HostFunction::ArrayReverseThis
+            | HostFunction::ArraySortThis
             | HostFunction::ArrayIndexOfThis
             | HostFunction::ArrayLastIndexOfThis
             | HostFunction::ArrayFrom
@@ -4232,6 +4237,66 @@ impl Vm {
         Ok(first)
     }
 
+    fn execute_array_unshift_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.unshift called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+        let arg_count =
+            i64::try_from(args.len()).map_err(|_| VmError::TypeError("invalid array length"))?;
+        let new_length = length
+            .checked_add(arg_count)
+            .filter(|next| *next <= MAX_SAFE_INTEGER_F64 as i64)
+            .ok_or(VmError::TypeError("invalid array length"))?;
+
+        if arg_count > 0 {
+            let mut index = length;
+            while index > 0 {
+                index -= 1;
+                let from_key = index.to_string();
+                let to_key = (index + arg_count).to_string();
+                if self.has_property_on_receiver(&target, &from_key, realm)? {
+                    let from_value =
+                        self.get_property_from_receiver(target.clone(), &from_key, realm)?;
+                    self.ensure_assign_target_writable(&target, &to_key)?;
+                    let _ =
+                        self.set_property_on_receiver(target.clone(), to_key, from_value, realm)?;
+                } else {
+                    let deleted = self.delete_property(target.clone(), to_key)?;
+                    if !deleted {
+                        return Err(VmError::TypeError(
+                            "Array.prototype.unshift could not delete property",
+                        ));
+                    }
+                }
+            }
+
+            for (index, arg) in args.iter().enumerate() {
+                let key = index.to_string();
+                self.ensure_assign_target_writable(&target, &key)?;
+                let _ = self.set_property_on_receiver(target.clone(), key, arg.clone(), realm)?;
+            }
+        }
+
+        self.ensure_assign_target_writable(&target, "length")?;
+        let _ = self.set_property_on_receiver(
+            target,
+            "length".to_string(),
+            JsValue::Number(new_length as f64),
+            realm,
+        )?;
+        Ok(JsValue::Number(new_length as f64))
+    }
+
     fn execute_array_reduce_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -5120,11 +5185,68 @@ impl Vm {
             HostFunction::ArrayPushThis => {
                 self.execute_array_push_this(this_arg, &args, realm, caller_strict)
             }
+            HostFunction::ArrayUnshiftThis => {
+                self.execute_array_unshift_this(this_arg, &args, realm, caller_strict)
+            }
             HostFunction::ArrayReduceThis => {
                 self.execute_array_reduce_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::ArrayReduceRightThis => {
                 self.execute_array_reduce_right_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayToStringThis => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Array.prototype.toString called on null or undefined",
+                )?;
+                let join = self.get_property_from_receiver(target.clone(), "join", realm)?;
+                if Self::is_callable_value(&join) {
+                    self.execute_callable(join, Some(target), Vec::new(), realm, caller_strict)
+                } else {
+                    let tag = self.object_to_string_tag(Some(target), realm)?;
+                    Ok(JsValue::String(format!("[object {tag}]")))
+                }
+            }
+            HostFunction::ArrayToLocaleStringThis => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Array.prototype.toLocaleString called on null or undefined",
+                )?;
+                let length_value =
+                    self.get_property_from_receiver(target.clone(), "length", realm)?;
+                let length_number =
+                    self.coerce_number_runtime(length_value, realm, caller_strict)?;
+                let length = Self::to_length_from_number(length_number);
+                let mut parts = Vec::with_capacity(length.max(0) as usize);
+                for index in 0..length {
+                    let value =
+                        self.get_property_from_receiver(target.clone(), &index.to_string(), realm)?;
+                    let part = match value {
+                        JsValue::Undefined | JsValue::Null => String::new(),
+                        other => {
+                            let to_locale_string = self.get_property_from_receiver(
+                                other.clone(),
+                                "toLocaleString",
+                                realm,
+                            )?;
+                            if !Self::is_callable_value(&to_locale_string) {
+                                return Err(VmError::TypeError(
+                                    "Array.prototype.toLocaleString element toLocaleString must be callable",
+                                ));
+                            }
+                            let localized = self.execute_callable(
+                                to_locale_string,
+                                Some(other),
+                                Vec::new(),
+                                realm,
+                                caller_strict,
+                            )?;
+                            self.coerce_to_string_runtime(localized, realm, caller_strict)?
+                        }
+                    };
+                    parts.push(part);
+                }
+                Ok(JsValue::String(parts.join(",")))
             }
             HostFunction::ArrayJoinThis => {
                 let target = self.object_prototype_this_object(
@@ -5222,8 +5344,8 @@ impl Vm {
             HostFunction::ArrayReverseThis => {
                 self.execute_array_reverse_this(this_arg, realm, caller_strict)
             }
-            HostFunction::ArraySort(object_id) => {
-                self.execute_array_sort(object_id, &args, realm, caller_strict)
+            HostFunction::ArraySortThis => {
+                self.execute_array_sort_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::RegExpTestThis => {
                 let receiver_id = self.strict_this_regexp_object(this_arg)?;
@@ -5726,9 +5848,12 @@ impl Vm {
                 Ok(JsValue::Number(self.to_number(&value).tan()))
             }
             NativeFunction::StringConstructor => {
-                let value = args
-                    .first()
-                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                let value = match args.first() {
+                    None => String::new(),
+                    Some(value) => {
+                        self.coerce_to_string_runtime(value.clone(), realm, caller_strict)?
+                    }
+                };
                 Ok(JsValue::String(value))
             }
             NativeFunction::StringFromCharCode => {
@@ -10638,6 +10763,9 @@ impl Vm {
         if property == "shift" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayShiftThis));
         }
+        if property == "unshift" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayUnshiftThis));
+        }
         if property == "concat" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
         }
@@ -10687,7 +10815,7 @@ impl Vm {
             return Ok(self.create_host_function_value(HostFunction::ArrayReverseThis));
         }
         if property == "sort" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArraySortThis));
         }
         if property == "keys" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
@@ -11606,10 +11734,13 @@ impl Vm {
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             let join = self.create_host_function_value(HostFunction::ArrayJoinThis);
-            let to_string = self.create_host_function_value(HostFunction::ArrayJoinThis);
+            let to_string = self.create_host_function_value(HostFunction::ArrayToStringThis);
+            let to_locale_string =
+                self.create_host_function_value(HostFunction::ArrayToLocaleStringThis);
             let push = self.create_host_function_value(HostFunction::ArrayPushThis);
             let pop = self.create_host_function_value(HostFunction::ArrayPopThis);
             let shift = self.create_host_function_value(HostFunction::ArrayShiftThis);
+            let unshift = self.create_host_function_value(HostFunction::ArrayUnshiftThis);
             let concat = self.create_host_function_value(HostFunction::ArrayConcatThis);
             let every = self.create_host_function_value(HostFunction::ArrayEveryThis);
             let some = self.create_host_function_value(HostFunction::ArraySomeThis);
@@ -11621,7 +11752,7 @@ impl Vm {
             let find_index = self.create_host_function_value(HostFunction::ArrayFindIndexThis);
             let copy_within = self.create_host_function_value(HostFunction::ArrayCopyWithinThis);
             let reverse = self.create_host_function_value(HostFunction::ArrayReverseThis);
-            let sort = self.create_host_function_value(HostFunction::ArraySort(id));
+            let sort = self.create_host_function_value(HostFunction::ArraySortThis);
             let reduce = self.create_host_function_value(HostFunction::ArrayReduceThis);
             let reduce_right = self.create_host_function_value(HostFunction::ArrayReduceRightThis);
             let splice = self.create_host_function_value(HostFunction::ArraySpliceThis);
@@ -11631,6 +11762,7 @@ impl Vm {
             self.set_builtin_function_length(&push, 1.0);
             self.set_builtin_function_length(&pop, 0.0);
             self.set_builtin_function_length(&shift, 0.0);
+            self.set_builtin_function_length(&unshift, 1.0);
             self.set_builtin_function_length(&concat, 1.0);
             self.set_builtin_function_length(&every, 1.0);
             self.set_builtin_function_length(&some, 1.0);
@@ -11700,6 +11832,17 @@ impl Vm {
                         configurable: true,
                     },
                 );
+                object
+                    .properties
+                    .insert("toLocaleString".to_string(), to_locale_string);
+                object.property_attributes.insert(
+                    "toLocaleString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
                 object.properties.insert("push".to_string(), push);
                 object.property_attributes.insert(
                     "push".to_string(),
@@ -11721,6 +11864,15 @@ impl Vm {
                 object.properties.insert("shift".to_string(), shift);
                 object.property_attributes.insert(
                     "shift".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("unshift".to_string(), unshift);
+                object.property_attributes.insert(
+                    "unshift".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -13226,6 +13378,9 @@ impl Vm {
         if property == "shift" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayShiftThis));
         }
+        if property == "unshift" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayUnshiftThis));
+        }
         if property == "concat" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
         }
@@ -13275,7 +13430,7 @@ impl Vm {
             return Ok(self.create_host_function_value(HostFunction::ArrayReverseThis));
         }
         if property == "sort" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySort(object_id)));
+            return Ok(self.create_host_function_value(HostFunction::ArraySortThis));
         }
         if property == "keys" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
@@ -14684,73 +14839,141 @@ impl Vm {
         Ok(target)
     }
 
-    fn execute_array_sort(
+    fn execute_array_sort_this(
         &mut self,
-        object_id: ObjectId,
+        this_arg: Option<JsValue>,
         args: &[JsValue],
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let length = self.array_length(object_id)?;
-        let mut values = Vec::new();
-        {
-            let object = self
-                .objects
-                .get(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
-            for index in 0..length {
-                if let Some(value) = object.properties.get(&index.to_string()).cloned() {
-                    values.push(value);
-                }
-            }
+        struct ArraySortSlot {
+            value: JsValue,
+            pos: i64,
+            string_key: Option<String>,
         }
+
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.sort called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
         let compare_fn = match args.first() {
             None | Some(JsValue::Undefined) => None,
             Some(value) if Self::is_callable_value(value) => Some(value.clone()),
             Some(_) => return Err(VmError::TypeError("Array.prototype.sort comparefn")),
         };
-        if let Some(compare_fn) = compare_fn {
-            let values_len = values.len();
-            for left_index in 0..values_len {
-                for right_index in (left_index + 1)..values_len {
-                    let comparison = self.execute_callable(
-                        compare_fn.clone(),
-                        Some(JsValue::Undefined),
-                        vec![values[left_index].clone(), values[right_index].clone()],
-                        realm,
-                        caller_strict,
-                    )?;
-                    let comparison = self.to_number(&comparison);
-                    if comparison.is_nan() {
-                        continue;
-                    }
-                    if comparison > 0.0 {
-                        values.swap(left_index, right_index);
-                    }
-                }
-            }
-        } else {
-            values.sort_by_key(|value| self.coerce_to_string(value));
-        }
 
-        let object = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
+        let mut slots = Vec::new();
+        let mut undefined_count = 0i64;
         for index in 0..length {
             let key = index.to_string();
-            object.properties.remove(&key);
-            object.property_attributes.remove(&key);
+            if !self.has_property_on_receiver(&target, &key, realm)? {
+                continue;
+            }
+            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
+            if matches!(value, JsValue::Undefined) {
+                undefined_count += 1;
+                continue;
+            }
+            slots.push(ArraySortSlot {
+                value,
+                pos: index,
+                string_key: None,
+            });
         }
-        for (index, value) in values.into_iter().enumerate() {
-            let key = index.to_string();
-            object.properties.insert(key.clone(), value);
-            object
-                .property_attributes
-                .entry(key)
-                .or_insert_with(PropertyAttributes::default);
+
+        if let Some(compare_fn) = compare_fn {
+            let mut comparison_error: Option<VmError> = None;
+            slots.sort_by(|left, right| {
+                if comparison_error.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
+                let comparison = match self.execute_callable(
+                    compare_fn.clone(),
+                    Some(JsValue::Undefined),
+                    vec![left.value.clone(), right.value.clone()],
+                    realm,
+                    caller_strict,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        comparison_error = Some(error);
+                        return std::cmp::Ordering::Equal;
+                    }
+                };
+                let number = match self.coerce_number_runtime(comparison, realm, caller_strict) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        comparison_error = Some(error);
+                        return std::cmp::Ordering::Equal;
+                    }
+                };
+                let ordering = if number.is_nan() {
+                    std::cmp::Ordering::Equal
+                } else if number < 0.0 {
+                    std::cmp::Ordering::Less
+                } else if number > 0.0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                if ordering == std::cmp::Ordering::Equal {
+                    left.pos.cmp(&right.pos)
+                } else {
+                    ordering
+                }
+            });
+            if let Some(error) = comparison_error {
+                return Err(error);
+            }
+        } else {
+            for slot in &mut slots {
+                slot.string_key = Some(self.coerce_to_string_runtime(
+                    slot.value.clone(),
+                    realm,
+                    caller_strict,
+                )?);
+            }
+            slots.sort_by(|left, right| {
+                let left_key = left.string_key.as_deref().unwrap_or("");
+                let right_key = right.string_key.as_deref().unwrap_or("");
+                match left_key.cmp(right_key) {
+                    std::cmp::Ordering::Equal => left.pos.cmp(&right.pos),
+                    ordering => ordering,
+                }
+            });
         }
-        Ok(JsValue::Object(object_id))
+
+        let mut write_index = 0i64;
+        for slot in slots {
+            if slot.pos != write_index {
+                let key = write_index.to_string();
+                self.ensure_assign_target_writable(&target, &key)?;
+                let _ = self.set_property_on_receiver(target.clone(), key, slot.value, realm)?;
+            }
+            write_index += 1;
+        }
+        for _ in 0..undefined_count {
+            let key = write_index.to_string();
+            self.ensure_assign_target_writable(&target, &key)?;
+            let _ =
+                self.set_property_on_receiver(target.clone(), key, JsValue::Undefined, realm)?;
+            write_index += 1;
+        }
+        while write_index < length {
+            let deleted = self.delete_property(target.clone(), write_index.to_string())?;
+            if !deleted {
+                return Err(VmError::TypeError(
+                    "Array.prototype.sort could not delete property",
+                ));
+            }
+            write_index += 1;
+        }
+
+        Ok(target)
     }
 
     fn evaluate_in_operator(

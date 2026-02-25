@@ -1,6 +1,6 @@
 # Current Status Snapshot
 
-基线日期：2026-02-24
+基线日期：2026-02-25
 
 ## 1. 复核范围
 
@@ -34,7 +34,11 @@
 - `test262 built-ins/Array/prototype/some` 最新全量：`executed=211`、`passed=211`、`failed=0`（快照：`target/test262-builtins-array-prototype-some-20260225-v24.json`）。
 - `test262 built-ins/Array/prototype/splice` 最新全量：`executed=54`、`passed=54`、`failed=0`（快照：`target/test262-builtins-array-prototype-splice-20260225-v26.json`）。
 - `test262 built-ins/Array --max-cases 2000` 最新采样：`executed=2000`、`passed=2000`、`failed=0`（快照：`target/test262-builtins-array-20260225-v24-s2000.json`；阶段性对比：`v13-s2000=1373/627`、`v16-s2000=1547/453`、`v20-s2000=1718/282`、`v21-s2000=1937/63`）。
-- `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2288`、`failed=41`（快照：`target/test262-builtins-array-20260225-v26-s3000.json`，当前主要失败簇集中在 `sort`，其次是 `unshift/toLocaleString/toString`）。
+- `test262 built-ins/Array/prototype/sort` 最新全量：`executed=40`、`passed=40`、`failed=0`（快照：`target/test262-builtins-array-prototype-sort-20260225-v27d.json`）。
+- `test262 built-ins/Array/prototype/unshift` 最新全量：`executed=15`、`passed=15`、`failed=0`（快照：`target/test262-builtins-array-prototype-unshift-20260225-v27d.json`）。
+- `test262 built-ins/Array/prototype/toLocaleString` 最新全量：`executed=2`、`passed=2`、`failed=0`（快照：`target/test262-builtins-array-prototype-toLocaleString-20260225-v27d.json`）。
+- `test262 built-ins/Array/prototype/toString` 最新全量：`executed=6`、`passed=6`、`failed=0`（快照：`target/test262-builtins-array-prototype-toString-20260225-v27d.json`）。
+- `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2329`、`failed=0`（快照：`target/test262-builtins-array-20260225-v27-s3000.json`）。
 - 本轮新增语义收敛：
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `Array` 失败簇首轮收敛：补齐 `Array.from`（迭代器/array-like 双路径 + mapfn + constructor 分派）、`Array(length)` 非法长度 `RangeError`、`Array.isArray`（Array marker）和 `Array.prototype.splice` 最小路径；同时修复 `NativeFunction` 属性读取的原型链回退并补回 `Object.__tdzMarker` 自有属性声明，消除 for-in/for-of 回归。
@@ -46,7 +50,7 @@
   - `Array.prototype.map/lastIndexOf` 再收敛：`map` 补齐 array-like generic 路径与 species 构造长度传递（`ArraySpeciesCreate` 的长度边界跟随 `ToLength`）；`lastIndexOf` 修复 `fromIndex` 参数“显式传入 `undefined/NaN` 时按 `+0`，仅缺参时默认 `len-1`”语义。对应 `map`(193/0)、`lastIndexOf`(190/0) 子目录清零。
   - `Array.prototype.push/pop/reduce/reduceRight` 主路径收敛：补齐 `Array.prototype` 方法挂载、generic receiver `ToObject(this)`、`LengthOfArrayLike`、`reduce/reduceRight` 的继承属性扫描与 callback 时序（先取 `length` 再校验 callback），并对 `push/pop` 增加 `Set(..., true)` 风格的可写性校验。对应 `pop`(17/0)、`push`(17/0)、`reduce`(252/0)、`reduceRight`(251/0) 子目录清零。
   - `Array.prototype.reverse/shift/slice/some` 主路径收敛：`reverse` 对齐 `HasProperty/Get` 的可观察顺序与 hole/delete 语义，`shift` 对齐 generic receiver 与只读 `length` 抛错，`slice` 补齐 `start/end` 归一化与 array-like/hole 复制，`some` 补齐 callback 路径。对应 `reverse`(11/0)、`shift`(16/0)、`slice`(46/0)、`some`(211/0) 子目录清零，`Array --max-cases 2000` 达成 `2000/0`。
-  - `Array.prototype.splice` 收敛：从“仅删除”实现升级为规范主路径（`insertCount/deleteCount`、前后搬移、species 结果数组、`Set/Delete` 抛错路径），对应 `splice`(54/0) 子目录清零，并将 `Array --max-cases 3000` 推进到 `2288/41`。
+  - `Array.prototype.sort/unshift/toLocaleString/toString` 收敛：`sort` 改为 receiver 驱动 + `HasProperty/Get/Set/Delete` 可观察顺序并对齐 undefined/hole 收尾；新增 `unshift` host 路径（右移搬运 + `length` 抛错路径）；新增 `Array.prototype.toLocaleString` 与 `Array.prototype.toString`（`join` fallback 到 `Object.prototype.toString`）；并修复 `String(obj)` 走运行时 `ToString`。对应 `sort`(40/0)、`unshift`(15/0)、`toLocaleString`(2/0)、`toString`(6/0) 子目录清零，`Array --max-cases 3000` 达成 `2329/0`。
   - `Array.prototype.entries` 迭代器补齐“耗尽后不可复活”语义（对齐 test262 `iteration-mutable`），并新增 VM 回归测试。
   - `Number.MAX_SAFE_INTEGER/MIN_SAFE_INTEGER` 常量已接入（含属性特性与默认键集合），支撑大长度 array-like 边界测试。
   - `obj.m()` / `obj[k]()` 调用已通过 `CallMethod*` 保留 receiver 绑定。
