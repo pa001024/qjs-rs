@@ -561,13 +561,6 @@ impl Compiler {
                 consequent,
                 alternate,
             } => {
-                if !keep_value {
-                    if let Some(name) = self.loop_completion_targets.last() {
-                        code.push(Opcode::LoadUndefined);
-                        code.push(Opcode::StoreVariable(name.clone()));
-                        code.push(Opcode::Pop);
-                    }
-                }
                 self.compile_expr(condition, code);
                 let jump_to_alternate_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
@@ -611,11 +604,6 @@ impl Compiler {
                 self.compile_expr(condition, code);
                 let jump_to_end_pos = code.len();
                 code.push(Opcode::JumpIfFalse(usize::MAX));
-                if let Some(name) = &completion_name {
-                    code.push(Opcode::LoadUndefined);
-                    code.push(Opcode::StoreVariable(name.clone()));
-                    code.push(Opcode::Pop);
-                }
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     handler_depth: self.handler_depth,
@@ -672,11 +660,6 @@ impl Compiler {
                     None
                 };
                 let loop_start = code.len();
-                if let Some(name) = &completion_name {
-                    code.push(Opcode::LoadUndefined);
-                    code.push(Opcode::StoreVariable(name.clone()));
-                    code.push(Opcode::Pop);
-                }
                 self.break_contexts.push(BreakContext {
                     scope_depth: self.scope_depth,
                     handler_depth: self.handler_depth,
@@ -819,11 +802,6 @@ impl Compiler {
                 } else {
                     None
                 };
-                if let Some(name) = &completion_name {
-                    code.push(Opcode::LoadUndefined);
-                    code.push(Opcode::StoreVariable(name.clone()));
-                    code.push(Opcode::Pop);
-                }
 
                 self.break_contexts.push(BreakContext {
                     scope_depth: if needs_per_iteration_scope {
@@ -3205,14 +3183,11 @@ mod tests {
                     name: "$__loop_completion_0".to_string(),
                     mutable: true,
                 },
-                Opcode::LoadUndefined,
-                Opcode::StoreVariable("$__loop_completion_0".to_string()),
-                Opcode::Pop,
                 Opcode::LoadNumber(1.0),
                 Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
                 Opcode::LoadNumber(0.0),
-                Opcode::JumpIfFalse(11),
+                Opcode::JumpIfFalse(8),
                 Opcode::Jump(2),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
@@ -3308,10 +3283,7 @@ mod tests {
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(44),
-                Opcode::LoadUndefined,
-                Opcode::StoreVariable("$__loop_completion_1".to_string()),
-                Opcode::Pop,
+                Opcode::JumpIfFalse(41),
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
@@ -3339,7 +3311,7 @@ mod tests {
                 Opcode::ExitScope,
                 Opcode::Jump(11),
                 Opcode::ExitScope,
-                Opcode::Jump(46),
+                Opcode::Jump(43),
                 Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
                 Opcode::ExitScope,
                 Opcode::Halt,
@@ -3371,10 +3343,7 @@ mod tests {
                     mutable: true,
                 },
                 Opcode::LoadNumber(1.0),
-                Opcode::JumpIfFalse(17),
-                Opcode::LoadUndefined,
-                Opcode::StoreVariable("$__loop_completion_0".to_string()),
-                Opcode::Pop,
+                Opcode::JumpIfFalse(14),
                 Opcode::EnterScope,
                 Opcode::EnterScope,
                 Opcode::ExitScope,
@@ -3382,7 +3351,7 @@ mod tests {
                 Opcode::Jump(2),
                 Opcode::ExitScope,
                 Opcode::ExitScope,
-                Opcode::Jump(17),
+                Opcode::Jump(14),
                 Opcode::ExitScope,
                 Opcode::Jump(2),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
