@@ -2,8 +2,8 @@
 
 use ast::{BindingKind, ForInitializer, Identifier, Script, Stmt, VariableDeclaration};
 use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+use fancy_regex::{Regex, RegexBuilder};
 use parser::{parse_expression, parse_script_with_super};
-use regex::RegexBuilder;
 use runtime::{JsValue, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -6661,14 +6661,7 @@ impl Vm {
                     "invalid regular expression pattern".to_string(),
                 ))
             })?;
-        let mut builder = RegexBuilder::new(&normalized_pattern);
-        builder.case_insensitive(flags.contains('i'));
-        builder.multi_line(flags.contains('m'));
-        builder.dot_matches_new_line(flags.contains('s'));
-        if unicode {
-            builder.unicode(true);
-        }
-        if builder.build().is_err() {
+        if Self::build_regexp_matcher(&normalized_pattern, flags).is_err() {
             return Err(VmError::UncaughtException(self.create_error_exception(
                 NativeFunction::SyntaxErrorConstructor,
                 "SyntaxError",
@@ -6767,27 +6760,47 @@ impl Vm {
         } else {
             input.to_string()
         };
-        let mut builder = RegexBuilder::new(&normalized_pattern);
-        builder.case_insensitive(flags.contains('i'));
-        builder.multi_line(flags.contains('m'));
-        builder.dot_matches_new_line(flags.contains('s'));
-        if unicode {
-            builder.unicode(true);
-        }
-        let Ok(regex) = builder.build() else {
+        let Ok(regex) = Self::build_regexp_matcher(&normalized_pattern, &flags) else {
             return Ok(None);
         };
 
         if sticky {
-            Ok(regex
-                .find_at(&normalized_input, last_index)
-                .filter(|m| m.start() == last_index)
-                .map(|m| (m.start(), m.as_str().to_string())))
+            match regex.find_from_pos(&normalized_input, last_index) {
+                Ok(Some(matched)) if matched.start() == last_index => {
+                    Ok(Some((matched.start(), matched.as_str().to_string())))
+                }
+                Ok(_) | Err(_) => Ok(None),
+            }
         } else {
-            Ok(regex
-                .find(&normalized_input)
-                .map(|m| (m.start(), m.as_str().to_string())))
+            match regex.find(&normalized_input) {
+                Ok(Some(matched)) => Ok(Some((matched.start(), matched.as_str().to_string()))),
+                Ok(None) | Err(_) => Ok(None),
+            }
         }
+    }
+
+    fn build_regexp_matcher(pattern: &str, flags: &str) -> Result<Regex, ()> {
+        let mut inline_flags = String::new();
+        if flags.contains('i') {
+            inline_flags.push('i');
+        }
+        if flags.contains('m') {
+            inline_flags.push('m');
+        }
+        if flags.contains('s') {
+            inline_flags.push('s');
+        }
+        if flags.contains('u') {
+            inline_flags.push('u');
+        }
+        let wrapped_pattern = if inline_flags.is_empty() {
+            pattern.to_string()
+        } else {
+            format!("(?{inline_flags}:{pattern})")
+        };
+        let mut builder = RegexBuilder::new(&wrapped_pattern);
+        builder.case_insensitive(flags.contains('i'));
+        builder.build().map_err(|_| ())
     }
 
     fn normalize_regexp_pattern(pattern: &str, unicode: bool) -> Result<String, ()> {
@@ -6795,8 +6808,26 @@ impl Vm {
         let mut normalized = String::with_capacity(pattern.len());
         let mut index = 0usize;
         let mut in_character_class = false;
+        let capture_group_count = Self::count_regexp_capturing_groups(&chars);
         while index < chars.len() {
             let ch = chars[index];
+            if !unicode
+                && !in_character_class
+                && ch == '('
+                && chars.get(index + 1) == Some(&'?')
+                && matches!(chars.get(index + 2), Some('=' | '!'))
+                && let Some(assertion_end) = Self::find_group_end(&chars, index)
+                && let Some((min_count, quantifier_len)) =
+                    Self::parse_quantifier_min_count(&chars, assertion_end + 1)
+            {
+                if min_count > 0 {
+                    for assertion_char in &chars[index..=assertion_end] {
+                        normalized.push(*assertion_char);
+                    }
+                }
+                index = assertion_end + 1 + quantifier_len;
+                continue;
+            }
             if ch == '\\' && index + 1 < chars.len() {
                 let next = chars[index + 1];
                 if next == '0' {
@@ -6806,6 +6837,22 @@ impl Vm {
                     if !has_decimal_follow {
                         normalized.push_str("\\x00");
                         index += 2;
+                        continue;
+                    }
+                }
+                if next == 'c' && !unicode && in_character_class {
+                    if let Some(control_char) = chars.get(index + 2)
+                        && (control_char.is_ascii_alphabetic()
+                            || control_char.is_ascii_digit()
+                            || *control_char == '_')
+                    {
+                        let control_value = (*control_char as u32) % 32;
+                        Self::push_regex_literal_code_unit(
+                            &mut normalized,
+                            control_value,
+                            in_character_class,
+                        );
+                        index += 3;
                         continue;
                     }
                 }
@@ -6893,6 +6940,20 @@ impl Vm {
                     if unicode {
                         return Err(());
                     }
+                    let mut decimal_end = index + 1;
+                    while decimal_end < chars.len() && chars[decimal_end].is_ascii_digit() {
+                        decimal_end += 1;
+                    }
+                    let decimal_digits: String = chars[index + 1..decimal_end].iter().collect();
+                    if let Ok(decimal_value) = decimal_digits.parse::<usize>()
+                        && decimal_value > 0
+                        && decimal_value <= capture_group_count
+                    {
+                        normalized.push('\\');
+                        normalized.push_str(&decimal_digits);
+                        index = decimal_end;
+                        continue;
+                    }
                     if let Some((code_point, consumed_digits)) =
                         Self::parse_regex_legacy_octal_escape(&chars, index + 1)
                     {
@@ -6942,6 +7003,23 @@ impl Vm {
             if ch == ']' {
                 in_character_class = false;
                 normalized.push(ch);
+                index += 1;
+                continue;
+            }
+            if unicode && !in_character_class {
+                if matches!(ch, ']' | '}') {
+                    return Err(());
+                }
+                if ch == '{' && Self::parse_quantifier_min_count(&chars, index).is_none() {
+                    return Err(());
+                }
+            }
+            if in_character_class
+                && ch == '-'
+                && Self::class_range_requires_union_fallback(&chars, index)
+            {
+                normalized.push('\\');
+                normalized.push('-');
                 index += 1;
                 continue;
             }
@@ -7012,6 +7090,157 @@ impl Vm {
         } else {
             matches!(next, 'b' | 'B' | 'd' | 'D' | 's' | 'S' | 'w' | 'W')
         }
+    }
+
+    fn count_regexp_capturing_groups(chars: &[char]) -> usize {
+        let mut count = 0usize;
+        let mut index = 0usize;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '(' {
+                if chars.get(index + 1) != Some(&'?') {
+                    count += 1;
+                }
+            }
+            index += 1;
+        }
+        count
+    }
+
+    fn find_group_end(chars: &[char], start: usize) -> Option<usize> {
+        if chars.get(start) != Some(&'(') {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut index = start;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn parse_quantifier_min_count(chars: &[char], start: usize) -> Option<(usize, usize)> {
+        let first = *chars.get(start)?;
+        match first {
+            '*' | '?' => {
+                let mut consumed = 1usize;
+                if chars.get(start + consumed) == Some(&'?') {
+                    consumed += 1;
+                }
+                Some((0, consumed))
+            }
+            '+' => {
+                let mut consumed = 1usize;
+                if chars.get(start + consumed) == Some(&'?') {
+                    consumed += 1;
+                }
+                Some((1, consumed))
+            }
+            '{' => {
+                let mut index = start + 1;
+                let mut min_digits = String::new();
+                while let Some(ch) = chars.get(index).copied() {
+                    if !ch.is_ascii_digit() {
+                        break;
+                    }
+                    min_digits.push(ch);
+                    index += 1;
+                }
+                if min_digits.is_empty() {
+                    return None;
+                }
+                let min_count = min_digits.parse::<usize>().ok()?;
+                if chars.get(index) == Some(&',') {
+                    index += 1;
+                    while let Some(ch) = chars.get(index).copied() {
+                        if !ch.is_ascii_digit() {
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                if chars.get(index) != Some(&'}') {
+                    return None;
+                }
+                index += 1;
+                if chars.get(index) == Some(&'?') {
+                    index += 1;
+                }
+                Some((min_count, index - start))
+            }
+            _ => None,
+        }
+    }
+
+    fn class_range_requires_union_fallback(chars: &[char], dash_index: usize) -> bool {
+        let left_is_class_set_escape = dash_index >= 2
+            && chars.get(dash_index - 2) == Some(&'\\')
+            && Self::is_class_set_escape(chars[dash_index - 1]);
+        let right_is_class_set_escape = dash_index + 2 < chars.len()
+            && chars.get(dash_index + 1) == Some(&'\\')
+            && Self::is_class_set_escape(chars[dash_index + 2]);
+        left_is_class_set_escape || right_is_class_set_escape
+    }
+
+    fn is_class_set_escape(ch: char) -> bool {
+        matches!(ch, 'd' | 'D' | 's' | 'S' | 'w' | 'W')
     }
 
     fn normalize_regexp_input_for_unicode(input: &str) -> String {
@@ -7096,17 +7325,27 @@ impl Vm {
         }
         let mut value = first.to_digit(8)?;
         let mut consumed = 1usize;
-        while consumed < 3 {
-            let candidate = chars.get(start + consumed).copied();
-            let Some(candidate) = candidate else {
-                break;
-            };
-            if !matches!(candidate, '0'..='7') {
-                break;
-            }
-            value = value * 8 + candidate.to_digit(8)?;
-            consumed += 1;
+        let Some(second) = chars.get(start + 1).copied() else {
+            return Some((value, consumed));
+        };
+        if !matches!(second, '0'..='7') {
+            return Some((value, consumed));
         }
+        value = value * 8 + second.to_digit(8)?;
+        consumed = 2;
+
+        if !matches!(first, '0'..='3') {
+            return Some((value, consumed));
+        }
+        let Some(third) = chars.get(start + 2).copied() else {
+            return Some((value, consumed));
+        };
+        if !matches!(third, '0'..='7') {
+            return Some((value, consumed));
+        }
+        value = value * 8 + third.to_digit(8)?;
+        consumed = 3;
+
         Some((value, consumed))
     }
 

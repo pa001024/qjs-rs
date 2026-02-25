@@ -171,6 +171,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `annexB (v6)`: discovered=1086, executed=825, skipped=261, passed=774, failed=51
 - `annexB (v7)`: discovered=1086, executed=825, skipped=261, passed=806, failed=19
 - `annexB (v11)`: discovered=1086, executed=825, skipped=261, passed=808, failed=17
+- `annexB (v14)`: discovered=1086, executed=825, skipped=261, passed=825, failed=0
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -215,6 +216,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - 本轮 Annex B eval indirect 清零：将同一套 B.3.3 绑定同步机制扩展到 non-strict indirect eval，`annexB/language/eval-code/indirect` 达到 `128/0`（`target/test262-annexb-language-eval-code-indirect-20260225-v1.json`），`annexB` 全目录进一步提升至 `684/141`（`target/test262-annexb-baseline-20260225-v5.json`），主失败簇转移到 `annexB/language/function-code` 与 `annexB/language/global-code`。
 - 本轮 Annex B function/global 主簇清理：VM 将 B.3.3 varEnv 同步机制扩展到 non-strict script/function 执行（非 eval）路径，并补齐“catch BindingIdentifier 不触发 lexical 冲突过滤”与“参数名排除（含默认参数）”条件，消除 `function-code/global-code` 的 block-level function declaration 大簇；`annexB` 提升到 `806/19`（`target/test262-annexb-baseline-20260225-v7.json`），剩余失败集中在 `assignmenttargettype` 与少量 parse-negative 边角。
 - 本轮 Annex B function/global 细化收敛：在上述机制上补齐 `arguments` 排除与“按候选声明计数同步”（避免同名非候选声明错误覆盖），`function-code` 进一步收敛到 `157/2`（`target/test262-annexb-language-function-code-20260225-v2.json`），`annexB` 提升到 `808/17`（`target/test262-annexb-baseline-20260225-v11.json`）。
+- 本轮 Annex B 尾部清零：对齐 QuickJS 行为补齐 call-expression assignment/update/for-in(of) lhs 的 runtime `ReferenceError` 路径、`for (var x = init in ...)` non-strict initializer 语义、non-strict block/switch FunctionDeclaration 重名规则（B.3.3.4/B.3.3.5）；regexp 侧补齐 legacy escape/class-range/assertion-quantifier 归一化并切换 `fancy-regex` 执行后端。`annexB` 收敛至 `825/0`（`target/test262-annexb-baseline-20260226-v14.log`）。
 - 本轮 Annex B RegExp 再收敛：对齐 QuickJS `lre_parse_escape` 的 legacy 规则，补齐 non-`u` identity escape、decimal/octal fallback 与 `\x/\u` 不完整逃逸回退；同时 `RegExp.prototype.exec` 返回值补齐 `index/input` 字段。`annexB/built-ins/RegExp` 达到 `22/0`（`target/test262-annexb-builtins-regexp-20260225-v6.json`）。
 - 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），并新增 `RegExp.prototype.compile`（含 `lastIndex` throw=true 回写路径与 RegExp-pattern 分支）；同时将 HostFunction 构造限制为 `bind` 产物；相关 7 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。

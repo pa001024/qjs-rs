@@ -10,4 +10,5 @@ ast.workspace = true
 bytecode.workspace = true
 parser.workspace = true
 runtime.workspace = true
+fancy-regex = "0.14"
 regex = "1"
