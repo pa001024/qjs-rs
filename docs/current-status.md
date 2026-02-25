@@ -38,8 +38,14 @@
 - `test262 built-ins/Array/prototype/unshift` 最新全量：`executed=15`、`passed=15`、`failed=0`（快照：`target/test262-builtins-array-prototype-unshift-20260225-v27d.json`）。
 - `test262 built-ins/Array/prototype/toLocaleString` 最新全量：`executed=2`、`passed=2`、`failed=0`（快照：`target/test262-builtins-array-prototype-toLocaleString-20260225-v27d.json`）。
 - `test262 built-ins/Array/prototype/toString` 最新全量：`executed=6`、`passed=6`、`failed=0`（快照：`target/test262-builtins-array-prototype-toString-20260225-v27d.json`）。
+- `test262 annexB/built-ins/Date/prototype/getYear` 最新全量：`executed=3`、`passed=3`、`failed=0`（快照：`target/test262-annexb-date-getYear-20260225-v2.json`）。
+- `test262 annexB/built-ins/Date/prototype/setYear` 最新全量：`executed=8`、`passed=8`、`failed=0`（快照：`target/test262-annexb-date-setYear-20260225-v2.json`）。
+- `test262 annexB/built-ins/Date/prototype/toGMTString` 最新全量：`executed=1`、`passed=1`、`failed=0`（快照：`target/test262-annexb-date-toGMTString-20260225-v1.json`）。
+- `test262 annexB/built-ins/escape` 最新全量：`executed=8`、`passed=8`、`failed=0`（快照：`target/test262-annexb-escape-20260225-v1.json`）。
+- `test262 annexB/built-ins/unescape` 最新全量：`executed=11`、`passed=11`、`failed=0`（快照：`target/test262-annexb-unescape-20260225-v1.json`）。
 - `test262 built-ins/Array --max-cases 3000` 最新采样：`executed=2329`、`passed=2329`、`failed=0`（快照：`target/test262-builtins-array-20260225-v27-s3000.json`）。
 - 本轮新增语义收敛：
+  - Annex B Date/Global 收敛：新增 `escape/unescape` native 算法（按 QuickJS `js_global_escape/js_global_unescape` 的 code-unit 规则）、补齐 `Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 同一函数对象），并修复 HostFunction 构造语义（仅 `bind` 产物可构造），对应 5 个 Annex B 目录全部清零。
   - `built-ins/Object` 全子集清零：补齐 `Object.values/getOwnPropertyDescriptors/is`、`Object.prototype` 多方法 ToObject/ToPropertyKey 细节、`Object.setPrototypeOf` 边界、`Reflect` 最小入口，并新增 Proxy `preventExtensions/ownKeys` 最小链路与 async paren-arrow 解析支持。
   - `Array` 失败簇首轮收敛：补齐 `Array.from`（迭代器/array-like 双路径 + mapfn + constructor 分派）、`Array(length)` 非法长度 `RangeError`、`Array.isArray`（Array marker）和 `Array.prototype.splice` 最小路径；同时修复 `NativeFunction` 属性读取的原型链回退并补回 `Object.__tdzMarker` 自有属性声明，消除 for-in/for-of 回归。
   - `Array.length` 收缩语义对齐 QuickJS `set_array_length` 方向：从“全区间删除”改为“仅遍历已存在索引属性”，修复超大稀疏索引（如 `4294967294`）导致的超时；新增 VM 回归测试覆盖。

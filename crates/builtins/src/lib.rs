@@ -149,6 +149,11 @@ pub fn install_baseline(realm: &mut Realm) {
         "encodeURIComponent",
         JsValue::NativeFunction(NativeFunction::EncodeURIComponent),
     );
+    realm.define_global("escape", JsValue::NativeFunction(NativeFunction::Escape));
+    realm.define_global(
+        "unescape",
+        JsValue::NativeFunction(NativeFunction::Unescape),
+    );
     realm.define_global("assert", JsValue::NativeFunction(NativeFunction::Assert));
     realm.define_global(
         "Test262Error",
@@ -216,6 +221,26 @@ mod tests {
         assert_eq!(
             realm.get_global("isFinite"),
             Some(&JsValue::NativeFunction(NativeFunction::IsFinite))
+        );
+    }
+
+    #[test]
+    fn installs_escape_global() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("escape"),
+            Some(&JsValue::NativeFunction(NativeFunction::Escape))
+        );
+    }
+
+    #[test]
+    fn installs_unescape_global() {
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        assert_eq!(
+            realm.get_global("unescape"),
+            Some(&JsValue::NativeFunction(NativeFunction::Unescape))
         );
     }
 

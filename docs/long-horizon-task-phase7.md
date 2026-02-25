@@ -127,6 +127,11 @@
   - `built-ins/Array/prototype/unshift`: `15/0`（`target/test262-builtins-array-prototype-unshift-20260225-v27d.json`）
   - `built-ins/Array/prototype/toLocaleString`: `2/0`（`target/test262-builtins-array-prototype-toLocaleString-20260225-v27d.json`）
   - `built-ins/Array/prototype/toString`: `6/0`（`target/test262-builtins-array-prototype-toString-20260225-v27d.json`）
+  - `annexB/built-ins/Date/prototype/getYear`: `3/0`（`target/test262-annexb-date-getYear-20260225-v2.json`）
+  - `annexB/built-ins/Date/prototype/setYear`: `8/0`（`target/test262-annexb-date-setYear-20260225-v2.json`）
+  - `annexB/built-ins/Date/prototype/toGMTString`: `1/0`（`target/test262-annexb-date-toGMTString-20260225-v1.json`）
+  - `annexB/built-ins/escape`: `8/0`（`target/test262-annexb-escape-20260225-v1.json`）
+  - `annexB/built-ins/unescape`: `11/0`（`target/test262-annexb-unescape-20260225-v1.json`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
@@ -138,6 +143,7 @@
   - Track G（TypedArray 扩展）：从当前 alias 过渡到真实 typed-array 家族构造器与 element 读写语义，覆盖 `Int8/Uint8Clamped/Int16/Uint16/Int32/Uint32/Float32/Float64/BigInt64/BigUint64`。
   - Track H（WeakMap/WeakSet 语义）：从 Map/Set alias 过渡到最小真实语义（对象键约束、`set/get/has/delete`），并补齐与 GC root 的交互约束。
   - Track I（全量基线推进）：开启 `test262` 更大样本/全量抽样与 nightly 快照，按失败簇持续回归清理。
+  - Track K（Annex B String 收敛）：对齐 QuickJS `js_string_substr/js_string_CreateHTML`，补齐 `substr` 与 HTML 包装方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`）。
 - 每个 Track 必须输出：
   - QuickJS 对照点（函数名/分支）
   - 代码提交（最小可验证增量）

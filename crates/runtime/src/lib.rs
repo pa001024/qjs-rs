@@ -79,6 +79,8 @@ pub enum NativeFunction {
     DecodeURIComponent,
     EncodeURI,
     EncodeURIComponent,
+    Escape,
+    Unescape,
     Assert,
     Test262Error,
     ErrorConstructor,

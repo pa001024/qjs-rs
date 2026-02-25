@@ -232,9 +232,13 @@ enum HostFunction {
     DateGetFullYearThis,
     DateGetMonthThis,
     DateGetDateThis,
+    DateGetTimeThis,
     DateGetUTCFullYearThis,
     DateGetUTCMonthThis,
     DateGetUTCDateThis,
+    DateGetYearThis,
+    DateSetYearThis,
+    DateToUTCStringThis,
     FunctionToString {
         target: JsValue,
     },
@@ -934,9 +938,13 @@ impl Vm {
             | HostFunction::DateGetFullYearThis
             | HostFunction::DateGetMonthThis
             | HostFunction::DateGetDateThis
+            | HostFunction::DateGetTimeThis
             | HostFunction::DateGetUTCFullYearThis
             | HostFunction::DateGetUTCMonthThis
             | HostFunction::DateGetUTCDateThis
+            | HostFunction::DateGetYearThis
+            | HostFunction::DateSetYearThis
+            | HostFunction::DateToUTCStringThis
             | HostFunction::ThrowTypeError
             | HostFunction::FunctionPrototype
             | HostFunction::JsonStringify
@@ -2532,15 +2540,7 @@ impl Vm {
                     bound_args.extend(args);
                     return self.execute_construct_value(target, bound_args, realm, caller_strict);
                 }
-                let constructed = self.create_object_value();
-                self.install_constructor_property(&constructed, JsValue::HostFunction(host_id));
-                let result =
-                    self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
-                if Self::is_object_like_value(&result) {
-                    Ok(result)
-                } else {
-                    Ok(constructed)
-                }
+                Err(VmError::NotCallable)
             }
             _ => Err(VmError::NotCallable),
         }
@@ -2658,8 +2658,17 @@ impl Vm {
                 }
             }
             JsValue::HostFunction(host_id) => {
+                let Some(HostFunction::BoundCall {
+                    target,
+                    this_arg: _,
+                    mut bound_args,
+                }) = self.host_functions.get(&host_id).cloned()
+                else {
+                    return Err(VmError::NotCallable);
+                };
+                bound_args.extend(args);
                 let result =
-                    self.execute_host_function_call(host_id, None, args, realm, caller_strict)?;
+                    self.execute_construct_value(target, bound_args, realm, caller_strict)?;
                 if Self::is_object_like_value(&result) {
                     if let Some((prototype, prototype_value)) = super_prototype_hint {
                         self.apply_prototype_components_to_value(
@@ -2796,17 +2805,6 @@ impl Vm {
             }
             JsValue::String(value) => Ok(self.js_string_iterator_values(&value)),
             _ => Err(VmError::TypeError("spread expects array-like object")),
-        }
-    }
-
-    fn install_constructor_property(&mut self, target: &JsValue, constructor: JsValue) {
-        let JsValue::Object(object_id) = target else {
-            return;
-        };
-        if let Some(object) = self.objects.get_mut(object_id) {
-            object
-                .properties
-                .insert("constructor".to_string(), constructor);
         }
     }
 
@@ -3324,6 +3322,18 @@ impl Vm {
         }
     }
 
+    fn date_timestamp_for_object(&self, object_id: ObjectId) -> Result<f64, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        Ok(object
+            .properties
+            .get(DATE_VALUE_KEY)
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0))
+    }
+
     fn date_parts_for_object(
         &self,
         object_id: ObjectId,
@@ -3362,6 +3372,159 @@ impl Vm {
         let millis_per_day = 86_400_000.0;
         let days = (timestamp_ms / millis_per_day).floor() as i64;
         Self::civil_from_days(days)
+    }
+
+    fn date_time_components_from_timestamp(timestamp_ms: f64) -> (u32, u32, u32, u32) {
+        let millis_per_day = 86_400_000.0;
+        let day_floor = (timestamp_ms / millis_per_day).floor();
+        let mut millis_within_day = timestamp_ms - day_floor * millis_per_day;
+        if millis_within_day < 0.0 {
+            millis_within_day += millis_per_day;
+        }
+        let millis_within_day = millis_within_day.trunc() as u64;
+        let hour = (millis_within_day / 3_600_000) as u32;
+        let minute = ((millis_within_day % 3_600_000) / 60_000) as u32;
+        let second = ((millis_within_day % 60_000) / 1_000) as u32;
+        let millisecond = (millis_within_day % 1_000) as u32;
+        (hour, minute, second, millisecond)
+    }
+
+    // Howard Hinnant's days-from-civil algorithm.
+    fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+        let y = year as i64 - i64::from(month <= 1);
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let m = month as i64 + 1;
+        let mp = m + if m > 2 { -3 } else { 9 };
+        let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    fn make_date_timestamp_ms(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+        millisecond: u32,
+    ) -> f64 {
+        let days = Self::days_from_civil(year, month, day);
+        let day_ms = days as f64 * 86_400_000.0;
+        let time_ms = (hour as f64) * 3_600_000.0
+            + (minute as f64) * 60_000.0
+            + (second as f64) * 1_000.0
+            + (millisecond as f64);
+        day_ms + time_ms
+    }
+
+    fn time_clip(value: f64) -> f64 {
+        if !value.is_finite() || value.abs() > 8.64e15 {
+            f64::NAN
+        } else {
+            value.trunc()
+        }
+    }
+
+    fn set_date_internal_timestamp(
+        &mut self,
+        object_id: ObjectId,
+        timestamp: f64,
+    ) -> Result<(), VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object
+            .properties
+            .insert(DATE_VALUE_KEY.to_string(), JsValue::Number(timestamp));
+        Ok(())
+    }
+
+    fn set_date_local_components(
+        &mut self,
+        object_id: ObjectId,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Result<(), VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object
+            .properties
+            .insert("__dateYear".to_string(), JsValue::Number(year as f64));
+        object
+            .properties
+            .insert("__dateMonth".to_string(), JsValue::Number(month as f64));
+        object
+            .properties
+            .insert("__dateDay".to_string(), JsValue::Number(day as f64));
+        Ok(())
+    }
+
+    fn clear_date_local_components(&mut self, object_id: ObjectId) -> Result<(), VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object.properties.remove("__dateYear");
+        object.properties.remove("__dateMonth");
+        object.properties.remove("__dateDay");
+        Ok(())
+    }
+
+    fn execute_date_set_year_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let object_id = self.strict_this_date_object(this_arg)?;
+        let stored_timestamp = self.date_timestamp_for_object(object_id)?;
+        let (base_month, base_day, base_hour, base_minute, base_second, base_milli) =
+            if stored_timestamp.is_nan() {
+                (0, 1, 0, 0, 0, 0)
+            } else {
+                let (_, month, day) = self.date_parts_for_object(object_id, false)?;
+                let (hour, minute, second, milli) =
+                    Self::date_time_components_from_timestamp(stored_timestamp);
+                (month, day, hour, minute, second, milli)
+            };
+
+        let year_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let mut year_number = self.coerce_number_runtime(year_value, realm, caller_strict)?;
+        if year_number.is_nan() {
+            self.set_date_internal_timestamp(object_id, f64::NAN)?;
+            self.clear_date_local_components(object_id)?;
+            return Ok(JsValue::Number(f64::NAN));
+        }
+        year_number = year_number.trunc();
+        if (0.0..100.0).contains(&year_number) {
+            year_number += 1900.0;
+        }
+
+        let timestamp = Self::make_date_timestamp_ms(
+            year_number as i32,
+            base_month,
+            base_day,
+            base_hour,
+            base_minute,
+            base_second,
+            base_milli,
+        );
+        let clipped = Self::time_clip(timestamp);
+        self.set_date_internal_timestamp(object_id, clipped)?;
+        if clipped.is_nan() {
+            self.clear_date_local_components(object_id)?;
+            return Ok(JsValue::Number(f64::NAN));
+        }
+        let (year, month, day) = Self::utc_date_parts_from_timestamp(clipped);
+        self.set_date_local_components(object_id, year, month, day)?;
+        Ok(JsValue::Number(clipped))
     }
 
     // Howard Hinnant's civil-from-days algorithm.
@@ -5495,35 +5658,80 @@ impl Vm {
                     .unwrap_or(0.0);
                 Ok(JsValue::Number(timestamp))
             }
+            HostFunction::DateGetTimeThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let timestamp = self.date_timestamp_for_object(object_id)?;
+                Ok(JsValue::Number(timestamp))
+            }
             HostFunction::DateGetFullYearThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (year, _, _) = self.date_parts_for_object(object_id, false)?;
                 Ok(JsValue::Number(year as f64))
             }
             HostFunction::DateGetMonthThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (_, month, _) = self.date_parts_for_object(object_id, false)?;
                 Ok(JsValue::Number(month as f64))
             }
             HostFunction::DateGetDateThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (_, _, day) = self.date_parts_for_object(object_id, false)?;
                 Ok(JsValue::Number(day as f64))
             }
             HostFunction::DateGetUTCFullYearThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (year, _, _) = self.date_parts_for_object(object_id, true)?;
                 Ok(JsValue::Number(year as f64))
             }
             HostFunction::DateGetUTCMonthThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (_, month, _) = self.date_parts_for_object(object_id, true)?;
                 Ok(JsValue::Number(month as f64))
             }
             HostFunction::DateGetUTCDateThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 let (_, _, day) = self.date_parts_for_object(object_id, true)?;
                 Ok(JsValue::Number(day as f64))
+            }
+            HostFunction::DateGetYearThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                if self.date_timestamp_for_object(object_id)?.is_nan() {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
+                let (year, _, _) = self.date_parts_for_object(object_id, false)?;
+                Ok(JsValue::Number((year - 1900) as f64))
+            }
+            HostFunction::DateSetYearThis => {
+                self.execute_date_set_year_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::DateToUTCStringThis => {
+                let object_id = self.strict_this_date_object(this_arg)?;
+                let timestamp = self.date_timestamp_for_object(object_id)?;
+                if timestamp.is_nan() {
+                    return Ok(JsValue::String("Invalid Date".to_string()));
+                }
+                Ok(JsValue::String(format!(
+                    "Date({})",
+                    Self::coerce_number_to_string(timestamp)
+                )))
             }
             HostFunction::FunctionToString { target } => Ok(JsValue::String(format!(
                 "{}() {{ [native code] }}",
@@ -5897,6 +6105,8 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 Ok(JsValue::String(self.coerce_to_string(&value)))
             }
+            NativeFunction::Escape => self.execute_escape(&args, realm, caller_strict),
+            NativeFunction::Unescape => self.execute_unescape(&args, realm, caller_strict),
             NativeFunction::Assert => {
                 let condition = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if self.is_truthy(&condition) {
@@ -8145,21 +8355,68 @@ impl Vm {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as f64)
                 .unwrap_or(0.0)
+        } else if args.len() == 1 {
+            Self::time_clip(
+                args.first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0),
+            )
         } else {
-            args.first()
-                .map(|value| self.to_number(value))
-                .unwrap_or(0.0)
-        };
-        let local_components = if args.len() >= 2 {
-            let year = self.to_number(&args[0]) as i32;
-            let month = self.to_number(&args[1]) as i32;
+            let mut year = self.to_number(&args[0]);
+            let month = self.to_number(&args[1]);
             let day = args
                 .get(2)
                 .map(|value| self.to_number(value))
-                .unwrap_or(1.0) as i32;
-            Some((year, month, day))
-        } else {
+                .unwrap_or(1.0);
+            let hour = args
+                .get(3)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0);
+            let minute = args
+                .get(4)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0);
+            let second = args
+                .get(5)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0);
+            let millisecond = args
+                .get(6)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0);
+
+            if !year.is_finite()
+                || !month.is_finite()
+                || !day.is_finite()
+                || !hour.is_finite()
+                || !minute.is_finite()
+                || !second.is_finite()
+                || !millisecond.is_finite()
+            {
+                f64::NAN
+            } else {
+                year = year.trunc();
+                if (0.0..=99.0).contains(&year) {
+                    year += 1900.0;
+                }
+                let month_trunc = month.trunc() as i64;
+                let total_months = year as i64 * 12 + month_trunc;
+                let normalized_year = total_months.div_euclid(12) as i32;
+                let normalized_month = total_months.rem_euclid(12) as u32;
+                let day_number = day.trunc() as i64;
+                let days =
+                    Self::days_from_civil(normalized_year, normalized_month, 1) + day_number - 1;
+                let time_ms = hour.trunc() * 3_600_000.0
+                    + minute.trunc() * 60_000.0
+                    + second.trunc() * 1_000.0
+                    + millisecond.trunc();
+                Self::time_clip(days as f64 * 86_400_000.0 + time_ms)
+            }
+        };
+        let local_components = if timestamp.is_nan() {
             None
+        } else {
+            Some(Self::utc_date_parts_from_timestamp(timestamp))
         };
         let object = self.create_object_value();
         let object_id = match object {
@@ -8215,6 +8472,10 @@ impl Vm {
             target
                 .properties
                 .insert("__dateDay".to_string(), JsValue::Number(day as f64));
+        } else {
+            target.properties.remove("__dateYear");
+            target.properties.remove("__dateMonth");
+            target.properties.remove("__dateDay");
         }
         Ok(JsValue::Object(object_id))
     }
@@ -12312,10 +12573,20 @@ impl Vm {
             let get_full_year = self.create_host_function_value(HostFunction::DateGetFullYearThis);
             let get_month = self.create_host_function_value(HostFunction::DateGetMonthThis);
             let get_date = self.create_host_function_value(HostFunction::DateGetDateThis);
+            let get_time = self.create_host_function_value(HostFunction::DateGetTimeThis);
             let get_utc_full_year =
                 self.create_host_function_value(HostFunction::DateGetUTCFullYearThis);
             let get_utc_month = self.create_host_function_value(HostFunction::DateGetUTCMonthThis);
             let get_utc_date = self.create_host_function_value(HostFunction::DateGetUTCDateThis);
+            let get_year = self.create_host_function_value(HostFunction::DateGetYearThis);
+            let set_year = self.create_host_function_value(HostFunction::DateSetYearThis);
+            let to_utc_string = self.create_host_function_value(HostFunction::DateToUTCStringThis);
+            self.set_builtin_function_length(&get_year, 0.0);
+            self.set_builtin_function_name(&get_year, "getYear");
+            self.set_builtin_function_length(&set_year, 1.0);
+            self.set_builtin_function_name(&set_year, "setYear");
+            self.set_builtin_function_length(&to_utc_string, 0.0);
+            self.set_builtin_function_name(&to_utc_string, "toUTCString");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -12366,14 +12637,21 @@ impl Vm {
                     "setUTCFullYear",
                     "toLocaleString",
                     "toUTCString",
+                    "toGMTString",
+                    "getYear",
+                    "setYear",
                 ] {
                     let value = match method {
                         "getFullYear" => get_full_year.clone(),
                         "getMonth" => get_month.clone(),
                         "getDate" => get_date.clone(),
+                        "getTime" => get_time.clone(),
                         "getUTCFullYear" => get_utc_full_year.clone(),
                         "getUTCMonth" => get_utc_month.clone(),
                         "getUTCDate" => get_utc_date.clone(),
+                        "getYear" => get_year.clone(),
+                        "setYear" => set_year.clone(),
+                        "toUTCString" | "toGMTString" => to_utc_string.clone(),
                         _ => JsValue::NativeFunction(NativeFunction::DatePrototypeMethod),
                     };
                     object.properties.insert(method.to_string(), value);
@@ -13294,6 +13572,24 @@ impl Vm {
             .insert("length".to_string(), JsValue::Number(length));
         object.property_attributes.insert(
             "length".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
+    fn set_builtin_function_name(&mut self, function: &JsValue, name: &str) {
+        let JsValue::HostFunction(host_id) = function else {
+            return;
+        };
+        let object = self.host_function_objects.entry(*host_id).or_default();
+        object
+            .properties
+            .insert("name".to_string(), JsValue::String(name.to_string()));
+        object.property_attributes.insert(
+            "name".to_string(),
             PropertyAttributes {
                 writable: false,
                 enumerable: false,
@@ -15645,6 +15941,8 @@ impl Vm {
             NativeFunction::DecodeURIComponent => "decodeURIComponent",
             NativeFunction::EncodeURI => "encodeURI",
             NativeFunction::EncodeURIComponent => "encodeURIComponent",
+            NativeFunction::Escape => "escape",
+            NativeFunction::Unescape => "unescape",
             _ => "native",
         }
     }
@@ -16401,6 +16699,134 @@ impl Vm {
             }
         }
         escaped
+    }
+
+    fn execute_escape(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = self.coerce_to_string_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let mut output = String::new();
+        for code_unit in self.string_to_js_code_units(&input) {
+            if Self::is_escape_unescaped_code_unit(code_unit) {
+                output.push(code_unit as u8 as char);
+            } else if code_unit >= 0x0100 {
+                output.push_str(&format!("%u{code_unit:04X}"));
+            } else {
+                output.push_str(&format!("%{code_unit:02X}"));
+            }
+        }
+        Ok(JsValue::String(output))
+    }
+
+    fn execute_unescape(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = self.coerce_to_string_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let units = self.string_to_js_code_units(&input);
+        let mut output_units = Vec::with_capacity(units.len());
+        let mut index = 0usize;
+        while index < units.len() {
+            let mut code_unit = units[index];
+            if code_unit == b'%' as u16 {
+                if index + 5 < units.len()
+                    && units[index + 1] == b'u' as u16
+                    && let (Some(h0), Some(h1), Some(h2), Some(h3)) = (
+                        Self::hex_digit_value(units[index + 2]),
+                        Self::hex_digit_value(units[index + 3]),
+                        Self::hex_digit_value(units[index + 4]),
+                        Self::hex_digit_value(units[index + 5]),
+                    )
+                {
+                    code_unit = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3;
+                    index += 6;
+                    output_units.push(code_unit);
+                    continue;
+                }
+                if index + 2 < units.len()
+                    && let (Some(h0), Some(h1)) = (
+                        Self::hex_digit_value(units[index + 1]),
+                        Self::hex_digit_value(units[index + 2]),
+                    )
+                {
+                    code_unit = (h0 << 4) | h1;
+                    index += 3;
+                    output_units.push(code_unit);
+                    continue;
+                }
+            }
+            output_units.push(code_unit);
+            index += 1;
+        }
+        Ok(JsValue::String(Self::string_from_js_code_units(
+            &output_units,
+        )))
+    }
+
+    fn is_escape_unescaped_code_unit(code_unit: u16) -> bool {
+        matches!(code_unit, 0x41..=0x5A)
+            || matches!(code_unit, 0x61..=0x7A)
+            || matches!(code_unit, 0x30..=0x39)
+            || matches!(
+                code_unit,
+                0x40 // @
+                    | 0x2A // *
+                    | 0x5F // _
+                    | 0x2B // +
+                    | 0x2D // -
+                    | 0x2E // .
+                    | 0x2F // /
+            )
+    }
+
+    fn hex_digit_value(code_unit: u16) -> Option<u16> {
+        match code_unit {
+            0x30..=0x39 => Some(code_unit - 0x30),
+            0x61..=0x66 => Some(10 + (code_unit - 0x61)),
+            0x41..=0x46 => Some(10 + (code_unit - 0x41)),
+            _ => None,
+        }
+    }
+
+    fn string_from_js_code_units(code_units: &[u16]) -> String {
+        let mut output = String::new();
+        let mut index = 0usize;
+        while index < code_units.len() {
+            let code_unit = code_units[index] as u32;
+            if (0xD800..=0xDBFF).contains(&code_unit) && index + 1 < code_units.len() {
+                let next = code_units[index + 1] as u32;
+                if (0xDC00..=0xDFFF).contains(&next) {
+                    let code_point = 0x1_0000 + ((code_unit - 0xD800) << 10) + (next - 0xDC00);
+                    if let Some(ch) = char::from_u32(code_point) {
+                        output.push(ch);
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+            if let Some(placeholder) = Self::surrogate_placeholder_from_code_unit(code_unit) {
+                output.push(placeholder);
+            } else if let Some(ch) = char::from_u32(code_unit) {
+                output.push(ch);
+            } else {
+                output.push('\u{FFFD}');
+            }
+            index += 1;
+        }
+        output
     }
 
     fn parse_int_baseline(&self, args: &[JsValue]) -> f64 {
@@ -19313,6 +19739,68 @@ mod tests {
         assert!(vm.objects.contains_key(&object_id));
         assert!(stats.marked_objects >= 1);
         assert_eq!(vm.gc_stats(), stats);
+    }
+
+    #[test]
+    fn annex_b_escape_and_unescape_follow_quickjs_encoding_rules() {
+        let script = parse_script(
+            "escape('\\u{10401}') === '%uD801%uDC01' && \
+             escape('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_+-./') === 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_+-./' && \
+             unescape('%u0041%2B%20') === 'A+ ';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global("escape", JsValue::NativeFunction(NativeFunction::Escape));
+        realm.define_global(
+            "unescape",
+            JsValue::NativeFunction(NativeFunction::Unescape),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_date_getyear_setyear_and_togmtstring_alias_work() {
+        let script = parse_script(
+            "var d = new Date(1970, 1, 2, 3, 4, 5); \
+             var expected = new Date(1971, 1, 2, 3, 4, 5).valueOf(); \
+             var ok1 = d.setYear(71) === expected; \
+             var ok2 = d.getYear() === 71; \
+             var ok3 = Date.prototype.toGMTString === Date.prototype.toUTCString; \
+             ok1 && ok2 && ok3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Date",
+            JsValue::NativeFunction(NativeFunction::DateConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn date_annex_b_methods_are_not_constructors() {
+        let script = parse_script(
+            "var threwGetYear = false; \
+             var threwSetYear = false; \
+             var threwToGmt = false; \
+             try { new Date.prototype.getYear(); } catch (e) { threwGetYear = true; } \
+             try { new Date.prototype.setYear(); } catch (e) { threwSetYear = true; } \
+             try { new Date.prototype.toGMTString(); } catch (e) { threwToGmt = true; } \
+             threwGetYear && threwSetYear && threwToGmt;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Date",
+            JsValue::NativeFunction(NativeFunction::DateConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]

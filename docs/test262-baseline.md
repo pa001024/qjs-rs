@@ -145,6 +145,11 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `built-ins/Array/prototype/unshift (v27d)`: discovered=22, executed=15, skipped=7, passed=15, failed=0
 - `built-ins/Array/prototype/toLocaleString (v27d)`: discovered=12, executed=2, skipped=10, passed=2, failed=0
 - `built-ins/Array/prototype/toString (v27d)`: discovered=11, executed=6, skipped=5, passed=6, failed=0
+- `annexB/built-ins/Date/prototype/getYear (v2)`: discovered=7, executed=3, skipped=4, passed=3, failed=0
+- `annexB/built-ins/Date/prototype/setYear (v2)`: discovered=14, executed=8, skipped=6, passed=8, failed=0
+- `annexB/built-ins/Date/prototype/toGMTString (v1)`: discovered=3, executed=1, skipped=2, passed=1, failed=0
+- `annexB/built-ins/escape (v1)`: discovered=16, executed=8, skipped=8, passed=8, failed=0
+- `annexB/built-ins/unescape (v1)`: discovered=19, executed=11, skipped=8, passed=11, failed=0
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -183,6 +188,7 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `language/literals/numeric (latest)`: discovered=157, executed=83, skipped=74, passed=83, failed=0
 
 备注：
+- 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），并将 HostFunction 构造限制为 `bind` 产物，5 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。
 - runner 目前仅对明显依赖 `$262` host API 的用例做保守跳过；`assert` / `Test262Error` 已接入 baseline 运行路径。
