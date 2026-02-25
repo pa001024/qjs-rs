@@ -12,7 +12,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 Phase: 1 of 7 (Semantic Core Closure)
 Plan: 0 of TBD in current phase
 Status: Ready to plan
-Last activity: 2026-02-25 - Created roadmap and mapped all v1 requirements to phases.
+Last activity: 2026-02-25 - Captured Phase 1 implementation context and locked spec-first semantic decisions.
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -43,6 +43,7 @@ Recent decisions affecting current work:
 - [Roadmap] Sequence semantic/runtime closure before async/modules and builtin expansion.
 - [Roadmap] Keep a standard-depth 7-phase roadmap to preserve coherent requirement groupings.
 - [Roadmap] Reserve compatibility telemetry/reporting gates for final convergence phase.
+- [Phase 1 Context] Implement selected gray areas with specification-aligned behavior only (no simplification policies).
 
 ### Pending Todos
 
@@ -55,6 +56,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-25 00:00
-Stopped at: Roadmap initialization complete; next action is planning Phase 1.
-Resume file: None
+Last session: 2026-02-25
+Stopped at: Phase 1 context gathered.
+Resume file: `.planning/phases/01-semantic-core-closure/01-CONTEXT.md`
