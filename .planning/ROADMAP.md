@@ -97,7 +97,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Semantic Core Closure | 1/3 | In Progress | - |
+| 1. Semantic Core Closure | 2/3 | In Progress | - |
 | 2. Runtime Safety and Root Integrity | 0/TBD | Not started | - |
 | 3. Promise Job Queue Semantics | 0/TBD | Not started | - |
 | 4. ES Module Lifecycle | 0/TBD | Not started | - |
