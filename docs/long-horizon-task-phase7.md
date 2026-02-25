@@ -134,9 +134,11 @@
   - `annexB/built-ins/unescape`: `11/0`（`target/test262-annexb-unescape-20260225-v1.json`）
   - `annexB/built-ins/String/prototype`: `39/0`（`target/test262-annexb-string-prototype-20260225-v5.json`）
   - `annexB/built-ins/RegExp/prototype/compile`: `14/0`（`target/test262-annexb-regexp-prototype-compile-20260225-v3.json`）
+  - `annexB/built-ins/RegExp`: `22/0`（`target/test262-annexb-builtins-regexp-20260225-v6.json`）
   - `annexB/language/comments`: `8/0`（`target/test262-annexb-language-comments-20260225-v3.json`）
   - `annexB/built-ins/Function`: `6/0`（`target/test262-annexb-builtins-function-20260225-v2.json`）
-  - `annexB/language/eval-code/direct`: `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v4.json`；`catch ({ f })` 解析已打通，下一步聚焦 B.3.3 绑定语义）
+  - `annexB/language/eval-code/direct`: `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v6.json`；`catch ({ f })` 解析已打通，下一步聚焦 B.3.3 绑定语义）
+  - `annexB` 全目录：`577/248`（`target/test262-annexb-baseline-20260225-v3.json`，失败簇主要集中在 `annexB/language/eval-code/direct`）
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）

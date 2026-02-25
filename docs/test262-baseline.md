@@ -152,10 +152,15 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 - `annexB/built-ins/unescape (v1)`: discovered=19, executed=11, skipped=8, passed=11, failed=0
 - `annexB/built-ins/String/prototype (v5)`: discovered=111, executed=39, skipped=72, passed=39, failed=0
 - `annexB/built-ins/RegExp/prototype/compile (v3)`: discovered=23, executed=14, skipped=9, passed=14, failed=0
+- `annexB/built-ins/RegExp (v5)`: discovered=62, executed=22, skipped=40, passed=22, failed=0
+- `annexB/built-ins/RegExp (v6)`: discovered=62, executed=22, skipped=40, passed=22, failed=0
 - `annexB/language/comments (v3)`: discovered=8, executed=8, skipped=0, passed=8, failed=0
 - `annexB/built-ins/Function (v2)`: discovered=6, executed=6, skipped=0, passed=6, failed=0
 - `annexB/language/eval-code/direct (v3)`: discovered=309, executed=276, skipped=33, passed=169, failed=107
 - `annexB/language/eval-code/direct (v4)`: discovered=309, executed=276, skipped=33, passed=185, failed=91
+- `annexB/language/eval-code/direct (v5)`: discovered=309, executed=276, skipped=33, passed=185, failed=91
+- `annexB/language/eval-code/direct (v6)`: discovered=309, executed=276, skipped=33, passed=185, failed=91
+- `annexB (v3)`: discovered=1086, executed=825, skipped=261, passed=577, failed=248
 - `built-ins/Array --max-cases 2000 (v13-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1373, failed=627
 - `built-ins/Array --max-cases 2000 (v16-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1547, failed=453
 - `built-ins/Array --max-cases 2000 (v20-s2000)`: discovered=3081, executed=2000, skipped=583, passed=1718, failed=282
@@ -195,7 +200,8 @@ cargo run -p test-harness --bin test262-run -- --root d:\dev\test262\test\langua
 
 备注：
 - 本轮对齐 QuickJS Annex B comments/CreateDynamicFunction：lexer 新增 `<!--` 与“行首（含换行后）`-->`”HTML 注释词法路径；`Function` 构造器 source 拼接增加参数段后换行，并收紧 parser 参数列表非法 token 处理，修复 `createdynfn-html-*` 参数用例。对应 `annexB/language/comments` 达到 `8/0`，`annexB/built-ins/Function` 达到 `6/0`。
-- 本轮 Annex B eval direct 再收敛：parser 在 `catch` 参数路径补齐 object pattern（`catch ({ f })`）并降级为 catch block 前置 `let` 绑定，清理 `skip-early-err-try` 相关 parse fail；当前快照 `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v4.json`），剩余失败集中在 B.3.3 block function declaration 的运行时绑定语义。
+- 本轮 Annex B eval direct 再收敛：parser 在 `catch` 参数路径补齐 object pattern（`catch ({ f })`）并降级为 catch block 前置 `let` 绑定，清理 `skip-early-err-try` 相关 parse fail；当前快照 `185/91`（`target/test262-annexb-language-eval-code-direct-20260225-v6.json`），剩余失败集中在 B.3.3 block function declaration 的运行时绑定语义。
+- 本轮 Annex B RegExp 再收敛：对齐 QuickJS `lre_parse_escape` 的 legacy 规则，补齐 non-`u` identity escape、decimal/octal fallback 与 `\x/\u` 不完整逃逸回退；同时 `RegExp.prototype.exec` 返回值补齐 `index/input` 字段。`annexB/built-ins/RegExp` 达到 `22/0`（`target/test262-annexb-builtins-regexp-20260225-v6.json`）。
 - 本轮对齐 QuickJS Annex B：VM 新增 `escape/unescape`（按 code-unit `%xx/%uxxxx` 规则）、`Date.prototype.getYear/setYear/toGMTString`（`toGMTString` 与 `toUTCString` 别名同对象），补齐 `String.prototype.substr` 与 `CreateHTML` 方法簇（`anchor/big/blink/bold/fixed/fontcolor/fontsize/italics/link/small/strike/sub/sup`），并新增 `RegExp.prototype.compile`（含 `lastIndex` throw=true 回写路径与 RegExp-pattern 分支）；同时将 HostFunction 构造限制为 `bind` 产物；相关 7 个 Annex B 目录当前快照均为 `failed=0`。
 - 已修复 frontmatter 前置版权注释场景（否则会错误地按“无 frontmatter”处理）。
 - runner 已支持 `--show-failures N` 输出失败样本，便于后续按优先级补语法和语义。

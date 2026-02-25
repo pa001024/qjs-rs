@@ -5668,7 +5668,7 @@ impl Vm {
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let matched = self.execute_regexp_test(receiver_id, &input)?;
+                let matched = self.execute_regexp_match(receiver_id, &input)?.is_some();
                 Ok(JsValue::Bool(matched))
             }
             HostFunction::RegExpExecThis => {
@@ -5677,11 +5677,25 @@ impl Vm {
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let matched = self.execute_regexp_test(receiver_id, &input)?;
-                if !matched {
+                let Some((index, matched)) = self.execute_regexp_match(receiver_id, &input)? else {
                     return Ok(JsValue::Null);
+                };
+                let value = self.create_array_from_values(vec![JsValue::String(matched)])?;
+                if let JsValue::Object(object_id) = value.clone() {
+                    self.set_object_property(
+                        object_id,
+                        "index".to_string(),
+                        JsValue::Number(index as f64),
+                        realm,
+                    )?;
+                    self.set_object_property(
+                        object_id,
+                        "input".to_string(),
+                        JsValue::String(input),
+                        realm,
+                    )?;
                 }
-                self.create_array_from_values(vec![JsValue::String(input)])
+                Ok(value)
             }
             HostFunction::RegExpCompileThis => {
                 let receiver_id = self.strict_this_regexp_object(this_arg)?;
@@ -6585,11 +6599,21 @@ impl Vm {
     ) -> Result<(), VmError> {
         self.validate_regexp_flags(flags)?;
         let unicode = flags.contains('u');
-        let normalized_pattern = Self::normalize_regexp_pattern(pattern, unicode);
+        let normalized_pattern =
+            Self::normalize_regexp_pattern(pattern, unicode).map_err(|_| {
+                VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::SyntaxErrorConstructor,
+                    "SyntaxError",
+                    "invalid regular expression pattern".to_string(),
+                ))
+            })?;
         let mut builder = RegexBuilder::new(&normalized_pattern);
         builder.case_insensitive(flags.contains('i'));
         builder.multi_line(flags.contains('m'));
         builder.dot_matches_new_line(flags.contains('s'));
+        if unicode {
+            builder.unicode(true);
+        }
         if builder.build().is_err() {
             return Err(VmError::UncaughtException(self.create_error_exception(
                 NativeFunction::SyntaxErrorConstructor,
@@ -6660,7 +6684,11 @@ impl Vm {
         Ok(format!("/{source}/{flags}"))
     }
 
-    fn execute_regexp_test(&self, object_id: ObjectId, input: &str) -> Result<bool, VmError> {
+    fn execute_regexp_match(
+        &self,
+        object_id: ObjectId,
+        input: &str,
+    ) -> Result<Option<(usize, String)>, VmError> {
         let object = self
             .objects
             .get(&object_id)
@@ -6676,7 +6704,10 @@ impl Vm {
 
         let sticky = flags.contains('y');
         let unicode = flags.contains('u');
-        let normalized_pattern = Self::normalize_regexp_pattern(&pattern, unicode);
+        let normalized_pattern = match Self::normalize_regexp_pattern(&pattern, unicode) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
         let normalized_input = if unicode {
             Self::normalize_regexp_input_for_unicode(input)
         } else {
@@ -6686,21 +6717,26 @@ impl Vm {
         builder.case_insensitive(flags.contains('i'));
         builder.multi_line(flags.contains('m'));
         builder.dot_matches_new_line(flags.contains('s'));
-        builder.unicode(unicode);
+        if unicode {
+            builder.unicode(true);
+        }
         let Ok(regex) = builder.build() else {
-            return Ok(false);
+            return Ok(None);
         };
 
         if sticky {
             Ok(regex
                 .find_at(&normalized_input, last_index)
-                .is_some_and(|m| m.start() == last_index))
+                .filter(|m| m.start() == last_index)
+                .map(|m| (m.start(), m.as_str().to_string())))
         } else {
-            Ok(regex.is_match(&normalized_input))
+            Ok(regex
+                .find(&normalized_input)
+                .map(|m| (m.start(), m.as_str().to_string())))
         }
     }
 
-    fn normalize_regexp_pattern(pattern: &str, unicode: bool) -> String {
+    fn normalize_regexp_pattern(pattern: &str, unicode: bool) -> Result<String, ()> {
         let chars: Vec<char> = pattern.chars().collect();
         let mut normalized = String::with_capacity(pattern.len());
         let mut index = 0usize;
@@ -6761,9 +6797,85 @@ impl Vm {
                         index += consumed;
                         continue;
                     }
+                    if unicode {
+                        return Err(());
+                    }
+                    Self::push_regex_literal_char(&mut normalized, 'u', in_character_class);
+                    index += 2;
+                    continue;
                 }
-                normalized.push('\\');
-                normalized.push(next);
+                if next == 'x' {
+                    if let Some((code_point, consumed)) = Self::parse_regex_x_escape(&chars, index)
+                    {
+                        if let Some(value) = char::from_u32(code_point) {
+                            Self::push_regex_literal_char(
+                                &mut normalized,
+                                value,
+                                in_character_class,
+                            );
+                            index += consumed;
+                            continue;
+                        }
+                    }
+                    if unicode {
+                        return Err(());
+                    }
+                    Self::push_regex_literal_char(&mut normalized, 'x', in_character_class);
+                    index += 2;
+                    continue;
+                }
+                if let Some(escaped_char) =
+                    Self::legacy_simple_regexp_escape(next, in_character_class)
+                {
+                    Self::push_regex_literal_code_unit(
+                        &mut normalized,
+                        escaped_char as u32,
+                        in_character_class,
+                    );
+                    index += 2;
+                    continue;
+                }
+                if next.is_ascii_digit() {
+                    if unicode {
+                        return Err(());
+                    }
+                    if let Some((code_point, consumed_digits)) =
+                        Self::parse_regex_legacy_octal_escape(&chars, index + 1)
+                    {
+                        Self::push_regex_literal_code_unit(
+                            &mut normalized,
+                            code_point,
+                            in_character_class,
+                        );
+                        index += 1 + consumed_digits;
+                        continue;
+                    }
+                    Self::push_regex_literal_char(&mut normalized, next, in_character_class);
+                    index += 2;
+                    continue;
+                }
+                if unicode && matches!(next, 'p' | 'P') && chars.get(index + 2) == Some(&'{') {
+                    normalized.push('\\');
+                    normalized.push(next);
+                    index += 2;
+                    continue;
+                }
+                if Self::preserve_regexp_escape(next, in_character_class) {
+                    normalized.push('\\');
+                    normalized.push(next);
+                    index += 2;
+                    continue;
+                }
+                if unicode {
+                    return Err(());
+                }
+                // Annex B identity escapes: when not in /u mode, unknown escapes fall back
+                // to the escaped character itself.
+                Self::push_regex_literal_code_unit(
+                    &mut normalized,
+                    next as u32,
+                    in_character_class,
+                );
                 index += 2;
                 continue;
             }
@@ -6796,7 +6908,7 @@ impl Vm {
             normalized.push(ch);
             index += 1;
         }
-        normalized
+        Ok(normalized)
     }
 
     fn push_regex_literal_char(target: &mut String, ch: char, in_character_class: bool) {
@@ -6812,6 +6924,40 @@ impl Vm {
             target.push('\\');
         }
         target.push(ch);
+    }
+
+    fn push_regex_literal_code_unit(target: &mut String, code_unit: u32, in_character_class: bool) {
+        if code_unit <= 0xFF && code_unit < 0x20 {
+            target.push('\\');
+            target.push('x');
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            target.push(HEX[((code_unit >> 4) & 0xF) as usize] as char);
+            target.push(HEX[(code_unit & 0xF) as usize] as char);
+            return;
+        }
+        if let Some(ch) = char::from_u32(code_unit) {
+            Self::push_regex_literal_char(target, ch, in_character_class);
+        }
+    }
+
+    fn legacy_simple_regexp_escape(next: char, in_character_class: bool) -> Option<char> {
+        match next {
+            'f' => Some('\u{000C}'),
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            'v' => Some('\u{000B}'),
+            'b' if in_character_class => Some('\u{0008}'),
+            _ => None,
+        }
+    }
+
+    fn preserve_regexp_escape(next: char, in_character_class: bool) -> bool {
+        if in_character_class {
+            matches!(next, 'd' | 'D' | 's' | 'S' | 'w' | 'W')
+        } else {
+            matches!(next, 'b' | 'B' | 'd' | 'D' | 's' | 'S' | 'w' | 'W')
+        }
     }
 
     fn normalize_regexp_input_for_unicode(input: &str) -> String {
@@ -6870,6 +7016,44 @@ impl Vm {
         }
         let value = u32::from_str_radix(&hex, 16).ok()?;
         Some((value, 6))
+    }
+
+    fn parse_regex_x_escape(chars: &[char], start: usize) -> Option<(u32, usize)> {
+        if chars.get(start) != Some(&'\\') || chars.get(start + 1) != Some(&'x') {
+            return None;
+        }
+        if start + 3 >= chars.len() {
+            return None;
+        }
+        let high = chars[start + 2];
+        let low = chars[start + 3];
+        if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+            return None;
+        }
+        let hex: String = [high, low].into_iter().collect();
+        let value = u32::from_str_radix(&hex, 16).ok()?;
+        Some((value, 4))
+    }
+
+    fn parse_regex_legacy_octal_escape(chars: &[char], start: usize) -> Option<(u32, usize)> {
+        let first = *chars.get(start)?;
+        if !matches!(first, '0'..='7') {
+            return None;
+        }
+        let mut value = first.to_digit(8)?;
+        let mut consumed = 1usize;
+        while consumed < 3 {
+            let candidate = chars.get(start + consumed).copied();
+            let Some(candidate) = candidate else {
+                break;
+            };
+            if !matches!(candidate, '0'..='7') {
+                break;
+            }
+            value = value * 8 + candidate.to_digit(8)?;
+            consumed += 1;
+        }
+        Some((value, consumed))
     }
 
     fn surrogate_placeholder_from_code_unit(code_unit: u32) -> Option<char> {
@@ -17648,6 +17832,7 @@ mod tests {
     use super::{GcStats, Vm, VmError};
     use bytecode::{Chunk, CompiledFunction, Opcode, compile_script};
     use parser::parse_script;
+    use regex::RegexBuilder;
     use runtime::{JsValue, NativeFunction, Realm};
 
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
@@ -20093,6 +20278,59 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_normalize_identity_and_incomplete_escapes() {
+        assert_eq!(
+            Vm::normalize_regexp_pattern("\\a", false).expect("normalize should succeed"),
+            "a"
+        );
+        assert_eq!(
+            Vm::normalize_regexp_pattern("a\\a", false).expect("normalize should succeed"),
+            "aa"
+        );
+        assert_eq!(
+            Vm::normalize_regexp_pattern("\\x", false).expect("normalize should succeed"),
+            "x"
+        );
+        assert_eq!(
+            Vm::normalize_regexp_pattern("\\xa", false).expect("normalize should succeed"),
+            "xa"
+        );
+        assert_eq!(
+            Vm::normalize_regexp_pattern("\\u", false).expect("normalize should succeed"),
+            "u"
+        );
+        assert_eq!(
+            Vm::normalize_regexp_pattern("\\ua", false).expect("normalize should succeed"),
+            "ua"
+        );
+        assert!(
+            Vm::normalize_regexp_pattern("\\u", true).is_err(),
+            "unicode mode should reject incomplete unicode escape"
+        );
+    }
+
+    #[test]
+    fn annex_b_regexp_normalize_legacy_decimal_escape_as_octal() {
+        let normalized = Vm::normalize_regexp_pattern("[\\d][\\12-\\14]{1,}[^\\d]", false).unwrap();
+        let builder = RegexBuilder::new(&normalized);
+        let regex = builder
+            .build()
+            .expect("normalized legacy decimal escapes should compile");
+        let matched = regex
+            .find("line1\n\n\n\n\nline2")
+            .expect("expected a match");
+        assert_eq!(matched.as_str(), "1\n\n\n\n\nl");
+
+        let normalized_backref_fallback =
+            Vm::normalize_regexp_pattern("\\b(\\w+) \\2\\b", false).unwrap();
+        let builder = RegexBuilder::new(&normalized_backref_fallback);
+        let regex = builder
+            .build()
+            .expect("normalized backref fallback should compile");
+        assert!(!regex.is_match("do you listen the the band"));
     }
 
     #[test]
