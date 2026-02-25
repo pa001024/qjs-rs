@@ -366,6 +366,13 @@ enum EvalCallKind {
     Indirect,
 }
 
+#[derive(Debug, Clone)]
+struct EvalStateSnapshot {
+    scopes: Vec<ScopeRef>,
+    var_scope_stack: Vec<usize>,
+    with_objects: Vec<WithFrame>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GcStats {
     pub roots: usize,
@@ -7927,9 +7934,7 @@ impl Vm {
         {
             return Err(VmError::TypeError("cannot declare global function in eval"));
         }
-        let saved_scopes = self.scopes.clone();
-        let saved_var_scope_stack = self.var_scope_stack.clone();
-        let saved_with_objects = self.with_objects.clone();
+        let saved_eval_state = self.snapshot_eval_state();
 
         match call_kind {
             EvalCallKind::Direct => {
@@ -7988,9 +7993,7 @@ impl Vm {
         if deletable_eval_bindings {
             self.eval_deletable_binding_depth = self.eval_deletable_binding_depth.saturating_sub(1);
         }
-        self.scopes = saved_scopes;
-        self.var_scope_stack = saved_var_scope_stack;
-        self.with_objects = saved_with_objects;
+        self.restore_eval_state(saved_eval_state);
         result
     }
 
@@ -7999,6 +8002,20 @@ impl Vm {
             EvalCallKind::Indirect => true,
             EvalCallKind::Direct => self.var_scope_stack.last().copied() == Some(0),
         }
+    }
+
+    fn snapshot_eval_state(&self) -> EvalStateSnapshot {
+        EvalStateSnapshot {
+            scopes: self.scopes.clone(),
+            var_scope_stack: self.var_scope_stack.clone(),
+            with_objects: self.with_objects.clone(),
+        }
+    }
+
+    fn restore_eval_state(&mut self, snapshot: EvalStateSnapshot) {
+        self.scopes = snapshot.scopes;
+        self.var_scope_stack = snapshot.var_scope_stack;
+        self.with_objects = snapshot.with_objects;
     }
 
     fn execute_function_constructor(
