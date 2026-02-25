@@ -2611,7 +2611,7 @@ impl Parser {
 
         let mut catch_param = None;
         let mut catch_block = None;
-        let mut catch_array_pattern = None;
+        let mut catch_parameter_effects = Vec::new();
         if self.matches_keyword("catch") {
             if self.matches(&TokenKind::LParen) {
                 if self.check_identifier() {
@@ -2622,11 +2622,21 @@ impl Parser {
                     let temp_name = self.next_catch_temp_identifier();
                     let elements =
                         self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
-                    catch_array_pattern = Some((temp_name.clone(), elements));
+                    catch_parameter_effects
+                        .extend(Self::lower_catch_array_pattern_bindings(&temp_name, &elements));
+                    catch_param = Some(temp_name);
+                } else if self.check(&TokenKind::LBrace) {
+                    let temp_name = self.next_catch_temp_identifier();
+                    let effects = self.parse_object_parameter_pattern_effects(&temp_name)?;
+                    catch_parameter_effects.extend(Self::lower_catch_object_pattern_bindings(
+                        effects,
+                    ));
                     catch_param = Some(temp_name);
                 } else {
                     return Err(
-                        self.error_current("expected catch binding identifier or array pattern")
+                        self.error_current(
+                            "expected catch binding identifier, array pattern, or object pattern",
+                        )
                     );
                 }
                 self.expect(TokenKind::RParen, "expected ')' after catch binding")?;
@@ -2635,11 +2645,9 @@ impl Parser {
                 "expected '{' before catch block",
                 "expected '}' after catch block",
             )?;
-            if let Some((temp_name, elements)) = catch_array_pattern {
-                let mut lowered_bindings =
-                    Self::lower_catch_array_pattern_bindings(&temp_name, &elements);
-                lowered_bindings.append(&mut parsed_catch_block);
-                parsed_catch_block = lowered_bindings;
+            if !catch_parameter_effects.is_empty() {
+                catch_parameter_effects.append(&mut parsed_catch_block);
+                parsed_catch_block = catch_parameter_effects;
             }
             catch_block = Some(parsed_catch_block);
         }
@@ -2678,6 +2686,22 @@ impl Parser {
                     name: element.name.clone(),
                     initializer: Some(Self::array_pattern_element_value_expr(&temp_expr, element)),
                 })
+            })
+            .collect()
+    }
+
+    fn lower_catch_object_pattern_bindings(effects: Vec<Stmt>) -> Vec<Stmt> {
+        effects
+            .into_iter()
+            .map(|statement| match statement {
+                Stmt::Expression(Expr::Assign { target, value }) => {
+                    Stmt::VariableDeclaration(VariableDeclaration {
+                        kind: BindingKind::Let,
+                        name: target,
+                        initializer: Some(*value),
+                    })
+                }
+                other => other,
             })
             .collect()
     }
@@ -7562,6 +7586,34 @@ for ( [let][0]; ; )
                 name: Identifier(name),
                 ..
             })) if name == "_"
+        ));
+    }
+
+    #[test]
+    fn parses_try_catch_with_object_pattern_parameter() {
+        let parsed = parse_script("try { throw { f: 1 }; } catch ({ f }) { f; }")
+            .expect("script parsing should succeed");
+        let Stmt::Try {
+            catch_param,
+            catch_block,
+            ..
+        } = &parsed.statements[0]
+        else {
+            panic!("expected try statement");
+        };
+        let Some(Identifier(param_name)) = catch_param else {
+            panic!("expected synthesized catch parameter");
+        };
+        assert!(param_name.starts_with("$__catch_param_"));
+
+        let catch_block = catch_block.as_ref().expect("expected catch block");
+        assert!(matches!(
+            catch_block.first(),
+            Some(Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: Identifier(name),
+                ..
+            })) if name == "f"
         ));
     }
 
