@@ -43,6 +43,8 @@ const PROXY_OBJECT_MARKER_KEY: &str = "$__qjs_proxy_object__$";
 const PROXY_TARGET_KEY: &str = "$__qjs_proxy_target__$";
 const PROXY_HANDLER_KEY: &str = "$__qjs_proxy_handler__$";
 const PROXY_OWN_KEYS_ORDER_KEY: &str = "$__qjs_proxy_own_keys_order__$";
+const PROXY_REVOKED_KEY: &str = "$__qjs_proxy_revoked__$";
+const SET_ENTRIES_KEY: &str = "$__qjs_set_entries__$";
 const REGEXP_SOURCE_SLOT_KEY: &str = "$__qjs_regexp_source_slot__$";
 const REGEXP_FLAGS_SLOT_KEY: &str = "$__qjs_regexp_flags_slot__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
@@ -186,6 +188,12 @@ enum HostFunction {
     ArrayBufferSliceThis,
     MapSetThis,
     SetAddThis,
+    SetDeleteThis,
+    SetHasThis,
+    ProxyRevocable,
+    ProxyRevoke {
+        proxy: JsValue,
+    },
     BooleanToString,
     BooleanValueOf,
     FunctionPrototype,
@@ -945,6 +953,9 @@ impl Vm {
             | HostFunction::FunctionValueOf { target } => {
                 self.gc_mark_stack.push(target);
             }
+            HostFunction::ProxyRevoke { proxy } => {
+                self.gc_mark_stack.push(proxy);
+            }
             HostFunction::StringReplaceThis
             | HostFunction::StringMatchThis
             | HostFunction::StringSearchThis
@@ -980,6 +991,9 @@ impl Vm {
             | HostFunction::ArrayBufferSliceThis
             | HostFunction::MapSetThis
             | HostFunction::SetAddThis
+            | HostFunction::SetDeleteThis
+            | HostFunction::SetHasThis
+            | HostFunction::ProxyRevocable
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
             | HostFunction::ArrayConcatThis
@@ -2591,7 +2605,7 @@ impl Vm {
                         caller_strict,
                     );
                 }
-                self.execute_native_call(native, args, realm, caller_strict)
+                self.execute_native_call(native, args, realm, caller_strict, true)
             }
             JsValue::HostFunction(host_id) => {
                 if let Some(HostFunction::BoundCall {
@@ -2705,7 +2719,7 @@ impl Vm {
                 ) {
                     self.execute_boxed_primitive_constructor(native, args, realm, caller_strict)?
                 } else {
-                    self.execute_native_call(native, args, realm, caller_strict)?
+                    self.execute_native_call(native, args, realm, caller_strict, true)?
                 };
                 if Self::is_object_like_value(&result) {
                     if let Some((prototype, prototype_value)) = super_prototype_hint.clone() {
@@ -2881,7 +2895,7 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match callee {
             JsValue::NativeFunction(native) => {
-                self.execute_native_call(native, args, realm, caller_strict)
+                self.execute_native_call(native, args, realm, caller_strict, false)
             }
             JsValue::HostFunction(host_id) => {
                 self.execute_host_function_call(host_id, this_arg, args, realm, caller_strict)
@@ -3387,6 +3401,72 @@ impl Vm {
                 "Set.prototype method called on incompatible",
             )),
         }
+    }
+
+    fn read_set_entries(&self, set_id: ObjectId) -> Result<Vec<JsValue>, VmError> {
+        let entries_id = self
+            .objects
+            .get(&set_id)
+            .and_then(|object| object.properties.get(SET_ENTRIES_KEY))
+            .and_then(|value| match value {
+                JsValue::Object(object_id) => Some(*object_id),
+                _ => None,
+            });
+        let Some(entries_id) = entries_id else {
+            return Ok(Vec::new());
+        };
+        let entries_object = self
+            .objects
+            .get(&entries_id)
+            .ok_or(VmError::UnknownObject(entries_id))?;
+        let length = entries_object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        let mut entries = Vec::with_capacity(length);
+        for index in 0..length {
+            entries.push(
+                entries_object
+                    .properties
+                    .get(&index.to_string())
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined),
+            );
+        }
+        Ok(entries)
+    }
+
+    fn write_set_entries(
+        &mut self,
+        set_id: ObjectId,
+        entries: Vec<JsValue>,
+    ) -> Result<(), VmError> {
+        let entries_array = self.create_array_from_values(entries.clone())?;
+        let size = entries.len() as f64;
+        let set_object = self
+            .objects
+            .get_mut(&set_id)
+            .ok_or(VmError::UnknownObject(set_id))?;
+        set_object
+            .properties
+            .insert(SET_ENTRIES_KEY.to_string(), entries_array);
+        set_object.property_attributes.insert(
+            SET_ENTRIES_KEY.to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+        set_object
+            .properties
+            .insert("__setSize".to_string(), JsValue::Number(size));
+        set_object
+            .properties
+            .insert("size".to_string(), JsValue::Number(size));
+        Ok(())
     }
 
     fn strict_this_regexp_object(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
@@ -5519,24 +5599,79 @@ impl Vm {
             }
             HostFunction::SetAddThis => {
                 let receiver_id = self.strict_this_set(this_arg)?;
-                let size = self
-                    .objects
-                    .get(&receiver_id)
-                    .and_then(|object| object.properties.get("__setSize"))
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0)
-                    + 1.0;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let mut entries = self.read_set_entries(receiver_id)?;
+                if !entries
+                    .iter()
+                    .any(|entry| self.same_value_zero(entry, &value))
+                {
+                    entries.push(value);
+                    self.write_set_entries(receiver_id, entries)?;
+                }
+                Ok(JsValue::Object(receiver_id))
+            }
+            HostFunction::SetDeleteThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let mut entries = self.read_set_entries(receiver_id)?;
+                if let Some(index) = entries
+                    .iter()
+                    .position(|entry| self.same_value_zero(entry, &value))
+                {
+                    entries.remove(index);
+                    self.write_set_entries(receiver_id, entries)?;
+                    Ok(JsValue::Bool(true))
+                } else {
+                    Ok(JsValue::Bool(false))
+                }
+            }
+            HostFunction::SetHasThis => {
+                let receiver_id = self.strict_this_set(this_arg)?;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let entries = self.read_set_entries(receiver_id)?;
+                Ok(JsValue::Bool(
+                    entries
+                        .iter()
+                        .any(|entry| self.same_value_zero(entry, &value)),
+                ))
+            }
+            HostFunction::ProxyRevocable => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let proxy = self.create_proxy_object(target, handler)?;
+                let revoke = self.create_host_function_value(HostFunction::ProxyRevoke {
+                    proxy: proxy.clone(),
+                });
+                self.set_builtin_function_length(&revoke, 0.0);
+                self.set_builtin_function_name(&revoke, "revoke");
+                let pair = self.create_object_value();
+                let pair_id = match pair {
+                    JsValue::Object(id) => id,
+                    _ => unreachable!(),
+                };
                 let object = self
                     .objects
-                    .get_mut(&receiver_id)
-                    .ok_or(VmError::UnknownObject(receiver_id))?;
-                object
-                    .properties
-                    .insert("__setSize".to_string(), JsValue::Number(size));
-                object
-                    .properties
-                    .insert("size".to_string(), JsValue::Number(size));
-                Ok(JsValue::Object(receiver_id))
+                    .get_mut(&pair_id)
+                    .ok_or(VmError::UnknownObject(pair_id))?;
+                object.properties.insert("proxy".to_string(), proxy);
+                object.properties.insert("revoke".to_string(), revoke);
+                Ok(JsValue::Object(pair_id))
+            }
+            HostFunction::ProxyRevoke { proxy } => {
+                if let JsValue::Object(proxy_id) = proxy {
+                    if let Some(object) = self.objects.get_mut(&proxy_id) {
+                        object
+                            .properties
+                            .insert(PROXY_REVOKED_KEY.to_string(), JsValue::Bool(true));
+                        object
+                            .properties
+                            .insert(PROXY_TARGET_KEY.to_string(), JsValue::Null);
+                        object
+                            .properties
+                            .insert(PROXY_HANDLER_KEY.to_string(), JsValue::Null);
+                    }
+                }
+                Ok(JsValue::Undefined)
             }
             HostFunction::BooleanToString => {
                 let value = self.strict_this_boolean(this_arg)?;
@@ -6075,6 +6210,7 @@ impl Vm {
         args: Vec<JsValue>,
         realm: &Realm,
         caller_strict: bool,
+        called_with_new: bool,
     ) -> Result<JsValue, VmError> {
         match native {
             NativeFunction::Eval => self.execute_eval_argument(
@@ -6150,9 +6286,15 @@ impl Vm {
             }
             NativeFunction::ArrayBufferConstructor => self.execute_array_buffer_constructor(&args),
             NativeFunction::DataViewConstructor => self.execute_data_view_constructor(&args),
-            NativeFunction::MapConstructor => self.execute_map_constructor(&args, realm),
-            NativeFunction::SetConstructor => self.execute_set_constructor(&args, realm),
-            NativeFunction::ProxyConstructor => self.execute_proxy_constructor(&args),
+            NativeFunction::MapConstructor => {
+                self.execute_map_constructor(&args, realm, called_with_new)
+            }
+            NativeFunction::SetConstructor => {
+                self.execute_set_constructor(&args, realm, called_with_new)
+            }
+            NativeFunction::ProxyConstructor => {
+                self.execute_proxy_constructor(&args, called_with_new)
+            }
             NativeFunction::PromiseConstructor => {
                 self.execute_promise_constructor(&args, realm, caller_strict)
             }
@@ -7371,7 +7513,7 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let primitive = self.execute_native_call(native, args, realm, caller_strict)?;
+        let primitive = self.execute_native_call(native, args, realm, caller_strict, false)?;
         let object = self.create_object_value();
         let object_id = match &object {
             JsValue::Object(id) => *id,
@@ -8154,13 +8296,12 @@ impl Vm {
     fn execute_map_constructor(
         &mut self,
         args: &[JsValue],
-        _realm: &Realm,
+        realm: &Realm,
+        called_with_new: bool,
     ) -> Result<JsValue, VmError> {
-        let initial_size = match args.first() {
-            None | Some(JsValue::Undefined) | Some(JsValue::Null) => 0.0,
-            Some(JsValue::Object(object_id)) => self.array_length(*object_id)? as f64,
-            Some(_) => 0.0,
-        };
+        if !called_with_new {
+            return Err(VmError::TypeError("Map constructor requires 'new'"));
+        }
         if self.map_prototype_id.is_none() {
             let _ = self.map_prototype_value();
         }
@@ -8169,42 +8310,54 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
-        let target = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
-        target.prototype = self.map_prototype_id;
-        target.prototype_value = None;
-        target
-            .properties
-            .insert("__mapTag".to_string(), JsValue::Bool(true));
-        target
-            .properties
-            .insert("__mapSize".to_string(), JsValue::Number(initial_size));
-        target
-            .properties
-            .insert("size".to_string(), JsValue::Number(initial_size));
-        target.property_attributes.insert(
-            "size".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
-        );
-        Ok(JsValue::Object(object_id))
+        let map = JsValue::Object(object_id);
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.map_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__mapTag".to_string(), JsValue::Bool(true));
+            target
+                .properties
+                .insert("__mapSize".to_string(), JsValue::Number(0.0));
+            target
+                .properties
+                .insert("size".to_string(), JsValue::Number(0.0));
+            target.property_attributes.insert(
+                "size".to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
+            let adder = self.get_property_from_receiver(map.clone(), "set", realm)?;
+            if !Self::is_callable_value(&adder) {
+                return Err(VmError::TypeError("Map constructor set must be callable"));
+            }
+            self.add_collection_entries_from_iterable(map.clone(), iterable, adder, true, realm)?;
+        }
+
+        Ok(map)
     }
 
     fn execute_set_constructor(
         &mut self,
         args: &[JsValue],
-        _realm: &Realm,
+        realm: &Realm,
+        called_with_new: bool,
     ) -> Result<JsValue, VmError> {
-        let initial_size = match args.first() {
-            None | Some(JsValue::Undefined) | Some(JsValue::Null) => 0.0,
-            Some(JsValue::Object(object_id)) => self.array_length(*object_id)? as f64,
-            Some(_) => 0.0,
-        };
+        if !called_with_new {
+            return Err(VmError::TypeError("Set constructor requires 'new'"));
+        }
         if self.set_prototype_id.is_none() {
             let _ = self.set_prototype_value();
         }
@@ -8213,35 +8366,112 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
-        let target = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
-        target.prototype = self.set_prototype_id;
-        target.prototype_value = None;
-        target
-            .properties
-            .insert("__setTag".to_string(), JsValue::Bool(true));
-        target
-            .properties
-            .insert("__setSize".to_string(), JsValue::Number(initial_size));
-        target
-            .properties
-            .insert("size".to_string(), JsValue::Number(initial_size));
-        target.property_attributes.insert(
-            "size".to_string(),
-            PropertyAttributes {
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
-        );
-        Ok(JsValue::Object(object_id))
+        let set = JsValue::Object(object_id);
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.set_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__setTag".to_string(), JsValue::Bool(true));
+            target
+                .properties
+                .insert("__setSize".to_string(), JsValue::Number(0.0));
+            target
+                .properties
+                .insert("size".to_string(), JsValue::Number(0.0));
+            target.property_attributes.insert(
+                "size".to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
+        self.write_set_entries(object_id, Vec::new())?;
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
+            let adder = self.get_property_from_receiver(set.clone(), "add", realm)?;
+            if !Self::is_callable_value(&adder) {
+                return Err(VmError::TypeError("Set constructor add must be callable"));
+            }
+            self.add_collection_entries_from_iterable(set.clone(), iterable, adder, false, realm)?;
+        }
+
+        Ok(set)
     }
 
-    fn execute_proxy_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
-        let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+    fn add_collection_entries_from_iterable(
+        &mut self,
+        collection: JsValue,
+        iterable: JsValue,
+        adder: JsValue,
+        map_mode: bool,
+        realm: &Realm,
+    ) -> Result<(), VmError> {
+        let iterator_record = self.create_for_of_runtime_iterator_record(iterable, realm)?;
+        loop {
+            let step = self.execute_object_for_of_step(&[iterator_record.clone()], realm)?;
+            let done = self
+                .get_property_from_receiver(step.clone(), "done", realm)
+                .map(|value| self.is_truthy(&value))?;
+            if done {
+                break;
+            }
+            let next = match self.get_property_from_receiver(step, "value", realm) {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = self.execute_object_for_of_close(&[iterator_record.clone()], realm);
+                    return Err(err);
+                }
+            };
+            let call_result = if map_mode {
+                if !Self::is_object_like_value(&next) {
+                    Err(VmError::TypeError("Map iterable entries must be object"))
+                } else {
+                    let key = self.get_property_from_receiver(next.clone(), "0", realm);
+                    let value = self.get_property_from_receiver(next, "1", realm);
+                    match (key, value) {
+                        (Ok(key), Ok(value)) => self
+                            .execute_callable(
+                                adder.clone(),
+                                Some(collection.clone()),
+                                vec![key, value],
+                                realm,
+                                false,
+                            )
+                            .map(|_| ()),
+                        (Err(err), _) | (_, Err(err)) => Err(err),
+                    }
+                }
+            } else {
+                self.execute_callable(
+                    adder.clone(),
+                    Some(collection.clone()),
+                    vec![next],
+                    realm,
+                    false,
+                )
+                .map(|_| ())
+            };
+            if let Err(err) = call_result {
+                let _ = self.execute_object_for_of_close(&[iterator_record.clone()], realm);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_proxy_object(
+        &mut self,
+        target: JsValue,
+        handler: JsValue,
+    ) -> Result<JsValue, VmError> {
         if !Self::is_object_like_value(&target) {
             return Err(VmError::TypeError("Proxy target must be object"));
         }
@@ -8275,7 +8505,15 @@ impl Vm {
             proxy
                 .properties
                 .insert(PROXY_HANDLER_KEY.to_string(), handler.clone());
-            for key in [PROXY_OBJECT_MARKER_KEY, PROXY_TARGET_KEY, PROXY_HANDLER_KEY] {
+            proxy
+                .properties
+                .insert(PROXY_REVOKED_KEY.to_string(), JsValue::Bool(false));
+            for key in [
+                PROXY_OBJECT_MARKER_KEY,
+                PROXY_TARGET_KEY,
+                PROXY_HANDLER_KEY,
+                PROXY_REVOKED_KEY,
+            ] {
                 proxy.property_attributes.insert(
                     key.to_string(),
                     PropertyAttributes {
@@ -8323,7 +8561,7 @@ impl Vm {
         for key in mirrored_keys.iter().cloned() {
             if matches!(
                 key.as_str(),
-                PROXY_OBJECT_MARKER_KEY | PROXY_TARGET_KEY | PROXY_HANDLER_KEY
+                PROXY_OBJECT_MARKER_KEY | PROXY_TARGET_KEY | PROXY_HANDLER_KEY | PROXY_REVOKED_KEY
             ) {
                 continue;
             }
@@ -8360,6 +8598,19 @@ impl Vm {
             );
         }
         Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_proxy_constructor(
+        &mut self,
+        args: &[JsValue],
+        called_with_new: bool,
+    ) -> Result<JsValue, VmError> {
+        if !called_with_new {
+            return Err(VmError::TypeError("Proxy constructor requires 'new'"));
+        }
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        self.create_proxy_object(target, handler)
     }
 
     fn execute_promise_constructor(
@@ -8722,6 +8973,7 @@ impl Vm {
                     "of",
                     "parse",
                     "UTC",
+                    "revocable",
                     "fromCharCode",
                     "NaN",
                     "POSITIVE_INFINITY",
@@ -10644,6 +10896,13 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        if object
+            .properties
+            .get(PROXY_REVOKED_KEY)
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)))
+        {
+            return Err(VmError::TypeError("Proxy has been revoked"));
+        }
         let target = object
             .properties
             .get(PROXY_TARGET_KEY)
@@ -13828,6 +14087,14 @@ impl Vm {
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             let add = self.create_host_function_value(HostFunction::SetAddThis);
+            let delete = self.create_host_function_value(HostFunction::SetDeleteThis);
+            let has = self.create_host_function_value(HostFunction::SetHasThis);
+            self.set_builtin_function_length(&add, 1.0);
+            self.set_builtin_function_name(&add, "add");
+            self.set_builtin_function_length(&delete, 1.0);
+            self.set_builtin_function_name(&delete, "delete");
+            self.set_builtin_function_length(&has, 1.0);
+            self.set_builtin_function_name(&has, "has");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -13844,6 +14111,24 @@ impl Vm {
                 object.properties.insert("add".to_string(), add);
                 object.property_attributes.insert(
                     "add".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("delete".to_string(), delete);
+                object.property_attributes.insert(
+                    "delete".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("has".to_string(), has);
+                object.property_attributes.insert(
+                    "has".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -15835,6 +16120,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "valueOf")
                 | (NativeFunction::DateConstructor, "parse")
                 | (NativeFunction::DateConstructor, "UTC")
+                | (NativeFunction::ProxyConstructor, "revocable")
                 | (NativeFunction::StringConstructor, "fromCharCode")
                 | (NativeFunction::NumberConstructor, "NaN")
                 | (NativeFunction::NumberConstructor, "POSITIVE_INFINITY")
@@ -17211,6 +17497,14 @@ impl Vm {
             NativeFunction::StringConstructor => "String",
             NativeFunction::NumberConstructor => "Number",
             NativeFunction::BooleanConstructor => "Boolean",
+            NativeFunction::MapConstructor => "Map",
+            NativeFunction::SetConstructor => "Set",
+            NativeFunction::ProxyConstructor => "Proxy",
+            NativeFunction::PromiseConstructor => "Promise",
+            NativeFunction::ArrayBufferConstructor => "ArrayBuffer",
+            NativeFunction::DataViewConstructor => "DataView",
+            NativeFunction::Uint8ArrayConstructor => "Uint8Array",
+            NativeFunction::SymbolConstructor => "Symbol",
             NativeFunction::DateConstructor => "Date",
             NativeFunction::RegExpConstructor => "RegExp",
             NativeFunction::ErrorConstructor => "Error",
@@ -17407,6 +17701,12 @@ impl Vm {
             (NativeFunction::DateConstructor, "UTC") => {
                 JsValue::NativeFunction(NativeFunction::DateUtc)
             }
+            (NativeFunction::ProxyConstructor, "revocable") => {
+                let revocable = self.create_host_function_value(HostFunction::ProxyRevocable);
+                self.set_builtin_function_length(&revocable, 2.0);
+                self.set_builtin_function_name(&revocable, "revocable");
+                revocable
+            }
             (NativeFunction::SymbolConstructor, "iterator") => {
                 JsValue::String("Symbol.iterator".to_string())
             }
@@ -17518,6 +17818,13 @@ impl Vm {
             | (NativeFunction::DateParse, "length")
             | (NativeFunction::DateUtc, "length")
             | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
+            (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
+            (NativeFunction::MapConstructor, "length")
+            | (NativeFunction::SetConstructor, "length")
+            | (NativeFunction::PromiseConstructor, "length")
+            | (NativeFunction::ArrayBufferConstructor, "length")
+            | (NativeFunction::DataViewConstructor, "length")
+            | (NativeFunction::Uint8ArrayConstructor, "length") => JsValue::Number(0.0),
             (_, "length") => JsValue::Number(1.0),
             _ => JsValue::Undefined,
         }
@@ -18449,6 +18756,18 @@ impl Vm {
             (JsValue::Object(lhs), JsValue::Object(rhs)) => lhs == rhs,
             (JsValue::Undefined, JsValue::Undefined) => true,
             _ => false,
+        }
+    }
+
+    fn same_value_zero(&self, left: &JsValue, right: &JsValue) -> bool {
+        match (left, right) {
+            (JsValue::Number(lhs), JsValue::Number(rhs)) => {
+                if lhs.is_nan() && rhs.is_nan() {
+                    return true;
+                }
+                lhs == rhs
+            }
+            _ => self.same_value(left, right),
         }
     }
 
@@ -21595,6 +21914,58 @@ slots[1][2].value + slots[2][0].value;
         let stats_after_unpin = vm.collect_garbage(&realm);
         assert!(stats_after_unpin.reclaimed_objects >= 1);
         assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn weakmap_constructor_requires_new_target_baseline() {
+        let script = parse_script(
+            "let threw = false; try { WeakMap(); } catch (e) { threw = e instanceof TypeError; } threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "WeakMap",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn weakset_constructor_iterable_supports_has_and_delete() {
+        let script = parse_script(
+            "var key = {}; var s = new WeakSet([key]); var removed = s.delete(key); removed && s.has(key) === false;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "WeakSet",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn proxy_revocable_revoke_function_lists_length_before_name() {
+        let script = parse_script(
+            "var revoke = Proxy.revocable({}, {}).revoke; var names = Object.getOwnPropertyNames(revoke); var lengthIndex = names.indexOf('length'); var nameIndex = names.indexOf('name'); lengthIndex >= 0 && nameIndex === lengthIndex + 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Proxy",
+            JsValue::NativeFunction(NativeFunction::ProxyConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
