@@ -7178,12 +7178,11 @@ impl Vm {
         }
         let chunk = compile_script(&script);
         let eval_strict = self.code_is_strict(&chunk.code);
-        let annex_b_eval_var_function_names =
-            if matches!(call_kind, EvalCallKind::Direct) && !eval_strict {
-                Self::script_annex_b_eval_var_function_names(&script)
-            } else {
-                BTreeSet::new()
-            };
+        let annex_b_eval_var_function_names = if !eval_strict {
+            Self::script_annex_b_eval_var_function_names(&script)
+        } else {
+            BTreeSet::new()
+        };
         if !eval_strict
             && Self::script_declares_restricted_global_function(&script)
             && self.eval_targets_global_var_scope(call_kind)
