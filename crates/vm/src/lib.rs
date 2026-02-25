@@ -10096,17 +10096,25 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn execute_object_define_property(
+    fn parse_property_descriptor(
         &mut self,
-        args: &[JsValue],
+        descriptor: JsValue,
         realm: &Realm,
-    ) -> Result<JsValue, VmError> {
-        let property = self.coerce_to_property_key_runtime(
-            args.get(1).cloned().unwrap_or(JsValue::Undefined),
-            realm,
-            false,
-        )?;
-        let descriptor = match args.get(2).cloned().unwrap_or(JsValue::Undefined) {
+    ) -> Result<
+        (
+            bool,
+            JsValue,
+            bool,
+            JsValue,
+            bool,
+            JsValue,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+        ),
+        VmError,
+    > {
+        let descriptor = match descriptor {
             value @ (JsValue::Object(_)
             | JsValue::Function(_)
             | JsValue::NativeFunction(_)
@@ -10153,19 +10161,100 @@ impl Vm {
         } else {
             None
         };
-        let desc_configurable =
-            if self.has_property_on_receiver(&descriptor, "configurable", realm)? {
-                let configurable =
-                    self.get_property_from_receiver(descriptor, "configurable", realm)?;
-                Some(self.is_truthy(&configurable))
-            } else {
-                None
-            };
+        let desc_configurable = if self.has_property_on_receiver(&descriptor, "configurable", realm)?
+        {
+            let configurable = self.get_property_from_receiver(descriptor, "configurable", realm)?;
+            Some(self.is_truthy(&configurable))
+        } else {
+            None
+        };
         if (has_get || has_set) && (has_value || desc_writable.is_some()) {
             return Err(VmError::TypeError(
                 "cannot have setter/getter and value or writable",
             ));
         }
+        Ok((
+            has_value,
+            desc_value,
+            has_get,
+            desc_get,
+            has_set,
+            desc_set,
+            desc_writable,
+            desc_enumerable,
+            desc_configurable,
+        ))
+    }
+
+    fn materialize_property_descriptor(
+        &mut self,
+        descriptor: &(
+            bool,
+            JsValue,
+            bool,
+            JsValue,
+            bool,
+            JsValue,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+        ),
+    ) -> JsValue {
+        let (
+            has_value,
+            value,
+            has_get,
+            get,
+            has_set,
+            set,
+            writable,
+            enumerable,
+            configurable,
+        ) = descriptor;
+        let mut entries = Vec::new();
+        if *has_value {
+            entries.push(("value", value.clone()));
+        }
+        if *has_get {
+            entries.push(("get", get.clone()));
+        }
+        if *has_set {
+            entries.push(("set", set.clone()));
+        }
+        if let Some(writable) = *writable {
+            entries.push(("writable", JsValue::Bool(writable)));
+        }
+        if let Some(enumerable) = *enumerable {
+            entries.push(("enumerable", JsValue::Bool(enumerable)));
+        }
+        if let Some(configurable) = *configurable {
+            entries.push(("configurable", JsValue::Bool(configurable)));
+        }
+        self.create_descriptor_object(entries)
+    }
+
+    fn execute_object_define_property(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let property = self.coerce_to_property_key_runtime(
+            args.get(1).cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            false,
+        )?;
+        let (
+            has_value,
+            desc_value,
+            has_get,
+            desc_get,
+            has_set,
+            desc_set,
+            desc_writable,
+            desc_enumerable,
+            desc_configurable,
+        ) =
+            self.parse_property_descriptor(args.get(2).cloned().unwrap_or(JsValue::Undefined), realm)?;
         if let Some(JsValue::HostFunction(host_id)) = args.first() {
             if Some(*host_id) == self.function_prototype_host_id && property == "prototype" {
                 if has_get {
@@ -10625,9 +10714,15 @@ impl Vm {
             "Object.defineProperties descriptors must be object",
         )?;
         let descriptor_keys = self.collect_own_property_keys(&descriptors, true)?;
+        let mut normalized_descriptors = Vec::with_capacity(descriptor_keys.len());
         for property_name in descriptor_keys {
             let descriptor =
                 self.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
+            let parsed = self.parse_property_descriptor(descriptor, realm)?;
+            let normalized = self.materialize_property_descriptor(&parsed);
+            normalized_descriptors.push((property_name, normalized));
+        }
+        for (property_name, descriptor) in normalized_descriptors {
             let define_args = [target.clone(), JsValue::String(property_name), descriptor];
             let _ = self.execute_object_define_property(&define_args, realm)?;
         }
