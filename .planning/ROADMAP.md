@@ -39,7 +39,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   1. GC root scanning includes stack frames, globals, module-cache candidates, and pending job queue references.
   2. Invalid or stale object handles are rejected with deterministic typed runtime errors.
   3. Stress scenarios with repeated allocation/collection do not produce stale-handle panics or undefined behavior.
-**Plans**: TBD
+**Plans**: 2/3 plans complete
 
 ### Phase 3: Promise Job Queue Semantics
 **Goal**: Promise settlement and microtask execution are deterministic and safely controllable by embedding hosts.

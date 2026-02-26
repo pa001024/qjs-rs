@@ -58,7 +58,7 @@ Each task was committed atomically:
 1. **Task 1: Add explicit module/job root candidate buckets to VM state** - `ca042c1` (feat)
 2. **Task 2: Wire candidate buckets into root traversal and lock with regression tests** - `51d6f4f` (fix)
 
-**Plan metadata:** (pending in this summary commit)
+**Plan metadata:** `b374859` (docs)
 
 ## Files Created/Modified
 - `.planning/phases/02-runtime-safety-and-root-integrity/02-01-SUMMARY.md` - plan execution record and handoff metadata.
