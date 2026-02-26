@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 5
 current_phase_name: Core Builtins Baseline
 current_plan: 3
-status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-02-26T17:48:02.483Z"
+status: verifying
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-02-26T18:12:56.419Z"
 last_activity: 2026-02-26
 progress:
   total_phases: 7
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 15
-  completed_plans: 14
-  percent: 93
+  completed_plans: 15
+  percent: 100
 ---
 
 # Project State
@@ -33,10 +33,10 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Total Phases:** 7
 **Current Plan:** 3
 **Total Plans in Phase:** 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-02-26
-**Last Activity Description:** Completed Phase 5 Plan 02
-**Progress:** [█████████░] 93%
+**Last Activity Description:** Completed Phase 5 Plan 03
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 02 P03 | 5 min | 3 tasks | 1 files |
 | Phase 05 P01 | 11 min | 3 tasks | 7 files |
 | Phase 05 P02 | 10 min | 3 tasks | 9 files |
+| Phase 05 P03 | 9 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Use local test262-lite built-ins/Error and built-ins/NativeErrors smoke fixtures. — Keeps CI deterministic while enforcing Phase-5 native error semantics via assert-based runtime checks.
 - [Phase 05]: Use serde_json for baseline JSON grammar decoding before VM reviver traversal. — Keeps parse behavior deterministic while letting VM own reviver semantics.
 - [Phase 05]: Implement JSON.stringify with explicit recursion stack and cycle TypeError guard. — Prevents placeholder output drift and locks deterministic cycle failures.
+- [Phase 05]: Use runtime ToString coercion in Function constructor argument/body assembly. — Preserves throwable coercion semantics in constructor edge cases while keeping dynamic function assembly deterministic.
+- [Phase 05]: Expand Number static predicates and missing Math callable surface in VM native dispatch. — Removes targeted NotCallable clusters for the phase subset without broad architectural churn.
+- [Phase 05]: Normalize Date string output to UTC RFC1123-style text for baseline gates. — Avoids locale-fragile CI assertions while preserving deterministic parse/UTC/getTime behavior.
 
 ### Pending Todos
 
@@ -99,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-26T17:48:02.481Z
-**Stopped at:** Completed 05-02-PLAN.md
+**Last session:** 2026-02-26T18:12:56.418Z
+**Stopped at:** Completed 05-03-PLAN.md
 **Resume file:** None

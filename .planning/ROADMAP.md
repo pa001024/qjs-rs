@@ -14,7 +14,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees. (completed 2026-02-26)
 - [x] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks. (completed 2026-02-26)
 - [x] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling. (completed 2026-02-26)
-- [ ] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets.
+- [x] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets. (completed 2026-02-26)
 - [ ] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts.
 - [ ] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates.
 
@@ -73,7 +73,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 Plans:
 - [x] 05-01-PLAN.md - Close Error hierarchy constructor/prototype/toString determinism and native-error subset gates.
 - [x] 05-02-PLAN.md - Replace placeholder JSON parse/stringify with deterministic reviver/replacer/space/cycle semantics.
-- [ ] 05-03-PLAN.md - Close core builtin conformance clusters and lock Phase 5 CI subset contract.
+- [x] 05-03-PLAN.md - Close core builtin conformance clusters and lock Phase 5 CI subset contract.
 
 ### Phase 6: Collection and RegExp Semantics
 **Goal**: Collections and regular expressions use dedicated semantics aligned with targeted runtime behavior.
@@ -105,6 +105,6 @@ Plans:
 | 2. Runtime Safety and Root Integrity | 3/3 | Complete    | 2026-02-26 |
 | 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
 | 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
-| 5. Core Builtins Baseline | 2/3 | In Progress | - |
+| 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
 | 6. Collection and RegExp Semantics | 0/TBD | Not started | - |
 | 7. Compatibility and Governance Gates | 0/TBD | Not started | - |
