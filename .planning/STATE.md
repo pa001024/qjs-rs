@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 5
 current_phase_name: Core Builtins Baseline
-current_plan: Not started
-status: planning
-stopped_at: Phase 5 context gathered
-last_updated: "2026-02-26T16:44:34.377Z"
-last_activity: 2026-02-26
+current_plan: "02"
+status: in_progress
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-02-27T01:22:17Z"
+last_activity: 2026-02-27
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 12
-  completed_plans: 12
-  percent: 57
+  total_plans: 15
+  completed_plans: 13
+  percent: 87
 ---
 
 # Project State
@@ -31,12 +31,12 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Current Phase:** 5
 **Current Phase Name:** Core Builtins Baseline
 **Total Phases:** 7
-**Current Plan:** Not started
+**Current Plan:** 02
 **Total Plans in Phase:** 3
-**Status:** Ready for planning
-**Last Activity:** 2026-02-26
-**Last Activity Description:** Phase 4 complete and verified
-**Progress:** [█████.....] 57%
+**Status:** In progress
+**Last Activity:** 2026-02-27
+**Last Activity Description:** Completed Phase 5 Plan 01
+**Progress:** [█████████░] 87%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 02 P02 | 4 min | 3 tasks | 3 files |
 | Phase 02 P01 | 46 min | 2 tasks | 1 files |
 | Phase 02 P03 | 5 min | 3 tasks | 1 files |
+| Phase 05 P01 | 11 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Reject duplicate GC baseline keys and lock guard failure messages with exact tests. — Deterministic parser and guard diagnostics keep baseline regressions actionable in CI.
 - [Phase 02]: Raise baseline minimums to 10000/10000/0.95/250 with intent comments. — Higher but conservative thresholds improve regression sensitivity while staying repeatable on current stress snapshots.
 - [Phase 02]: Keep module/job root registration internal to Vm for Phase 2. — Avoid premature public API while locking MEM-01 behavior with VM-local buckets and tests.
+- [Phase 05]: Use one shared native-error prototype factory path with per-constructor caches. — Removes subclass alias drift and keeps constructor/prototype links deterministic.
+- [Phase 05]: Add integration test native_error_constructor_prototype_chain for exact-name verification. — Plan verification command uses --exact and must execute at least one matching test.
+- [Phase 05]: Use local test262-lite built-ins/Error and built-ins/NativeErrors smoke fixtures. — Keeps CI deterministic while enforcing Phase-5 native error semantics via assert-based runtime checks.
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-26T16:44:34.374Z
-**Stopped at:** Phase 5 context gathered
-**Resume file:** .planning/phases/05-core-builtins-baseline/05-CONTEXT.md
+**Last session:** 2026-02-26T17:23:55.816Z
+**Stopped at:** Completed 05-01-PLAN.md
+**Resume file:** None

@@ -71,7 +71,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   3. `JSON.parse` and `JSON.stringify` interoperate on baseline nested data and reject malformed input deterministically.
 **Plans**: 3 plans
 Plans:
-- [ ] 05-01-PLAN.md - Close Error hierarchy constructor/prototype/toString determinism and native-error subset gates.
+- [x] 05-01-PLAN.md - Close Error hierarchy constructor/prototype/toString determinism and native-error subset gates.
 - [ ] 05-02-PLAN.md - Replace placeholder JSON parse/stringify with deterministic reviver/replacer/space/cycle semantics.
 - [ ] 05-03-PLAN.md - Close core builtin conformance clusters and lock Phase 5 CI subset contract.
 
@@ -105,6 +105,6 @@ Plans:
 | 2. Runtime Safety and Root Integrity | 3/3 | Complete    | 2026-02-26 |
 | 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
 | 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
-| 5. Core Builtins Baseline | 0/3 | Not started | - |
+| 5. Core Builtins Baseline | 1/3 | In Progress | - |
 | 6. Collection and RegExp Semantics | 0/TBD | Not started | - |
 | 7. Compatibility and Governance Gates | 0/TBD | Not started | - |

@@ -30,7 +30,7 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 ### Builtins Coverage
 
 - [ ] **BUI-01**: Core builtins (`Object`, `Function`, `Array`, `String`, `Number`, `Boolean`, `Math`, `Date`) satisfy targeted conformance subsets used in CI.
-- [ ] **BUI-02**: Error hierarchy (`Error` plus standard subclasses) exposes expected constructor/prototype behavior and stringification.
+- [x] **BUI-02**: Error hierarchy (`Error` plus standard subclasses) exposes expected constructor/prototype behavior and stringification.
 - [ ] **BUI-03**: `JSON.parse` and `JSON.stringify` support baseline interoperability scenarios used by harness and integration tests.
 - [ ] **BUI-04**: `Map/Set/WeakMap/WeakSet` use dedicated semantics (no baseline constructor alias shortcuts).
 - [ ] **BUI-05**: RegExp constructor and prototype methods (`exec/test/toString`) preserve flags and match behavior for supported patterns.
@@ -87,7 +87,7 @@ Roadmap mapping table. Updated during roadmap creation.
 | MOD-01 | Phase 4 | Complete |
 | MOD-02 | Phase 4 | Complete |
 | BUI-01 | Phase 5 | Pending |
-| BUI-02 | Phase 5 | Pending |
+| BUI-02 | Phase 5 | Complete |
 | BUI-03 | Phase 5 | Pending |
 | BUI-04 | Phase 6 | Pending |
 | BUI-05 | Phase 6 | Pending |
@@ -103,4 +103,4 @@ Roadmap mapping table. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-02-25*
-*Last updated: 2026-02-26 after 04 phase completion*
+*Last updated: 2026-02-27 after 05-01 plan completion*
