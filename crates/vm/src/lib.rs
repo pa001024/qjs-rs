@@ -3440,7 +3440,7 @@ impl Vm {
                     return Err(VmError::NotCallable);
                 }
                 if matches!(native, NativeFunction::DateConstructor) {
-                    return self.execute_date_constructor(&args);
+                    return self.execute_date_constructor(&args, realm, caller_strict);
                 }
                 if matches!(
                     native,
@@ -3560,7 +3560,7 @@ impl Vm {
                     return Err(VmError::NotCallable);
                 }
                 let result = if matches!(native, NativeFunction::DateConstructor) {
-                    self.execute_date_constructor(&args)?
+                    self.execute_date_constructor(&args, realm, caller_strict)?
                 } else if matches!(
                     native,
                     NativeFunction::NumberConstructor
@@ -4558,6 +4558,192 @@ impl Vm {
         let second = ((millis_within_day % 60_000) / 1_000) as u32;
         let millisecond = (millis_within_day % 1_000) as u32;
         (hour, minute, second, millisecond)
+    }
+
+    fn format_date_utc_string(timestamp_ms: f64) -> String {
+        if timestamp_ms.is_nan() {
+            return "Invalid Date".to_string();
+        }
+        let (year, month, day) = Self::utc_date_parts_from_timestamp(timestamp_ms);
+        let (hour, minute, second, _) = Self::date_time_components_from_timestamp(timestamp_ms);
+        let days_since_epoch = (timestamp_ms / 86_400_000.0).floor() as i64;
+        let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let weekday = weekdays[(days_since_epoch + 4).rem_euclid(7) as usize];
+        let month_name = months[month as usize];
+        format!("{weekday}, {day:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
+    }
+
+    fn parse_date_string_baseline(&self, text: &str) -> Option<f64> {
+        if let Ok(number) = text.parse::<f64>() {
+            return Some(number);
+        }
+        Self::parse_iso_utc_date_string(text).or_else(|| Self::parse_rfc_utc_date_string(text))
+    }
+
+    fn parse_iso_utc_date_string(text: &str) -> Option<f64> {
+        if let Some((date_part, time_part)) = text.split_once('T') {
+            let time_part = time_part.strip_suffix('Z')?;
+            let mut date_fields = date_part.split('-');
+            let year = date_fields.next()?.parse::<i32>().ok()?;
+            let month = date_fields.next()?.parse::<u32>().ok()?;
+            let day = date_fields.next()?.parse::<u32>().ok()?;
+            if date_fields.next().is_some() || !(1..=12).contains(&month) || day == 0 {
+                return None;
+            }
+            let mut time_fields = time_part.split(':');
+            let hour = time_fields.next()?.parse::<u32>().ok()?;
+            let minute = time_fields.next()?.parse::<u32>().ok()?;
+            let second_with_fraction = time_fields.next()?;
+            if time_fields.next().is_some() {
+                return None;
+            }
+            let (second, millisecond) =
+                if let Some((second_part, fraction_part)) = second_with_fraction.split_once('.') {
+                    let second = second_part.parse::<u32>().ok()?;
+                    let mut ms = fraction_part
+                        .chars()
+                        .take(3)
+                        .collect::<String>()
+                        .parse::<u32>()
+                        .ok()?;
+                    if fraction_part.len() == 1 {
+                        ms *= 100;
+                    } else if fraction_part.len() == 2 {
+                        ms *= 10;
+                    }
+                    (second, ms)
+                } else {
+                    (second_with_fraction.parse::<u32>().ok()?, 0)
+                };
+            if hour > 23 || minute > 59 || second > 59 {
+                return None;
+            }
+            return Some(Self::make_date_timestamp_ms(
+                year,
+                month - 1,
+                day,
+                hour,
+                minute,
+                second,
+                millisecond,
+            ));
+        }
+
+        let mut date_fields = text.split('-');
+        let year = date_fields.next()?.parse::<i32>().ok()?;
+        let month = date_fields.next()?.parse::<u32>().ok()?;
+        let day = date_fields.next()?.parse::<u32>().ok()?;
+        if date_fields.next().is_some() || !(1..=12).contains(&month) || day == 0 {
+            return None;
+        }
+        Some(Self::make_date_timestamp_ms(year, month - 1, day, 0, 0, 0, 0))
+    }
+
+    fn parse_rfc_utc_date_string(text: &str) -> Option<f64> {
+        let fields: Vec<_> = text.split_whitespace().collect();
+        if fields.len() != 6 || fields[5] != "GMT" {
+            return None;
+        }
+        let day = fields[1].parse::<u32>().ok()?;
+        let month = match fields[2] {
+            "Jan" => 0,
+            "Feb" => 1,
+            "Mar" => 2,
+            "Apr" => 3,
+            "May" => 4,
+            "Jun" => 5,
+            "Jul" => 6,
+            "Aug" => 7,
+            "Sep" => 8,
+            "Oct" => 9,
+            "Nov" => 10,
+            "Dec" => 11,
+            _ => return None,
+        };
+        let year = fields[3].parse::<i32>().ok()?;
+        let mut time_parts = fields[4].split(':');
+        let hour = time_parts.next()?.parse::<u32>().ok()?;
+        let minute = time_parts.next()?.parse::<u32>().ok()?;
+        let second = time_parts.next()?.parse::<u32>().ok()?;
+        if time_parts.next().is_some() || hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+        Some(Self::make_date_timestamp_ms(
+            year, month, day, hour, minute, second, 0,
+        ))
+    }
+
+    fn date_utc_from_components(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<f64, VmError> {
+        let mut year = self.coerce_number_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let month = self.coerce_number_runtime(
+            args.get(1).cloned().unwrap_or(JsValue::Number(0.0)),
+            realm,
+            caller_strict,
+        )?;
+        let day = self.coerce_number_runtime(
+            args.get(2).cloned().unwrap_or(JsValue::Number(1.0)),
+            realm,
+            caller_strict,
+        )?;
+        let hour = self.coerce_number_runtime(
+            args.get(3).cloned().unwrap_or(JsValue::Number(0.0)),
+            realm,
+            caller_strict,
+        )?;
+        let minute = self.coerce_number_runtime(
+            args.get(4).cloned().unwrap_or(JsValue::Number(0.0)),
+            realm,
+            caller_strict,
+        )?;
+        let second = self.coerce_number_runtime(
+            args.get(5).cloned().unwrap_or(JsValue::Number(0.0)),
+            realm,
+            caller_strict,
+        )?;
+        let millisecond = self.coerce_number_runtime(
+            args.get(6).cloned().unwrap_or(JsValue::Number(0.0)),
+            realm,
+            caller_strict,
+        )?;
+
+        if !year.is_finite()
+            || !month.is_finite()
+            || !day.is_finite()
+            || !hour.is_finite()
+            || !minute.is_finite()
+            || !second.is_finite()
+            || !millisecond.is_finite()
+        {
+            return Ok(f64::NAN);
+        }
+
+        year = year.trunc();
+        if (0.0..=99.0).contains(&year) {
+            year += 1900.0;
+        }
+        let month_trunc = month.trunc() as i64;
+        let total_months = year as i64 * 12 + month_trunc;
+        let normalized_year = total_months.div_euclid(12) as i32;
+        let normalized_month = total_months.rem_euclid(12) as u32;
+        let day_number = day.trunc() as i64;
+        let days = Self::days_from_civil(normalized_year, normalized_month, 1) + day_number - 1;
+        let time_ms = hour.trunc() * 3_600_000.0
+            + minute.trunc() * 60_000.0
+            + second.trunc() * 1_000.0
+            + millisecond.trunc();
+        Ok(Self::time_clip(days as f64 * 86_400_000.0 + time_ms))
     }
 
     // Howard Hinnant's days-from-civil algorithm.
@@ -7136,10 +7322,7 @@ impl Vm {
                     .and_then(|object| object.properties.get(DATE_VALUE_KEY))
                     .map(|value| self.to_number(value))
                     .unwrap_or(0.0);
-                Ok(JsValue::String(format!(
-                    "Date({})",
-                    Self::coerce_number_to_string(timestamp)
-                )))
+                Ok(JsValue::String(Self::format_date_utc_string(timestamp)))
             }
             HostFunction::DateValueOf(object_id) => {
                 let timestamp = self
@@ -7217,13 +7400,7 @@ impl Vm {
             HostFunction::DateToUTCStringThis => {
                 let object_id = self.strict_this_date_object(this_arg)?;
                 let timestamp = self.date_timestamp_for_object(object_id)?;
-                if timestamp.is_nan() {
-                    return Ok(JsValue::String("Invalid Date".to_string()));
-                }
-                Ok(JsValue::String(format!(
-                    "Date({})",
-                    Self::coerce_number_to_string(timestamp)
-                )))
+                Ok(JsValue::String(Self::format_date_utc_string(timestamp)))
             }
             HostFunction::FunctionToString { target } => Ok(JsValue::String(format!(
                 "{}() {{ [native code] }}",
@@ -7441,25 +7618,26 @@ impl Vm {
             }
             NativeFunction::Uint8ArrayConstructor => self.execute_uint8_array_constructor(&args),
             NativeFunction::DateConstructor => {
-                let timestamp = args
-                    .first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0);
-                Ok(JsValue::String(format!(
-                    "Date({})",
-                    Self::coerce_number_to_string(timestamp)
-                )))
+                let date_object = self.execute_date_constructor(&args, realm, caller_strict)?;
+                let object_id = match date_object {
+                    JsValue::Object(object_id) => object_id,
+                    _ => return Ok(JsValue::String("Invalid Date".to_string())),
+                };
+                let timestamp = self.date_timestamp_for_object(object_id)?;
+                Ok(JsValue::String(Self::format_date_utc_string(timestamp)))
             }
             NativeFunction::DateParse => {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let text = self.coerce_to_string(&value);
-                let parsed = text.trim().parse::<f64>().ok().unwrap_or(f64::NAN);
+                let text = self.coerce_to_string_runtime(value, realm, caller_strict)?;
+                let parsed = self
+                    .parse_date_string_baseline(text.trim())
+                    .map(Self::time_clip)
+                    .unwrap_or(f64::NAN);
                 Ok(JsValue::Number(parsed))
             }
-            NativeFunction::DateUtc => {
-                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-                Ok(JsValue::Number(self.to_number(&value)))
-            }
+            NativeFunction::DateUtc => Ok(JsValue::Number(
+                self.date_utc_from_components(&args, realm, caller_strict)?,
+            )),
             NativeFunction::DatePrototypeMethod => Ok(JsValue::Number(f64::NAN)),
             NativeFunction::MathAbs => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -11368,69 +11546,26 @@ impl Vm {
         }
     }
 
-    fn execute_date_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+    fn execute_date_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         let timestamp = if args.is_empty() {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as f64)
                 .unwrap_or(0.0)
         } else if args.len() == 1 {
-            Self::time_clip(
-                args.first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0),
-            )
-        } else {
-            let mut year = self.to_number(&args[0]);
-            let month = self.to_number(&args[1]);
-            let day = args
-                .get(2)
-                .map(|value| self.to_number(value))
-                .unwrap_or(1.0);
-            let hour = args
-                .get(3)
-                .map(|value| self.to_number(value))
-                .unwrap_or(0.0);
-            let minute = args
-                .get(4)
-                .map(|value| self.to_number(value))
-                .unwrap_or(0.0);
-            let second = args
-                .get(5)
-                .map(|value| self.to_number(value))
-                .unwrap_or(0.0);
-            let millisecond = args
-                .get(6)
-                .map(|value| self.to_number(value))
-                .unwrap_or(0.0);
-
-            if !year.is_finite()
-                || !month.is_finite()
-                || !day.is_finite()
-                || !hour.is_finite()
-                || !minute.is_finite()
-                || !second.is_finite()
-                || !millisecond.is_finite()
-            {
-                f64::NAN
-            } else {
-                year = year.trunc();
-                if (0.0..=99.0).contains(&year) {
-                    year += 1900.0;
+            match args.first().cloned().unwrap_or(JsValue::Undefined) {
+                JsValue::String(text) => {
+                    Self::time_clip(self.parse_date_string_baseline(text.trim()).unwrap_or(f64::NAN))
                 }
-                let month_trunc = month.trunc() as i64;
-                let total_months = year as i64 * 12 + month_trunc;
-                let normalized_year = total_months.div_euclid(12) as i32;
-                let normalized_month = total_months.rem_euclid(12) as u32;
-                let day_number = day.trunc() as i64;
-                let days =
-                    Self::days_from_civil(normalized_year, normalized_month, 1) + day_number - 1;
-                let time_ms = hour.trunc() * 3_600_000.0
-                    + minute.trunc() * 60_000.0
-                    + second.trunc() * 1_000.0
-                    + millisecond.trunc();
-                Self::time_clip(days as f64 * 86_400_000.0 + time_ms)
+                value => Self::time_clip(self.coerce_number_runtime(value, realm, caller_strict)?),
             }
+        } else {
+            self.date_utc_from_components(args, realm, caller_strict)?
         };
         let local_components = if timestamp.is_nan() {
             None
@@ -15965,11 +16100,18 @@ impl Vm {
             let get_utc_date = self.create_host_function_value(HostFunction::DateGetUTCDateThis);
             let get_year = self.create_host_function_value(HostFunction::DateGetYearThis);
             let set_year = self.create_host_function_value(HostFunction::DateSetYearThis);
+            let to_string = self.create_host_function_value(HostFunction::DateToUTCStringThis);
+            let to_locale_string =
+                self.create_host_function_value(HostFunction::DateToUTCStringThis);
             let to_utc_string = self.create_host_function_value(HostFunction::DateToUTCStringThis);
             self.set_builtin_function_length(&get_year, 0.0);
             self.set_builtin_function_name(&get_year, "getYear");
             self.set_builtin_function_length(&set_year, 1.0);
             self.set_builtin_function_name(&set_year, "setYear");
+            self.set_builtin_function_length(&to_string, 0.0);
+            self.set_builtin_function_name(&to_string, "toString");
+            self.set_builtin_function_length(&to_locale_string, 0.0);
+            self.set_builtin_function_name(&to_locale_string, "toLocaleString");
             self.set_builtin_function_length(&to_utc_string, 0.0);
             self.set_builtin_function_name(&to_utc_string, "toUTCString");
             if let Some(object) = self.objects.get_mut(&id) {
@@ -16027,6 +16169,9 @@ impl Vm {
                     "setYear",
                 ] {
                     let value = match method {
+                        "toString" => to_string.clone(),
+                        "toLocaleString" => to_locale_string.clone(),
+                        "valueOf" => get_time.clone(),
                         "getFullYear" => get_full_year.clone(),
                         "getMonth" => get_month.clone(),
                         "getDate" => get_date.clone(),
@@ -20166,8 +20311,9 @@ impl Vm {
             | (NativeFunction::ObjectFreeze, "length")
             | (NativeFunction::ArrayIsArray, "length")
             | (NativeFunction::DateParse, "length")
-            | (NativeFunction::DateUtc, "length")
             | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
+            (NativeFunction::DateConstructor, "length")
+            | (NativeFunction::DateUtc, "length") => JsValue::Number(7.0),
             (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
             (NativeFunction::MapConstructor, "length")
             | (NativeFunction::SetConstructor, "length")

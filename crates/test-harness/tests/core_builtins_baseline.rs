@@ -49,3 +49,25 @@ fn string_number_math_baseline() {
         JsValue::Bool(true),
     );
 }
+
+#[test]
+fn date_baseline() {
+    assert_script(
+        "var ok = true; \
+         var ts = Date.UTC(2020, 0, 2, 3, 4, 5, 6); \
+         var d = new Date(ts); \
+         ok = ok && Date.length === 7 && Date.UTC.length === 7; \
+         ok = ok && d.getTime() === ts; \
+         ok = ok && d.toString() === 'Thu, 02 Jan 2020 03:04:05 GMT'; \
+         ok = ok && d.toUTCString() === 'Thu, 02 Jan 2020 03:04:05 GMT'; \
+         ok = ok && Date(ts) === d.toString(); \
+         ok = ok && Date.parse('2020-01-02T03:04:05.006Z') === ts; \
+         ok = ok && Date.parse('Thu, 02 Jan 2020 03:04:05 GMT') === Date.UTC(2020, 0, 2, 3, 4, 5); \
+         ok = ok && Date.parse(d.toUTCString()) === Date.UTC(2020, 0, 2, 3, 4, 5); \
+         ok = ok && isNaN(Date.parse('not-a-date')); \
+         var utcThrows = false; \
+         try { Date.UTC({ valueOf: function() { throw 'utc'; } }, 0); } catch (err) { utcThrows = err === 'utc'; } \
+         ok && utcThrows;",
+        JsValue::Bool(true),
+    );
+}

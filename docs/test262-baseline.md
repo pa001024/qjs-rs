@@ -2,6 +2,23 @@
 
 基线日期：2026-02-25
 
+## Phase 5 Core Builtins Subset Contract（2026-02-26）
+
+为 BUI-01 在 Phase 5 的 CI 约束，固定执行以下命令：
+
+```powershell
+cargo test -p vm core_builtins_object_array_boolean_function -- --exact
+cargo test -p vm core_builtins_string_number_math -- --exact
+cargo test -p test-harness --test core_builtins_baseline
+cargo test -p test-harness --test test262_lite core_builtins_subset -- --exact
+```
+
+当前基线结果：
+- `core_builtins_object_array_boolean_function`: 1 passed, 0 failed
+- `core_builtins_string_number_math`: 1 passed, 0 failed
+- `core_builtins_baseline`（integration）: all passed
+- `core_builtins_subset`（test262-lite families）: 8/8 families passed, 0 failed
+
 测试语料：
 - 仓库：`d:\dev\test262`
 - 用例根目录：`d:\dev\test262\test`

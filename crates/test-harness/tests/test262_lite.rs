@@ -79,6 +79,10 @@ fn json_subset_root() -> PathBuf {
     native_errors_subset_root().join("JSON")
 }
 
+fn core_builtin_family_root(name: &str) -> PathBuf {
+    native_errors_subset_root().join(name)
+}
+
 fn assert_basic_suite_expectations(summary: &test_harness::test262::SuiteSummary) {
     assert!(
         summary.discovered > 0,
@@ -135,4 +139,23 @@ fn json_subset() {
         "json subset should execute all smoke fixtures"
     );
     assert_eq!(summary.failed, 0, "json subset should have zero mismatches");
+}
+
+#[test]
+fn core_builtins_subset() {
+    for family in [
+        "Object", "Array", "Boolean", "Function", "String", "Number", "Math", "Date",
+    ] {
+        let summary = run_suite(&core_builtin_family_root(family), SuiteOptions::default())
+            .unwrap_or_else(|err| panic!("{family} subset should run: {err}"));
+        assert!(
+            summary.discovered >= 1,
+            "{family} subset should include at least one smoke fixture"
+        );
+        assert!(
+            summary.executed >= 1,
+            "{family} subset should execute at least one smoke fixture"
+        );
+        assert_eq!(summary.failed, 0, "{family} subset should have zero mismatches");
+    }
 }
