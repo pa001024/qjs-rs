@@ -19720,7 +19720,10 @@ impl Vm {
 
 #[cfg(test)]
 mod tests {
-    use super::{GcStats, Vm, VmError};
+    use super::{
+        GcStats, TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_SHADOW_ROOT_MISMATCH,
+        TYPE_ERROR_STALE_HANDLE, Vm, VmError,
+    };
     use bytecode::{Chunk, CompiledFunction, Opcode, compile_script};
     use parser::parse_script;
     use regex::RegexBuilder;
@@ -22448,6 +22451,85 @@ mod tests {
         assert_eq!(
             vm.get_object_property(fresh_id, "x", &realm),
             Ok(JsValue::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn classifies_invalid_slot_and_generation_handles() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object else {
+            panic!("expected object value");
+        };
+
+        let invalid_slot_id = Vm::make_object_id(u32::MAX, 0);
+        assert!(matches!(
+            vm.get_object_property(invalid_slot_id, "x", &realm),
+            Err(VmError::InvalidHandle(id)) if id == invalid_slot_id
+        ));
+
+        let invalid_generation_id = Vm::make_object_id(
+            Vm::object_id_slot(object_id),
+            Vm::object_id_generation(object_id)
+                .checked_add(1)
+                .expect("generation should increment for invalid-handle test"),
+        );
+        assert!(matches!(
+            vm.get_object_property(invalid_generation_id, "x", &realm),
+            Err(VmError::InvalidHandle(id)) if id == invalid_generation_id
+        ));
+    }
+
+    #[test]
+    fn runtime_error_exception_value_maps_handle_classes_to_stable_type_error_messages() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let stale = vm.create_object_value();
+        let JsValue::Object(stale_id) = stale else {
+            panic!("expected object value");
+        };
+        let _ = vm.collect_garbage(&realm);
+        let _fresh = vm.create_object_value();
+        let invalid_slot_id = Vm::make_object_id(u32::MAX, 0);
+
+        let stale_exception = vm
+            .runtime_error_exception_value(&VmError::UnknownObject(stale_id))
+            .expect("stale-handle exception should be created");
+        let JsValue::Object(stale_exception_id) = stale_exception else {
+            panic!("expected stale-handle exception object");
+        };
+        assert_eq!(
+            vm.get_object_property(stale_exception_id, "name", &realm),
+            Ok(JsValue::String("TypeError".to_string()))
+        );
+        assert_eq!(
+            vm.get_object_property(stale_exception_id, "message", &realm),
+            Ok(JsValue::String(TYPE_ERROR_STALE_HANDLE.to_string()))
+        );
+
+        let invalid_exception = vm
+            .runtime_error_exception_value(&VmError::UnknownObject(invalid_slot_id))
+            .expect("invalid-handle exception should be created");
+        let JsValue::Object(invalid_exception_id) = invalid_exception else {
+            panic!("expected invalid-handle exception object");
+        };
+        assert_eq!(
+            vm.get_object_property(invalid_exception_id, "name", &realm),
+            Ok(JsValue::String("TypeError".to_string()))
+        );
+        assert_eq!(
+            vm.get_object_property(invalid_exception_id, "message", &realm),
+            Ok(JsValue::String(TYPE_ERROR_INVALID_HANDLE.to_string()))
+        );
+    }
+
+    #[test]
+    fn restore_caller_state_shadow_root_mismatch_returns_typed_error() {
+        let mut vm = Vm::default();
+        assert_eq!(
+            vm.restore_caller_state(Vec::new(), Vec::new(), Vec::new()),
+            Err(VmError::RuntimeIntegrity(TYPE_ERROR_SHADOW_ROOT_MISMATCH))
         );
     }
 
