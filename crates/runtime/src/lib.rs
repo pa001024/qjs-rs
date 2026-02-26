@@ -110,6 +110,16 @@ pub enum JsValue {
     Undefined,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleLifecycleState {
+    Unlinked,
+    Linking,
+    Linked,
+    Evaluating,
+    Evaluated,
+    Errored,
+}
+
 #[derive(Debug, Default)]
 pub struct Realm {
     globals: BTreeMap<String, JsValue>,

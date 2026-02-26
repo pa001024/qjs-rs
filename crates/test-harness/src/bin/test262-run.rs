@@ -67,7 +67,11 @@ fn parse_gc_expectations_str(raw: &str) -> Result<GcExpectations, String> {
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?;
-                if expectations.runtime_collections_min.replace(parsed).is_some() {
+                if expectations
+                    .runtime_collections_min
+                    .replace(parsed)
+                    .is_some()
+                {
                     return Err(format!("line {}: duplicate key '{key}'", index + 1));
                 }
             }

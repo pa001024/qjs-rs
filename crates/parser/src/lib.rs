@@ -6,9 +6,9 @@ use std::{
 };
 
 use ast::{
-    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ObjectProperty,
-    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget,
-    VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Module,
+    ModuleExport, ModuleImport, ModuleImportBinding, ObjectProperty, ObjectPropertyKey, Script,
+    Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -71,6 +71,422 @@ pub fn parse_script_with_super(
     validate_statement_list_strict_mode(&statements, false)?;
     parser.expect_eof()?;
     Ok(Script { statements })
+}
+
+pub fn parse_module(source: &str) -> Result<Module, ParseError> {
+    let mut imports = Vec::new();
+    let mut exports = Vec::new();
+    let mut exported_names = BTreeSet::new();
+    let mut transformed_lines = Vec::new();
+    let mut default_export_index = 0usize;
+
+    for raw_line in source.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            transformed_lines.push(raw_line.to_string());
+            continue;
+        }
+        if trimmed.starts_with("import ") {
+            imports.push(parse_module_import_declaration(trimmed)?);
+            continue;
+        }
+        if trimmed.starts_with("export ") {
+            let export_body = trimmed
+                .strip_prefix("export ")
+                .expect("prefix checked")
+                .trim();
+            if export_body.starts_with('{') {
+                for export in parse_named_export_clause(export_body)? {
+                    register_module_export(&mut exports, &mut exported_names, export)?;
+                }
+                continue;
+            }
+            if export_body.starts_with('*') {
+                return Err(ParseError {
+                    message: "unsupported export form".to_string(),
+                    position: 0,
+                });
+            }
+            if let Some(default_expr) = export_body.strip_prefix("default ") {
+                let default_expr = default_expr.trim();
+                if !default_expr.ends_with(';') {
+                    return Err(ParseError {
+                        message: "module declaration must end with ';'".to_string(),
+                        position: 0,
+                    });
+                }
+                let expr = default_expr[..default_expr.len() - 1].trim();
+                if expr.is_empty() {
+                    return Err(ParseError {
+                        message: "export default requires an expression".to_string(),
+                        position: 0,
+                    });
+                }
+                let local = format!("$__qjs_module_default_export_{default_export_index}__$");
+                default_export_index += 1;
+                transformed_lines.push(format!("const {local} = {expr};"));
+                register_module_export(
+                    &mut exports,
+                    &mut exported_names,
+                    ModuleExport {
+                        exported: "default".to_string(),
+                        local,
+                    },
+                )?;
+                continue;
+            }
+
+            if export_body.contains(" from ") {
+                return Err(ParseError {
+                    message: "unsupported export re-export form".to_string(),
+                    position: 0,
+                });
+            }
+            for local in collect_module_declared_bindings(export_body)? {
+                register_module_export(
+                    &mut exports,
+                    &mut exported_names,
+                    ModuleExport {
+                        exported: local.clone(),
+                        local,
+                    },
+                )?;
+            }
+            transformed_lines.push(export_body.to_string());
+            continue;
+        }
+
+        transformed_lines.push(raw_line.to_string());
+    }
+
+    if !exports.is_empty() {
+        transformed_lines.push(render_module_export_snapshot_statement(&exports));
+    }
+    let transformed_source = transformed_lines.join("\n");
+    let body = parse_script_with_super(&transformed_source, false)?;
+    Ok(Module {
+        imports,
+        exports,
+        body,
+    })
+}
+
+fn parse_module_import_declaration(line: &str) -> Result<ModuleImport, ParseError> {
+    let mut rest = line.strip_prefix("import ").expect("prefix checked").trim();
+    if !rest.ends_with(';') {
+        return Err(ParseError {
+            message: "module declaration must end with ';'".to_string(),
+            position: 0,
+        });
+    }
+    rest = rest[..rest.len() - 1].trim();
+
+    if rest.starts_with('\'') || rest.starts_with('"') {
+        return Ok(ModuleImport {
+            specifier: parse_module_string_literal(rest)?,
+            bindings: Vec::new(),
+        });
+    }
+
+    let Some((raw_clause, raw_specifier)) = rest.rsplit_once(" from ") else {
+        return Err(ParseError {
+            message: "unsupported import declaration form".to_string(),
+            position: 0,
+        });
+    };
+    let clause = raw_clause.trim();
+    let specifier = parse_module_string_literal(raw_specifier.trim())?;
+    let bindings = parse_module_import_clause_bindings(clause)?;
+    Ok(ModuleImport {
+        specifier,
+        bindings,
+    })
+}
+
+fn parse_module_import_clause_bindings(
+    clause: &str,
+) -> Result<Vec<ModuleImportBinding>, ParseError> {
+    if clause.starts_with('{') {
+        return parse_named_import_bindings(clause);
+    }
+    if let Some(local) = clause.strip_prefix("* as ") {
+        return Ok(vec![ModuleImportBinding {
+            imported: "*".to_string(),
+            local: parse_module_binding_identifier(local.trim())?,
+        }]);
+    }
+
+    let mut bindings = Vec::new();
+    if let Some((default_binding, remainder)) = clause.split_once(',') {
+        bindings.push(ModuleImportBinding {
+            imported: "default".to_string(),
+            local: parse_module_binding_identifier(default_binding.trim())?,
+        });
+        let remainder = remainder.trim();
+        if remainder.starts_with('{') {
+            bindings.extend(parse_named_import_bindings(remainder)?);
+        } else if let Some(local) = remainder.strip_prefix("* as ") {
+            bindings.push(ModuleImportBinding {
+                imported: "*".to_string(),
+                local: parse_module_binding_identifier(local.trim())?,
+            });
+        } else {
+            return Err(ParseError {
+                message: "unsupported import declaration form".to_string(),
+                position: 0,
+            });
+        }
+        return Ok(bindings);
+    }
+
+    bindings.push(ModuleImportBinding {
+        imported: "default".to_string(),
+        local: parse_module_binding_identifier(clause.trim())?,
+    });
+    Ok(bindings)
+}
+
+fn parse_named_import_bindings(clause: &str) -> Result<Vec<ModuleImportBinding>, ParseError> {
+    let inner = parse_braced_clause_inner(clause)?;
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bindings = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (imported, local) = if let Some((imported, local)) = part.split_once(" as ") {
+            (
+                parse_module_import_name(imported.trim())?,
+                parse_module_binding_identifier(local.trim())?,
+            )
+        } else {
+            let ident = parse_module_binding_identifier(part)?;
+            (ident.clone(), ident)
+        };
+        bindings.push(ModuleImportBinding { imported, local });
+    }
+    Ok(bindings)
+}
+
+fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseError> {
+    if !clause.ends_with(';') {
+        return Err(ParseError {
+            message: "module declaration must end with ';'".to_string(),
+            position: 0,
+        });
+    }
+    let body = clause[..clause.len() - 1].trim();
+    let inner = parse_braced_clause_inner(body)?;
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut exports = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let export = if let Some((local, exported)) = part.split_once(" as ") {
+            ModuleExport {
+                local: parse_module_binding_identifier(local.trim())?,
+                exported: parse_module_export_name(exported.trim())?,
+            }
+        } else {
+            let local = parse_module_binding_identifier(part)?;
+            ModuleExport {
+                local: local.clone(),
+                exported: local,
+            }
+        };
+        exports.push(export);
+    }
+    Ok(exports)
+}
+
+fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
+    let declaration = declaration.trim();
+    if let Some(rest) = declaration.strip_prefix("const ") {
+        return parse_variable_export_bindings(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("let ") {
+        return parse_variable_export_bindings(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("var ") {
+        return parse_variable_export_bindings(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("function ") {
+        let name = parse_leading_identifier(rest)?;
+        return Ok(vec![name]);
+    }
+    if let Some(rest) = declaration.strip_prefix("async function ") {
+        let name = parse_leading_identifier(rest)?;
+        return Ok(vec![name]);
+    }
+    if let Some(rest) = declaration.strip_prefix("class ") {
+        let name = parse_leading_identifier(rest)?;
+        return Ok(vec![name]);
+    }
+    Err(ParseError {
+        message: "unsupported export declaration form".to_string(),
+        position: 0,
+    })
+}
+
+fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, ParseError> {
+    if !declarators.trim_end().ends_with(';') {
+        return Err(ParseError {
+            message: "module declaration must end with ';'".to_string(),
+            position: 0,
+        });
+    }
+    let body = declarators.trim_end();
+    let body = body[..body.len() - 1].trim();
+    if body.is_empty() {
+        return Err(ParseError {
+            message: "unsupported export declaration form".to_string(),
+            position: 0,
+        });
+    }
+
+    let mut names = Vec::new();
+    for declarator in body.split(',') {
+        let declarator = declarator.trim();
+        if declarator.is_empty() {
+            continue;
+        }
+        let lhs = declarator
+            .split_once('=')
+            .map_or(declarator, |(left, _)| left)
+            .trim();
+        if lhs.contains('{') || lhs.contains('[') {
+            return Err(ParseError {
+                message: "unsupported destructuring export declaration".to_string(),
+                position: 0,
+            });
+        }
+        names.push(parse_module_binding_identifier(lhs)?);
+    }
+    if names.is_empty() {
+        return Err(ParseError {
+            message: "unsupported export declaration form".to_string(),
+            position: 0,
+        });
+    }
+    Ok(names)
+}
+
+fn parse_leading_identifier(source: &str) -> Result<String, ParseError> {
+    let mut chars = source.trim_start().chars().peekable();
+    let mut ident = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            ident.push(ch);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    parse_module_binding_identifier(&ident)
+}
+
+fn parse_braced_clause_inner(clause: &str) -> Result<String, ParseError> {
+    let clause = clause.trim();
+    if !clause.starts_with('{') || !clause.ends_with('}') {
+        return Err(ParseError {
+            message: "unsupported module declaration form".to_string(),
+            position: 0,
+        });
+    }
+    Ok(clause[1..clause.len() - 1].trim().to_string())
+}
+
+fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
+    let source = source.trim();
+    let quote = source.chars().next().ok_or(ParseError {
+        message: "expected module specifier".to_string(),
+        position: 0,
+    })?;
+    if quote != '\'' && quote != '"' {
+        return Err(ParseError {
+            message: "expected module specifier string literal".to_string(),
+            position: 0,
+        });
+    }
+    if !source.ends_with(quote) || source.len() < 2 {
+        return Err(ParseError {
+            message: "unterminated module specifier literal".to_string(),
+            position: 0,
+        });
+    }
+    Ok(source[1..source.len() - 1].to_string())
+}
+
+fn parse_module_import_name(name: &str) -> Result<String, ParseError> {
+    if name == "default" {
+        return Ok(name.to_string());
+    }
+    parse_module_binding_identifier(name)
+}
+
+fn parse_module_export_name(name: &str) -> Result<String, ParseError> {
+    if name == "default" {
+        return Ok(name.to_string());
+    }
+    parse_module_binding_identifier(name)
+}
+
+fn parse_module_binding_identifier(name: &str) -> Result<String, ParseError> {
+    let name = name.trim();
+    if !is_valid_module_identifier(name) || is_forbidden_binding_identifier(name) {
+        return Err(ParseError {
+            message: "invalid module binding identifier".to_string(),
+            position: 0,
+        });
+    }
+    Ok(name.to_string())
+}
+
+fn is_valid_module_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn register_module_export(
+    exports: &mut Vec<ModuleExport>,
+    exported_names: &mut BTreeSet<String>,
+    export: ModuleExport,
+) -> Result<(), ParseError> {
+    if !exported_names.insert(export.exported.clone()) {
+        return Err(ParseError {
+            message: "duplicate export binding".to_string(),
+            position: 0,
+        });
+    }
+    exports.push(export);
+    Ok(())
+}
+
+fn render_module_export_snapshot_statement(exports: &[ModuleExport]) -> String {
+    let mut rendered = String::from("({");
+    for (index, export) in exports.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&export.exported);
+        rendered.push_str(": ");
+        rendered.push_str(&export.local);
+    }
+    rendered.push_str("});");
+    rendered
 }
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
@@ -6261,11 +6677,11 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_METHOD_NO_PROTOTYPE_MARKER, parse_expression, parse_script};
+    use super::{CLASS_METHOD_NO_PROTOTYPE_MARKER, parse_expression, parse_module, parse_script};
     use ast::{
-        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-        ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
-        UpdateTarget, VariableDeclaration,
+        BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ModuleExport,
+        ModuleImportBinding, ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral,
+        SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration,
     };
 
     #[test]
@@ -6282,6 +6698,51 @@ mod tests {
             right: Box::new(Expr::Number(3.0)),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn module_parse_baseline() {
+        let source = "\
+import value from './dep.js';\n\
+import { inc as plus } from './math.js';\n\
+const local = plus + 1;\n\
+export { local };\n\
+export default value;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 2);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(
+            parsed.imports[0].bindings,
+            vec![ModuleImportBinding {
+                imported: "default".to_string(),
+                local: "value".to_string(),
+            }]
+        );
+        assert_eq!(parsed.imports[1].specifier, "./math.js");
+        assert_eq!(
+            parsed.imports[1].bindings,
+            vec![ModuleImportBinding {
+                imported: "inc".to_string(),
+                local: "plus".to_string(),
+            }]
+        );
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "local".to_string(),
+            local: "local".to_string(),
+        }));
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "default")
+        );
+        assert!(
+            matches!(
+                parsed.body.statements.last(),
+                Some(Stmt::Expression(Expr::ObjectLiteral(_)))
+            ),
+            "module parse should append synthetic export snapshot expression"
+        );
     }
 
     #[test]

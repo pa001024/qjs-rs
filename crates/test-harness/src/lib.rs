@@ -6,7 +6,8 @@ use builtins::install_baseline;
 use bytecode::{compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};
-use vm::Vm;
+use std::collections::BTreeMap;
+use vm::{ModuleHost, ModuleHostError, Vm};
 
 pub fn run_expression(source: &str) -> Result<JsValue, String> {
     run_expression_with_globals(source, &[])
@@ -27,6 +28,20 @@ pub fn run_script(source: &str, globals: &[(&str, JsValue)]) -> Result<JsValue, 
     execute_chunk_with_globals(&chunk, globals)
 }
 
+pub fn run_module_entry(
+    entry: &str,
+    modules: &[(&str, &str)],
+) -> Result<BTreeMap<String, JsValue>, String> {
+    let mut host = InMemoryModuleHost::default();
+    for (key, source) in modules {
+        host.modules
+            .insert((*key).to_string(), (*source).to_string());
+    }
+    let mut vm = Vm::default();
+    vm.evaluate_module_entry(entry, &mut host)
+        .map_err(|err| format!("{err:?}"))
+}
+
 fn execute_chunk_with_globals(
     chunk: &bytecode::Chunk,
     globals: &[(&str, JsValue)],
@@ -39,6 +54,36 @@ fn execute_chunk_with_globals(
     let mut vm = Vm::default();
     vm.execute_in_realm(chunk, &realm)
         .map_err(|err| format!("{err:?}"))
+}
+
+#[derive(Debug, Default)]
+struct InMemoryModuleHost {
+    modules: BTreeMap<String, String>,
+}
+
+impl ModuleHost for InMemoryModuleHost {
+    fn resolve(
+        &mut self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<String, ModuleHostError> {
+        if let Some(specifier) = specifier.strip_prefix("./") {
+            if let Some(referrer) = referrer {
+                if let Some((prefix, _)) = referrer.rsplit_once('/') {
+                    return Ok(format!("{prefix}/{specifier}"));
+                }
+            }
+            return Ok(specifier.to_string());
+        }
+        Ok(specifier.to_string())
+    }
+
+    fn load(&mut self, canonical_key: &str) -> Result<String, ModuleHostError> {
+        self.modules
+            .get(canonical_key)
+            .cloned()
+            .ok_or(ModuleHostError::LoadFailed)
+    }
 }
 
 #[cfg(test)]

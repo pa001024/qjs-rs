@@ -5,7 +5,11 @@ use test_harness::run_script;
 
 fn assert_script_value(source: &str, expected: JsValue) {
     let result = run_script(source, &[]);
-    assert_eq!(result, Ok(expected), "unexpected result for script:\n{source}");
+    assert_eq!(
+        result,
+        Ok(expected),
+        "unexpected result for script:\n{source}"
+    );
 }
 
 #[test]

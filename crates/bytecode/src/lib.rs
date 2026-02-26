@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
 use ast::{
-    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
-    ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget,
-    VariableDeclaration,
+    BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Module,
+    ModuleExport, ModuleImport, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase,
+    UnaryOp, UpdateTarget, VariableDeclaration,
 };
 use std::collections::BTreeSet;
 
@@ -151,6 +151,13 @@ pub struct Chunk {
     pub functions: Vec<CompiledFunction>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CompiledModule {
+    pub chunk: Chunk,
+    pub imports: Vec<ModuleImport>,
+    pub exports: Vec<ModuleExport>,
+}
+
 #[derive(Debug, Default)]
 struct Compiler {
     functions: Vec<CompiledFunction>,
@@ -220,6 +227,14 @@ pub fn compile_expression(expr: &Expr) -> Chunk {
     Chunk {
         code,
         functions: compiler.functions,
+    }
+}
+
+pub fn compile_module(module: &Module) -> CompiledModule {
+    CompiledModule {
+        chunk: compile_script(&module.body),
+        imports: module.imports.clone(),
+        exports: module.exports.clone(),
     }
 }
 

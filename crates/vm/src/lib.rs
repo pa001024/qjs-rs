@@ -1,10 +1,16 @@
 #![forbid(unsafe_code)]
 
-use ast::{BindingKind, ForInitializer, Identifier, Script, Stmt, VariableDeclaration};
-use bytecode::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+use ast::{
+    BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
+    VariableDeclaration,
+};
+use bytecode::{
+    Chunk, CompiledFunction, CompiledModule, Opcode, compile_expression, compile_module,
+    compile_script,
+};
 use fancy_regex::{Regex, RegexBuilder};
-use parser::{parse_expression, parse_script_with_super};
-use runtime::{JsValue, NativeFunction, Realm};
+use parser::{parse_expression, parse_module, parse_script_with_super};
+use runtime::{JsValue, ModuleLifecycleState, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -71,6 +77,12 @@ const TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION: &str =
 const TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED: &str = "PromiseJobQueue:HostOnEnqueueFailed";
 const TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED: &str = "PromiseJobQueue:HostOnDrainStartFailed";
 const TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED: &str = "PromiseJobQueue:HostOnDrainEndFailed";
+const TYPE_ERROR_MODULE_INVALID_TRANSITION: &str = "ModuleLifecycle:InvalidTransition";
+const TYPE_ERROR_MODULE_RESOLVE_FAILED: &str = "ModuleLifecycle:ResolveFailed";
+const TYPE_ERROR_MODULE_LOAD_FAILED: &str = "ModuleLifecycle:LoadFailed";
+const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
+const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
+const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -397,6 +409,36 @@ impl PromiseJobHostHooks for NoopPromiseJobHostHooks {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleHostError {
+    ResolveFailed,
+    LoadFailed,
+}
+
+pub trait ModuleHost {
+    fn resolve(
+        &mut self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<String, ModuleHostError>;
+    fn load(&mut self, canonical_key: &str) -> Result<String, ModuleHostError>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModuleRecord {
+    canonical_key: String,
+    source: String,
+    compiled: Option<CompiledModule>,
+    imports: Vec<ModuleImport>,
+    exports_spec: Vec<ModuleExport>,
+    exports: BTreeMap<String, JsValue>,
+    resolved_dependencies: Vec<String>,
+    state: ModuleLifecycleState,
+    error: Option<VmError>,
+    root_candidate_handle: Option<u64>,
+    evaluation_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionSignal {
     Halt,
     Return,
@@ -527,6 +569,8 @@ pub struct Vm {
     next_host_function_id: u64,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
+    module_records: BTreeMap<String, ModuleRecord>,
+    module_evaluation_order: Vec<String>,
     module_cache_root_candidates: BTreeMap<u64, JsValue>,
     next_module_cache_root_candidate_id: u64,
     pending_job_root_candidates: BTreeMap<u64, JsValue>,
@@ -604,6 +648,8 @@ impl Vm {
         self.next_host_function_id = 0;
         self.host_pins.clear();
         self.next_host_pin_id = 0;
+        self.clear_module_cache();
+        self.module_evaluation_order.clear();
         self.clear_module_cache_root_candidates();
         self.next_module_cache_root_candidate_id = 0;
         self.clear_pending_job_root_candidates();
@@ -837,6 +883,420 @@ impl Vm {
 
     fn clear_module_cache_root_candidates(&mut self) {
         self.module_cache_root_candidates.clear();
+    }
+
+    pub fn clear_module_cache(&mut self) {
+        let handles: Vec<u64> = self
+            .module_records
+            .values()
+            .filter_map(|record| record.root_candidate_handle)
+            .collect();
+        for handle in handles {
+            let _ = self.release_module_cache_root_candidate(handle);
+        }
+        self.module_records.clear();
+        self.module_evaluation_order.clear();
+    }
+
+    pub fn module_cache_len(&self) -> usize {
+        self.module_records.len()
+    }
+
+    pub fn module_state(&self, canonical_key: &str) -> Option<ModuleLifecycleState> {
+        self.module_records
+            .get(canonical_key)
+            .map(|record| record.state)
+    }
+
+    pub fn module_evaluation_count(&self, canonical_key: &str) -> Option<usize> {
+        self.module_records
+            .get(canonical_key)
+            .map(|record| record.evaluation_count)
+    }
+
+    pub fn module_export(&self, canonical_key: &str, exported_name: &str) -> Option<JsValue> {
+        self.module_records
+            .get(canonical_key)
+            .and_then(|record| record.exports.get(exported_name))
+            .cloned()
+    }
+
+    pub fn module_evaluation_order(&self) -> Vec<String> {
+        self.module_evaluation_order.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn debug_transition_module_state(
+        &mut self,
+        canonical_key: &str,
+        next: ModuleLifecycleState,
+    ) -> Result<(), VmError> {
+        self.set_module_state(canonical_key, next)
+    }
+
+    pub fn evaluate_module_entry(
+        &mut self,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        let canonical_key = self.resolve_module_key(None, specifier, host)?;
+        self.instantiate_module_graph(&canonical_key, host)?;
+        self.evaluate_module_graph(&canonical_key, host)?;
+        self.module_records
+            .get(&canonical_key)
+            .map(|record| record.exports.clone())
+            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))
+    }
+
+    fn resolve_module_key(
+        &mut self,
+        referrer: Option<&str>,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<String, VmError> {
+        let canonical_key = host
+            .resolve(referrer, specifier)
+            .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_RESOLVE_FAILED))?;
+        if canonical_key.trim().is_empty() {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT));
+        }
+        self.ensure_module_record_loaded(&canonical_key, host)?;
+        Ok(canonical_key)
+    }
+
+    fn ensure_module_record_loaded(
+        &mut self,
+        canonical_key: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<(), VmError> {
+        if let Some(record) = self.module_records.get(canonical_key) {
+            if record.state == ModuleLifecycleState::Errored {
+                return Err(record
+                    .error
+                    .clone()
+                    .unwrap_or(VmError::TypeError(TYPE_ERROR_MODULE_LOAD_FAILED)));
+            }
+            return Ok(());
+        }
+
+        let source = host
+            .load(canonical_key)
+            .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_LOAD_FAILED))?;
+        let module_root = self.create_object_value();
+        let root_candidate_handle = self.register_module_cache_root_candidate(module_root);
+
+        let parsed = match parse_module(&source) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let err = VmError::TypeError(TYPE_ERROR_MODULE_PARSE_FAILED);
+                self.module_records.insert(
+                    canonical_key.to_string(),
+                    ModuleRecord {
+                        canonical_key: canonical_key.to_string(),
+                        source,
+                        compiled: None,
+                        imports: Vec::new(),
+                        exports_spec: Vec::new(),
+                        exports: BTreeMap::new(),
+                        resolved_dependencies: Vec::new(),
+                        state: ModuleLifecycleState::Errored,
+                        error: Some(err.clone()),
+                        root_candidate_handle: Some(root_candidate_handle),
+                        evaluation_count: 0,
+                    },
+                );
+                return Err(err);
+            }
+        };
+        let compiled = compile_module(&parsed);
+        self.module_records.insert(
+            canonical_key.to_string(),
+            ModuleRecord {
+                canonical_key: canonical_key.to_string(),
+                source,
+                imports: parsed.imports.clone(),
+                exports_spec: parsed.exports.clone(),
+                compiled: Some(compiled),
+                exports: BTreeMap::new(),
+                resolved_dependencies: Vec::new(),
+                state: ModuleLifecycleState::Unlinked,
+                error: None,
+                root_candidate_handle: Some(root_candidate_handle),
+                evaluation_count: 0,
+            },
+        );
+        Ok(())
+    }
+
+    fn instantiate_module_graph(
+        &mut self,
+        canonical_key: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<(), VmError> {
+        self.instantiate_module_recursive(canonical_key, host)
+    }
+
+    fn instantiate_module_recursive(
+        &mut self,
+        canonical_key: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<(), VmError> {
+        let Some(state) = self
+            .module_records
+            .get(canonical_key)
+            .map(|record| record.state)
+        else {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT));
+        };
+
+        match state {
+            ModuleLifecycleState::Evaluated
+            | ModuleLifecycleState::Evaluating
+            | ModuleLifecycleState::Linked => return Ok(()),
+            ModuleLifecycleState::Linking => return Ok(()),
+            ModuleLifecycleState::Errored => {
+                let err = self.module_cached_error(canonical_key, TYPE_ERROR_MODULE_LOAD_FAILED);
+                return Err(err);
+            }
+            ModuleLifecycleState::Unlinked => {}
+        }
+
+        self.set_module_state(canonical_key, ModuleLifecycleState::Linking)?;
+        let imports = self
+            .module_records
+            .get(canonical_key)
+            .map(|record| record.imports.clone())
+            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+        let mut resolved_dependencies = Vec::new();
+        for import in imports {
+            let dependency_key =
+                match self.resolve_module_key(Some(canonical_key), &import.specifier, host) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        self.cache_module_error(canonical_key, err.clone());
+                        return Err(err);
+                    }
+                };
+            resolved_dependencies.push(dependency_key.clone());
+            if let Err(err) = self.instantiate_module_recursive(&dependency_key, host) {
+                self.cache_module_error(canonical_key, err.clone());
+                return Err(err);
+            }
+        }
+
+        if let Some(record) = self.module_records.get_mut(canonical_key) {
+            record.resolved_dependencies = resolved_dependencies;
+        }
+        self.set_module_state(canonical_key, ModuleLifecycleState::Linked)?;
+        Ok(())
+    }
+
+    fn evaluate_module_graph(
+        &mut self,
+        canonical_key: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<(), VmError> {
+        self.evaluate_module_recursive(canonical_key, host)
+    }
+
+    fn evaluate_module_recursive(
+        &mut self,
+        canonical_key: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<(), VmError> {
+        let Some(state) = self
+            .module_records
+            .get(canonical_key)
+            .map(|record| record.state)
+        else {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT));
+        };
+        match state {
+            ModuleLifecycleState::Evaluated => return Ok(()),
+            ModuleLifecycleState::Evaluating => return Ok(()),
+            ModuleLifecycleState::Errored => {
+                let err =
+                    self.module_cached_error(canonical_key, TYPE_ERROR_MODULE_EVALUATE_FAILED);
+                return Err(err);
+            }
+            ModuleLifecycleState::Linked => {}
+            ModuleLifecycleState::Unlinked | ModuleLifecycleState::Linking => {
+                let err = VmError::TypeError(TYPE_ERROR_MODULE_INVALID_TRANSITION);
+                self.cache_module_error(canonical_key, err.clone());
+                return Err(err);
+            }
+        }
+
+        self.set_module_state(canonical_key, ModuleLifecycleState::Evaluating)?;
+        let dependencies = self
+            .module_records
+            .get(canonical_key)
+            .map(|record| record.resolved_dependencies.clone())
+            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+        for dependency in dependencies {
+            if let Err(err) = self.evaluate_module_recursive(&dependency, host) {
+                self.cache_module_error(canonical_key, err.clone());
+                return Err(err);
+            }
+        }
+
+        let module_exports = match self.execute_module_record(canonical_key) {
+            Ok(exports) => exports,
+            Err(err) => {
+                self.cache_module_error(canonical_key, err.clone());
+                return Err(err);
+            }
+        };
+
+        if let Some(record) = self.module_records.get_mut(canonical_key) {
+            record.exports = module_exports;
+            record.evaluation_count = record.evaluation_count.saturating_add(1);
+        }
+        self.set_module_state(canonical_key, ModuleLifecycleState::Evaluated)?;
+        self.module_evaluation_order.push(canonical_key.to_string());
+        Ok(())
+    }
+
+    fn execute_module_record(
+        &self,
+        canonical_key: &str,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        let record = self
+            .module_records
+            .get(canonical_key)
+            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+        let Some(compiled) = record.compiled.as_ref() else {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+        };
+
+        let mut realm = Realm::default();
+        for (index, import) in compiled.imports.iter().enumerate() {
+            let dependency_key = record
+                .resolved_dependencies
+                .get(index)
+                .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+            let dependency = self
+                .module_records
+                .get(dependency_key)
+                .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+            for binding in &import.bindings {
+                if binding.imported == "*" {
+                    return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+                }
+                let imported_value = dependency
+                    .exports
+                    .get(&binding.imported)
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined);
+                realm.define_global(
+                    &binding.local,
+                    Self::sanitize_module_value_for_exchange(imported_value),
+                );
+            }
+        }
+
+        let mut module_vm = Vm::default();
+        let result = module_vm
+            .execute_in_realm(&compiled.chunk, &realm)
+            .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
+        if compiled.exports.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let snapshot = module_vm
+            .snapshot_object_properties(&result)
+            .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
+        let mut exports = BTreeMap::new();
+        for export in &compiled.exports {
+            let value = snapshot
+                .get(&export.exported)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            exports.insert(
+                export.exported.clone(),
+                Self::sanitize_module_value_for_exchange(value),
+            );
+        }
+        Ok(exports)
+    }
+
+    fn snapshot_object_properties(
+        &self,
+        value: &JsValue,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        let JsValue::Object(object_id) = value else {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+        };
+        let object = self
+            .objects
+            .get(object_id)
+            .ok_or(VmError::UnknownObject(*object_id))?;
+        Ok(object.properties.clone())
+    }
+
+    fn sanitize_module_value_for_exchange(value: JsValue) -> JsValue {
+        match value {
+            JsValue::Number(_)
+            | JsValue::Bool(_)
+            | JsValue::Null
+            | JsValue::String(_)
+            | JsValue::Undefined => value,
+            _ => JsValue::Undefined,
+        }
+    }
+
+    fn module_cached_error(&self, canonical_key: &str, fallback: &'static str) -> VmError {
+        self.module_records
+            .get(canonical_key)
+            .and_then(|record| record.error.clone())
+            .unwrap_or(VmError::TypeError(fallback))
+    }
+
+    fn cache_module_error(&mut self, canonical_key: &str, err: VmError) {
+        if let Some(record) = self.module_records.get_mut(canonical_key) {
+            record.state = ModuleLifecycleState::Errored;
+            record.error = Some(err);
+        }
+    }
+
+    fn set_module_state(
+        &mut self,
+        canonical_key: &str,
+        next: ModuleLifecycleState,
+    ) -> Result<(), VmError> {
+        let record = self
+            .module_records
+            .get_mut(canonical_key)
+            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+        if !Self::is_valid_module_transition(record.state, next) {
+            return Err(VmError::TypeError(TYPE_ERROR_MODULE_INVALID_TRANSITION));
+        }
+        record.state = next;
+        Ok(())
+    }
+
+    fn is_valid_module_transition(
+        current: ModuleLifecycleState,
+        next: ModuleLifecycleState,
+    ) -> bool {
+        if current == next {
+            return true;
+        }
+        matches!(
+            (current, next),
+            (
+                ModuleLifecycleState::Unlinked,
+                ModuleLifecycleState::Linking
+            ) | (ModuleLifecycleState::Linking, ModuleLifecycleState::Linked)
+                | (
+                    ModuleLifecycleState::Linked,
+                    ModuleLifecycleState::Evaluating
+                )
+                | (
+                    ModuleLifecycleState::Evaluating,
+                    ModuleLifecycleState::Evaluated
+                )
+                | (_, ModuleLifecycleState::Errored)
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

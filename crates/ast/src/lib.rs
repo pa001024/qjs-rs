@@ -244,3 +244,28 @@ pub enum Stmt {
 pub struct Script {
     pub statements: Vec<Stmt>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImportBinding {
+    pub imported: String,
+    pub local: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    pub specifier: String,
+    pub bindings: Vec<ModuleImportBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExport {
+    pub exported: String,
+    pub local: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Module {
+    pub imports: Vec<ModuleImport>,
+    pub exports: Vec<ModuleExport>,
+    pub body: Script,
+}

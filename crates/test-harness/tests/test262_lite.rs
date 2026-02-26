@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
-use test_harness::test262::{SuiteOptions, run_suite};
+use test_harness::test262::{SuiteOptions, parse_test262_case, run_suite, should_skip};
 
 #[test]
 fn runs_test262_lite_suite_in_default_profile() {
@@ -83,5 +83,15 @@ fn assert_basic_suite_expectations(summary: &test_harness::test262::SuiteSummary
     assert_eq!(
         summary.failed, 0,
         "test262-lite should have zero mismatches"
+    );
+}
+
+#[test]
+fn keeps_module_flag_cases_skipped_until_module_harness_is_enabled() {
+    let case = parse_test262_case("/*---\nflags: [module]\n---*/\nimport './dep.js';")
+        .expect("frontmatter parse should succeed");
+    assert!(
+        should_skip(&case.frontmatter),
+        "module-flagged test262 cases should remain explicitly skipped in lite profile",
     );
 }
