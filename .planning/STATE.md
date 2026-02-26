@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
-current_phase_name: Semantic Core Closure
-current_plan: Not started
-status: completed
-stopped_at: Phase 2 context gathered
-last_updated: "2026-02-25T21:16:37.272Z"
-last_activity: 2026-02-25
+current_phase: 2
+current_phase_name: Runtime Safety and Root Integrity
+current_plan: 3
+status: executing
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-02-26T04:15:52.422Z"
+last_activity: 2026-02-26
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_plans: 6
+  completed_plans: 4
+  percent: 67
 ---
 
 # Project State
@@ -24,19 +24,19 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-02-25)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.
-**Current focus:** Phase 1 - Semantic Core Closure
+**Current focus:** Phase 2 - Runtime Safety and Root Integrity
 
 ## Current Position
 
-**Current Phase:** 1
-**Current Phase Name:** Semantic Core Closure
+**Current Phase:** 2
+**Current Phase Name:** Runtime Safety and Root Integrity
 **Total Phases:** 7
-**Current Plan:** Not started
+**Current Plan:** 3
 **Total Plans in Phase:** 3
-**Status:** Milestone complete
-**Last Activity:** 2026-02-25
-**Last Activity Description:** Phase 1 complete
-**Progress:** [██████████] 100%
+**Status:** Ready to execute
+**Last Activity:** 2026-02-26
+**Last Activity Description:** Completed 02-02 MEM-01 harness guard plan
+**Progress:** [███████░░░] 67%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 - Trend: Baseline established
 | Phase 01 P02 | 10 min | 2 tasks | 2 files |
 | Phase 01 P03 | 16 min | 2 tasks | 2 files |
+| Phase 02 P02 | 4 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Use nested script-level regressions to lock typed error behavior for abrupt completion plus finally interactions. — SEM-03 risk concentrates in nested abrupt flows, so script-level assertions over final value and error type provide deterministic, user-observable guarantees.
 - [Phase 01]: Pre-validate defineProperties descriptors before applying mutations so mixed-validity batches cannot partially commit. — Batch descriptor validation must fail atomically before object state changes.
 - [Phase 01]: Centralize descriptor parsing/validation and reuse it across defineProperty and defineProperties to guarantee deterministic typed errors. — Single invariant choke point prevents divergence between single-property and batch-property definition paths.
+- [Phase 02]: Split test262-lite coverage into explicit default and stress profiles. — Independent profile gates prevent zero-GC drift from being hidden by stress-only assertions.
+- [Phase 02]: Reject duplicate GC baseline keys and lock guard failure messages with exact tests. — Deterministic parser and guard diagnostics keep baseline regressions actionable in CI.
+- [Phase 02]: Raise baseline minimums to 10000/10000/0.95/250 with intent comments. — Higher but conservative thresholds improve regression sensitivity while staying repeatable on current stress snapshots.
 
 ### Pending Todos
 
@@ -86,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-25T21:16:37.271Z
-**Stopped at:** Phase 2 context gathered
-**Resume file:** .planning/phases/02-runtime-safety-and-root-integrity/02-CONTEXT.md
+**Last session:** 2026-02-26T04:15:52.420Z
+**Stopped at:** Completed 02-02-PLAN.md
+**Resume file:** None
