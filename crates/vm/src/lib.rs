@@ -62,6 +62,8 @@ const SURROGATE_START: u16 = 0xD800;
 const OBJECT_ID_SLOT_BITS: u64 = 32;
 const OBJECT_ID_SLOT_MASK: u64 = (1u64 << OBJECT_ID_SLOT_BITS) - 1;
 const MAX_SAFE_INTEGER_F64: f64 = 9007199254740991.0;
+const TYPE_ERROR_INVALID_HANDLE: &str = "InvalidHandle";
+const TYPE_ERROR_STALE_HANDLE: &str = "StaleHandle";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -320,6 +322,12 @@ struct WithFrame {
     scope_depth: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleErrorKind {
+    InvalidHandle,
+    StaleHandle,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum VmError {
     EmptyStack,
@@ -332,6 +340,8 @@ pub enum VmError {
     UnknownHostFunction(u64),
     UnknownFunction(usize),
     UnknownObject(u64),
+    InvalidHandle(u64),
+    StaleHandle(u64),
     NotCallable,
     TopLevelReturn,
     InvalidJump(usize),
@@ -800,13 +810,46 @@ impl Vm {
         (object_id & OBJECT_ID_SLOT_MASK) as u32
     }
 
-    #[cfg(test)]
     fn object_id_generation(object_id: ObjectId) -> u32 {
         (object_id >> OBJECT_ID_SLOT_BITS) as u32
     }
 
     fn make_object_id(slot: u32, generation: u32) -> ObjectId {
         ((generation as u64) << OBJECT_ID_SLOT_BITS) | (slot as u64)
+    }
+
+    fn classify_unknown_object_handle(&self, object_id: ObjectId) -> HandleErrorKind {
+        let slot = Self::object_id_slot(object_id) as usize;
+        let generation = Self::object_id_generation(object_id);
+        let Some(current_generation) = self.object_generations.get(slot).copied() else {
+            return HandleErrorKind::InvalidHandle;
+        };
+        if generation > current_generation || self.objects.contains_key(&object_id) {
+            HandleErrorKind::InvalidHandle
+        } else {
+            HandleErrorKind::StaleHandle
+        }
+    }
+
+    fn classify_unknown_object_error(&self, object_id: ObjectId) -> VmError {
+        match self.classify_unknown_object_handle(object_id) {
+            HandleErrorKind::InvalidHandle => VmError::InvalidHandle(object_id),
+            HandleErrorKind::StaleHandle => VmError::StaleHandle(object_id),
+        }
+    }
+
+    fn classify_vm_error(&self, err: VmError) -> VmError {
+        match err {
+            VmError::UnknownObject(object_id) => self.classify_unknown_object_error(object_id),
+            other => other,
+        }
+    }
+
+    fn handle_error_type_message(kind: HandleErrorKind) -> &'static str {
+        match kind {
+            HandleErrorKind::InvalidHandle => TYPE_ERROR_INVALID_HANDLE,
+            HandleErrorKind::StaleHandle => TYPE_ERROR_STALE_HANDLE,
+        }
     }
 
     fn allocate_object_id(&mut self) -> ObjectId {
