@@ -145,6 +145,8 @@
   - `built-ins/Proxy`：`1/0`（`Proxy.revocable` 与 revoke 函数属性顺序已对齐）
   - `built-ins/Map --max-cases 200`：`53/0`（`target/test262-builtins-map-20260226-v2-s200.json`；`v1-s200=49/4` -> `v2-s200=53/0`，已对齐 QuickJS `delete/clear/forEach/iterator/size` 主路径）
   - `built-ins/Set --max-cases 200`：`126/0`（`target/test262-builtins-set-20260226-v2-s200.json`；`v1-s200=123/3` -> `v2-s200=126/0`，已对齐 tombstone 迭代语义与 `keys===values`）
+  - `built-ins/Boolean`：`39/0`（`target/test262-builtins-boolean-20260226-v2.json`；`v1=34/5` -> `v2=39/0`，已对齐 `Boolean.prototype` 的 `[[BooleanData]] = false` 初值语义）
+  - `built-ins --max-cases 5000`：`4405/595`（`target/test262-builtins-baseline-20260226-v3-s5000.json`；阶段对比：`v2-s5000=4400/600` -> `v3-s5000=4405/595`）。
   - `Array` 扩容采样（`--max-cases 300`）：`300/0`（`target/test262-builtins-array-20260225-v8-s300.json`）
   - `Array` 扩容采样（`--max-cases 1000`）：`1000/0`（`target/test262-builtins-array-20260225-v12-s1000.json`）
   - `Array` 扩容采样（`--max-cases 2000`）：`2000/0`（`target/test262-builtins-array-20260225-v24-s2000.json`，阶段演进：`v13-s2000=1373/627` -> `v16-s2000=1547/453` -> `v20-s2000=1718/282` -> `v21-s2000=1937/63` -> `v24-s2000=2000/0`）
