@@ -71,6 +71,10 @@ fn test262_lite_root() -> PathBuf {
         .join("test262-lite")
 }
 
+fn native_errors_subset_root() -> PathBuf {
+    test262_lite_root().join("pass").join("built-ins")
+}
+
 fn assert_basic_suite_expectations(summary: &test_harness::test262::SuiteSummary) {
     assert!(
         summary.discovered > 0,
@@ -93,5 +97,23 @@ fn keeps_module_flag_cases_skipped_until_module_harness_is_enabled() {
     assert!(
         should_skip(&case.frontmatter),
         "module-flagged test262 cases should remain explicitly skipped in lite profile",
+    );
+}
+
+#[test]
+fn native_errors_subset() {
+    let summary = run_suite(&native_errors_subset_root(), SuiteOptions::default())
+        .expect("native error subset should execute");
+    assert!(
+        summary.discovered >= 3,
+        "native error subset should include multiple built-ins fixtures"
+    );
+    assert!(
+        summary.executed >= 3,
+        "native error subset should execute all smoke fixtures"
+    );
+    assert_eq!(
+        summary.failed, 0,
+        "native error subset should have zero mismatches"
     );
 }
