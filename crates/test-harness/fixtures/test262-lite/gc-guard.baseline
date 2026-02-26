@@ -1,5 +1,9 @@
 # test262-lite GC guard baseline
-collections_total_min=1000
-runtime_collections_min=1000
-runtime_ratio_min=0.90
-reclaimed_objects_min=1
+# Require sustained collection activity in stress profile.
+collections_total_min=10000
+# Runtime-triggered collections should dominate total collections.
+runtime_collections_min=10000
+# Keep runtime collection share high even when boundary checks fire.
+runtime_ratio_min=0.95
+# Ensure stress runs reclaim a meaningful amount of objects.
+reclaimed_objects_min=250
