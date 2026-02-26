@@ -13,7 +13,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 1: Semantic Core Closure** - Close eval/scope/control-flow/descriptor semantic gaps in executable behavior. (completed 2026-02-25)
 - [x] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees. (completed 2026-02-26)
 - [x] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks. (completed 2026-02-26)
-- [ ] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling.
+- [x] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling. (completed 2026-02-26)
 - [ ] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets.
 - [ ] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts.
 - [ ] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates.
@@ -59,7 +59,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   1. Static import/export module graphs complete parse, instantiate, and evaluate in integration tests.
   2. Repeated imports reuse module cache entries without re-instantiating completed modules.
   3. Cyclic module graphs execute in deterministic order with deterministic error propagation on failure.
-**Plans**: TBD
+**Plans**: 3/3 plans complete
 
 ### Phase 5: Core Builtins Baseline
 **Goal**: Core builtin objects, error hierarchy, and JSON interop satisfy targeted conformance scenarios.
@@ -100,7 +100,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 | 1. Semantic Core Closure | 3/3 | Complete    | 2026-02-25 |
 | 2. Runtime Safety and Root Integrity | 3/3 | Complete    | 2026-02-26 |
 | 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
-| 4. ES Module Lifecycle | 0/TBD | Not started | - |
+| 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
 | 5. Core Builtins Baseline | 0/TBD | Not started | - |
 | 6. Collection and RegExp Semantics | 0/TBD | Not started | - |
 | 7. Compatibility and Governance Gates | 0/TBD | Not started | - |

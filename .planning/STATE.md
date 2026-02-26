@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 4
-current_phase_name: ES Module Lifecycle
+current_phase: 5
+current_phase_name: Core Builtins Baseline
 current_plan: Not started
 status: planning
-stopped_at: Phase 4 plans created
-last_updated: "2026-02-26T13:09:48.574Z"
+stopped_at: Phase 4 complete and verified
+last_updated: "2026-02-26T16:00:00.000Z"
 last_activity: 2026-02-26
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 12
-  completed_plans: 9
-  percent: 43
+  completed_plans: 12
+  percent: 57
 ---
 
 # Project State
@@ -24,19 +24,19 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-02-25)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.
-**Current focus:** Phase 4 - ES Module Lifecycle
+**Current focus:** Phase 5 - Core Builtins Baseline
 
 ## Current Position
 
-**Current Phase:** 4
-**Current Phase Name:** ES Module Lifecycle
+**Current Phase:** 5
+**Current Phase Name:** Core Builtins Baseline
 **Total Phases:** 7
 **Current Plan:** Not started
 **Total Plans in Phase:** 3
 **Status:** Ready for planning
 **Last Activity:** 2026-02-26
-**Last Activity Description:** Phase 3 complete and verified
-**Progress:** [████......] 43%
+**Last Activity Description:** Phase 4 complete and verified
+**Progress:** [█████.....] 57%
 
 ## Performance Metrics
 
@@ -93,5 +93,5 @@ None yet.
 ## Session Continuity
 
 **Last session:** 2026-02-26T13:09:48.572Z
-**Stopped at:** Phase 4 plans created
-**Resume file:** .planning/phases/04-es-module-lifecycle/04-01-PLAN.md
+**Stopped at:** Phase 4 complete and verified
+**Resume file:** .planning/ROADMAP.md

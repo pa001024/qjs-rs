@@ -24,8 +24,8 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 
 - [x] **ASY-01**: Promise settlement and microtask ordering follow deterministic queue semantics for `then/catch/finally` chains.
 - [x] **ASY-02**: Runtime exposes host callbacks to enqueue and drain Promise jobs safely from embedding code.
-- [ ] **MOD-01**: ES module flow supports parse, instantiate, and evaluate for static import/export graphs.
-- [ ] **MOD-02**: Module loader handles cache reuse and cyclic dependency execution order with deterministic error propagation.
+- [x] **MOD-01**: ES module flow supports parse, instantiate, and evaluate for static import/export graphs.
+- [x] **MOD-02**: Module loader handles cache reuse and cyclic dependency execution order with deterministic error propagation.
 
 ### Builtins Coverage
 
@@ -84,8 +84,8 @@ Roadmap mapping table. Updated during roadmap creation.
 | MEM-03 | Phase 7 | Pending |
 | ASY-01 | Phase 3 | Complete |
 | ASY-02 | Phase 3 | Complete |
-| MOD-01 | Phase 4 | Pending |
-| MOD-02 | Phase 4 | Pending |
+| MOD-01 | Phase 4 | Complete |
+| MOD-02 | Phase 4 | Complete |
 | BUI-01 | Phase 5 | Pending |
 | BUI-02 | Phase 5 | Pending |
 | BUI-03 | Phase 5 | Pending |
@@ -103,4 +103,4 @@ Roadmap mapping table. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-02-25*
-*Last updated: 2026-02-26 after 02-03 recovery completion*
+*Last updated: 2026-02-26 after 04 phase completion*
