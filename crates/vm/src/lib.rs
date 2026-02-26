@@ -85,6 +85,8 @@ const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
 const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
 const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
+const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
+    "JSON.stringify cannot serialize cyclic structures";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -318,6 +320,13 @@ enum HostFunction {
     FunctionValueOf {
         target: JsValue,
     },
+}
+
+#[derive(Debug, Clone)]
+struct JsonStringifyContext {
+    replacer_function: Option<JsValue>,
+    property_list: Option<Vec<String>>,
+    gap: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20384,37 +20393,35 @@ impl Vm {
     fn execute_json_stringify(
         &mut self,
         args: &[JsValue],
-        _realm: &Realm,
-        _caller_strict: bool,
+        realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-        let serialized = match value {
-            JsValue::Undefined
-            | JsValue::Function(_)
-            | JsValue::NativeFunction(_)
-            | JsValue::HostFunction(_)
-            | JsValue::Uninitialized => JsValue::Undefined,
-            JsValue::Null => JsValue::String("null".to_string()),
-            JsValue::Bool(boolean) => JsValue::String(boolean.to_string()),
-            JsValue::Number(number) => {
-                if number.is_finite() {
-                    JsValue::String(Self::coerce_number_to_string(number))
-                } else {
-                    JsValue::String("null".to_string())
-                }
-            }
-            JsValue::String(string) => {
-                JsValue::String(format!("\"{}\"", Self::escape_json_string(&string)))
-            }
-            JsValue::Object(object_id) => {
-                if self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
-                    JsValue::String("[]".to_string())
-                } else {
-                    JsValue::String("{}".to_string())
-                }
-            }
+        let replacer = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let context = JsonStringifyContext {
+            replacer_function: if Self::is_callable_value(&replacer) {
+                Some(replacer)
+            } else {
+                None
+            },
+            property_list: self.json_stringify_property_list(args.get(1).cloned(), realm)?,
+            gap: self.json_stringify_gap_string(args.get(2).cloned()),
         };
-        Ok(serialized)
+        let holder = self.create_object_value();
+        self.create_data_property_or_throw(holder.clone(), String::new(), value, realm)?;
+        let mut stack = Vec::new();
+        let serialized = self.json_stringify_property(
+            holder,
+            "",
+            &mut stack,
+            "",
+            &context,
+            realm,
+            caller_strict,
+        )?;
+        Ok(serialized
+            .map(JsValue::String)
+            .unwrap_or(JsValue::Undefined))
     }
 
     fn execute_json_parse(
@@ -20552,6 +20559,222 @@ impl Vm {
             .property_attributes
             .entry(key.to_string())
             .or_insert_with(PropertyAttributes::default);
+    }
+
+    fn json_stringify_cycle_error(&mut self) -> VmError {
+        VmError::UncaughtException(self.create_error_exception(
+            NativeFunction::TypeErrorConstructor,
+            "TypeError",
+            JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE.to_string(),
+        ))
+    }
+
+    fn json_stringify_property_list(
+        &mut self,
+        replacer: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<Option<Vec<String>>, VmError> {
+        let Some(JsValue::Object(object_id)) = replacer else {
+            return Ok(None);
+        };
+        if !self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
+            return Ok(None);
+        }
+        let mut property_list = Vec::new();
+        let mut seen = BTreeSet::new();
+        let length = self.array_length(object_id)?;
+        for index in 0..length {
+            let index_key = index.to_string();
+            let item =
+                self.get_property_from_receiver(JsValue::Object(object_id), &index_key, realm)?;
+            if let Some(property_name) = self.json_replacer_property_name(item) {
+                if seen.insert(property_name.clone()) {
+                    property_list.push(property_name);
+                }
+            }
+        }
+        Ok(Some(property_list))
+    }
+
+    fn json_replacer_property_name(&self, value: JsValue) -> Option<String> {
+        match value {
+            JsValue::String(string) => Some(string),
+            JsValue::Number(number) => Some(Self::coerce_number_to_string(number)),
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::String(string)) => Some(string),
+                Some(JsValue::Number(number)) => Some(Self::coerce_number_to_string(number)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn json_stringify_gap_string(&self, space: Option<JsValue>) -> String {
+        match space.unwrap_or(JsValue::Undefined) {
+            JsValue::Number(number) => {
+                let width = Self::to_integer_or_infinity_i64(number).clamp(0, 10);
+                " ".repeat(width as usize)
+            }
+            JsValue::String(string) => string.chars().take(10).collect(),
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::Number(number)) => {
+                    let width = Self::to_integer_or_infinity_i64(number).clamp(0, 10);
+                    " ".repeat(width as usize)
+                }
+                Some(JsValue::String(string)) => string.chars().take(10).collect(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    fn json_stringify_property(
+        &mut self,
+        holder: JsValue,
+        key: &str,
+        stack: &mut Vec<ObjectId>,
+        indent: &str,
+        context: &JsonStringifyContext,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Option<String>, VmError> {
+        let mut value = self.get_property_from_receiver(holder.clone(), key, realm)?;
+        if Self::is_object_like_value(&value) {
+            let to_json = self.get_property_from_receiver(value.clone(), "toJSON", realm)?;
+            if Self::is_callable_value(&to_json) {
+                value = self.execute_callable(
+                    to_json,
+                    Some(value.clone()),
+                    vec![JsValue::String(key.to_string())],
+                    realm,
+                    caller_strict,
+                )?;
+            }
+        }
+        if let Some(replacer_function) = context.replacer_function.clone() {
+            value = self.execute_callable(
+                replacer_function,
+                Some(holder),
+                vec![JsValue::String(key.to_string()), value],
+                realm,
+                caller_strict,
+            )?;
+        }
+        if let JsValue::Object(object_id) = value.clone() {
+            if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                value = boxed;
+            }
+        }
+        match value {
+            JsValue::Undefined
+            | JsValue::Function(_)
+            | JsValue::NativeFunction(_)
+            | JsValue::HostFunction(_)
+            | JsValue::Uninitialized => Ok(None),
+            JsValue::Null => Ok(Some("null".to_string())),
+            JsValue::Bool(boolean) => Ok(Some(boolean.to_string())),
+            JsValue::Number(number) => {
+                if number.is_finite() {
+                    Ok(Some(Self::coerce_number_to_string(number)))
+                } else {
+                    Ok(Some("null".to_string()))
+                }
+            }
+            JsValue::String(string) => {
+                Ok(Some(format!("\"{}\"", Self::escape_json_string(&string))))
+            }
+            JsValue::Object(object_id) => self.json_stringify_object(
+                object_id,
+                stack,
+                indent,
+                context,
+                realm,
+                caller_strict,
+            ),
+        }
+    }
+
+    fn json_stringify_object(
+        &mut self,
+        object_id: ObjectId,
+        stack: &mut Vec<ObjectId>,
+        indent: &str,
+        context: &JsonStringifyContext,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Option<String>, VmError> {
+        if stack.contains(&object_id) {
+            return Err(self.json_stringify_cycle_error());
+        }
+        stack.push(object_id);
+        let stepback = indent.to_string();
+        let next_indent = format!("{indent}{}", context.gap);
+        let value = JsValue::Object(object_id);
+        let serialized = if self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
+            let length = self.array_length(object_id)?;
+            let mut partial = Vec::with_capacity(length);
+            for index in 0..length {
+                let key = index.to_string();
+                let element = self.json_stringify_property(
+                    value.clone(),
+                    &key,
+                    stack,
+                    &next_indent,
+                    context,
+                    realm,
+                    caller_strict,
+                )?;
+                partial.push(element.unwrap_or_else(|| "null".to_string()));
+            }
+            if partial.is_empty() {
+                "[]".to_string()
+            } else if context.gap.is_empty() {
+                format!("[{}]", partial.join(","))
+            } else {
+                format!(
+                    "[\n{next_indent}{}\n{stepback}]",
+                    partial.join(&format!(",\n{next_indent}"))
+                )
+            }
+        } else {
+            let keys = if let Some(property_list) = &context.property_list {
+                property_list.clone()
+            } else {
+                self.collect_own_property_keys(&value, true)?
+            };
+            let mut members = Vec::new();
+            for key in keys {
+                if let Some(serialized_value) = self.json_stringify_property(
+                    value.clone(),
+                    &key,
+                    stack,
+                    &next_indent,
+                    context,
+                    realm,
+                    caller_strict,
+                )? {
+                    let escaped_key = Self::escape_json_string(&key);
+                    let member = if context.gap.is_empty() {
+                        format!("\"{escaped_key}\":{serialized_value}")
+                    } else {
+                        format!("\"{escaped_key}\": {serialized_value}")
+                    };
+                    members.push(member);
+                }
+            }
+            if members.is_empty() {
+                "{}".to_string()
+            } else if context.gap.is_empty() {
+                format!("{{{}}}", members.join(","))
+            } else {
+                format!(
+                    "{{\n{next_indent}{}\n{stepback}}}",
+                    members.join(&format!(",\n{next_indent}"))
+                )
+            }
+        };
+        stack.pop();
+        Ok(Some(serialized))
     }
 
     fn escape_json_string(value: &str) -> String {
