@@ -589,6 +589,11 @@ pub struct Vm {
     boolean_prototype_id: Option<ObjectId>,
     error_prototype_id: Option<ObjectId>,
     type_error_prototype_id: Option<ObjectId>,
+    reference_error_prototype_id: Option<ObjectId>,
+    syntax_error_prototype_id: Option<ObjectId>,
+    eval_error_prototype_id: Option<ObjectId>,
+    range_error_prototype_id: Option<ObjectId>,
+    uri_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     regexp_prototype_id: Option<ObjectId>,
     array_buffer_prototype_id: Option<ObjectId>,
@@ -670,6 +675,11 @@ impl Vm {
         self.boolean_prototype_id = None;
         self.error_prototype_id = None;
         self.type_error_prototype_id = None;
+        self.reference_error_prototype_id = None;
+        self.syntax_error_prototype_id = None;
+        self.eval_error_prototype_id = None;
+        self.range_error_prototype_id = None;
+        self.uri_error_prototype_id = None;
         self.date_prototype_id = None;
         self.regexp_prototype_id = None;
         self.array_buffer_prototype_id = None;
@@ -1562,6 +1572,11 @@ impl Vm {
             self.boolean_prototype_id,
             self.error_prototype_id,
             self.type_error_prototype_id,
+            self.reference_error_prototype_id,
+            self.syntax_error_prototype_id,
+            self.eval_error_prototype_id,
+            self.range_error_prototype_id,
+            self.uri_error_prototype_id,
             self.date_prototype_id,
             self.regexp_prototype_id,
             self.array_buffer_prototype_id,
@@ -7679,11 +7694,24 @@ impl Vm {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
-            NativeFunction::ReferenceErrorConstructor
-            | NativeFunction::SyntaxErrorConstructor
-            | NativeFunction::EvalErrorConstructor
-            | NativeFunction::RangeErrorConstructor
-            | NativeFunction::URIErrorConstructor => match self.error_prototype_value() {
+            NativeFunction::ReferenceErrorConstructor => match self.reference_error_prototype_value()
+            {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::SyntaxErrorConstructor => match self.syntax_error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::EvalErrorConstructor => match self.eval_error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::RangeErrorConstructor => match self.range_error_prototype_value() {
+                JsValue::Object(id) => Some(id),
+                _ => None,
+            },
+            NativeFunction::URIErrorConstructor => match self.uri_error_prototype_value() {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
@@ -15678,10 +15706,24 @@ impl Vm {
         prototype
     }
 
-    fn type_error_prototype_value(&mut self) -> JsValue {
-        if let Some(id) = self.type_error_prototype_id {
+    fn native_error_prototype_value(
+        &mut self,
+        constructor: NativeFunction,
+        name: &str,
+    ) -> JsValue {
+        let cached_id = match constructor {
+            NativeFunction::TypeErrorConstructor => self.type_error_prototype_id,
+            NativeFunction::ReferenceErrorConstructor => self.reference_error_prototype_id,
+            NativeFunction::SyntaxErrorConstructor => self.syntax_error_prototype_id,
+            NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id,
+            NativeFunction::RangeErrorConstructor => self.range_error_prototype_id,
+            NativeFunction::URIErrorConstructor => self.uri_error_prototype_id,
+            _ => None,
+        };
+        if let Some(id) = cached_id {
             return JsValue::Object(id);
         }
+
         let prototype = self.create_object_value();
         if let JsValue::Object(id) = prototype {
             let error_proto = match self.error_prototype_value() {
@@ -15693,20 +15735,62 @@ impl Vm {
                 object.prototype_value = None;
                 object.properties.insert(
                     "constructor".to_string(),
-                    JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+                    JsValue::NativeFunction(constructor),
                 );
-                object.property_attributes.insert(
-                    "constructor".to_string(),
-                    PropertyAttributes {
-                        writable: true,
-                        enumerable: false,
-                        configurable: true,
-                    },
-                );
+                object
+                    .properties
+                    .insert("name".to_string(), JsValue::String(name.to_string()));
+                object
+                    .properties
+                    .insert("message".to_string(), JsValue::String(String::new()));
+                for key in ["constructor", "name", "message"] {
+                    object.property_attributes.insert(
+                        key.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
             }
-            self.type_error_prototype_id = Some(id);
+            match constructor {
+                NativeFunction::TypeErrorConstructor => self.type_error_prototype_id = Some(id),
+                NativeFunction::ReferenceErrorConstructor => {
+                    self.reference_error_prototype_id = Some(id)
+                }
+                NativeFunction::SyntaxErrorConstructor => self.syntax_error_prototype_id = Some(id),
+                NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id = Some(id),
+                NativeFunction::RangeErrorConstructor => self.range_error_prototype_id = Some(id),
+                NativeFunction::URIErrorConstructor => self.uri_error_prototype_id = Some(id),
+                _ => {}
+            }
         }
         prototype
+    }
+
+    fn type_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::TypeErrorConstructor, "TypeError")
+    }
+
+    fn reference_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::ReferenceErrorConstructor, "ReferenceError")
+    }
+
+    fn syntax_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::SyntaxErrorConstructor, "SyntaxError")
+    }
+
+    fn eval_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::EvalErrorConstructor, "EvalError")
+    }
+
+    fn range_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::RangeErrorConstructor, "RangeError")
+    }
+
+    fn uri_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(NativeFunction::URIErrorConstructor, "URIError")
     }
 
     fn date_prototype_value(&mut self) -> JsValue {
@@ -19726,11 +19810,21 @@ impl Vm {
                 self.type_error_prototype_value()
             }
             (NativeFunction::Test262Error, "prototype") => self.error_prototype_value(),
-            (NativeFunction::ReferenceErrorConstructor, "prototype")
-            | (NativeFunction::SyntaxErrorConstructor, "prototype")
-            | (NativeFunction::EvalErrorConstructor, "prototype")
-            | (NativeFunction::RangeErrorConstructor, "prototype")
-            | (NativeFunction::URIErrorConstructor, "prototype") => self.error_prototype_value(),
+            (NativeFunction::ReferenceErrorConstructor, "prototype") => {
+                self.reference_error_prototype_value()
+            }
+            (NativeFunction::SyntaxErrorConstructor, "prototype") => {
+                self.syntax_error_prototype_value()
+            }
+            (NativeFunction::EvalErrorConstructor, "prototype") => {
+                self.eval_error_prototype_value()
+            }
+            (NativeFunction::RangeErrorConstructor, "prototype") => {
+                self.range_error_prototype_value()
+            }
+            (NativeFunction::URIErrorConstructor, "prototype") => {
+                self.uri_error_prototype_value()
+            }
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::ArrayBufferConstructor, "prototype") => {
                 self.array_buffer_prototype_value()
@@ -23194,6 +23288,61 @@ mod tests {
         realm.define_global(
             "TypeError",
             JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn native_error_constructor_prototype_chain() {
+        let script = parse_script(
+            "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError];\
+             var ok = true;\
+             for (var i = 0; i < ctors.length; i++) {\
+               var C = ctors[i];\
+               ok = ok && C.prototype !== Error.prototype;\
+               ok = ok && C.prototype.constructor === C;\
+               ok = ok && Object.getPrototypeOf(C.prototype) === Error.prototype;\
+               var e = new C('boom');\
+               ok = ok && Object.getPrototypeOf(e) === C.prototype;\
+               ok = ok && (e instanceof C) && (e instanceof Error);\
+             }\
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        realm.define_global(
+            "SyntaxError",
+            JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
+        );
+        realm.define_global(
+            "RangeError",
+            JsValue::NativeFunction(NativeFunction::RangeErrorConstructor),
+        );
+        realm.define_global(
+            "EvalError",
+            JsValue::NativeFunction(NativeFunction::EvalErrorConstructor),
+        );
+        realm.define_global(
+            "URIError",
+            JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
