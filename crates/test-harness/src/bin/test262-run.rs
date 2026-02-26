@@ -56,31 +56,34 @@ fn parse_gc_expectations_str(raw: &str) -> Result<GcExpectations, String> {
 
         match key {
             "collections_total_min" => {
-                expectations.collections_total_min = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?,
-                );
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?;
+                if expectations.collections_total_min.replace(parsed).is_some() {
+                    return Err(format!("line {}: duplicate key '{key}'", index + 1));
+                }
             }
             "runtime_collections_min" => {
-                expectations.runtime_collections_min = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?,
-                );
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?;
+                if expectations.runtime_collections_min.replace(parsed).is_some() {
+                    return Err(format!("line {}: duplicate key '{key}'", index + 1));
+                }
             }
             "runtime_ratio_min" => {
-                expectations.runtime_ratio_min = Some(parse_runtime_ratio(
-                    value,
-                    &format!("line {} '{key}'", index + 1),
-                )?);
+                let parsed = parse_runtime_ratio(value, &format!("line {} '{key}'", index + 1))?;
+                if expectations.runtime_ratio_min.replace(parsed).is_some() {
+                    return Err(format!("line {}: duplicate key '{key}'", index + 1));
+                }
             }
             "reclaimed_objects_min" => {
-                expectations.reclaimed_objects_min = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?,
-                );
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("line {}: invalid usize for '{key}'", index + 1))?;
+                if expectations.reclaimed_objects_min.replace(parsed).is_some() {
+                    return Err(format!("line {}: duplicate key '{key}'", index + 1));
+                }
             }
             _ => {
                 return Err(format!("line {}: unknown key '{key}'", index + 1));
@@ -495,6 +498,23 @@ reclaimed_objects_min=1
     }
 
     #[test]
+    fn rejects_duplicate_gc_baseline_key() {
+        let raw = "collections_total_min=100\ncollections_total_min=200\n";
+        let err = parse_gc_expectations_str(raw).expect_err("baseline parse should fail");
+        assert_eq!(err, "line 2: duplicate key 'collections_total_min'");
+    }
+
+    #[test]
+    fn rejects_out_of_range_runtime_ratio_in_baseline() {
+        let raw = "runtime_ratio_min=1.5";
+        let err = parse_gc_expectations_str(raw).expect_err("baseline parse should fail");
+        assert_eq!(
+            err,
+            "line 1 'runtime_ratio_min' must be between 0.0 and 1.0 inclusive: 1.5"
+        );
+    }
+
+    #[test]
     fn explicit_expectation_overrides_take_precedence_over_baseline() {
         let baseline = GcExpectations {
             collections_total_min: Some(1000),
@@ -521,7 +541,35 @@ reclaimed_objects_min=1
         summary.gc.boundary_collections = 3;
         let expectations = GcExpectations::default();
         let failures = check_gc_expectations(&summary, &expectations);
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("collections_total =="));
+        assert_eq!(
+            failures,
+            vec![
+                "expected gc.collections_total == gc.runtime_collections + gc.boundary_collections, got 10 != 4 + 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn gc_expectations_emit_deterministic_failure_messages_for_all_threshold_misses() {
+        let mut summary = summary_with_gc(5, 2, 0);
+        summary.gc.boundary_collections = 1;
+        let expectations = GcExpectations {
+            collections_total_min: Some(10),
+            runtime_collections_min: Some(4),
+            runtime_ratio_min: Some(0.8),
+            reclaimed_objects_min: Some(1),
+        };
+
+        let failures = check_gc_expectations(&summary, &expectations);
+        assert_eq!(
+            failures,
+            vec![
+                "expected gc.collections_total == gc.runtime_collections + gc.boundary_collections, got 5 != 2 + 1",
+                "expected gc.collections_total >= 10, got 5",
+                "expected gc.runtime_collections >= 4, got 2",
+                "expected gc.runtime_ratio >= 0.8000, got 0.4000 (runtime_collections=2, collections_total=5)",
+                "expected gc.reclaimed_objects >= 1, got 0",
+            ]
+        );
     }
 }
