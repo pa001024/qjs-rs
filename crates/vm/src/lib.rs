@@ -64,6 +64,7 @@ const OBJECT_ID_SLOT_MASK: u64 = (1u64 << OBJECT_ID_SLOT_BITS) - 1;
 const MAX_SAFE_INTEGER_F64: f64 = 9007199254740991.0;
 const TYPE_ERROR_INVALID_HANDLE: &str = "InvalidHandle";
 const TYPE_ERROR_STALE_HANDLE: &str = "StaleHandle";
+const TYPE_ERROR_SHADOW_ROOT_MISMATCH: &str = "RuntimeIntegrity:ShadowRootMismatch";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -348,6 +349,7 @@ pub enum VmError {
     HandlerUnderflow,
     NoPendingException,
     UncaughtException(JsValue),
+    RuntimeIntegrity(&'static str),
     TypeError(&'static str),
 }
 
@@ -3283,7 +3285,7 @@ impl Vm {
                     saved_handlers,
                     saved_var_scope_stack,
                     saved_param_init_body_scopes,
-                );
+                )?;
                 return Err(err);
             }
         };
@@ -3316,7 +3318,7 @@ impl Vm {
                             saved_handlers,
                             saved_var_scope_stack,
                             saved_param_init_body_scopes,
-                        );
+                        )?;
                         return Err(err);
                     }
                 } else {
@@ -3324,7 +3326,7 @@ impl Vm {
                         saved_handlers,
                         saved_var_scope_stack,
                         saved_param_init_body_scopes,
-                    );
+                    )?;
                     return Err(err);
                 }
             }
@@ -3339,7 +3341,7 @@ impl Vm {
                             saved_handlers,
                             saved_var_scope_stack,
                             saved_param_init_body_scopes,
-                        );
+                        )?;
                         return Err(VmError::UnknownIdentifier("this".to_string()));
                     }
                 };
@@ -3350,7 +3352,7 @@ impl Vm {
                             saved_handlers,
                             saved_var_scope_stack,
                             saved_param_init_body_scopes,
-                        );
+                        )?;
                         return Err(VmError::ScopeUnderflow);
                     }
                 };
@@ -3359,7 +3361,7 @@ impl Vm {
                         saved_handlers,
                         saved_var_scope_stack,
                         saved_param_init_body_scopes,
-                    );
+                    )?;
                     return Err(VmError::UnknownIdentifier("this".to_string()));
                 }
                 value = this_value;
@@ -3368,7 +3370,7 @@ impl Vm {
                     saved_handlers,
                     saved_var_scope_stack,
                     saved_param_init_body_scopes,
-                );
+                )?;
                 return Err(VmError::TypeError(
                     "derived class constructor must return object or undefined",
                 ));
@@ -3385,7 +3387,7 @@ impl Vm {
                 saved_handlers,
                 saved_var_scope_stack,
                 saved_param_init_body_scopes,
-            );
+            )?;
             return Ok(promise);
         }
 
@@ -3393,7 +3395,7 @@ impl Vm {
             saved_handlers,
             saved_var_scope_stack,
             saved_param_init_body_scopes,
-        );
+        )?;
         Ok(value)
     }
 
@@ -3402,11 +3404,10 @@ impl Vm {
         saved_handlers: Vec<ExceptionHandler>,
         saved_var_scope_stack: Vec<usize>,
         saved_param_init_body_scopes: Vec<ScopeRef>,
-    ) {
-        let saved = self
-            .gc_shadow_roots
-            .pop()
-            .expect("caller state shadow roots should be present");
+    ) -> Result<(), VmError> {
+        let Some(saved) = self.gc_shadow_roots.pop() else {
+            return Err(VmError::RuntimeIntegrity(TYPE_ERROR_SHADOW_ROOT_MISMATCH));
+        };
         self.stack = saved.stack;
         self.scopes = saved.scopes;
         self.with_objects = saved.with_objects;
@@ -3415,6 +3416,7 @@ impl Vm {
         self.identifier_references = saved.identifier_references;
         self.var_scope_stack = saved_var_scope_stack;
         self.param_init_body_scopes = saved_param_init_body_scopes;
+        Ok(())
     }
 
     fn strict_this_string(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
@@ -12030,7 +12032,7 @@ impl Vm {
         err: VmError,
         code_len: usize,
     ) -> Result<usize, VmError> {
-        match err {
+        match self.classify_vm_error(err) {
             VmError::UncaughtException(exception) => self.throw_to_handler(exception, code_len),
             other => {
                 if self.exception_handlers.is_empty() {
@@ -12046,7 +12048,7 @@ impl Vm {
     }
 
     fn runtime_error_exception_value(&mut self, err: &VmError) -> Option<JsValue> {
-        match err {
+        match self.classify_vm_error(err.clone()) {
             VmError::UnknownIdentifier(name) => Some(self.create_error_exception(
                 NativeFunction::ReferenceErrorConstructor,
                 "ReferenceError",
@@ -12061,6 +12063,21 @@ impl Vm {
                 NativeFunction::TypeErrorConstructor,
                 "TypeError",
                 "NotCallable".to_string(),
+            )),
+            VmError::InvalidHandle(_) => Some(self.create_error_exception(
+                NativeFunction::TypeErrorConstructor,
+                "TypeError",
+                Self::handle_error_type_message(HandleErrorKind::InvalidHandle).to_string(),
+            )),
+            VmError::StaleHandle(_) => Some(self.create_error_exception(
+                NativeFunction::TypeErrorConstructor,
+                "TypeError",
+                Self::handle_error_type_message(HandleErrorKind::StaleHandle).to_string(),
+            )),
+            VmError::RuntimeIntegrity(message) => Some(self.create_error_exception(
+                NativeFunction::TypeErrorConstructor,
+                "TypeError",
+                message.to_string(),
             )),
             VmError::ImmutableBinding(name) => Some(self.create_error_exception(
                 NativeFunction::TypeErrorConstructor,
@@ -13034,7 +13051,10 @@ impl Vm {
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
             let (getter, setter_exists, value, next, prototype_value) = {
-                let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
+                let object = self
+                    .objects
+                    .get(&id)
+                    .ok_or_else(|| self.classify_unknown_object_error(id))?;
                 (
                     object.getters.get(property).cloned(),
                     object.setters.contains_key(property),
@@ -13090,7 +13110,7 @@ impl Vm {
             let object = self
                 .objects
                 .get(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
             (
                 object.setters.get(&property).cloned(),
                 object.getters.contains_key(&property),
@@ -13126,7 +13146,7 @@ impl Vm {
                     let object = self
                         .objects
                         .get(&proto_id)
-                        .ok_or(VmError::UnknownObject(proto_id))?;
+                        .ok_or_else(|| self.classify_unknown_object_error(proto_id))?;
                     (
                         object.setters.get(&property).cloned(),
                         object.getters.contains_key(&property),
@@ -16161,7 +16181,10 @@ impl Vm {
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
             let (getter, setter_exists, value, next, prototype_value) = {
-                let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
+                let object = self
+                    .objects
+                    .get(&id)
+                    .ok_or_else(|| self.classify_unknown_object_error(id))?;
                 (
                     object.getters.get(property).cloned(),
                     object.setters.contains_key(property),
@@ -16216,7 +16239,7 @@ impl Vm {
             let object = self
                 .objects
                 .get(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
             (
                 object.argument_mappings.get(&property).copied(),
                 object.setters.get(&property).cloned(),
@@ -16258,7 +16281,7 @@ impl Vm {
                     let object = self
                         .objects
                         .get(&proto_id)
-                        .ok_or(VmError::UnknownObject(proto_id))?;
+                        .ok_or_else(|| self.classify_unknown_object_error(proto_id))?;
                     (
                         object.setters.get(&property).cloned(),
                         object.getters.contains_key(&property),
@@ -16307,7 +16330,7 @@ impl Vm {
             let object = self
                 .objects
                 .get(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
             object.extensible
                 || object.properties.contains_key(&property)
                 || object.getters.contains_key(&property)
@@ -16337,10 +16360,10 @@ impl Vm {
                 return Ok(value);
             }
         }
-        let object = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
+        let object = match self.objects.get_mut(&object_id) {
+            Some(object) => object,
+            None => return Err(self.classify_unknown_object_error(object_id)),
+        };
         object.properties.insert(property.clone(), value.clone());
         object
             .property_attributes
@@ -17968,7 +17991,7 @@ impl Vm {
         let is_configurable = self
             .objects
             .get(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?
+            .ok_or_else(|| self.classify_unknown_object_error(object_id))?
             .property_attributes
             .get(property)
             .map(|attributes| attributes.configurable)
@@ -17976,10 +17999,10 @@ impl Vm {
         if !is_configurable {
             return Ok(false);
         }
-        let object = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
+        let object = match self.objects.get_mut(&object_id) {
+            Some(object) => object,
+            None => return Err(self.classify_unknown_object_error(object_id)),
+        };
         object.properties.remove(property);
         object.getters.remove(property);
         object.setters.remove(property);
@@ -22415,7 +22438,7 @@ mod tests {
 
         assert!(matches!(
             vm.get_object_property(stale_id, "x", &realm),
-            Err(VmError::UnknownObject(id)) if id == stale_id
+            Err(VmError::StaleHandle(id)) if id == stale_id
         ));
 
         assert_eq!(
