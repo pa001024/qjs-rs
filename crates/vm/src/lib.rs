@@ -7677,10 +7677,10 @@ impl Vm {
         name: &str,
         args: &[JsValue],
     ) -> JsValue {
-        let message = args
-            .first()
-            .map(|value| self.coerce_to_string(value))
-            .unwrap_or_default();
+        let message = match args.first() {
+            None | Some(JsValue::Undefined) => String::new(),
+            Some(value) => self.coerce_to_string(value),
+        };
         self.create_error_exception(constructor, name, message)
     }
 
