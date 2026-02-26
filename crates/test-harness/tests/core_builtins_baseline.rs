@@ -27,3 +27,25 @@ fn object_array_boolean_function_baseline() {
         JsValue::Bool(true),
     );
 }
+
+#[test]
+fn string_number_math_baseline() {
+    assert_script(
+        "var ok = true; \
+         ok = ok && String('abc') === 'abc'; \
+         ok = ok && String.fromCharCode(65, 66, 67) === 'ABC'; \
+         ok = ok && Number('42') === 42; \
+         ok = ok && Number.isFinite(1) && !Number.isFinite('1'); \
+         ok = ok && Number.isInteger(-0) && Number.isSafeInteger(9007199254740991) && !Number.isSafeInteger(9007199254740992); \
+         ok = ok && Number.isNaN(Number('x')); \
+         ok = ok && Math.sign(-0) === -0 && (1 / Math.sign(-0)) === -Infinity; \
+         ok = ok && Math.clz32(1) === 31; \
+         ok = ok && Math.hypot(3, 4) === 5; \
+         ok = ok && Math.log2(8) === 3 && Math.log10(1000) === 3; \
+         ok = ok && Math.acosh(1) === 0; \
+         var threw = false; \
+         try { String.fromCharCode({ valueOf: function() { throw 'boom'; } }); } catch (err) { threw = err === 'boom'; } \
+         ok && threw;",
+        JsValue::Bool(true),
+    );
+}

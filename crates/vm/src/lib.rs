@@ -7413,7 +7413,8 @@ impl Vm {
             NativeFunction::ObjectTdzMarker => Ok(JsValue::Uninitialized),
             NativeFunction::NumberConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
-                Ok(JsValue::Number(self.to_number(&value)))
+                let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+                Ok(JsValue::Number(number))
             }
             NativeFunction::BooleanConstructor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Bool(false));
@@ -7468,13 +7469,25 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).acos()))
             }
+            NativeFunction::MathAcosh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).acosh()))
+            }
             NativeFunction::MathAsin => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).asin()))
             }
+            NativeFunction::MathAsinh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).asinh()))
+            }
             NativeFunction::MathAtan => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).atan()))
+            }
+            NativeFunction::MathAtanh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).atanh()))
             }
             NativeFunction::MathAtan2 => {
                 let y = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -7483,25 +7496,79 @@ impl Vm {
                     self.to_number(&y).atan2(self.to_number(&x)),
                 ))
             }
+            NativeFunction::MathCbrt => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).cbrt()))
+            }
             NativeFunction::MathCeil => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).ceil()))
+            }
+            NativeFunction::MathClz32 => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(0.0));
+                let uint = Self::to_uint32_number(self.to_number(&value));
+                Ok(JsValue::Number(uint.leading_zeros() as f64))
             }
             NativeFunction::MathCos => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).cos()))
             }
+            NativeFunction::MathCosh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).cosh()))
+            }
             NativeFunction::MathExp => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).exp()))
+            }
+            NativeFunction::MathExpm1 => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).exp_m1()))
             }
             NativeFunction::MathFloor => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).floor()))
             }
+            NativeFunction::MathFround => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number((self.to_number(&value) as f32) as f64))
+            }
+            NativeFunction::MathHypot => {
+                if args.iter().any(|value| self.to_number(value).is_infinite()) {
+                    return Ok(JsValue::Number(f64::INFINITY));
+                }
+                if args.iter().any(|value| self.to_number(value).is_nan()) {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
+                let mut sum = 0.0;
+                for value in args {
+                    let number = self.to_number(&value);
+                    sum += number * number;
+                }
+                Ok(JsValue::Number(sum.sqrt()))
+            }
+            NativeFunction::MathImul => {
+                let left = args.first().cloned().unwrap_or(JsValue::Number(0.0));
+                let right = args.get(1).cloned().unwrap_or(JsValue::Number(0.0));
+                let left = Self::to_int32_number(self.to_number(&left));
+                let right = Self::to_int32_number(self.to_number(&right));
+                Ok(JsValue::Number(left.wrapping_mul(right) as f64))
+            }
             NativeFunction::MathLog => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).ln()))
+            }
+            NativeFunction::MathLog1p => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).ln_1p()))
+            }
+            NativeFunction::MathLog10 => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).log10()))
+            }
+            NativeFunction::MathLog2 => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).log2()))
             }
             NativeFunction::MathMax => {
                 if args.is_empty() {
@@ -7549,6 +7616,24 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).round()))
             }
+            NativeFunction::MathSign => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                let number = self.to_number(&value);
+                let result = if number.is_nan() {
+                    f64::NAN
+                } else if number == 0.0 {
+                    number
+                } else if number.is_sign_positive() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                Ok(JsValue::Number(result))
+            }
+            NativeFunction::MathSinh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).sinh()))
+            }
             NativeFunction::MathTrunc => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).trunc()))
@@ -7565,6 +7650,10 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Number(self.to_number(&value).tan()))
             }
+            NativeFunction::MathTanh => {
+                let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
+                Ok(JsValue::Number(self.to_number(&value).tanh()))
+            }
             NativeFunction::StringConstructor => {
                 let value = match args.first() {
                     None => String::new(),
@@ -7577,7 +7666,8 @@ impl Vm {
             NativeFunction::StringFromCharCode => {
                 let mut output = String::new();
                 for value in args {
-                    let code = (self.to_number(&value) as i64 as u32) & 0xFFFF;
+                    let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+                    let code = (Self::to_uint32_number(number) & 0xFFFF) as u32;
                     if let Some(ch) = char::from_u32(code) {
                         output.push(ch);
                     } else {
@@ -7605,6 +7695,34 @@ impl Vm {
             NativeFunction::IsFinite => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
                 Ok(JsValue::Bool(self.to_number(&value).is_finite()))
+            }
+            NativeFunction::NumberIsFinite => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let result = match value {
+                    JsValue::Number(number) => number.is_finite(),
+                    _ => false,
+                };
+                Ok(JsValue::Bool(result))
+            }
+            NativeFunction::NumberIsInteger => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let result = match value {
+                    JsValue::Number(number) => number.is_finite() && number.trunc() == number,
+                    _ => false,
+                };
+                Ok(JsValue::Bool(result))
+            }
+            NativeFunction::NumberIsSafeInteger => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let result = match value {
+                    JsValue::Number(number) => {
+                        number.is_finite()
+                            && number.trunc() == number
+                            && number.abs() <= 9_007_199_254_740_991.0
+                    }
+                    _ => false,
+                };
+                Ok(JsValue::Bool(result))
             }
             NativeFunction::ParseInt => Ok(JsValue::Number(self.parse_int_baseline(&args))),
             NativeFunction::ParseFloat => Ok(JsValue::Number(self.parse_float_baseline(&args))),
@@ -14843,23 +14961,39 @@ impl Vm {
             for (name, native) in [
                 ("abs", NativeFunction::MathAbs),
                 ("acos", NativeFunction::MathAcos),
+                ("acosh", NativeFunction::MathAcosh),
                 ("asin", NativeFunction::MathAsin),
+                ("asinh", NativeFunction::MathAsinh),
                 ("atan", NativeFunction::MathAtan),
+                ("atanh", NativeFunction::MathAtanh),
                 ("atan2", NativeFunction::MathAtan2),
+                ("cbrt", NativeFunction::MathCbrt),
                 ("ceil", NativeFunction::MathCeil),
+                ("clz32", NativeFunction::MathClz32),
                 ("cos", NativeFunction::MathCos),
+                ("cosh", NativeFunction::MathCosh),
                 ("exp", NativeFunction::MathExp),
+                ("expm1", NativeFunction::MathExpm1),
                 ("floor", NativeFunction::MathFloor),
+                ("fround", NativeFunction::MathFround),
+                ("hypot", NativeFunction::MathHypot),
+                ("imul", NativeFunction::MathImul),
                 ("log", NativeFunction::MathLog),
+                ("log1p", NativeFunction::MathLog1p),
+                ("log10", NativeFunction::MathLog10),
+                ("log2", NativeFunction::MathLog2),
                 ("max", NativeFunction::MathMax),
                 ("min", NativeFunction::MathMin),
                 ("pow", NativeFunction::MathPow),
                 ("random", NativeFunction::MathRandom),
                 ("round", NativeFunction::MathRound),
+                ("sign", NativeFunction::MathSign),
+                ("sinh", NativeFunction::MathSinh),
                 ("trunc", NativeFunction::MathTrunc),
                 ("sin", NativeFunction::MathSin),
                 ("sqrt", NativeFunction::MathSqrt),
                 ("tan", NativeFunction::MathTan),
+                ("tanh", NativeFunction::MathTanh),
             ] {
                 math_object
                     .properties
@@ -18282,6 +18416,9 @@ impl Vm {
                 | (NativeFunction::NumberConstructor, "MAX_SAFE_INTEGER")
                 | (NativeFunction::NumberConstructor, "MIN_SAFE_INTEGER")
                 | (NativeFunction::NumberConstructor, "isNaN")
+                | (NativeFunction::NumberConstructor, "isFinite")
+                | (NativeFunction::NumberConstructor, "isInteger")
+                | (NativeFunction::NumberConstructor, "isSafeInteger")
                 | (NativeFunction::SymbolConstructor, "iterator")
                 | (NativeFunction::SymbolConstructor, "asyncIterator")
                 | (NativeFunction::SymbolConstructor, "hasInstance")
@@ -19673,6 +19810,44 @@ impl Vm {
             NativeFunction::ParseFloat => "parseFloat",
             NativeFunction::IsNaN => "isNaN",
             NativeFunction::IsFinite => "isFinite",
+            NativeFunction::NumberIsFinite => "isFinite",
+            NativeFunction::NumberIsInteger => "isInteger",
+            NativeFunction::NumberIsSafeInteger => "isSafeInteger",
+            NativeFunction::MathAbs => "abs",
+            NativeFunction::MathAcos => "acos",
+            NativeFunction::MathAcosh => "acosh",
+            NativeFunction::MathAsin => "asin",
+            NativeFunction::MathAsinh => "asinh",
+            NativeFunction::MathAtan => "atan",
+            NativeFunction::MathAtanh => "atanh",
+            NativeFunction::MathAtan2 => "atan2",
+            NativeFunction::MathCbrt => "cbrt",
+            NativeFunction::MathCeil => "ceil",
+            NativeFunction::MathClz32 => "clz32",
+            NativeFunction::MathCos => "cos",
+            NativeFunction::MathCosh => "cosh",
+            NativeFunction::MathExp => "exp",
+            NativeFunction::MathExpm1 => "expm1",
+            NativeFunction::MathFloor => "floor",
+            NativeFunction::MathFround => "fround",
+            NativeFunction::MathHypot => "hypot",
+            NativeFunction::MathImul => "imul",
+            NativeFunction::MathLog => "log",
+            NativeFunction::MathLog1p => "log1p",
+            NativeFunction::MathLog10 => "log10",
+            NativeFunction::MathLog2 => "log2",
+            NativeFunction::MathMax => "max",
+            NativeFunction::MathMin => "min",
+            NativeFunction::MathPow => "pow",
+            NativeFunction::MathRandom => "random",
+            NativeFunction::MathRound => "round",
+            NativeFunction::MathSign => "sign",
+            NativeFunction::MathSin => "sin",
+            NativeFunction::MathSinh => "sinh",
+            NativeFunction::MathSqrt => "sqrt",
+            NativeFunction::MathTan => "tan",
+            NativeFunction::MathTanh => "tanh",
+            NativeFunction::MathTrunc => "trunc",
             NativeFunction::DecodeURI => "decodeURI",
             NativeFunction::DecodeURIComponent => "decodeURIComponent",
             NativeFunction::EncodeURI => "encodeURI",
@@ -19716,6 +19891,15 @@ impl Vm {
             }
             (NativeFunction::NumberConstructor, "isNaN") => {
                 JsValue::NativeFunction(NativeFunction::IsNaN)
+            }
+            (NativeFunction::NumberConstructor, "isFinite") => {
+                JsValue::NativeFunction(NativeFunction::NumberIsFinite)
+            }
+            (NativeFunction::NumberConstructor, "isInteger") => {
+                JsValue::NativeFunction(NativeFunction::NumberIsInteger)
+            }
+            (NativeFunction::NumberConstructor, "isSafeInteger") => {
+                JsValue::NativeFunction(NativeFunction::NumberIsSafeInteger)
             }
             (NativeFunction::ObjectConstructor, "defineProperty") => {
                 JsValue::NativeFunction(NativeFunction::ObjectDefineProperty)

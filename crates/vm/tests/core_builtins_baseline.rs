@@ -54,3 +54,38 @@ fn core_builtins_object_array_boolean_function() {
     let mut vm = Vm::default();
     assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
 }
+
+#[test]
+fn core_builtins_string_number_math() {
+    let script = parse_script(
+        "var ok = true;\
+         ok = ok && String('abc') === 'abc';\
+         ok = ok && String.fromCharCode(65, 66, 67) === 'ABC';\
+         ok = ok && Number('42') === 42;\
+         ok = ok && Number.isFinite(1) && !Number.isFinite('1');\
+         ok = ok && Number.isInteger(-0) && Number.isSafeInteger(9007199254740991) && !Number.isSafeInteger(9007199254740992);\
+         ok = ok && Number.isNaN(Number('x'));\
+         ok = ok && Math.sign(-0) === -0 && (1 / Math.sign(-0)) === -Infinity;\
+         ok = ok && Math.clz32(1) === 31;\
+         ok = ok && Math.hypot(3, 4) === 5;\
+         ok = ok && Math.log2(8) === 3 && Math.log10(1000) === 3;\
+         ok = ok && Math.acosh(1) === 0;\
+         var threw = false;\
+         try { String.fromCharCode({ valueOf: function() { throw 'boom'; } }); } catch (err) { threw = err === 'boom'; }\
+         ok && threw;",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+
+    let mut realm = Realm::default();
+    realm.define_global(
+        "String",
+        JsValue::NativeFunction(NativeFunction::StringConstructor),
+    );
+    realm.define_global(
+        "Number",
+        JsValue::NativeFunction(NativeFunction::NumberConstructor),
+    );
+    let mut vm = Vm::default();
+    assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+}
