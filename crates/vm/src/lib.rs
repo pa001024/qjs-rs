@@ -7352,9 +7352,11 @@ impl Vm {
                 caller_strict,
                 EvalCallKind::Indirect,
             ),
-            NativeFunction::FunctionConstructor => self.execute_function_constructor(&args, realm),
+            NativeFunction::FunctionConstructor => {
+                self.execute_function_constructor(&args, realm, caller_strict)
+            }
             NativeFunction::GeneratorFunctionConstructor => {
-                self.execute_generator_function_constructor(&args, realm)
+                self.execute_generator_function_constructor(&args, realm, caller_strict)
             }
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => self.execute_array_constructor(&args),
@@ -8853,14 +8855,15 @@ impl Vm {
         &mut self,
         args: &[JsValue],
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let (params, body) = if let Some(last) = args.last() {
-            let params = args[..args.len().saturating_sub(1)]
-                .iter()
-                .map(|arg| self.coerce_to_string(arg))
-                .collect::<Vec<_>>()
-                .join(", ");
-            (params, self.coerce_to_string(last))
+            let mut params = Vec::with_capacity(args.len().saturating_sub(1));
+            for arg in &args[..args.len().saturating_sub(1)] {
+                params.push(self.coerce_to_string_runtime(arg.clone(), realm, caller_strict)?);
+            }
+            let body = self.coerce_to_string_runtime(last.clone(), realm, caller_strict)?;
+            (params.join(", "), body)
         } else {
             (String::new(), String::new())
         };
@@ -8890,6 +8893,7 @@ impl Vm {
         &mut self,
         args: &[JsValue],
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let body = args
             .last()
@@ -8911,7 +8915,8 @@ impl Vm {
             let body_index = transformed_args.len().saturating_sub(1);
             transformed_args[body_index] = JsValue::String(transformed_body);
         }
-        let producer = self.execute_function_constructor(&transformed_args, realm)?;
+        let producer =
+            self.execute_function_constructor(&transformed_args, realm, caller_strict)?;
         Ok(self.create_host_function_value(HostFunction::GeneratorFactory { producer }))
     }
 
