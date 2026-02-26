@@ -11,6 +11,7 @@ use bytecode::{
 use fancy_regex::{Regex, RegexBuilder};
 use parser::{parse_expression, parse_module, parse_script_with_super};
 use runtime::{JsValue, ModuleLifecycleState, NativeFunction, Realm};
+use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -83,6 +84,7 @@ const TYPE_ERROR_MODULE_LOAD_FAILED: &str = "ModuleLifecycle:LoadFailed";
 const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
 const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
 const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
+const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -6804,8 +6806,10 @@ impl Vm {
                 Ok(JsValue::Bool(value))
             }
             HostFunction::FunctionPrototype => Ok(JsValue::Undefined),
-            HostFunction::JsonStringify => Ok(self.execute_json_stringify(args.first())),
-            HostFunction::JsonParse => Ok(self.execute_json_parse(args.first())),
+            HostFunction::JsonStringify => {
+                self.execute_json_stringify(&args, realm, caller_strict)
+            }
+            HostFunction::JsonParse => self.execute_json_parse(&args, realm, caller_strict),
             HostFunction::ArrayPushThis => {
                 self.execute_array_push_this(this_arg, &args, realm, caller_strict)
             }
@@ -14905,6 +14909,10 @@ impl Vm {
         };
         let stringify = self.create_host_function_value(HostFunction::JsonStringify);
         let parse = self.create_host_function_value(HostFunction::JsonParse);
+        self.set_builtin_function_length(&stringify, 3.0);
+        self.set_builtin_function_name(&stringify, "stringify");
+        self.set_builtin_function_length(&parse, 2.0);
+        self.set_builtin_function_name(&parse, "parse");
         {
             let json_object = self
                 .objects
@@ -20373,56 +20381,177 @@ impl Vm {
         }
     }
 
-    fn execute_json_stringify(&self, value: Option<&JsValue>) -> JsValue {
-        let Some(value) = value else {
-            return JsValue::Undefined;
-        };
-        match value {
+    fn execute_json_stringify(
+        &mut self,
+        args: &[JsValue],
+        _realm: &Realm,
+        _caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let serialized = match value {
             JsValue::Undefined
             | JsValue::Function(_)
             | JsValue::NativeFunction(_)
-            | JsValue::HostFunction(_) => JsValue::Undefined,
+            | JsValue::HostFunction(_)
+            | JsValue::Uninitialized => JsValue::Undefined,
             JsValue::Null => JsValue::String("null".to_string()),
             JsValue::Bool(boolean) => JsValue::String(boolean.to_string()),
             JsValue::Number(number) => {
                 if number.is_finite() {
-                    JsValue::String(Self::coerce_number_to_string(*number))
+                    JsValue::String(Self::coerce_number_to_string(number))
                 } else {
                     JsValue::String("null".to_string())
                 }
             }
-            JsValue::String(text) => {
-                JsValue::String(format!("\"{}\"", Self::escape_json_string(text)))
+            JsValue::String(string) => {
+                JsValue::String(format!("\"{}\"", Self::escape_json_string(&string)))
             }
             JsValue::Object(object_id) => {
-                if self
-                    .objects
-                    .get(object_id)
-                    .is_some_and(|object| object.properties.contains_key("length"))
-                {
+                if self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
                     JsValue::String("[]".to_string())
                 } else {
                     JsValue::String("{}".to_string())
                 }
             }
-            JsValue::Uninitialized => JsValue::Undefined,
+        };
+        Ok(serialized)
+    }
+
+    fn execute_json_parse(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let source = self.coerce_to_string_runtime(input, realm, caller_strict)?;
+        let parsed = match serde_json::from_str::<JsonValue>(&source) {
+            Ok(parsed) => parsed,
+            Err(_) => return Err(self.json_parse_syntax_error()),
+        };
+        let mut result = self.json_value_to_js_value(parsed)?;
+        let reviver = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        if Self::is_callable_value(&reviver) {
+            let holder = self.create_object_value();
+            self.create_data_property_or_throw(holder.clone(), String::new(), result, realm)?;
+            result =
+                self.json_internalize_property(holder, "", reviver, realm, caller_strict)?;
+        }
+        Ok(result)
+    }
+
+    fn json_parse_syntax_error(&mut self) -> VmError {
+        VmError::UncaughtException(self.create_error_exception(
+            NativeFunction::SyntaxErrorConstructor,
+            "SyntaxError",
+            JSON_PARSE_SYNTAX_ERROR_MESSAGE.to_string(),
+        ))
+    }
+
+    fn json_value_to_js_value(&mut self, value: JsonValue) -> Result<JsValue, VmError> {
+        match value {
+            JsonValue::Null => Ok(JsValue::Null),
+            JsonValue::Bool(boolean) => Ok(JsValue::Bool(boolean)),
+            JsonValue::Number(number) => {
+                let numeric = number
+                    .as_f64()
+                    .or_else(|| number.to_string().parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                Ok(JsValue::Number(numeric))
+            }
+            JsonValue::String(string) => Ok(JsValue::String(string)),
+            JsonValue::Array(values) => {
+                let mut converted = Vec::with_capacity(values.len());
+                for value in values {
+                    converted.push(self.json_value_to_js_value(value)?);
+                }
+                self.create_array_from_values(converted)
+            }
+            JsonValue::Object(entries) => {
+                let object = self.create_object_value();
+                let JsValue::Object(object_id) = object else {
+                    unreachable!();
+                };
+                for (key, value) in entries {
+                    let converted = self.json_value_to_js_value(value)?;
+                    let target = self
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(VmError::UnknownObject(object_id))?;
+                    target.properties.insert(key.clone(), converted);
+                    target
+                        .property_attributes
+                        .entry(key)
+                        .or_insert_with(PropertyAttributes::default);
+                }
+                Ok(JsValue::Object(object_id))
+            }
         }
     }
 
-    fn execute_json_parse(&self, value: Option<&JsValue>) -> JsValue {
-        let Some(value) = value else {
-            return JsValue::Undefined;
-        };
-        let text = self.coerce_to_string(value);
-        match text.trim() {
-            "null" => JsValue::Null,
-            "true" => JsValue::Bool(true),
-            "false" => JsValue::Bool(false),
-            source => source
-                .parse::<f64>()
-                .map(JsValue::Number)
-                .unwrap_or(JsValue::Undefined),
+    fn json_internalize_property(
+        &mut self,
+        holder: JsValue,
+        key: &str,
+        reviver: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let mut value = self.get_property_from_receiver(holder.clone(), key, realm)?;
+        if let JsValue::Object(object_id) = value.clone() {
+            let is_array = self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)?;
+            if is_array {
+                let length = self.array_length(object_id)?;
+                for index in 0..length {
+                    let entry_key = index.to_string();
+                    let revived = self.json_internalize_property(
+                        value.clone(),
+                        &entry_key,
+                        reviver.clone(),
+                        realm,
+                        caller_strict,
+                    )?;
+                    self.json_define_or_remove_property(object_id, &entry_key, revived);
+                }
+            } else {
+                for entry_key in self.collect_own_property_keys(&value, true)? {
+                    let revived = self.json_internalize_property(
+                        value.clone(),
+                        &entry_key,
+                        reviver.clone(),
+                        realm,
+                        caller_strict,
+                    )?;
+                    self.json_define_or_remove_property(object_id, &entry_key, revived);
+                }
+            }
+            value = JsValue::Object(object_id);
         }
+        self.execute_callable(
+            reviver,
+            Some(holder),
+            vec![JsValue::String(key.to_string()), value],
+            realm,
+            caller_strict,
+        )
+    }
+
+    fn json_define_or_remove_property(&mut self, object_id: ObjectId, key: &str, value: JsValue) {
+        let Some(object) = self.objects.get_mut(&object_id) else {
+            return;
+        };
+        if matches!(value, JsValue::Undefined) {
+            object.properties.remove(key);
+            object.getters.remove(key);
+            object.setters.remove(key);
+            object.property_attributes.remove(key);
+            return;
+        }
+        object.properties.insert(key.to_string(), value);
+        object
+            .property_attributes
+            .entry(key.to_string())
+            .or_insert_with(PropertyAttributes::default);
     }
 
     fn escape_json_string(value: &str) -> String {
