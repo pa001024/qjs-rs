@@ -7,7 +7,7 @@ use parser::{parse_expression, parse_script_with_super};
 use runtime::{JsValue, NativeFunction, Realm};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -65,6 +65,12 @@ const MAX_SAFE_INTEGER_F64: f64 = 9007199254740991.0;
 const TYPE_ERROR_INVALID_HANDLE: &str = "InvalidHandle";
 const TYPE_ERROR_STALE_HANDLE: &str = "StaleHandle";
 const TYPE_ERROR_SHADOW_ROOT_MISMATCH: &str = "RuntimeIntegrity:ShadowRootMismatch";
+const TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN: &str = "PromiseJobQueue:ReentrantDrain";
+const TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION: &str =
+    "PromiseJobQueue:InvalidCallbackInteraction";
+const TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED: &str = "PromiseJobQueue:HostOnEnqueueFailed";
+const TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED: &str = "PromiseJobQueue:HostOnDrainStartFailed";
+const TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED: &str = "PromiseJobQueue:HostOnDrainEndFailed";
 
 type BindingId = u64;
 type ObjectId = u64;
@@ -354,6 +360,43 @@ pub enum VmError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromiseJobDrainStopReason {
+    QueueEmpty,
+    BudgetExhausted,
+    InfrastructureFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromiseJobDrainReport {
+    pub processed: usize,
+    pub remaining: usize,
+    pub stop_reason: PromiseJobDrainStopReason,
+}
+
+pub trait PromiseJobHostHooks {
+    fn on_enqueue(&mut self, pending_jobs: usize) -> Result<(), VmError>;
+    fn on_drain_start(&mut self, pending_jobs: usize) -> Result<(), VmError>;
+    fn on_drain_end(&mut self, report: &PromiseJobDrainReport) -> Result<(), VmError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopPromiseJobHostHooks;
+
+impl PromiseJobHostHooks for NoopPromiseJobHostHooks {
+    fn on_enqueue(&mut self, _pending_jobs: usize) -> Result<(), VmError> {
+        Ok(())
+    }
+
+    fn on_drain_start(&mut self, _pending_jobs: usize) -> Result<(), VmError> {
+        Ok(())
+    }
+
+    fn on_drain_end(&mut self, _report: &PromiseJobDrainReport) -> Result<(), VmError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionSignal {
     Halt,
     Return,
@@ -409,6 +452,62 @@ struct GcShadowRoots {
     identifier_references: Vec<IdentifierReference>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum PromiseSettlement {
+    Fulfilled(JsValue),
+    Rejected(JsValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PromiseReactionKind {
+    Then {
+        on_fulfilled: Option<JsValue>,
+        on_rejected: Option<JsValue>,
+    },
+    Finally {
+        on_finally: Option<JsValue>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PromiseReaction {
+    kind: PromiseReactionKind,
+    result_promise_id: ObjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct PendingPromiseRecord {
+    reactions: Vec<PromiseReaction>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PromiseJobKind {
+    HostCapture,
+    Reaction {
+        settlement: PromiseSettlement,
+        reaction: PromiseReaction,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PromiseJob {
+    kind: PromiseJobKind,
+    capture_handles: Vec<u64>,
+}
+
+#[derive(Debug, Default)]
+struct PromiseJobQueue {
+    jobs: VecDeque<PromiseJob>,
+    draining: bool,
+    callback_in_progress: bool,
+}
+
+enum PromiseHook<'a> {
+    Enqueue(usize),
+    DrainStart(usize),
+    DrainEnd(&'a PromiseJobDrainReport),
+}
+
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -432,6 +531,8 @@ pub struct Vm {
     next_module_cache_root_candidate_id: u64,
     pending_job_root_candidates: BTreeMap<u64, JsValue>,
     next_pending_job_root_candidate_id: u64,
+    pending_promise_records: BTreeMap<ObjectId, PendingPromiseRecord>,
+    promise_job_queue: PromiseJobQueue,
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
@@ -507,6 +608,10 @@ impl Vm {
         self.next_module_cache_root_candidate_id = 0;
         self.clear_pending_job_root_candidates();
         self.next_pending_job_root_candidate_id = 0;
+        self.pending_promise_records.clear();
+        self.promise_job_queue.jobs.clear();
+        self.promise_job_queue.draining = false;
+        self.promise_job_queue.callback_in_progress = false;
         self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
@@ -754,6 +859,94 @@ impl Vm {
         self.pending_job_root_candidates.clear();
     }
 
+    pub fn has_pending_promise_jobs(&self) -> bool {
+        !self.promise_job_queue.jobs.is_empty()
+    }
+
+    pub fn pending_promise_job_count(&self) -> usize {
+        self.promise_job_queue.jobs.len()
+    }
+
+    pub fn enqueue_host_promise_job(
+        &mut self,
+        value: JsValue,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let handle = self.register_pending_job_root_candidate(value);
+        self.enqueue_promise_job(
+            PromiseJob {
+                kind: PromiseJobKind::HostCapture,
+                capture_handles: vec![handle],
+            },
+            hooks,
+        )
+    }
+
+    pub fn drain_promise_jobs(
+        &mut self,
+        budget: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<PromiseJobDrainReport, VmError> {
+        let mut hooks = NoopPromiseJobHostHooks;
+        self.drain_promise_jobs_with_host_hooks(budget, realm, caller_strict, &mut hooks)
+    }
+
+    pub fn drain_promise_jobs_with_host_hooks(
+        &mut self,
+        budget: usize,
+        realm: &Realm,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<PromiseJobDrainReport, VmError> {
+        if self.promise_job_queue.draining {
+            return Err(VmError::TypeError(TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN));
+        }
+        let pending_jobs = self.promise_job_queue.jobs.len();
+        self.call_promise_hook(hooks, PromiseHook::DrainStart(pending_jobs))?;
+        self.promise_job_queue.draining = true;
+        let mut processed = 0usize;
+        let mut stop_reason = if budget == 0 {
+            PromiseJobDrainStopReason::BudgetExhausted
+        } else {
+            PromiseJobDrainStopReason::QueueEmpty
+        };
+
+        while processed < budget {
+            let Some(job) = self.promise_job_queue.jobs.pop_front() else {
+                stop_reason = PromiseJobDrainStopReason::QueueEmpty;
+                break;
+            };
+            match self.execute_promise_job(job, realm, caller_strict, hooks) {
+                Ok(()) => {
+                    processed = processed.saturating_add(1);
+                }
+                Err(err) => {
+                    self.promise_job_queue.draining = false;
+                    let report = PromiseJobDrainReport {
+                        processed,
+                        remaining: self.promise_job_queue.jobs.len(),
+                        stop_reason: PromiseJobDrainStopReason::InfrastructureFailure,
+                    };
+                    let _ = self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report));
+                    return Err(err);
+                }
+            }
+            if processed == budget {
+                stop_reason = PromiseJobDrainStopReason::BudgetExhausted;
+            }
+        }
+
+        self.promise_job_queue.draining = false;
+        let report = PromiseJobDrainReport {
+            processed,
+            remaining: self.promise_job_queue.jobs.len(),
+            stop_reason,
+        };
+        self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report))?;
+        Ok(report)
+    }
+
     pub fn collect_garbage(&mut self, realm: &Realm) -> GcStats {
         self.gc_collections_total += 1;
         let objects_before = self.objects.len();
@@ -932,6 +1125,7 @@ impl Vm {
         roots.extend(realm.globals_values().cloned());
         roots.extend(self.module_cache_root_candidates.values().cloned());
         roots.extend(self.pending_job_root_candidates.values().cloned());
+        self.collect_pending_promise_record_roots(&mut roots);
         roots.extend(self.template_cache.values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
         roots.extend(
@@ -942,6 +1136,33 @@ impl Vm {
         );
         roots.extend(self.host_pins.values().cloned());
         roots
+    }
+
+    fn collect_pending_promise_record_roots(&self, roots: &mut Vec<JsValue>) {
+        for (promise_id, record) in &self.pending_promise_records {
+            roots.push(JsValue::Object(*promise_id));
+            for reaction in &record.reactions {
+                roots.push(JsValue::Object(reaction.result_promise_id));
+                match &reaction.kind {
+                    PromiseReactionKind::Then {
+                        on_fulfilled,
+                        on_rejected,
+                    } => {
+                        if let Some(handler) = on_fulfilled {
+                            roots.push(handler.clone());
+                        }
+                        if let Some(handler) = on_rejected {
+                            roots.push(handler.clone());
+                        }
+                    }
+                    PromiseReactionKind::Finally { on_finally } => {
+                        if let Some(handler) = on_finally {
+                            roots.push(handler.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn collect_roots_from_scopes(&self, scopes: &[ScopeRef], roots: &mut Vec<JsValue>) {
@@ -3038,6 +3259,15 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match callee {
             JsValue::NativeFunction(native) => {
+                let mut args = args;
+                if matches!(
+                    native,
+                    NativeFunction::PromiseThen
+                        | NativeFunction::PromiseCatch
+                        | NativeFunction::PromiseFinally
+                ) {
+                    args.insert(0, this_arg.unwrap_or(JsValue::Undefined));
+                }
                 self.execute_native_call(native, args, realm, caller_strict, false)
             }
             JsValue::HostFunction(host_id) => {
@@ -6713,6 +6943,11 @@ impl Vm {
             NativeFunction::PromiseConstructor => {
                 self.execute_promise_constructor(&args, realm, caller_strict)
             }
+            NativeFunction::PromiseThen => self.execute_promise_then(&args, realm, caller_strict),
+            NativeFunction::PromiseCatch => self.execute_promise_catch(&args, realm, caller_strict),
+            NativeFunction::PromiseFinally => {
+                self.execute_promise_finally(&args, realm, caller_strict)
+            }
             NativeFunction::Uint8ArrayConstructor => self.execute_uint8_array_constructor(&args),
             NativeFunction::DateConstructor => {
                 let timestamp = args
@@ -9271,25 +9506,7 @@ impl Vm {
         if !Self::is_callable_value(&executor) {
             return Err(VmError::TypeError("Promise executor must be callable"));
         }
-        if self.promise_prototype_id.is_none() {
-            let _ = self.promise_prototype_value();
-        }
-        let object = self.create_object_value();
-        let object_id = match object {
-            JsValue::Object(id) => id,
-            _ => unreachable!(),
-        };
-        {
-            let target = self
-                .objects
-                .get_mut(&object_id)
-                .ok_or(VmError::UnknownObject(object_id))?;
-            target.prototype = self.promise_prototype_id;
-            target.prototype_value = None;
-            target
-                .properties
-                .insert("__promiseTag".to_string(), JsValue::Bool(true));
-        }
+        let object_id = self.create_pending_promise()?;
         let resolve = self.create_host_function_value(HostFunction::FunctionPrototype);
         let reject = self.create_host_function_value(HostFunction::FunctionPrototype);
         let _ = self.execute_callable(
@@ -9302,11 +9519,106 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
-    fn create_async_settled_promise(
+    fn execute_promise_then(
         &mut self,
-        fulfilled: bool,
-        result: JsValue,
+        args: &[JsValue],
+        _realm: &Realm,
+        _caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let source_promise_id = self.promise_object_id_from_this_arg(args.first())?;
+        let on_fulfilled = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let on_rejected = args.get(2).cloned().unwrap_or(JsValue::Undefined);
+        let reaction = PromiseReaction {
+            kind: PromiseReactionKind::Then {
+                on_fulfilled: Self::normalize_promise_handler(on_fulfilled),
+                on_rejected: Self::normalize_promise_handler(on_rejected),
+            },
+            result_promise_id: self.create_pending_promise()?,
+        };
+        if let Some(settlement) = self.promise_settlement_from_object(source_promise_id)? {
+            let mut hooks = NoopPromiseJobHostHooks;
+            self.enqueue_promise_reaction_job(settlement, reaction.clone(), &mut hooks)?;
+        } else {
+            self.pending_promise_records
+                .entry(source_promise_id)
+                .or_default()
+                .reactions
+                .push(reaction.clone());
+        }
+        Ok(JsValue::Object(reaction.result_promise_id))
+    }
+
+    fn execute_promise_catch(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let mut then_args = Vec::with_capacity(3);
+        then_args.push(args.first().cloned().unwrap_or(JsValue::Undefined));
+        then_args.push(JsValue::Undefined);
+        then_args.push(args.get(1).cloned().unwrap_or(JsValue::Undefined));
+        self.execute_promise_then(&then_args, realm, caller_strict)
+    }
+
+    fn execute_promise_finally(
+        &mut self,
+        args: &[JsValue],
+        _realm: &Realm,
+        _caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let source_promise_id = self.promise_object_id_from_this_arg(args.first())?;
+        let on_finally = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let reaction = PromiseReaction {
+            kind: PromiseReactionKind::Finally {
+                on_finally: Self::normalize_promise_handler(on_finally),
+            },
+            result_promise_id: self.create_pending_promise()?,
+        };
+        if let Some(settlement) = self.promise_settlement_from_object(source_promise_id)? {
+            let mut hooks = NoopPromiseJobHostHooks;
+            self.enqueue_promise_reaction_job(settlement, reaction.clone(), &mut hooks)?;
+        } else {
+            self.pending_promise_records
+                .entry(source_promise_id)
+                .or_default()
+                .reactions
+                .push(reaction.clone());
+        }
+        Ok(JsValue::Object(reaction.result_promise_id))
+    }
+
+    fn normalize_promise_handler(value: JsValue) -> Option<JsValue> {
+        if Self::is_callable_value(&value) {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    fn promise_object_id_from_this_arg(
+        &self,
+        this_value: Option<&JsValue>,
+    ) -> Result<ObjectId, VmError> {
+        let Some(JsValue::Object(object_id)) = this_value else {
+            return Err(VmError::TypeError(
+                "Promise.prototype method called on incompatible receiver",
+            ));
+        };
+        if !self
+            .objects
+            .get(object_id)
+            .and_then(|object| object.properties.get("__promiseTag"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)))
+        {
+            return Err(VmError::TypeError(
+                "Promise.prototype method called on incompatible receiver",
+            ));
+        }
+        Ok(*object_id)
+    }
+
+    fn create_promise_object(&mut self) -> Result<ObjectId, VmError> {
         if self.promise_prototype_id.is_none() {
             let _ = self.promise_prototype_value();
         }
@@ -9326,12 +9638,384 @@ impl Vm {
             .insert("__promiseTag".to_string(), JsValue::Bool(true));
         target.properties.insert(
             "__asyncState".to_string(),
-            JsValue::String(if fulfilled { "fulfilled" } else { "rejected" }.to_string()),
+            JsValue::String("pending".to_string()),
         );
         target
             .properties
-            .insert("__asyncResult".to_string(), result);
+            .insert("__asyncResult".to_string(), JsValue::Undefined);
+        Ok(object_id)
+    }
+
+    fn create_pending_promise(&mut self) -> Result<ObjectId, VmError> {
+        let object_id = self.create_promise_object()?;
+        self.pending_promise_records
+            .entry(object_id)
+            .or_insert_with(PendingPromiseRecord::default);
+        Ok(object_id)
+    }
+
+    fn promise_settlement_from_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<PromiseSettlement>, VmError> {
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        let Some(JsValue::String(state)) = object.properties.get("__asyncState") else {
+            return Ok(None);
+        };
+        let result = object
+            .properties
+            .get("__asyncResult")
+            .cloned()
+            .unwrap_or(JsValue::Undefined);
+        match state.as_str() {
+            "fulfilled" => Ok(Some(PromiseSettlement::Fulfilled(result))),
+            "rejected" => Ok(Some(PromiseSettlement::Rejected(result))),
+            _ => Ok(None),
+        }
+    }
+
+    fn write_promise_settlement(
+        &mut self,
+        object_id: ObjectId,
+        settlement: &PromiseSettlement,
+    ) -> Result<(), VmError> {
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        match settlement {
+            PromiseSettlement::Fulfilled(value) => {
+                object.properties.insert(
+                    "__asyncState".to_string(),
+                    JsValue::String("fulfilled".to_string()),
+                );
+                object
+                    .properties
+                    .insert("__asyncResult".to_string(), value.clone());
+            }
+            PromiseSettlement::Rejected(reason) => {
+                object.properties.insert(
+                    "__asyncState".to_string(),
+                    JsValue::String("rejected".to_string()),
+                );
+                object
+                    .properties
+                    .insert("__asyncResult".to_string(), reason.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn create_async_settled_promise(
+        &mut self,
+        fulfilled: bool,
+        result: JsValue,
+    ) -> Result<JsValue, VmError> {
+        let object_id = self.create_promise_object()?;
+        let settlement = if fulfilled {
+            PromiseSettlement::Fulfilled(result)
+        } else {
+            PromiseSettlement::Rejected(result)
+        };
+        self.write_promise_settlement(object_id, &settlement)?;
         Ok(JsValue::Object(object_id))
+    }
+
+    fn call_promise_hook(
+        &mut self,
+        hooks: &mut dyn PromiseJobHostHooks,
+        hook: PromiseHook<'_>,
+    ) -> Result<(), VmError> {
+        if self.promise_job_queue.callback_in_progress {
+            return Err(VmError::TypeError(
+                TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION,
+            ));
+        }
+        self.promise_job_queue.callback_in_progress = true;
+        let error_token = match &hook {
+            PromiseHook::Enqueue(_) => TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED,
+            PromiseHook::DrainStart(_) => TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED,
+            PromiseHook::DrainEnd(_) => TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED,
+        };
+        let callback_result = match hook {
+            PromiseHook::Enqueue(pending_jobs) => hooks.on_enqueue(pending_jobs),
+            PromiseHook::DrainStart(pending_jobs) => hooks.on_drain_start(pending_jobs),
+            PromiseHook::DrainEnd(report) => hooks.on_drain_end(report),
+        };
+        self.promise_job_queue.callback_in_progress = false;
+        if callback_result.is_err() {
+            return Err(VmError::TypeError(error_token));
+        }
+        Ok(())
+    }
+
+    fn enqueue_promise_job(
+        &mut self,
+        job: PromiseJob,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        if self.promise_job_queue.callback_in_progress {
+            return Err(VmError::TypeError(
+                TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION,
+            ));
+        }
+        self.promise_job_queue.jobs.push_back(job);
+        let pending_jobs = self.promise_job_queue.jobs.len();
+        if let Err(err) = self.call_promise_hook(hooks, PromiseHook::Enqueue(pending_jobs)) {
+            if let Some(rolled_back) = self.promise_job_queue.jobs.pop_back() {
+                self.release_job_capture_handles(rolled_back.capture_handles);
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn enqueue_promise_reaction_job(
+        &mut self,
+        settlement: PromiseSettlement,
+        reaction: PromiseReaction,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let mut capture_handles = Vec::new();
+        capture_handles.push(
+            self.register_pending_job_root_candidate(JsValue::Object(reaction.result_promise_id)),
+        );
+        match &settlement {
+            PromiseSettlement::Fulfilled(value) | PromiseSettlement::Rejected(value) => {
+                capture_handles.push(self.register_pending_job_root_candidate(value.clone()));
+            }
+        }
+        match &reaction.kind {
+            PromiseReactionKind::Then {
+                on_fulfilled,
+                on_rejected,
+            } => {
+                if let Some(handler) = on_fulfilled {
+                    capture_handles.push(self.register_pending_job_root_candidate(handler.clone()));
+                }
+                if let Some(handler) = on_rejected {
+                    capture_handles.push(self.register_pending_job_root_candidate(handler.clone()));
+                }
+            }
+            PromiseReactionKind::Finally { on_finally } => {
+                if let Some(handler) = on_finally {
+                    capture_handles.push(self.register_pending_job_root_candidate(handler.clone()));
+                }
+            }
+        }
+        self.enqueue_promise_job(
+            PromiseJob {
+                kind: PromiseJobKind::Reaction {
+                    settlement,
+                    reaction,
+                },
+                capture_handles,
+            },
+            hooks,
+        )
+    }
+
+    fn execute_promise_job(
+        &mut self,
+        job: PromiseJob,
+        realm: &Realm,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let result = match job.kind {
+            PromiseJobKind::HostCapture => Ok(()),
+            PromiseJobKind::Reaction {
+                settlement,
+                reaction,
+            } => {
+                self.execute_promise_reaction_job(settlement, reaction, realm, caller_strict, hooks)
+            }
+        };
+        self.release_job_capture_handles(job.capture_handles);
+        result
+    }
+
+    fn execute_promise_reaction_job(
+        &mut self,
+        settlement: PromiseSettlement,
+        reaction: PromiseReaction,
+        realm: &Realm,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        match reaction.kind {
+            PromiseReactionKind::Then {
+                on_fulfilled,
+                on_rejected,
+            } => self.apply_then_reaction(
+                settlement,
+                on_fulfilled,
+                on_rejected,
+                reaction.result_promise_id,
+                realm,
+                caller_strict,
+                hooks,
+            ),
+            PromiseReactionKind::Finally { on_finally } => self.apply_finally_reaction(
+                settlement,
+                on_finally,
+                reaction.result_promise_id,
+                realm,
+                caller_strict,
+                hooks,
+            ),
+        }
+    }
+
+    fn apply_then_reaction(
+        &mut self,
+        settlement: PromiseSettlement,
+        on_fulfilled: Option<JsValue>,
+        on_rejected: Option<JsValue>,
+        result_promise_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let next_settlement = match settlement {
+            PromiseSettlement::Fulfilled(value) => {
+                if let Some(handler) = on_fulfilled {
+                    match self.execute_callable(
+                        handler,
+                        Some(JsValue::Undefined),
+                        vec![value],
+                        realm,
+                        caller_strict,
+                    ) {
+                        Ok(next) => PromiseSettlement::Fulfilled(next),
+                        Err(err) => {
+                            let Some(rejection) =
+                                self.promise_rejection_from_runtime_error(err.clone())
+                            else {
+                                return Err(err);
+                            };
+                            PromiseSettlement::Rejected(rejection)
+                        }
+                    }
+                } else {
+                    PromiseSettlement::Fulfilled(value)
+                }
+            }
+            PromiseSettlement::Rejected(reason) => {
+                if let Some(handler) = on_rejected {
+                    match self.execute_callable(
+                        handler,
+                        Some(JsValue::Undefined),
+                        vec![reason],
+                        realm,
+                        caller_strict,
+                    ) {
+                        Ok(next) => PromiseSettlement::Fulfilled(next),
+                        Err(err) => {
+                            let Some(rejection) =
+                                self.promise_rejection_from_runtime_error(err.clone())
+                            else {
+                                return Err(err);
+                            };
+                            PromiseSettlement::Rejected(rejection)
+                        }
+                    }
+                } else {
+                    PromiseSettlement::Rejected(reason)
+                }
+            }
+        };
+        self.settle_promise_with_hooks(result_promise_id, next_settlement, hooks)
+    }
+
+    fn apply_finally_reaction(
+        &mut self,
+        settlement: PromiseSettlement,
+        on_finally: Option<JsValue>,
+        result_promise_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let next_settlement = if let Some(handler) = on_finally {
+            match self.execute_callable(
+                handler,
+                Some(JsValue::Undefined),
+                Vec::new(),
+                realm,
+                caller_strict,
+            ) {
+                Ok(finally_value) => {
+                    if let Some(rejection) =
+                        self.promise_rejection_from_finally_value(&finally_value)?
+                    {
+                        PromiseSettlement::Rejected(rejection)
+                    } else {
+                        settlement
+                    }
+                }
+                Err(err) => {
+                    let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone())
+                    else {
+                        return Err(err);
+                    };
+                    PromiseSettlement::Rejected(rejection)
+                }
+            }
+        } else {
+            settlement
+        };
+        self.settle_promise_with_hooks(result_promise_id, next_settlement, hooks)
+    }
+
+    fn promise_rejection_from_runtime_error(&mut self, err: VmError) -> Option<JsValue> {
+        match self.classify_vm_error(err) {
+            VmError::UncaughtException(exception) => Some(exception),
+            other => self.runtime_error_exception_value(&other),
+        }
+    }
+
+    fn promise_rejection_from_finally_value(
+        &self,
+        value: &JsValue,
+    ) -> Result<Option<JsValue>, VmError> {
+        let JsValue::Object(object_id) = value else {
+            return Ok(None);
+        };
+        let Some(settlement) = self.promise_settlement_from_object(*object_id)? else {
+            return Ok(None);
+        };
+        match settlement {
+            PromiseSettlement::Rejected(reason) => Ok(Some(reason)),
+            PromiseSettlement::Fulfilled(_) => Ok(None),
+        }
+    }
+
+    fn settle_promise_with_hooks(
+        &mut self,
+        promise_id: ObjectId,
+        settlement: PromiseSettlement,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        if self.promise_settlement_from_object(promise_id)?.is_some() {
+            return Ok(());
+        }
+        self.write_promise_settlement(promise_id, &settlement)?;
+        if let Some(record) = self.pending_promise_records.remove(&promise_id) {
+            for reaction in record.reactions {
+                self.enqueue_promise_reaction_job(settlement.clone(), reaction, hooks)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn release_job_capture_handles(&mut self, handles: Vec<u64>) {
+        for handle in handles {
+            let _ = self.release_pending_job_root_candidate(handle);
+        }
     }
 
     fn execute_uint8_array_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -10256,13 +10940,14 @@ impl Vm {
         } else {
             None
         };
-        let desc_configurable = if self.has_property_on_receiver(&descriptor, "configurable", realm)?
-        {
-            let configurable = self.get_property_from_receiver(descriptor, "configurable", realm)?;
-            Some(self.is_truthy(&configurable))
-        } else {
-            None
-        };
+        let desc_configurable =
+            if self.has_property_on_receiver(&descriptor, "configurable", realm)? {
+                let configurable =
+                    self.get_property_from_receiver(descriptor, "configurable", realm)?;
+                Some(self.is_truthy(&configurable))
+            } else {
+                None
+            };
         if (has_get || has_set) && (has_value || desc_writable.is_some()) {
             return Err(VmError::TypeError(
                 "cannot have setter/getter and value or writable",
@@ -10295,17 +10980,8 @@ impl Vm {
             Option<bool>,
         ),
     ) -> JsValue {
-        let (
-            has_value,
-            value,
-            has_get,
-            get,
-            has_set,
-            set,
-            writable,
-            enumerable,
-            configurable,
-        ) = descriptor;
+        let (has_value, value, has_get, get, has_set, set, writable, enumerable, configurable) =
+            descriptor;
         let mut entries = Vec::new();
         if *has_value {
             entries.push(("value", value.clone()));
@@ -10348,8 +11024,8 @@ impl Vm {
             desc_writable,
             desc_enumerable,
             desc_configurable,
-        ) =
-            self.parse_property_descriptor(args.get(2).cloned().unwrap_or(JsValue::Undefined), realm)?;
+        ) = self
+            .parse_property_descriptor(args.get(2).cloned().unwrap_or(JsValue::Undefined), realm)?;
         if let Some(JsValue::HostFunction(host_id)) = args.first() {
             if Some(*host_id) == self.function_prototype_host_id && property == "prototype" {
                 if has_get {
@@ -15020,6 +15696,42 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
+                    "then".to_string(),
+                    JsValue::NativeFunction(NativeFunction::PromiseThen),
+                );
+                object.property_attributes.insert(
+                    "then".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert(
+                    "catch".to_string(),
+                    JsValue::NativeFunction(NativeFunction::PromiseCatch),
+                );
+                object.property_attributes.insert(
+                    "catch".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert(
+                    "finally".to_string(),
+                    JsValue::NativeFunction(NativeFunction::PromiseFinally),
+                );
+                object.property_attributes.insert(
+                    "finally".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::PromiseConstructor),
                 );
@@ -18375,6 +19087,9 @@ impl Vm {
             NativeFunction::SetConstructor => "Set",
             NativeFunction::ProxyConstructor => "Proxy",
             NativeFunction::PromiseConstructor => "Promise",
+            NativeFunction::PromiseThen => "then",
+            NativeFunction::PromiseCatch => "catch",
+            NativeFunction::PromiseFinally => "finally",
             NativeFunction::ArrayBufferConstructor => "ArrayBuffer",
             NativeFunction::DataViewConstructor => "DataView",
             NativeFunction::Uint8ArrayConstructor => "Uint8Array",
@@ -18669,6 +19384,7 @@ impl Vm {
                 target: JsValue::NativeFunction(native),
                 method: FunctionMethod::Bind,
             }),
+            (NativeFunction::PromiseThen, "length") => JsValue::Number(2.0),
             (NativeFunction::ObjectDefineProperty, "length") => JsValue::Number(3.0),
             (NativeFunction::ObjectDefineProperties, "length")
             | (NativeFunction::ObjectGetOwnPropertyDescriptor, "length")
@@ -19721,8 +20437,11 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::{
-        GcStats, TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_SHADOW_ROOT_MISMATCH,
-        TYPE_ERROR_STALE_HANDLE, Vm, VmError,
+        GcStats, PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks,
+        TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION,
+        TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED, TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED,
+        TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED, TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN,
+        TYPE_ERROR_SHADOW_ROOT_MISMATCH, TYPE_ERROR_STALE_HANDLE, Vm, VmError,
     };
     use bytecode::{Chunk, CompiledFunction, Opcode, compile_script};
     use parser::parse_script;
@@ -19734,6 +20453,63 @@ mod tests {
             code,
             functions: vec![],
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingPromiseHooks {
+        events: Vec<String>,
+        fail_on_enqueue: bool,
+        fail_on_drain_start: bool,
+        fail_on_drain_end: bool,
+    }
+
+    impl PromiseJobHostHooks for RecordingPromiseHooks {
+        fn on_enqueue(&mut self, pending_jobs: usize) -> Result<(), VmError> {
+            self.events.push(format!("enqueue:{pending_jobs}"));
+            if self.fail_on_enqueue {
+                return Err(VmError::RuntimeIntegrity("hook enqueue failed"));
+            }
+            Ok(())
+        }
+
+        fn on_drain_start(&mut self, pending_jobs: usize) -> Result<(), VmError> {
+            self.events.push(format!("drain_start:{pending_jobs}"));
+            if self.fail_on_drain_start {
+                return Err(VmError::RuntimeIntegrity("hook drain start failed"));
+            }
+            Ok(())
+        }
+
+        fn on_drain_end(&mut self, report: &PromiseJobDrainReport) -> Result<(), VmError> {
+            self.events.push(format!(
+                "drain_end:{}:{}:{:?}",
+                report.processed, report.remaining, report.stop_reason
+            ));
+            if self.fail_on_drain_end {
+                return Err(VmError::RuntimeIntegrity("hook drain end failed"));
+            }
+            Ok(())
+        }
+    }
+
+    fn promise_state(vm: &Vm, value: JsValue) -> (String, JsValue) {
+        let JsValue::Object(object_id) = value else {
+            panic!("expected promise object");
+        };
+        let object = vm
+            .objects
+            .get(&object_id)
+            .expect("promise object should exist");
+        let state = match object.properties.get("__asyncState") {
+            Some(JsValue::String(state)) => state.clone(),
+            other => panic!("unexpected promise state marker: {other:?}"),
+        };
+        let result = object
+            .properties
+            .get("__asyncResult")
+            .cloned()
+            .unwrap_or(JsValue::Undefined);
+        (state, result)
     }
 
     #[test]
@@ -22926,8 +23702,14 @@ slots[1][2].value + slots[2][0].value;
         assert!(roots.contains(&module_root));
         assert!(roots.contains(&pending_job_root));
 
-        assert!(vm.release_module_cache_root_candidate(module_handle).is_some());
-        assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_some());
+        assert!(
+            vm.release_module_cache_root_candidate(module_handle)
+                .is_some()
+        );
+        assert!(
+            vm.release_pending_job_root_candidate(pending_job_handle)
+                .is_some()
+        );
     }
 
     #[test]
@@ -22942,8 +23724,14 @@ slots[1][2].value + slots[2][0].value;
         let pending_job_handle = vm.register_pending_job_root_candidate(pending_job_root);
 
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Undefined));
-        assert!(vm.release_module_cache_root_candidate(module_handle).is_none());
-        assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_none());
+        assert!(
+            vm.release_module_cache_root_candidate(module_handle)
+                .is_none()
+        );
+        assert!(
+            vm.release_pending_job_root_candidate(pending_job_handle)
+                .is_none()
+        );
     }
 
     #[test]
@@ -22963,7 +23751,10 @@ slots[1][2].value + slots[2][0].value;
                 .collect_garbage_if_needed(&realm, false)
                 .expect("boundary gc should run while module candidate is registered");
             assert!(vm.objects.contains_key(&module_object_id));
-            assert!(vm.release_module_cache_root_candidate(module_handle).is_some());
+            assert!(
+                vm.release_module_cache_root_candidate(module_handle)
+                    .is_some()
+            );
             let stats_after_module_release = vm
                 .collect_garbage_if_needed(&realm, false)
                 .expect("boundary gc should run after module candidate release");
@@ -22982,7 +23773,10 @@ slots[1][2].value + slots[2][0].value;
                 .collect_garbage_if_needed(&realm, true)
                 .expect("runtime gc should run while pending-job candidate is registered");
             assert!(vm.objects.contains_key(&pending_job_object_id));
-            assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_some());
+            assert!(
+                vm.release_pending_job_root_candidate(pending_job_handle)
+                    .is_some()
+            );
             let stats_after_pending_job_release = vm
                 .collect_garbage_if_needed(&realm, true)
                 .expect("runtime gc should run after pending-job candidate release");
@@ -23225,6 +24019,375 @@ slots[1][2].value + slots[2][0].value;
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn promise_job_queue_fifo_ordering() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let source = vm
+            .create_async_settled_promise(true, JsValue::Number(7.0))
+            .expect("source promise should be created");
+        let middle = vm
+            .execute_promise_then(
+                &[source, JsValue::Undefined, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("first then should enqueue");
+        let tail = vm
+            .execute_promise_then(
+                &[middle, JsValue::Undefined, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("second then should register on pending promise");
+        assert_eq!(vm.pending_promise_job_count(), 1);
+
+        let mut hooks = RecordingPromiseHooks::default();
+        let first = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect("first drain should succeed");
+        assert_eq!(
+            first,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 1,
+                stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
+            }
+        );
+        let second = vm
+            .drain_promise_jobs_with_host_hooks(8, &realm, false, &mut hooks)
+            .expect("second drain should succeed");
+        assert_eq!(
+            second,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 0,
+                stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+            }
+        );
+        assert_eq!(
+            promise_state(&vm, tail),
+            ("fulfilled".to_string(), JsValue::Number(7.0))
+        );
+        assert_eq!(
+            hooks.events,
+            vec![
+                "drain_start:1".to_string(),
+                "enqueue:1".to_string(),
+                "drain_end:1:1:BudgetExhausted".to_string(),
+                "drain_start:1".to_string(),
+                "drain_end:1:0:QueueEmpty".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn promise_job_host_contract() {
+        let realm = Realm::default();
+
+        let mut vm = Vm::default();
+        let mut hooks = RecordingPromiseHooks::default();
+        vm.enqueue_host_promise_job(JsValue::Number(1.0), &mut hooks)
+            .expect("first host enqueue should succeed");
+        vm.enqueue_host_promise_job(JsValue::Number(2.0), &mut hooks)
+            .expect("second host enqueue should succeed");
+        let report = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect("host drain should succeed");
+        assert_eq!(
+            report,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 1,
+                stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
+            }
+        );
+        assert_eq!(
+            hooks.events,
+            vec![
+                "enqueue:1".to_string(),
+                "enqueue:2".to_string(),
+                "drain_start:2".to_string(),
+                "drain_end:1:1:BudgetExhausted".to_string(),
+            ]
+        );
+
+        let mut vm = Vm::default();
+        let mut hooks = RecordingPromiseHooks {
+            fail_on_enqueue: true,
+            ..RecordingPromiseHooks::default()
+        };
+        let err = vm
+            .enqueue_host_promise_job(JsValue::Number(3.0), &mut hooks)
+            .expect_err("enqueue callback failure should be typed");
+        assert_eq!(
+            err,
+            VmError::TypeError(TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED)
+        );
+        assert_eq!(vm.pending_promise_job_count(), 0);
+
+        let mut vm = Vm::default();
+        let mut hooks = RecordingPromiseHooks {
+            fail_on_drain_start: true,
+            ..RecordingPromiseHooks::default()
+        };
+        vm.enqueue_host_promise_job(JsValue::Number(4.0), &mut RecordingPromiseHooks::default())
+            .expect("queue setup should succeed");
+        let err = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect_err("drain start callback failure should be typed");
+        assert_eq!(
+            err,
+            VmError::TypeError(TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED)
+        );
+
+        let mut vm = Vm::default();
+        vm.enqueue_host_promise_job(JsValue::Number(5.0), &mut RecordingPromiseHooks::default())
+            .expect("queue setup should succeed");
+        let mut hooks = RecordingPromiseHooks {
+            fail_on_drain_end: true,
+            ..RecordingPromiseHooks::default()
+        };
+        let err = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect_err("drain end callback failure should be typed");
+        assert_eq!(
+            err,
+            VmError::TypeError(TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED)
+        );
+
+        let mut vm = Vm::default();
+        vm.promise_job_queue.callback_in_progress = true;
+        let err = vm
+            .enqueue_host_promise_job(JsValue::Number(1.0), &mut RecordingPromiseHooks::default())
+            .expect_err("invalid callback interaction should be typed");
+        assert_eq!(
+            err,
+            VmError::TypeError(TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION)
+        );
+        vm.promise_job_queue.callback_in_progress = false;
+        vm.promise_job_queue.draining = true;
+        let err = vm
+            .drain_promise_jobs_with_host_hooks(
+                1,
+                &realm,
+                false,
+                &mut RecordingPromiseHooks::default(),
+            )
+            .expect_err("reentrant drain should be typed");
+        assert_eq!(
+            err,
+            VmError::TypeError(TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN)
+        );
+    }
+
+    #[test]
+    fn promise_then_catch_finally_queue_semantics() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let fulfilled_source = vm
+            .create_async_settled_promise(true, JsValue::Number(10.0))
+            .expect("fulfilled source should be created");
+        let rejected_source = vm
+            .create_async_settled_promise(false, JsValue::String("boom".to_string()))
+            .expect("rejected source should be created");
+        let thrower = vm.create_host_function_value(super::HostFunction::ThrowTypeError);
+        let catch_handler = vm.create_host_function_value(super::HostFunction::FunctionPrototype);
+
+        let then_result = vm
+            .execute_promise_then(
+                &[
+                    fulfilled_source.clone(),
+                    JsValue::Undefined,
+                    JsValue::Undefined,
+                ],
+                &realm,
+                false,
+            )
+            .expect("then should enqueue");
+        let catch_result = vm
+            .execute_promise_catch(&[rejected_source, catch_handler], &realm, false)
+            .expect("catch should enqueue");
+        let finally_result = vm
+            .execute_promise_finally(
+                &[fulfilled_source.clone(), JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("finally passthrough should enqueue");
+        let finally_override = vm
+            .execute_promise_finally(&[fulfilled_source, thrower], &realm, false)
+            .expect("finally override should enqueue");
+
+        assert_eq!(vm.pending_promise_job_count(), 4);
+        let report = vm
+            .drain_promise_jobs(16, &realm, false)
+            .expect("drain should succeed");
+        assert_eq!(
+            report,
+            PromiseJobDrainReport {
+                processed: 4,
+                remaining: 0,
+                stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+            }
+        );
+        assert_eq!(
+            promise_state(&vm, then_result),
+            ("fulfilled".to_string(), JsValue::Number(10.0))
+        );
+        assert_eq!(
+            promise_state(&vm, catch_result),
+            ("fulfilled".to_string(), JsValue::Undefined)
+        );
+        assert_eq!(
+            promise_state(&vm, finally_result),
+            ("fulfilled".to_string(), JsValue::Number(10.0))
+        );
+        let (state, reason) = promise_state(&vm, finally_override);
+        assert_eq!(state, "rejected".to_string());
+        let JsValue::Object(reason_id) = reason else {
+            panic!("finally override rejection should be an error object");
+        };
+        let reason_object = vm
+            .objects
+            .get(&reason_id)
+            .expect("rejection object should exist");
+        assert_eq!(
+            reason_object.properties.get("name"),
+            Some(&JsValue::String("TypeError".to_string()))
+        );
+    }
+
+    #[test]
+    fn promise_queue_exception_propagation() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let source = vm
+            .create_async_settled_promise(true, JsValue::Number(1.0))
+            .expect("source should be created");
+        let thrower = vm.create_host_function_value(super::HostFunction::ThrowTypeError);
+        let rejected = vm
+            .execute_promise_then(
+                &[source.clone(), thrower, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("throwing then should enqueue");
+        let fulfilled = vm
+            .execute_promise_then(
+                &[source, JsValue::Undefined, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("passthrough then should enqueue");
+        let report = vm
+            .drain_promise_jobs(8, &realm, false)
+            .expect("drain should continue through promise rejection");
+        assert_eq!(
+            report,
+            PromiseJobDrainReport {
+                processed: 2,
+                remaining: 0,
+                stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+            }
+        );
+        let (state_rejected, rejected_reason) = promise_state(&vm, rejected);
+        assert_eq!(state_rejected, "rejected".to_string());
+        let JsValue::Object(reason_id) = rejected_reason else {
+            panic!("rejected promise should contain error object");
+        };
+        let reason_object = vm
+            .objects
+            .get(&reason_id)
+            .expect("error object should exist");
+        assert_eq!(
+            reason_object.properties.get("name"),
+            Some(&JsValue::String("TypeError".to_string()))
+        );
+        assert_eq!(
+            promise_state(&vm, fulfilled),
+            ("fulfilled".to_string(), JsValue::Number(1.0))
+        );
+
+        let mut hooks = RecordingPromiseHooks::default();
+        vm.enqueue_promise_reaction_job(
+            super::PromiseSettlement::Fulfilled(JsValue::Number(2.0)),
+            super::PromiseReaction {
+                kind: super::PromiseReactionKind::Then {
+                    on_fulfilled: None,
+                    on_rejected: None,
+                },
+                result_promise_id: u64::MAX,
+            },
+            &mut hooks,
+        )
+        .expect("malformed reaction job should enqueue");
+        let err = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect_err("infrastructure failure should abort drain");
+        assert!(matches!(
+            err,
+            VmError::UnknownObject(_) | VmError::InvalidHandle(_) | VmError::StaleHandle(_)
+        ));
+        assert!(
+            hooks
+                .events
+                .iter()
+                .any(|event| event.contains("InfrastructureFailure"))
+        );
+    }
+
+    #[test]
+    fn promise_queue_gc_root_integrity() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let captured = vm.create_object_value();
+        let JsValue::Object(captured_id) = captured.clone() else {
+            panic!("expected captured object");
+        };
+        let source = vm
+            .create_async_settled_promise(true, captured)
+            .expect("source should be created");
+        let identity = vm.create_host_function_value(super::HostFunction::FunctionPrototype);
+        let _ = vm
+            .execute_promise_then(
+                &[source.clone(), identity, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("then should enqueue capture job");
+        let source_id = match source {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let source_object = vm
+            .objects
+            .get_mut(&source_id)
+            .expect("source promise should exist");
+        source_object
+            .properties
+            .insert("__asyncResult".to_string(), JsValue::Undefined);
+
+        let pending_stats = vm.collect_garbage(&realm);
+        assert!(vm.objects.contains_key(&captured_id));
+
+        let report = vm
+            .drain_promise_jobs(8, &realm, false)
+            .expect("drain should complete");
+        assert_eq!(
+            report,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 0,
+                stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+            }
+        );
+
+        let post_drain_stats = vm.collect_garbage(&realm);
+        assert!(post_drain_stats.reclaimed_objects > pending_stats.reclaimed_objects);
+        assert!(!vm.objects.contains_key(&captured_id));
     }
 
     #[test]
