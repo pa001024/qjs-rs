@@ -75,6 +75,10 @@ fn native_errors_subset_root() -> PathBuf {
     test262_lite_root().join("pass").join("built-ins")
 }
 
+fn json_subset_root() -> PathBuf {
+    native_errors_subset_root().join("JSON")
+}
+
 fn assert_basic_suite_expectations(summary: &test_harness::test262::SuiteSummary) {
     assert!(
         summary.discovered > 0,
@@ -116,4 +120,19 @@ fn native_errors_subset() {
         summary.failed, 0,
         "native error subset should have zero mismatches"
     );
+}
+
+#[test]
+fn json_subset() {
+    let summary =
+        run_suite(&json_subset_root(), SuiteOptions::default()).expect("json subset should run");
+    assert!(
+        summary.discovered >= 3,
+        "json subset should include parse/stringify/cycle smoke fixtures"
+    );
+    assert!(
+        summary.executed >= 3,
+        "json subset should execute all smoke fixtures"
+    );
+    assert_eq!(summary.failed, 0, "json subset should have zero mismatches");
 }
