@@ -702,7 +702,8 @@ impl Vm {
         self.host_pins.remove(&handle)
     }
 
-    fn register_module_cache_root_candidate(&mut self, value: JsValue) -> u64 {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn register_module_cache_root_candidate(&mut self, value: JsValue) -> u64 {
         let handle = self.next_module_cache_root_candidate_id;
         self.next_module_cache_root_candidate_id = self
             .next_module_cache_root_candidate_id
@@ -712,7 +713,8 @@ impl Vm {
         handle
     }
 
-    fn release_module_cache_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn release_module_cache_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
         self.module_cache_root_candidates.remove(&handle)
     }
 
@@ -720,7 +722,8 @@ impl Vm {
         self.module_cache_root_candidates.clear();
     }
 
-    fn register_pending_job_root_candidate(&mut self, value: JsValue) -> u64 {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn register_pending_job_root_candidate(&mut self, value: JsValue) -> u64 {
         let handle = self.next_pending_job_root_candidate_id;
         self.next_pending_job_root_candidate_id = self
             .next_pending_job_root_candidate_id
@@ -730,7 +733,8 @@ impl Vm {
         handle
     }
 
-    fn release_pending_job_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn release_pending_job_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
         self.pending_job_root_candidates.remove(&handle)
     }
 
@@ -881,6 +885,8 @@ impl Vm {
             roots.push(getter.clone());
         }
         roots.extend(realm.globals_values().cloned());
+        roots.extend(self.module_cache_root_candidates.values().cloned());
+        roots.extend(self.pending_job_root_candidates.values().cloned());
         roots.extend(self.template_cache.values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
         roots.extend(
@@ -22716,6 +22722,136 @@ slots[1][2].value + slots[2][0].value;
         let stats_after_unpin = vm.collect_garbage(&realm);
         assert!(stats_after_unpin.reclaimed_objects >= 1);
         assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn module_cache_root_candidate_keeps_object_alive_until_released() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object.clone() else {
+            panic!("expected object value");
+        };
+
+        let handle = vm.register_module_cache_root_candidate(object);
+        let stats_while_registered = vm.collect_garbage(&realm);
+        assert_eq!(stats_while_registered.reclaimed_objects, 0);
+        assert!(vm.objects.contains_key(&object_id));
+
+        assert!(vm.release_module_cache_root_candidate(handle).is_some());
+        let stats_after_release = vm.collect_garbage(&realm);
+        assert!(stats_after_release.reclaimed_objects > stats_while_registered.reclaimed_objects);
+        assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn pending_job_root_candidate_keeps_object_alive_until_released() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let object = vm.create_object_value();
+        let JsValue::Object(object_id) = object.clone() else {
+            panic!("expected object value");
+        };
+
+        let handle = vm.register_pending_job_root_candidate(object);
+        let stats_while_registered = vm.collect_garbage(&realm);
+        assert_eq!(stats_while_registered.reclaimed_objects, 0);
+        assert!(vm.objects.contains_key(&object_id));
+
+        assert!(vm.release_pending_job_root_candidate(handle).is_some());
+        let stats_after_release = vm.collect_garbage(&realm);
+        assert!(stats_after_release.reclaimed_objects > stats_while_registered.reclaimed_objects);
+        assert!(!vm.objects.contains_key(&object_id));
+    }
+
+    #[test]
+    fn collect_roots_includes_module_and_pending_job_candidates() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let module_root = vm.create_object_value();
+        let pending_job_root = vm.create_object_value();
+
+        let module_handle = vm.register_module_cache_root_candidate(module_root.clone());
+        let pending_job_handle = vm.register_pending_job_root_candidate(pending_job_root.clone());
+
+        let roots = vm.collect_roots(&realm);
+        assert!(roots.contains(&module_root));
+        assert!(roots.contains(&pending_job_root));
+
+        assert!(vm.release_module_cache_root_candidate(module_handle).is_some());
+        assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_some());
+    }
+
+    #[test]
+    fn execute_in_realm_clears_module_and_pending_job_candidates() {
+        let chunk = empty_chunk(vec![Opcode::LoadUndefined, Opcode::Halt]);
+        let realm = Realm::default();
+        let mut vm = Vm::default();
+
+        let module_root = vm.create_object_value();
+        let pending_job_root = vm.create_object_value();
+        let module_handle = vm.register_module_cache_root_candidate(module_root);
+        let pending_job_handle = vm.register_pending_job_root_candidate(pending_job_root);
+
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Undefined));
+        assert!(vm.release_module_cache_root_candidate(module_handle).is_none());
+        assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_none());
+    }
+
+    #[test]
+    fn candidate_roots_survive_and_reclaim_across_boundary_and_runtime_gc_paths() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        vm.enable_auto_gc(true);
+        vm.set_auto_gc_object_threshold(1);
+
+        for _ in 0..32 {
+            let module_object = vm.create_object_value();
+            let JsValue::Object(module_object_id) = module_object.clone() else {
+                panic!("expected object value");
+            };
+            let module_handle = vm.register_module_cache_root_candidate(module_object);
+            let stats_while_module_registered = vm
+                .collect_garbage_if_needed(&realm, false)
+                .expect("boundary gc should run while module candidate is registered");
+            assert!(vm.objects.contains_key(&module_object_id));
+            assert!(vm.release_module_cache_root_candidate(module_handle).is_some());
+            let stats_after_module_release = vm
+                .collect_garbage_if_needed(&realm, false)
+                .expect("boundary gc should run after module candidate release");
+            assert!(
+                stats_after_module_release.reclaimed_objects
+                    > stats_while_module_registered.reclaimed_objects
+            );
+            assert!(!vm.objects.contains_key(&module_object_id));
+
+            let pending_job_object = vm.create_object_value();
+            let JsValue::Object(pending_job_object_id) = pending_job_object.clone() else {
+                panic!("expected object value");
+            };
+            let pending_job_handle = vm.register_pending_job_root_candidate(pending_job_object);
+            let stats_while_pending_job_registered = vm
+                .collect_garbage_if_needed(&realm, true)
+                .expect("runtime gc should run while pending-job candidate is registered");
+            assert!(vm.objects.contains_key(&pending_job_object_id));
+            assert!(vm.release_pending_job_root_candidate(pending_job_handle).is_some());
+            let stats_after_pending_job_release = vm
+                .collect_garbage_if_needed(&realm, true)
+                .expect("runtime gc should run after pending-job candidate release");
+            assert!(
+                stats_after_pending_job_release.reclaimed_objects
+                    > stats_while_pending_job_registered.reclaimed_objects
+            );
+            assert!(!vm.objects.contains_key(&pending_job_object_id));
+        }
+
+        let stats = vm.gc_stats();
+        assert!(stats.boundary_collections > 0);
+        assert!(stats.runtime_collections > 0);
+        assert_eq!(
+            stats.collections_total,
+            stats.boundary_collections + stats.runtime_collections
+        );
     }
 
     #[test]
