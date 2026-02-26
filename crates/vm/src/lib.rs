@@ -416,6 +416,10 @@ pub struct Vm {
     next_host_function_id: u64,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
+    module_cache_root_candidates: BTreeMap<u64, JsValue>,
+    next_module_cache_root_candidate_id: u64,
+    pending_job_root_candidates: BTreeMap<u64, JsValue>,
+    next_pending_job_root_candidate_id: u64,
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
@@ -487,6 +491,10 @@ impl Vm {
         self.next_host_function_id = 0;
         self.host_pins.clear();
         self.next_host_pin_id = 0;
+        self.clear_module_cache_root_candidates();
+        self.next_module_cache_root_candidate_id = 0;
+        self.clear_pending_job_root_candidates();
+        self.next_pending_job_root_candidate_id = 0;
         self.object_to_string_host_id = None;
         self.global_object_id = None;
         self.object_prototype_id = None;
@@ -692,6 +700,42 @@ impl Vm {
 
     pub fn unpin_host_value(&mut self, handle: u64) -> Option<JsValue> {
         self.host_pins.remove(&handle)
+    }
+
+    fn register_module_cache_root_candidate(&mut self, value: JsValue) -> u64 {
+        let handle = self.next_module_cache_root_candidate_id;
+        self.next_module_cache_root_candidate_id = self
+            .next_module_cache_root_candidate_id
+            .checked_add(1)
+            .expect("module root candidate handle overflow");
+        self.module_cache_root_candidates.insert(handle, value);
+        handle
+    }
+
+    fn release_module_cache_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
+        self.module_cache_root_candidates.remove(&handle)
+    }
+
+    fn clear_module_cache_root_candidates(&mut self) {
+        self.module_cache_root_candidates.clear();
+    }
+
+    fn register_pending_job_root_candidate(&mut self, value: JsValue) -> u64 {
+        let handle = self.next_pending_job_root_candidate_id;
+        self.next_pending_job_root_candidate_id = self
+            .next_pending_job_root_candidate_id
+            .checked_add(1)
+            .expect("pending job root candidate handle overflow");
+        self.pending_job_root_candidates.insert(handle, value);
+        handle
+    }
+
+    fn release_pending_job_root_candidate(&mut self, handle: u64) -> Option<JsValue> {
+        self.pending_job_root_candidates.remove(&handle)
+    }
+
+    fn clear_pending_job_root_candidates(&mut self) {
+        self.pending_job_root_candidates.clear();
     }
 
     pub fn collect_garbage(&mut self, realm: &Realm) -> GcStats {
