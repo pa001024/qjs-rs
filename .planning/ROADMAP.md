@@ -11,7 +11,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [x] **Phase 1: Semantic Core Closure** - Close eval/scope/control-flow/descriptor semantic gaps in executable behavior. (completed 2026-02-25)
-- [ ] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees.
+- [x] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees. (completed 2026-02-26)
 - [ ] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks.
 - [ ] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling.
 - [ ] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets.
@@ -39,7 +39,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   1. GC root scanning includes stack frames, globals, module-cache candidates, and pending job queue references.
   2. Invalid or stale object handles are rejected with deterministic typed runtime errors.
   3. Stress scenarios with repeated allocation/collection do not produce stale-handle panics or undefined behavior.
-**Plans**: 2/3 plans complete
+**Plans**: 3/3 plans complete
 
 ### Phase 3: Promise Job Queue Semantics
 **Goal**: Promise settlement and microtask execution are deterministic and safely controllable by embedding hosts.
@@ -98,7 +98,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Semantic Core Closure | 3/3 | Complete    | 2026-02-25 |
-| 2. Runtime Safety and Root Integrity | 2/3 | In Progress | - |
+| 2. Runtime Safety and Root Integrity | 3/3 | Complete | 2026-02-26 |
 | 3. Promise Job Queue Semantics | 0/TBD | Not started | - |
 | 4. ES Module Lifecycle | 0/TBD | Not started | - |
 | 5. Core Builtins Baseline | 0/TBD | Not started | - |

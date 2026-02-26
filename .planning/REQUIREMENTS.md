@@ -17,7 +17,7 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 ### Runtime and Memory
 
 - [x] **MEM-01**: GC root management covers stack frames, globals, module cache candidates, and job queue references without stale-handle use.
-- [ ] **MEM-02**: Runtime rejects invalid/stale object handles with deterministic typed errors instead of undefined behavior or panics.
+- [x] **MEM-02**: Runtime rejects invalid/stale object handles with deterministic typed errors instead of undefined behavior or panics.
 - [ ] **MEM-03**: GC telemetry reports stable baseline and stress profiles with documented thresholds and regression checks.
 
 ### Async and Modules
@@ -80,7 +80,7 @@ Roadmap mapping table. Updated during roadmap creation.
 | SEM-03 | Phase 1 | Complete |
 | SEM-04 | Phase 1 | Complete |
 | MEM-01 | Phase 2 | Complete |
-| MEM-02 | Phase 2 | Pending |
+| MEM-02 | Phase 2 | Complete |
 | MEM-03 | Phase 7 | Pending |
 | ASY-01 | Phase 3 | Pending |
 | ASY-02 | Phase 3 | Pending |
@@ -103,4 +103,4 @@ Roadmap mapping table. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-02-25*
-*Last updated: 2026-02-26 after 02-01 recovery completion*
+*Last updated: 2026-02-26 after 02-03 recovery completion*
