@@ -12,7 +12,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 
 - [x] **Phase 1: Semantic Core Closure** - Close eval/scope/control-flow/descriptor semantic gaps in executable behavior. (completed 2026-02-25)
 - [x] **Phase 2: Runtime Safety and Root Integrity** - Stabilize GC roots and stale-handle safety guarantees. (completed 2026-02-26)
-- [ ] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks.
+- [x] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks. (completed 2026-02-26)
 - [ ] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling.
 - [ ] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets.
 - [ ] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts.
@@ -49,7 +49,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
   1. `then/catch/finally` chains execute in deterministic microtask order across nested resolution/rejection paths.
   2. Embedding code can enqueue and drain Promise jobs through runtime host callbacks without violating runtime safety.
   3. Promise handler exceptions propagate through the queue with reproducible error behavior.
-**Plans**: TBD
+**Plans**: 3/3 plans complete
 
 ### Phase 4: ES Module Lifecycle
 **Goal**: ES module execution supports parse, instantiate, and evaluate with stable caching and cycle behavior.
@@ -99,7 +99,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 |-------|----------------|--------|-----------|
 | 1. Semantic Core Closure | 3/3 | Complete    | 2026-02-25 |
 | 2. Runtime Safety and Root Integrity | 3/3 | Complete    | 2026-02-26 |
-| 3. Promise Job Queue Semantics | 0/TBD | Not started | - |
+| 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
 | 4. ES Module Lifecycle | 0/TBD | Not started | - |
 | 5. Core Builtins Baseline | 0/TBD | Not started | - |
 | 6. Collection and RegExp Semantics | 0/TBD | Not started | - |
