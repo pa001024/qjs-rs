@@ -7,9 +7,11 @@ use boa_engine::{Context as BoaContext, Source};
 use builtins::install_baseline;
 use bytecode::compile_script;
 use contract::{
-    AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult, EngineKind,
-    EnvironmentInfo, GUARD_CHECKSUM_MODE, ReproducibilityMetadata, RequiredCaseDefinition,
-    SCHEMA_VERSION, TimingMode, help_text, parse_cli_args, required_case_catalog,
+    AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult,
+    ComparatorConfig, ComparatorTarget, EngineAvailabilityStatus, EngineExecutionMetadata,
+    EngineKind, EnvironmentInfo, GUARD_CHECKSUM_MODE, ReproducibilityMetadata,
+    RequiredCaseDefinition, SCHEMA_VERSION, TimingMode, help_text, parse_cli_args,
+    required_case_catalog,
 };
 use parser::parse_script;
 use runtime::JsValue;
@@ -180,7 +182,11 @@ struct NodePayload<'a> {
     iterations: usize,
 }
 
-fn run_nodejs_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
+fn run_nodejs_eval_per_iteration(
+    script: &str,
+    iterations: usize,
+    comparator: &ComparatorTarget,
+) -> Result<SampleMeasurement> {
     let payload = serde_json::to_string(&NodePayload { script, iterations })?;
     let node_snippet = r#"
 const payload = JSON.parse(process.argv[1]);
@@ -202,7 +208,11 @@ process.stdout.write(JSON.stringify({
   guard,
 }));
 "#;
-    let output = Command::new("node")
+    let mut command = Command::new(comparator.executable());
+    if let Some(workdir) = &comparator.workdir {
+        command.current_dir(workdir);
+    }
+    let output = command
         .arg("-e")
         .arg(node_snippet)
         .arg(payload)
@@ -220,7 +230,11 @@ process.stdout.write(JSON.stringify({
     })
 }
 
-fn run_quickjs_c_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
+fn run_quickjs_c_eval_per_iteration(
+    script: &str,
+    iterations: usize,
+    comparator: &ComparatorTarget,
+) -> Result<SampleMeasurement> {
     let script_json = serde_json::to_string(script)?;
     let quickjs_code = format!(
         "const code = {script_json};\
@@ -236,15 +250,15 @@ fn run_quickjs_c_eval_per_iteration(script: &str, iterations: usize) -> Result<S
          console.log(JSON.stringify({{ elapsed_ms: end - start, guard }}));"
     );
 
-    let output = Command::new("wsl.exe")
-        .arg("bash")
-        .arg("-lc")
-        .arg(format!(
-            "cd /mnt/d/dev/QuickJS && ./qjs -e {}",
-            shell_escape_single(&quickjs_code)
-        ))
+    let mut command = Command::new(comparator.executable());
+    if let Some(workdir) = &comparator.workdir {
+        command.current_dir(workdir);
+    }
+    let output = command
+        .arg("-e")
+        .arg(quickjs_code)
         .output()
-        .context("failed to execute quickjs-c benchmark via WSL")?;
+        .context("failed to execute quickjs-c benchmark")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -268,14 +282,17 @@ fn run_engine_case(
     timing_mode: TimingMode,
     script: &str,
     iterations: usize,
+    comparators: &ComparatorConfig,
 ) -> Result<SampleMeasurement> {
     let adapter_mode = timing_mode_for_engine(engine, timing_mode);
     match adapter_mode {
         TimingMode::EvalPerIteration => match engine {
             EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(script, iterations),
             EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
-            EngineKind::NodeJs => run_nodejs_eval_per_iteration(script, iterations),
-            EngineKind::QuickJsC => run_quickjs_c_eval_per_iteration(script, iterations),
+            EngineKind::NodeJs => run_nodejs_eval_per_iteration(script, iterations, &comparators.node),
+            EngineKind::QuickJsC => {
+                run_quickjs_c_eval_per_iteration(script, iterations, &comparators.quickjs)
+            }
         },
     }
 }
@@ -346,24 +363,214 @@ fn summarize(
     }
 }
 
-fn collect_environment() -> EnvironmentInfo {
+fn preflight_engine_execution(comparators: &ComparatorConfig) -> Result<Vec<EngineExecutionMetadata>> {
+    let mut metadata = vec![
+        EngineExecutionMetadata {
+            engine: EngineKind::QjsRs.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "in-process".to_string(),
+            path: None,
+            workdir: None,
+            version: Some(format!("qjs-rs {}", env!("CARGO_PKG_VERSION"))),
+            reason: None,
+        },
+        EngineExecutionMetadata {
+            engine: EngineKind::BoaEngine.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "in-process".to_string(),
+            path: None,
+            workdir: None,
+            version: Some("boa-engine (in-process)".to_string()),
+            reason: None,
+        },
+    ];
+
+    metadata.push(preflight_external_engine(
+        EngineKind::NodeJs,
+        &comparators.node,
+        &["--version"],
+    ));
+    metadata.push(preflight_external_engine(
+        EngineKind::QuickJsC,
+        &comparators.quickjs,
+        &["--version", "-v", "-h"],
+    ));
+
+    if comparators.strict_external {
+        let missing = metadata
+            .iter()
+            .filter(|entry| {
+                matches!(entry.engine.as_str(), "nodejs" | "quickjs-c")
+                    && entry.status != EngineAvailabilityStatus::Available
+            })
+            .map(|entry| {
+                format!(
+                    "{} ({})",
+                    entry.engine,
+                    entry
+                        .reason
+                        .as_deref()
+                        .unwrap_or("comparator preflight failed")
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            bail!(
+                "strict comparator preflight failed: {}. Configure comparators with --node-path/--quickjs-path (or env BENCH_* overrides) before rerunning.",
+                missing.join("; ")
+            );
+        }
+    }
+
+    Ok(metadata)
+}
+
+fn preflight_external_engine(
+    engine: EngineKind,
+    comparator: &ComparatorTarget,
+    version_args: &[&str],
+) -> EngineExecutionMetadata {
+    let executable = comparator.executable();
+    let resolved_path = resolve_executable_path(comparator);
+    let workdir = comparator.workdir.as_ref().map(|dir| dir.display().to_string());
+    let mut last_reason: Option<String> = None;
+
+    for version_arg in version_args {
+        let mut command = Command::new(&executable);
+        if let Some(workdir) = &comparator.workdir {
+            command.current_dir(workdir);
+        }
+        command.arg(version_arg);
+        match command.output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if output.status.success() {
+                    let version = first_non_empty_line(&stdout, &stderr)
+                        .unwrap_or_else(|| "version probe succeeded".to_string());
+                    return EngineExecutionMetadata {
+                        engine: engine.as_str().to_string(),
+                        status: EngineAvailabilityStatus::Available,
+                        command: comparator.command.clone(),
+                        path: resolved_path.clone(),
+                        workdir: workdir.clone(),
+                        version: Some(version),
+                        reason: None,
+                    };
+                }
+
+                if let Some(version) = first_non_empty_line(&stdout, &stderr) {
+                    if version.to_ascii_lowercase().contains("quickjs")
+                        || version.to_ascii_lowercase().contains("node")
+                    {
+                        return EngineExecutionMetadata {
+                            engine: engine.as_str().to_string(),
+                            status: EngineAvailabilityStatus::Available,
+                            command: comparator.command.clone(),
+                            path: resolved_path.clone(),
+                            workdir: workdir.clone(),
+                            version: Some(version),
+                            reason: None,
+                        };
+                    }
+                }
+
+                last_reason = Some(format!(
+                    "probe `{}` exited with status {}",
+                    version_arg,
+                    output
+                        .status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+            Err(error) => {
+                let status = if error.kind() == std::io::ErrorKind::NotFound {
+                    EngineAvailabilityStatus::Missing
+                } else {
+                    EngineAvailabilityStatus::Unsupported
+                };
+                return EngineExecutionMetadata {
+                    engine: engine.as_str().to_string(),
+                    status,
+                    command: comparator.command.clone(),
+                    path: resolved_path,
+                    workdir,
+                    version: None,
+                    reason: Some(error.to_string()),
+                };
+            }
+        }
+    }
+
+    EngineExecutionMetadata {
+        engine: engine.as_str().to_string(),
+        status: EngineAvailabilityStatus::Unsupported,
+        command: comparator.command.clone(),
+        path: resolved_path,
+        workdir,
+        version: None,
+        reason: last_reason.or_else(|| Some("no successful version probe".to_string())),
+    }
+}
+
+fn first_non_empty_line(primary: &str, fallback: &str) -> Option<String> {
+    primary
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .or_else(|| fallback.lines().find(|line| !line.trim().is_empty()))
+        .map(|line| line.trim().to_string())
+}
+
+fn resolve_executable_path(comparator: &ComparatorTarget) -> Option<String> {
+    if let Some(path) = &comparator.path {
+        return Some(path.display().to_string());
+    }
+
+    let lookup_program = if cfg!(target_os = "windows") {
+        "where"
+    } else {
+        "which"
+    };
+    Command::new(lookup_program)
+        .arg(&comparator.command)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+        })
+}
+
+fn engine_available(engine: EngineKind, metadata: &[EngineExecutionMetadata]) -> bool {
+    metadata
+        .iter()
+        .find(|entry| entry.engine == engine.as_str())
+        .map(|entry| entry.status == EngineAvailabilityStatus::Available)
+        .unwrap_or(false)
+}
+
+fn collect_environment(engine_metadata: &[EngineExecutionMetadata]) -> EnvironmentInfo {
     let rustc = Command::new("rustc")
         .arg("--version")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
-    let node = Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unavailable".to_string());
-    let quickjs_c = Command::new("wsl.exe")
-        .arg("bash")
-        .arg("-lc")
-        .arg("cd /mnt/d/dev/QuickJS && ./qjs -h | head -n 1")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unavailable".to_string());
+    let node = engine_metadata
+        .iter()
+        .find(|entry| entry.engine == EngineKind::NodeJs.as_str())
+        .and_then(|entry| entry.version.clone())
+        .unwrap_or_else(|| "unavailable".to_string());
+    let quickjs_c = engine_metadata
+        .iter()
+        .find(|entry| entry.engine == EngineKind::QuickJsC.as_str())
+        .and_then(|entry| entry.version.clone())
+        .unwrap_or_else(|| "unavailable".to_string());
     EnvironmentInfo {
         os: env::consts::OS.to_string(),
         arch: env::consts::ARCH.to_string(),
@@ -431,10 +638,6 @@ fn generated_at_utc() -> String {
     }
 }
 
-fn shell_escape_single(input: &str) -> String {
-    format!("'{}'", input.replace('\'', "'\"'\"'"))
-}
-
 #[cfg(test)]
 #[test]
 fn adapter_timing_mode_is_uniform() {
@@ -462,6 +665,68 @@ fn adapter_checksum_parity_is_value_based() {
     assert_ne!(checksum, 4.0, "checksum must not degrade to loop counters");
 }
 
+#[cfg(test)]
+#[test]
+fn comparator_preflight_metadata_is_complete() {
+    let engine_status = vec![
+        EngineExecutionMetadata {
+            engine: EngineKind::QjsRs.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "in-process".to_string(),
+            path: None,
+            workdir: None,
+            version: Some("qjs-rs test".to_string()),
+            reason: None,
+        },
+        EngineExecutionMetadata {
+            engine: EngineKind::BoaEngine.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "in-process".to_string(),
+            path: None,
+            workdir: None,
+            version: Some("boa test".to_string()),
+            reason: None,
+        },
+        EngineExecutionMetadata {
+            engine: EngineKind::NodeJs.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "node".to_string(),
+            path: Some("/usr/bin/node".to_string()),
+            workdir: Some("/tmp".to_string()),
+            version: Some("v22.0.0".to_string()),
+            reason: None,
+        },
+        EngineExecutionMetadata {
+            engine: EngineKind::QuickJsC.as_str().to_string(),
+            status: EngineAvailabilityStatus::Available,
+            command: "qjs".to_string(),
+            path: Some("/opt/quickjs/qjs".to_string()),
+            workdir: Some("/opt/quickjs".to_string()),
+            version: Some("QuickJS version 2026-01-01".to_string()),
+            reason: None,
+        },
+    ];
+
+    let reproducibility = ReproducibilityMetadata::for_run_with_engine_status(
+        contract::RunProfile::CiLinux,
+        Path::new("target/benchmarks/engine-comparison.ci-linux.json"),
+        true,
+        engine_status,
+    );
+
+    assert!(reproducibility.comparator_strict_mode);
+    let node = reproducibility
+        .engine_status
+        .iter()
+        .find(|entry| entry.engine == EngineKind::NodeJs.as_str())
+        .expect("node metadata should be present");
+    assert_eq!(node.status, EngineAvailabilityStatus::Available);
+    assert_eq!(node.command, "node");
+    assert_eq!(node.path.as_deref(), Some("/usr/bin/node"));
+    assert_eq!(node.workdir.as_deref(), Some("/tmp"));
+    assert!(node.version.is_some());
+}
+
 fn main() -> Result<()> {
     let cli = match parse_cli_args(env::args().skip(1))? {
         CliParseResult::Help => {
@@ -472,16 +737,28 @@ fn main() -> Result<()> {
     };
 
     let cases = benchmark_cases();
+    let preflight_metadata = preflight_engine_execution(&cli.comparators)?;
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
+        cli.comparators.strict_external,
         cases.len(),
         EngineKind::all_required().len(),
         cli.config.samples,
         cli.config.iterations
     );
+    for entry in &preflight_metadata {
+        println!(
+            "  comparator {:<10} status={:?} command={} path={} version={}",
+            entry.engine,
+            entry.status,
+            entry.command,
+            entry.path.as_deref().unwrap_or("<resolved-at-runtime>"),
+            entry.version.as_deref().unwrap_or("<unavailable>")
+        );
+    }
 
     let mut case_reports = Vec::with_capacity(cases.len());
     for case in &cases {
@@ -490,16 +767,30 @@ fn main() -> Result<()> {
         let mut engines = BTreeMap::new();
 
         for engine in EngineKind::all_required() {
+            if !engine_available(engine, &preflight_metadata) {
+                println!(
+                    "  - {:<11} skipped (comparator unavailable; see reproducibility.engine_status)",
+                    engine.as_str()
+                );
+                continue;
+            }
             let warmup = run_engine_case(
                 engine,
                 cli.timing_mode,
                 &wrapped,
                 cli.config.warmup_iterations,
+                &cli.comparators,
             )?;
 
             let mut samples = Vec::with_capacity(cli.config.samples);
             for _ in 0..cli.config.samples {
-                let sample = run_engine_case(engine, cli.timing_mode, &wrapped, cli.config.iterations)?;
+                let sample = run_engine_case(
+                    engine,
+                    cli.timing_mode,
+                    &wrapped,
+                    cli.config.iterations,
+                    &cli.comparators,
+                )?;
                 samples.push(sample);
             }
             let summary = summarize(samples, cli.config.iterations, warmup.guard_checksum);
@@ -527,8 +818,13 @@ fn main() -> Result<()> {
         run_profile: cli.run_profile,
         timing_mode: cli.timing_mode,
         config: cli.config.clone(),
-        reproducibility: ReproducibilityMetadata::for_run(cli.run_profile, &cli.output),
-        environment: collect_environment(),
+        reproducibility: ReproducibilityMetadata::for_run_with_engine_status(
+            cli.run_profile,
+            &cli.output,
+            cli.comparators.strict_external,
+            preflight_metadata.clone(),
+        ),
+        environment: collect_environment(&preflight_metadata),
         aggregate: aggregate(&case_reports),
         cases: case_reports,
     };

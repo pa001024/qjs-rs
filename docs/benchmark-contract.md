@@ -57,15 +57,18 @@ Supported run profiles:
 
 - `local-dev`
   - Defaults: `iterations=200`, `samples=7`, `warmup_iterations=3`
+  - Comparator strict mode default: `false` (missing external comparators are recorded and skipped)
   - Intended for local tuning and quick comparability checks
 - `ci-linux`
   - Defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`
+  - Comparator strict mode default: `true` (missing external comparators fail fast)
   - Intended for reproducible CI/non-regression baselines
 
 Rules:
 
 - CLI overrides (`--iterations`, `--samples`, `--warmup-iterations`) are allowed.
 - Effective values MUST be serialized in `config` for reproducibility.
+- Comparator strictness can be overridden with `--strict-comparators` / `--allow-missing-comparators` or `BENCH_STRICT_COMPARATORS`.
 
 ## 5. Timing Mode Enum
 
@@ -98,6 +101,7 @@ Rules:
 - `required_engines`: canonical engine list
 - `required_case_ids`: canonical case ID list
 - `output_policy.default_path`: contract default artifact path for the selected profile
+- `comparator_strict_mode`: effective strict/lenient comparator policy for this run
 - `engine_status`: per-engine availability/unsupported diagnostics
 
 `environment` MUST include at least:
@@ -109,7 +113,44 @@ Rules:
 - `node`
 - `quickjs_c`
 
+`engine_status[*]` MUST include reproducibility-ready execution metadata:
+
+- `command`: resolved command label used for preflight/run
+- `path`: resolved executable path (when discoverable)
+- `workdir`: adapter working directory (when configured)
+- `version`: captured during preflight for available engines
+- `status`: `available` | `missing` | `unsupported`
+- `reason`: mandatory for non-`available`
+
 ## 8. Compatibility Rules
 
 - Contract drift in envelope fields, required engine IDs, required case IDs, or run-profile enum requires explicit code review and test updates.
 - Any breaking envelope change requires a new schema version (for example `bench.v2`).
+
+## 9. Comparator Command/Path/Workdir Controls
+
+At minimum, `nodejs` and `quickjs-c` comparator adapters MUST support command/path/workdir overrides.
+
+CLI controls:
+
+- `--node-command`, `--node-path`, `--node-workdir`
+- `--quickjs-command`, `--quickjs-path`, `--quickjs-workdir`
+
+Environment controls:
+
+- `BENCH_NODE_COMMAND`, `BENCH_NODE_PATH`, `BENCH_NODE_WORKDIR`
+- `BENCH_QUICKJS_COMMAND`, `BENCH_QUICKJS_PATH`, `BENCH_QUICKJS_WORKDIR`
+
+Precedence (highest → lowest):
+
+1. CLI `--*-path`
+2. ENV `BENCH_*_PATH`
+3. CLI `--*-command`
+4. ENV `BENCH_*_COMMAND`
+5. Built-in default (`node` / `qjs`)
+
+Workdir precedence:
+
+1. CLI `--*-workdir`
+2. ENV `BENCH_*_WORKDIR`
+3. No working-directory override
