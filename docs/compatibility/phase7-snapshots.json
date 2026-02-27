@@ -1,0 +1,167 @@
+{
+  "runs": [
+    {
+      "commit": "650bd57",
+      "milestone": "v1.0",
+      "phase": "07",
+      "profiles": {
+        "baseline": {
+          "command": "cargo run -p test-harness --bin test262-run -- --root D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite --profile baseline --allow-failures --show-gc --json D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\baseline.json --markdown D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\baseline.md",
+          "json": "target/compatibility/phase07-v1.0-20260227T083551Z-650bd57/baseline.json",
+          "markdown": "target/compatibility/phase07-v1.0-20260227T083551Z-650bd57/baseline.md",
+          "summary": {
+            "discovered": 45,
+            "executed": 45,
+            "failed": 0,
+            "gc": {
+              "boundary_collections": 0,
+              "collections_total": 0,
+              "mark_duration_ns": 0,
+              "reclaimed_objects": 0,
+              "runtime_collections": 0,
+              "sweep_duration_ns": 0
+            },
+            "gc_drift": {
+              "anomaly_streak": 0,
+              "blocking_failures": [],
+              "investigation_required": false,
+              "status": "ok",
+              "warning_failures": []
+            },
+            "passed": 45,
+            "skipped": 0,
+            "skipped_categories": {
+              "fixture_file": 0,
+              "flag_async": 0,
+              "flag_module": 0,
+              "flag_only_strict": 0,
+              "requires_feature": 0,
+              "requires_harness_global_262": 0,
+              "requires_includes": 0
+            }
+          }
+        },
+        "stress": {
+          "command": "cargo run -p test-harness --bin test262-run -- --root D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite --profile stress --allow-failures --auto-gc --auto-gc-threshold 1 --runtime-gc --runtime-gc-interval 1 --show-gc --expect-gc-baseline D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite\\gc-guard.baseline --json D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\stress.json --markdown D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\stress.md",
+          "json": "target/compatibility/phase07-v1.0-20260227T083551Z-650bd57/stress.json",
+          "markdown": "target/compatibility/phase07-v1.0-20260227T083551Z-650bd57/stress.md",
+          "summary": {
+            "discovered": 45,
+            "executed": 45,
+            "failed": 3,
+            "gc": {
+              "boundary_collections": 38,
+              "collections_total": 46212,
+              "mark_duration_ns": 7248100,
+              "reclaimed_objects": 1750,
+              "runtime_collections": 46174,
+              "sweep_duration_ns": 105300
+            },
+            "gc_drift": {
+              "anomaly_streak": 0,
+              "blocking_failures": [],
+              "investigation_required": false,
+              "status": "ok",
+              "warning_failures": []
+            },
+            "passed": 42,
+            "skipped": 0,
+            "skipped_categories": {
+              "fixture_file": 0,
+              "flag_async": 0,
+              "flag_module": 0,
+              "flag_only_strict": 0,
+              "requires_feature": 0,
+              "requires_harness_global_262": 0,
+              "requires_includes": 0
+            }
+          }
+        }
+      },
+      "run_id": "phase07-v1.0-20260227T083551Z-650bd57",
+      "timestamp_utc": "2026-02-27T08:35:51Z"
+    },
+    {
+      "commit": "650bd57",
+      "milestone": "v1.0",
+      "phase": "07",
+      "profiles": {
+        "baseline": {
+          "command": "cargo run -p test-harness --bin test262-run -- --root D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite --profile baseline --allow-failures --show-gc --json D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083706Z-650bd57\\baseline.json --markdown D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083706Z-650bd57\\baseline.md --previous-summary D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\baseline.json",
+          "json": "target/compatibility/phase07-v1.0-20260227T083706Z-650bd57/baseline.json",
+          "markdown": "target/compatibility/phase07-v1.0-20260227T083706Z-650bd57/baseline.md",
+          "summary": {
+            "discovered": 45,
+            "executed": 45,
+            "failed": 0,
+            "gc": {
+              "boundary_collections": 0,
+              "collections_total": 0,
+              "mark_duration_ns": 0,
+              "reclaimed_objects": 0,
+              "runtime_collections": 0,
+              "sweep_duration_ns": 0
+            },
+            "gc_drift": {
+              "anomaly_streak": 0,
+              "blocking_failures": [],
+              "investigation_required": false,
+              "status": "ok",
+              "warning_failures": []
+            },
+            "passed": 45,
+            "skipped": 0,
+            "skipped_categories": {
+              "fixture_file": 0,
+              "flag_async": 0,
+              "flag_module": 0,
+              "flag_only_strict": 0,
+              "requires_feature": 0,
+              "requires_harness_global_262": 0,
+              "requires_includes": 0
+            }
+          }
+        },
+        "stress": {
+          "command": "cargo run -p test-harness --bin test262-run -- --root D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite --profile stress --allow-failures --auto-gc --auto-gc-threshold 1 --runtime-gc --runtime-gc-interval 1 --show-gc --expect-gc-baseline D:\\dev\\qjs-rs\\crates\\test-harness\\fixtures\\test262-lite\\gc-guard.baseline --json D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083706Z-650bd57\\stress.json --markdown D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083706Z-650bd57\\stress.md --previous-summary D:\\dev\\qjs-rs\\target\\compatibility\\phase07-v1.0-20260227T083551Z-650bd57\\stress.json",
+          "json": "target/compatibility/phase07-v1.0-20260227T083706Z-650bd57/stress.json",
+          "markdown": "target/compatibility/phase07-v1.0-20260227T083706Z-650bd57/stress.md",
+          "summary": {
+            "discovered": 45,
+            "executed": 45,
+            "failed": 3,
+            "gc": {
+              "boundary_collections": 38,
+              "collections_total": 46212,
+              "mark_duration_ns": 7662400,
+              "reclaimed_objects": 1750,
+              "runtime_collections": 46174,
+              "sweep_duration_ns": 101400
+            },
+            "gc_drift": {
+              "anomaly_streak": 0,
+              "blocking_failures": [],
+              "investigation_required": false,
+              "status": "ok",
+              "warning_failures": []
+            },
+            "passed": 42,
+            "skipped": 0,
+            "skipped_categories": {
+              "fixture_file": 0,
+              "flag_async": 0,
+              "flag_module": 0,
+              "flag_only_strict": 0,
+              "requires_feature": 0,
+              "requires_harness_global_262": 0,
+              "requires_includes": 0
+            }
+          }
+        }
+      },
+      "run_id": "phase07-v1.0-20260227T083706Z-650bd57",
+      "timestamp_utc": "2026-02-27T08:37:06Z"
+    }
+  ],
+  "schema_version": 1
+}

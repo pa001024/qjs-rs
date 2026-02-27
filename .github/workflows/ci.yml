@@ -56,3 +56,12 @@ jobs:
 
       - name: GC Guard Stress Gate
         run: cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --auto-gc --auto-gc-threshold 1 --runtime-gc --runtime-gc-interval 1 --show-gc --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline
+
+      - name: Compatibility Snapshot Manifest
+        run: |
+          python .github/scripts/run_compat_snapshot.py \
+            --phase 07 \
+            --milestone v1.0 \
+            --manifest docs/compatibility/phase7-snapshots.json \
+            --output-dir target/compatibility \
+            --allow-dirty
