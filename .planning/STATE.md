@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 08
 current_phase_name: Async and Module Builtins Integration Closure
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-02-27T10:12:50.295Z"
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-02-27T10:38:03.073Z"
 last_activity: 2026-02-27
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 24
-  completed_plans: 22
-  percent: 92
+  completed_plans: 23
+  percent: 96
 ---
 
 # Project State
@@ -31,12 +31,12 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Current Phase:** 08
 **Current Phase Name:** Async and Module Builtins Integration Closure
 **Total Phases:** 9
-**Current Plan:** 2
+**Current Plan:** 3
 **Total Plans in Phase:** 3
 **Status:** Ready to execute
 **Last Activity:** 2026-02-27
-**Last Activity Description:** Phase 08 Plan 01 complete
-**Progress:** [█████████░] 92%
+**Last Activity Description:** Phase 08 Plan 02 complete
+**Progress:** [██████████] 96%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 06 P02 | 9 min | 3 tasks | 2 files |
 | Phase 06 P03 | 5 min | 3 tasks | 8 files |
 | Phase 08 P01 | 4 min | 3 tasks | 5 files |
+| Phase 08 P02 | 5 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -107,6 +108,8 @@ Recent decisions affecting current work:
 - [Phase 08]: Install baseline globals in module realm initialization via builtins::install_baseline before module chunk execution. — Module realm should match script baseline globals to close Promise availability parity without adding path-specific shims.
 - [Phase 08]: Keep ModuleLifecycle typed error mapping unchanged and only close missing-builtin behavior. — Plan acceptance requires deterministic ParseFailed/EvaluateFailed/host contract tokens to remain stable after wiring changes.
 - [Phase 08]: Use constructor-based Promise + then chain in parity tests to validate supported async surface deterministically. — Promise.resolve is not yet implemented in this runtime surface, so constructor-based chaining is the correct deterministic parity probe.
+- [Phase 08]: Execute module chunks on the active VM and seed module scope from realm globals so module-originated Promise jobs stay visible to shared host hooks. — Module jobs created during evaluation must land in the same queue observed by host enqueue/drain hooks to directly evidence ASY-01 and ASY-02.
+- [Phase 08]: Validate module async behavior through host-driven drain reports/events instead of relying on synchronous export snapshots. — Queue stop reasons and hook events are the deterministic contract surface for module-path Promise semantics; export snapshots cannot observe queued microtasks.
 
 ### Pending Todos
 
@@ -118,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-27T10:12:50.292Z
-**Stopped at:** Completed 08-01-PLAN.md
+**Last session:** 2026-02-27T10:37:20.522Z
+**Stopped at:** Completed 08-02-PLAN.md
 **Resume file:** None

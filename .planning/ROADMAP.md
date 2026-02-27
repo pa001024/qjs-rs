@@ -119,7 +119,7 @@ Plans:
 **Plans**: 3 plans
 Plans:
 - [x] 08-01-PLAN.md - Reproduce and fix module realm baseline builtin availability gaps.
-- [ ] 08-02-PLAN.md - Add module-path Promise queue regression matrix for ASY-01/ASY-02 semantics.
+- [x] 08-02-PLAN.md - Add module-path Promise queue regression matrix for ASY-01/ASY-02 semantics.
 - [ ] 08-03-PLAN.md - Wire Phase 8 E2E module+async gates into harness/CI with deterministic evidence output.
 
 ### Phase 9: Verification Traceability Normalization
@@ -147,5 +147,5 @@ Plans:
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
-| 8. Async and Module Builtins Integration Closure | 1/3 | In Progress | - |
+| 8. Async and Module Builtins Integration Closure | 2/3 | In Progress | - |
 | 9. Verification Traceability Normalization | 0/2 | Not started | - |
