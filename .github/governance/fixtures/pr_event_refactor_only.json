@@ -1,0 +1,8 @@
+{
+  "action": "opened",
+  "pull_request": {
+    "number": 43,
+    "title": "refactor(vm): internal cleanup without semantic changes",
+    "body": "## Governance Checklist\n\n- [ ] Runtime-observable behavior changed\n- [x] Refactor-only (no semantic change)\n- Positive test reference: N/A\n- Boundary/error test reference: N/A\n- Refactor-only evidence: Refactor-only path; behavior unchanged and existing suite retained.\n- Exception record id: refactor-only-example\n"
+  }
+}

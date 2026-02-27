@@ -1,0 +1,8 @@
+{
+  "action": "opened",
+  "pull_request": {
+    "number": 42,
+    "title": "feat(vm): tighten runtime-observable behavior checks",
+    "body": "## Governance Checklist\n\n- [x] Runtime-observable behavior changed\n- [ ] Refactor-only (no semantic change)\n- Positive test reference: `crates/test-harness/tests/test262_lite.rs::runs_test262_lite_suite_in_default_profile`\n- Boundary/error test reference: `crates/test-harness/tests/test262_lite.rs::runs_test262_lite_suite_in_stress_profile`\n- Refactor-only evidence: N/A\n- Exception record id: N/A\n"
+  }
+}

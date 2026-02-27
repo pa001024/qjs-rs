@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "exceptions": [
+    {
+      "id": "refactor-only-example",
+      "reason": "Template fixture record for refactor-only governance validation.",
+      "impact_scope": "ci-governance",
+      "owner": "runtime-team",
+      "expires_at": "2099-12-31",
+      "rollback_condition": "Remove once fixture-based self-tests are replaced by live repository-specific records."
+    }
+  ]
+}
