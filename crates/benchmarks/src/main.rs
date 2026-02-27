@@ -1,0 +1,441 @@
+#![forbid(unsafe_code)]
+
+mod contract;
+
+use anyhow::{Context as _, Result, anyhow, bail};
+use boa_engine::{Context as BoaContext, Source};
+use builtins::install_baseline;
+use bytecode::compile_script;
+use contract::{
+    AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult, EngineKind,
+    EnvironmentInfo, ReproducibilityMetadata, RequiredCaseDefinition, SCHEMA_VERSION, help_text,
+    parse_cli_args, required_case_catalog,
+};
+use parser::parse_script;
+use runtime::JsValue;
+use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
+use vm::Vm;
+
+#[derive(Debug, Clone)]
+struct BenchCase {
+    definition: &'static RequiredCaseDefinition,
+    script_body: &'static str,
+}
+
+fn benchmark_cases() -> Vec<BenchCase> {
+    required_case_catalog()
+        .iter()
+        .map(|definition| BenchCase {
+            definition,
+            script_body: script_body_for_case(definition.id),
+        })
+        .collect()
+}
+
+fn script_body_for_case(case_id: &str) -> &'static str {
+    match case_id {
+        "arith-loop" => {
+            r#"
+let acc = 0;
+for (let i = 0; i < 4000; i = i + 1) {
+  acc = acc + i * 3 - i;
+}
+return acc;
+"#
+        }
+        "fib-iterative" => {
+            r#"
+function fib(n) {
+  let a = 0;
+  let b = 1;
+  for (let i = 0; i < n; i = i + 1) {
+    let t = a + b;
+    a = b;
+    b = t;
+  }
+  return a;
+}
+return fib(220);
+"#
+        }
+        "array-sum" => {
+            r#"
+let arr = [];
+for (let i = 0; i < 2000; i = i + 1) {
+  arr[i] = i;
+}
+let sum = 0;
+for (let i = 0; i < arr.length; i = i + 1) {
+  sum = sum + arr[i];
+}
+return sum;
+"#
+        }
+        "json-roundtrip" => {
+            r#"
+let value = {
+  alpha: 1,
+  beta: [1, 2, 3, 4],
+  gamma: { x: "hello", y: 42 }
+};
+let text = JSON.stringify(value);
+let parsed = JSON.parse(text);
+return parsed.gamma.y + parsed.beta[1];
+"#
+        }
+        unknown => panic!("contract case id without script body: {unknown}"),
+    }
+}
+
+fn wrap_script(script_body: &str) -> String {
+    format!("(() => {{ {script_body} }})()")
+}
+
+fn extract_number(value: &JsValue) -> f64 {
+    match value {
+        JsValue::Number(n) => *n,
+        JsValue::Bool(true) => 1.0,
+        JsValue::Bool(false) => 0.0,
+        _ => 0.0,
+    }
+}
+
+fn run_qjs_rs(script: &str, iterations: usize) -> Result<f64> {
+    let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
+    let chunk = compile_script(&parsed);
+    let mut realm = runtime::Realm::default();
+    install_baseline(&mut realm);
+    let mut vm = Vm::default();
+
+    let start = Instant::now();
+    let mut checksum = 0.0;
+    for _ in 0..iterations {
+        let value = vm
+            .execute_in_realm(&chunk, &realm)
+            .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
+        checksum += extract_number(&value);
+    }
+    std::hint::black_box(checksum);
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn run_boa_engine(script: &str, iterations: usize) -> Result<f64> {
+    let mut context = BoaContext::default();
+    let start = Instant::now();
+    let mut checksum = 0usize;
+    for _ in 0..iterations {
+        let value = context
+            .eval(Source::from_bytes(script.as_bytes()))
+            .map_err(|e| anyhow!("boa-engine error: {e}"))?;
+        std::hint::black_box(&value);
+        checksum = checksum.wrapping_add(1);
+    }
+    std::hint::black_box(checksum);
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeResult {
+    elapsed_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct NodePayload<'a> {
+    script: &'a str,
+    iterations: usize,
+}
+
+fn run_nodejs(script: &str, iterations: usize) -> Result<f64> {
+    let payload = serde_json::to_string(&NodePayload { script, iterations })?;
+    let node_snippet = r#"
+const payload = JSON.parse(process.argv[1]);
+const code = payload.script;
+const iterations = payload.iterations;
+let guard = 0;
+const start = process.hrtime.bigint();
+for (let i = 0; i < iterations; i += 1) {
+  const value = eval(code);
+  if (typeof value === "number") {
+    guard += value;
+  } else if (value === true) {
+    guard += 1;
+  }
+}
+const end = process.hrtime.bigint();
+process.stdout.write(JSON.stringify({
+  elapsed_ms: Number(end - start) / 1e6,
+  guard,
+}));
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_snippet)
+        .arg(payload)
+        .output()
+        .context("failed to execute nodejs benchmark")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("nodejs benchmark failed: {stderr}");
+    }
+    let result: NodeResult = serde_json::from_slice(&output.stdout)
+        .context("failed to parse nodejs benchmark output (expected json with elapsed_ms field)")?;
+    Ok(result.elapsed_ms)
+}
+
+fn run_quickjs_c(script: &str, iterations: usize) -> Result<f64> {
+    let script_json = serde_json::to_string(script)?;
+    let quickjs_code = format!(
+        "const code = {script_json};\
+         const iterations = {iterations};\
+         let guard = 0;\
+         const start = Date.now();\
+         for (let i = 0; i < iterations; i++) {{\
+           const value = eval(code);\
+           if (typeof value === 'number') guard += value;\
+           else if (value === true) guard += 1;\
+         }}\
+         const end = Date.now();\
+         console.log(JSON.stringify({{ elapsed_ms: end - start, guard }}));"
+    );
+
+    let output = Command::new("wsl.exe")
+        .arg("bash")
+        .arg("-lc")
+        .arg(format!(
+            "cd /mnt/d/dev/QuickJS && ./qjs -e {}",
+            shell_escape_single(&quickjs_code)
+        ))
+        .output()
+        .context("failed to execute quickjs-c benchmark via WSL")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("quickjs-c benchmark failed: stdout={stdout}; stderr={stderr}");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.contains("elapsed_ms"))
+        .ok_or_else(|| anyhow!("quickjs-c output missing elapsed_ms json: {stdout}"))?;
+    let result: NodeResult = serde_json::from_str(line)?;
+    Ok(result.elapsed_ms)
+}
+
+fn run_engine_case(engine: EngineKind, script: &str, iterations: usize) -> Result<f64> {
+    match engine {
+        EngineKind::QjsRs => run_qjs_rs(script, iterations),
+        EngineKind::BoaEngine => run_boa_engine(script, iterations),
+        EngineKind::NodeJs => run_nodejs(script, iterations),
+        EngineKind::QuickJsC => run_quickjs_c(script, iterations),
+    }
+}
+
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let len = sorted.len();
+    if len % 2 == 1 {
+        sorted[len / 2]
+    } else {
+        (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
+    }
+}
+
+fn stddev(values: &[f64], mean: f64) -> f64 {
+    let variance = values
+        .iter()
+        .map(|value| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    variance.sqrt()
+}
+
+fn summarize(samples: Vec<f64>, iterations: usize) -> CaseEngineResult {
+    let mean_ms = samples.iter().sum::<f64>() / samples.len() as f64;
+    let median_ms = median(&samples);
+    let min_ms = samples.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_ms = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let stddev_ms = stddev(&samples, mean_ms);
+    let throughput_ops_per_sec = (iterations as f64) / (mean_ms / 1000.0);
+    CaseEngineResult {
+        sample_ms: samples,
+        mean_ms,
+        median_ms,
+        min_ms,
+        max_ms,
+        stddev_ms,
+        throughput_ops_per_sec,
+    }
+}
+
+fn collect_environment() -> EnvironmentInfo {
+    let rustc = Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unavailable".to_string());
+    let quickjs_c = Command::new("wsl.exe")
+        .arg("bash")
+        .arg("-lc")
+        .arg("cd /mnt/d/dev/QuickJS && ./qjs -h | head -n 1")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unavailable".to_string());
+    EnvironmentInfo {
+        os: env::consts::OS.to_string(),
+        arch: env::consts::ARCH.to_string(),
+        cpu_parallelism: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+        rustc,
+        node,
+        quickjs_c,
+    }
+}
+
+fn aggregate(cases: &[CaseReport]) -> AggregateReport {
+    let mut totals: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for case in cases {
+        for (engine, result) in &case.engines {
+            totals
+                .entry(engine.clone())
+                .or_default()
+                .push(result.mean_ms);
+        }
+    }
+
+    let mean_ms_per_engine = totals
+        .iter()
+        .map(|(engine, values)| {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            (engine.clone(), mean)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let qjs_baseline = mean_ms_per_engine
+        .get("qjs-rs")
+        .copied()
+        .unwrap_or(1.0)
+        .max(0.000_001);
+    let relative_to_qjs_rs = mean_ms_per_engine
+        .iter()
+        .map(|(engine, mean)| (engine.clone(), qjs_baseline / *mean))
+        .collect::<BTreeMap<_, _>>();
+
+    AggregateReport {
+        mean_ms_per_engine,
+        relative_to_qjs_rs,
+    }
+}
+
+fn ensure_output_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn generated_at_utc() -> String {
+    let output = Command::new("node")
+        .arg("-e")
+        .arg("console.log(new Date().toISOString())")
+        .output();
+    match output {
+        Ok(result) if result.status.success() => {
+            String::from_utf8_lossy(&result.stdout).trim().to_string()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn shell_escape_single(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+fn main() -> Result<()> {
+    let cli = match parse_cli_args(env::args().skip(1))? {
+        CliParseResult::Help => {
+            println!("{}", help_text());
+            return Ok(());
+        }
+        CliParseResult::Run(args) => args,
+    };
+
+    let cases = benchmark_cases();
+
+    println!(
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration: {} cases x {} engines x {} samples ({} iterations/sample)",
+        SCHEMA_VERSION,
+        cli.run_profile.as_str(),
+        cases.len(),
+        EngineKind::all_required().len(),
+        cli.config.samples,
+        cli.config.iterations
+    );
+
+    let mut case_reports = Vec::with_capacity(cases.len());
+    for case in &cases {
+        println!("[case:{}] {}", case.definition.id, case.definition.title);
+        let wrapped = wrap_script(case.script_body);
+        let mut engines = BTreeMap::new();
+
+        for engine in EngineKind::all_required() {
+            let _ = run_engine_case(engine, &wrapped, cli.config.warmup_iterations)?;
+
+            let mut samples = Vec::with_capacity(cli.config.samples);
+            for _ in 0..cli.config.samples {
+                let elapsed_ms = run_engine_case(engine, &wrapped, cli.config.iterations)?;
+                samples.push(elapsed_ms);
+            }
+            let summary = summarize(samples, cli.config.iterations);
+            println!(
+                "  - {:<11} mean={:>8.3}ms median={:>8.3}ms throughput={:>10.2} ops/s",
+                engine.as_str(),
+                summary.mean_ms,
+                summary.median_ms,
+                summary.throughput_ops_per_sec
+            );
+            engines.insert(engine.as_str().to_string(), summary);
+        }
+
+        case_reports.push(CaseReport {
+            id: case.definition.id.to_string(),
+            title: case.definition.title.to_string(),
+            description: case.definition.description.to_string(),
+            engines,
+        });
+    }
+
+    let report = BenchmarkReport {
+        schema_version: SCHEMA_VERSION,
+        generated_at_utc: generated_at_utc(),
+        run_profile: cli.run_profile,
+        timing_mode: cli.timing_mode,
+        config: cli.config.clone(),
+        reproducibility: ReproducibilityMetadata::for_run(cli.run_profile, &cli.output),
+        environment: collect_environment(),
+        aggregate: aggregate(&case_reports),
+        cases: case_reports,
+    };
+
+    ensure_output_dir(&cli.output)?;
+    fs::write(&cli.output, serde_json::to_vec_pretty(&report)?)?;
+    println!("Wrote benchmark results to {}", cli.output.display());
+    Ok(())
+}
