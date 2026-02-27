@@ -11,6 +11,52 @@ struct GcExpectations {
     reclaimed_objects_min: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunProfile {
+    Baseline,
+    Stress,
+}
+
+impl RunProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Stress => "stress",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GcDriftStatus {
+    Ok,
+    Warning,
+    Blocking,
+}
+
+impl GcDriftStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Blocking => "blocking",
+        }
+    }
+
+    fn is_anomaly(self) -> bool {
+        !matches!(self, Self::Ok)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GcDriftReport {
+    profile: RunProfile,
+    status: GcDriftStatus,
+    warning_failures: Vec<String>,
+    blocking_failures: Vec<String>,
+    anomaly_streak: usize,
+    investigation_required: bool,
+}
+
 fn merge_gc_expectations(base: GcExpectations, overrides: GcExpectations) -> GcExpectations {
     GcExpectations {
         collections_total_min: overrides
@@ -169,9 +215,174 @@ fn check_gc_expectations(summary: &SuiteSummary, expectations: &GcExpectations) 
     failures
 }
 
+fn parse_profile(raw: &str) -> Result<RunProfile, String> {
+    match raw {
+        "baseline" => Ok(RunProfile::Baseline),
+        "stress" => Ok(RunProfile::Stress),
+        other => Err(format!(
+            "invalid --profile value: {other} (expected baseline|stress)"
+        )),
+    }
+}
+
+fn derive_warning_expectations(blocking: &GcExpectations) -> GcExpectations {
+    let relaxed_ratio = blocking
+        .runtime_ratio_min
+        .map(|value| (value - 0.05).max(0.0));
+    GcExpectations {
+        collections_total_min: blocking
+            .collections_total_min
+            .map(|value| value.saturating_sub(value / 10)),
+        runtime_collections_min: blocking
+            .runtime_collections_min
+            .map(|value| value.saturating_sub(value / 10)),
+        runtime_ratio_min: relaxed_ratio,
+        reclaimed_objects_min: blocking
+            .reclaimed_objects_min
+            .map(|value| value.saturating_sub(value / 10)),
+    }
+}
+
+fn parse_previous_gc_drift(path: &Path) -> Option<(GcDriftStatus, usize)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let gc_drift_start = raw.find("\"gc_drift\"")?;
+    let gc_section = &raw[gc_drift_start..];
+    let status_key = "\"status\": \"";
+    let status_index = gc_section.find(status_key)?;
+    let status_start = status_index + status_key.len();
+    let status_end = gc_section[status_start..].find('"')?;
+    let status_raw = &gc_section[status_start..status_start + status_end];
+    let status = match status_raw {
+        "ok" => GcDriftStatus::Ok,
+        "warning" => GcDriftStatus::Warning,
+        "blocking" => GcDriftStatus::Blocking,
+        _ => return None,
+    };
+
+    let streak_key = "\"anomaly_streak\":";
+    let streak_index = gc_section.find(streak_key)?;
+    let streak_start = streak_index + streak_key.len();
+    let streak_slice = gc_section[streak_start..].trim_start();
+    let streak_text = streak_slice
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    let anomaly_streak = streak_text.parse::<usize>().ok()?;
+    Some((status, anomaly_streak))
+}
+
+fn classify_gc_drift(
+    summary: &SuiteSummary,
+    profile: RunProfile,
+    blocking_expectations: &GcExpectations,
+    previous: Option<(GcDriftStatus, usize)>,
+) -> GcDriftReport {
+    let mut warning_failures = Vec::new();
+    let mut blocking_failures = Vec::new();
+
+    match profile {
+        RunProfile::Baseline => {
+            if summary.gc.collections_total
+                != summary.gc.runtime_collections + summary.gc.boundary_collections
+            {
+                blocking_failures.push(format!(
+                    "expected gc.collections_total == gc.runtime_collections + gc.boundary_collections, got {} != {} + {}",
+                    summary.gc.collections_total,
+                    summary.gc.runtime_collections,
+                    summary.gc.boundary_collections
+                ));
+            }
+            if summary.gc.collections_total > 0 {
+                warning_failures.push(format!(
+                    "baseline profile expected gc.collections_total == 0, got {}",
+                    summary.gc.collections_total
+                ));
+            }
+            if summary.gc.runtime_collections > 0 {
+                blocking_failures.push(format!(
+                    "baseline profile expected gc.runtime_collections == 0, got {}",
+                    summary.gc.runtime_collections
+                ));
+            }
+        }
+        RunProfile::Stress => {
+            blocking_failures = check_gc_expectations(summary, blocking_expectations);
+            let warning_expectations = derive_warning_expectations(blocking_expectations);
+            warning_failures = check_gc_expectations(summary, &warning_expectations);
+        }
+    }
+
+    let status = if !blocking_failures.is_empty() {
+        GcDriftStatus::Blocking
+    } else if !warning_failures.is_empty() {
+        GcDriftStatus::Warning
+    } else {
+        GcDriftStatus::Ok
+    };
+
+    let (previous_status, previous_streak) = previous.unwrap_or((GcDriftStatus::Ok, 0));
+    let anomaly_streak = if status.is_anomaly() {
+        if previous_status.is_anomaly() {
+            previous_streak + 1
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+    let investigation_required = anomaly_streak >= 2;
+
+    GcDriftReport {
+        profile,
+        status,
+        warning_failures,
+        blocking_failures,
+        anomaly_streak,
+        investigation_required,
+    }
+}
+
+fn escape_json_string(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn format_string_array_json(items: &[String], indent: &str) -> String {
+    if items.is_empty() {
+        return "[]".to_string();
+    }
+    let mut output = String::new();
+    output.push_str("[\n");
+    for (index, item) in items.iter().enumerate() {
+        output.push_str(indent);
+        output.push('"');
+        output.push_str(&escape_json_string(item));
+        output.push('"');
+        if index + 1 != items.len() {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+    output.push_str(&indent[..indent.len().saturating_sub(2)]);
+    output.push(']');
+    output
+}
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut root: Option<PathBuf> = None;
+    let mut profile: Option<RunProfile> = None;
+    let mut previous_summary_path: Option<PathBuf> = None;
     let mut max_cases: Option<usize> = None;
     let mut fail_fast = false;
     let mut allow_failures = false;
@@ -195,6 +406,20 @@ fn main() {
                     panic!("--root requires a path argument");
                 });
                 root = Some(PathBuf::from(value));
+            }
+            "--profile" => {
+                i += 1;
+                let value = args.get(i).unwrap_or_else(|| {
+                    panic!("--profile requires a value (baseline|stress)");
+                });
+                profile = Some(parse_profile(value).unwrap_or_else(|err| panic!("{err}")));
+            }
+            "--previous-summary" => {
+                i += 1;
+                let value = args.get(i).unwrap_or_else(|| {
+                    panic!("--previous-summary requires a path argument");
+                });
+                previous_summary_path = Some(PathBuf::from(value));
             }
             "--max-cases" => {
                 i += 1;
@@ -332,6 +557,16 @@ fn main() {
         .map(|path| load_gc_expectations(path).unwrap_or_else(|err| panic!("{err}")))
         .unwrap_or_default();
     let gc_expectations = merge_gc_expectations(baseline_expectations, gc_expectation_overrides);
+    let profile = profile.unwrap_or_else(|| {
+        if runtime_gc || auto_gc {
+            RunProfile::Stress
+        } else {
+            RunProfile::Baseline
+        }
+    });
+    let previous_gc_drift = previous_summary_path
+        .as_deref()
+        .and_then(parse_previous_gc_drift);
 
     let options = SuiteOptions {
         max_cases,
@@ -346,23 +581,29 @@ fn main() {
     let summary = run_suite(&root, options).unwrap_or_else(|err| {
         panic!("suite run failed: {err}");
     });
+    let gc_drift = classify_gc_drift(&summary, profile, &gc_expectations, previous_gc_drift);
 
-    print_summary(&summary, show_gc);
-    let gc_guard_failures = check_gc_expectations(&summary, &gc_expectations);
-    if !gc_guard_failures.is_empty() {
-        println!("gc guard failures:");
-        for failure in &gc_guard_failures {
+    print_summary(&summary, &gc_drift, show_gc);
+    if !gc_drift.warning_failures.is_empty() {
+        println!("gc warning drift signals:");
+        for failure in &gc_drift.warning_failures {
+            println!("  - {failure}");
+        }
+    }
+    if !gc_drift.blocking_failures.is_empty() {
+        println!("gc blocking drift signals:");
+        for failure in &gc_drift.blocking_failures {
             println!("  - {failure}");
         }
     }
 
     if let Some(path) = json {
-        write_summary_json(&path, &summary).unwrap_or_else(|err| {
+        write_summary_json(&path, &summary, &gc_drift).unwrap_or_else(|err| {
             panic!("failed to write json summary to {}: {err}", path.display());
         });
     }
     if let Some(path) = markdown {
-        write_summary_markdown(&path, &summary).unwrap_or_else(|err| {
+        write_summary_markdown(&path, &summary, &gc_drift).unwrap_or_else(|err| {
             panic!(
                 "failed to write markdown summary to {}: {err}",
                 path.display()
@@ -379,24 +620,34 @@ fn main() {
         }
     }
 
-    if (summary.failed > 0 && !allow_failures) || !gc_guard_failures.is_empty() {
+    if (summary.failed > 0 && !allow_failures)
+        || gc_drift.status == GcDriftStatus::Blocking
+        || gc_drift.investigation_required
+    {
         std::process::exit(1);
     }
 }
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>] [--markdown <path>] [--show-failures N] [--auto-gc] [--auto-gc-threshold N] [--runtime-gc] [--runtime-gc-interval N] [--show-gc] [--expect-gc-baseline <path>] [--expect-collections-total-min N] [--expect-runtime-collections-min N] [--expect-runtime-ratio-min R] [--expect-reclaimed-objects-min N]"
+        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--profile baseline|stress] [--previous-summary <path>] [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>] [--markdown <path>] [--show-failures N] [--auto-gc] [--auto-gc-threshold N] [--runtime-gc] [--runtime-gc-interval N] [--show-gc] [--expect-gc-baseline <path>] [--expect-collections-total-min N] [--expect-runtime-collections-min N] [--expect-runtime-ratio-min R] [--expect-reclaimed-objects-min N]"
     );
 }
 
-fn print_summary(summary: &SuiteSummary, show_gc: bool) {
+fn print_summary(summary: &SuiteSummary, gc_drift: &GcDriftReport, show_gc: bool) {
     println!("test262 summary:");
+    println!("  profile:    {}", gc_drift.profile.as_str());
     println!("  discovered: {}", summary.discovered);
     println!("  executed:   {}", summary.executed);
     println!("  skipped:    {}", summary.skipped);
     println!("  passed:     {}", summary.passed);
     println!("  failed:     {}", summary.failed);
+    println!("  gc_drift_status: {}", gc_drift.status.as_str());
+    println!("  anomaly_streak: {}", gc_drift.anomaly_streak);
+    println!(
+        "  investigation_required: {}",
+        gc_drift.investigation_required
+    );
     println!("  skipped categories:");
     for (name, value) in skip_category_rows(summary) {
         println!("    {name}: {value}");
@@ -439,9 +690,12 @@ fn skip_category_rows(summary: &SuiteSummary) -> [(&'static str, usize); 7] {
     ]
 }
 
-fn format_summary_json(summary: &SuiteSummary) -> String {
+fn format_summary_json(summary: &SuiteSummary, gc_drift: &GcDriftReport) -> String {
+    let warning_failures = format_string_array_json(&gc_drift.warning_failures, "      ");
+    let blocking_failures = format_string_array_json(&gc_drift.blocking_failures, "      ");
     format!(
-        "{{\n  \"discovered\": {},\n  \"executed\": {},\n  \"skipped\": {},\n  \"passed\": {},\n  \"failed\": {},\n  \"skipped_categories\": {{\n    \"fixture_file\": {},\n    \"flag_module\": {},\n    \"flag_only_strict\": {},\n    \"flag_async\": {},\n    \"requires_includes\": {},\n    \"requires_feature\": {},\n    \"requires_harness_global_262\": {}\n  }},\n  \"gc\": {{\n    \"collections_total\": {},\n    \"boundary_collections\": {},\n    \"runtime_collections\": {},\n    \"reclaimed_objects\": {},\n    \"mark_duration_ns\": {},\n    \"sweep_duration_ns\": {}\n  }}\n}}\n",
+        "{{\n  \"profile\": \"{}\",\n  \"discovered\": {},\n  \"executed\": {},\n  \"skipped\": {},\n  \"passed\": {},\n  \"failed\": {},\n  \"skipped_categories\": {{\n    \"fixture_file\": {},\n    \"flag_module\": {},\n    \"flag_only_strict\": {},\n    \"flag_async\": {},\n    \"requires_includes\": {},\n    \"requires_feature\": {},\n    \"requires_harness_global_262\": {}\n  }},\n  \"gc\": {{\n    \"collections_total\": {},\n    \"boundary_collections\": {},\n    \"runtime_collections\": {},\n    \"reclaimed_objects\": {},\n    \"mark_duration_ns\": {},\n    \"sweep_duration_ns\": {}\n  }},\n  \"gc_drift\": {{\n    \"status\": \"{}\",\n    \"anomaly_streak\": {},\n    \"investigation_required\": {},\n    \"warning_failures\": {},\n    \"blocking_failures\": {}\n  }}\n}}\n",
+        gc_drift.profile.as_str(),
         summary.discovered,
         summary.executed,
         summary.skipped,
@@ -459,13 +713,35 @@ fn format_summary_json(summary: &SuiteSummary) -> String {
         summary.gc.runtime_collections,
         summary.gc.reclaimed_objects,
         summary.gc.mark_duration_ns,
-        summary.gc.sweep_duration_ns
+        summary.gc.sweep_duration_ns,
+        gc_drift.status.as_str(),
+        gc_drift.anomaly_streak,
+        gc_drift.investigation_required,
+        warning_failures,
+        blocking_failures
     )
 }
 
-fn format_summary_markdown(summary: &SuiteSummary) -> String {
+fn format_summary_markdown(summary: &SuiteSummary, gc_drift: &GcDriftReport) -> String {
     let mut markdown = String::new();
     markdown.push_str("# Test262 Summary Report\n\n");
+    markdown.push_str("## Profile\n\n");
+    markdown.push_str("| Field | Value |\n");
+    markdown.push_str("| --- | --- |\n");
+    markdown.push_str(&format!("| profile | {} |\n", gc_drift.profile.as_str()));
+    markdown.push_str(&format!(
+        "| gc_drift_status | {} |\n",
+        gc_drift.status.as_str()
+    ));
+    markdown.push_str(&format!(
+        "| anomaly_streak | {} |\n",
+        gc_drift.anomaly_streak
+    ));
+    markdown.push_str(&format!(
+        "| investigation_required | {} |\n\n",
+        gc_drift.investigation_required
+    ));
+
     markdown.push_str("## Totals\n\n");
     markdown.push_str("| Metric | Value |\n");
     markdown.push_str("| --- | ---: |\n");
@@ -510,15 +786,40 @@ fn format_summary_markdown(summary: &SuiteSummary) -> String {
         "| sweep_duration_ns | {} |\n",
         summary.gc.sweep_duration_ns
     ));
+    markdown.push_str("\n## GC Drift Signals\n\n");
+    markdown.push_str("### Warning\n\n");
+    if gc_drift.warning_failures.is_empty() {
+        markdown.push_str("- none\n");
+    } else {
+        for failure in &gc_drift.warning_failures {
+            markdown.push_str(&format!("- {failure}\n"));
+        }
+    }
+    markdown.push_str("\n### Blocking\n\n");
+    if gc_drift.blocking_failures.is_empty() {
+        markdown.push_str("- none\n");
+    } else {
+        for failure in &gc_drift.blocking_failures {
+            markdown.push_str(&format!("- {failure}\n"));
+        }
+    }
     markdown
 }
 
-fn write_summary_json(path: &Path, summary: &SuiteSummary) -> Result<(), String> {
-    write_output(path, &format_summary_json(summary))
+fn write_summary_json(
+    path: &Path,
+    summary: &SuiteSummary,
+    gc_drift: &GcDriftReport,
+) -> Result<(), String> {
+    write_output(path, &format_summary_json(summary, gc_drift))
 }
 
-fn write_summary_markdown(path: &Path, summary: &SuiteSummary) -> Result<(), String> {
-    write_output(path, &format_summary_markdown(summary))
+fn write_summary_markdown(
+    path: &Path,
+    summary: &SuiteSummary,
+    gc_drift: &GcDriftReport,
+) -> Result<(), String> {
+    write_output(path, &format_summary_markdown(summary, gc_drift))
 }
 
 fn write_output(path: &Path, content: &str) -> Result<(), String> {
@@ -533,8 +834,9 @@ fn write_output(path: &Path, content: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GcExpectations, check_gc_expectations, format_summary_json, format_summary_markdown,
-        merge_gc_expectations, parse_gc_expectations_str, skip_category_rows,
+        GcDriftReport, GcDriftStatus, GcExpectations, RunProfile, check_gc_expectations,
+        classify_gc_drift, format_summary_json, format_summary_markdown, merge_gc_expectations,
+        parse_gc_expectations_str, skip_category_rows,
     };
     use test_harness::test262::{SuiteSkipCategories, SuiteSummary};
 
@@ -568,6 +870,17 @@ mod tests {
             requires_harness_global_262: 2,
         };
         summary
+    }
+
+    fn ok_gc_drift(profile: RunProfile) -> GcDriftReport {
+        GcDriftReport {
+            profile,
+            status: GcDriftStatus::Ok,
+            warning_failures: Vec::new(),
+            blocking_failures: Vec::new(),
+            anomaly_streak: 0,
+            investigation_required: false,
+        }
     }
 
     #[test]
@@ -717,8 +1030,9 @@ reclaimed_objects_min=1
     #[test]
     fn json_report_schema_includes_phase7_required_fields() {
         let summary = summary_with_phase7_counts();
-        let json = format_summary_json(&summary);
+        let json = format_summary_json(&summary, &ok_gc_drift(RunProfile::Stress));
 
+        assert!(json.contains("\"profile\": \"stress\""));
         assert!(json.contains("\"discovered\": 22"));
         assert!(json.contains("\"executed\": 14"));
         assert!(json.contains("\"failed\": 1"));
@@ -730,13 +1044,18 @@ reclaimed_objects_min=1
         assert!(json.contains("\"requires_includes\": 1"));
         assert!(json.contains("\"requires_feature\": 1"));
         assert!(json.contains("\"requires_harness_global_262\": 2"));
+        assert!(json.contains("\"gc_drift\": {"));
+        assert!(json.contains("\"status\": \"ok\""));
     }
 
     #[test]
     fn markdown_report_contains_deterministic_phase7_sections() {
         let summary = summary_with_phase7_counts();
-        let markdown = format_summary_markdown(&summary);
+        let markdown = format_summary_markdown(&summary, &ok_gc_drift(RunProfile::Baseline));
 
+        let profile_index = markdown
+            .find("## Profile")
+            .expect("markdown should include Profile heading");
         let totals_index = markdown
             .find("## Totals")
             .expect("markdown should include Totals heading");
@@ -746,9 +1065,11 @@ reclaimed_objects_min=1
         let gc_index = markdown
             .find("## GC Summary")
             .expect("markdown should include GC Summary heading");
+        assert!(profile_index < totals_index);
         assert!(totals_index < skipped_index);
         assert!(skipped_index < gc_index);
 
+        assert!(markdown.contains("| profile | baseline |"));
         assert!(markdown.contains("| discovered | 22 |"));
         assert!(markdown.contains("| executed | 14 |"));
         assert!(markdown.contains("| failed | 1 |"));
@@ -765,5 +1086,34 @@ reclaimed_objects_min=1
             .map(|(_, count)| count)
             .sum();
         assert_eq!(summary.skipped, categorized_total);
+    }
+
+    #[test]
+    fn classify_gc_drift_marks_baseline_runtime_gc_as_blocking() {
+        let mut summary = summary_with_gc(1, 1, 0);
+        summary.gc.boundary_collections = 0;
+        let drift = classify_gc_drift(
+            &summary,
+            RunProfile::Baseline,
+            &GcExpectations::default(),
+            None,
+        );
+        assert_eq!(drift.status, GcDriftStatus::Blocking);
+        assert_eq!(drift.anomaly_streak, 1);
+        assert!(!drift.blocking_failures.is_empty());
+    }
+
+    #[test]
+    fn classify_gc_drift_requires_investigation_on_consecutive_anomalies() {
+        let summary = summary_with_gc(1, 0, 0);
+        let drift = classify_gc_drift(
+            &summary,
+            RunProfile::Baseline,
+            &GcExpectations::default(),
+            Some((GcDriftStatus::Warning, 1)),
+        );
+        assert_eq!(drift.status, GcDriftStatus::Warning);
+        assert_eq!(drift.anomaly_streak, 2);
+        assert!(drift.investigation_required);
     }
 }
