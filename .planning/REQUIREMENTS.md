@@ -18,7 +18,7 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 
 - [x] **MEM-01**: GC root management covers stack frames, globals, module cache candidates, and job queue references without stale-handle use.
 - [x] **MEM-02**: Runtime rejects invalid/stale object handles with deterministic typed errors instead of undefined behavior or panics.
-- [ ] **MEM-03**: GC telemetry reports stable baseline and stress profiles with documented thresholds and regression checks.
+- [x] **MEM-03**: GC telemetry reports stable baseline and stress profiles with documented thresholds and regression checks.
 
 ### Async and Modules
 
@@ -37,10 +37,10 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 
 ### Conformance and Governance
 
-- [ ] **TST-01**: CI keeps `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` green on default branch.
-- [ ] **TST-02**: test262 reporting tracks discovered/executed/failed plus skip categories so coverage expansion is measurable.
-- [ ] **TST-03**: Every new runtime feature lands with at least one positive test and one boundary/error test.
-- [ ] **TST-04**: Project publishes repeatable compatibility snapshots and updates `docs/current-status.md` after major convergence work.
+- [x] **TST-01**: CI keeps `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` green on default branch.
+- [x] **TST-02**: test262 reporting tracks discovered/executed/failed plus skip categories so coverage expansion is measurable.
+- [x] **TST-03**: Every new runtime feature lands with at least one positive test and one boundary/error test.
+- [x] **TST-04**: Project publishes repeatable compatibility snapshots and updates `docs/current-status.md` after major convergence work.
 
 ## v2 Requirements
 
@@ -81,7 +81,7 @@ Roadmap mapping table. Updated during roadmap creation.
 | SEM-04 | Phase 1 | Complete |
 | MEM-01 | Phase 2 | Complete |
 | MEM-02 | Phase 2 | Complete |
-| MEM-03 | Phase 7 | Pending |
+| MEM-03 | Phase 7 | Complete |
 | ASY-01 | Phase 3 | Complete |
 | ASY-02 | Phase 3 | Complete |
 | MOD-01 | Phase 4 | Complete |
@@ -91,10 +91,10 @@ Roadmap mapping table. Updated during roadmap creation.
 | BUI-03 | Phase 5 | Complete |
 | BUI-04 | Phase 6 | Complete |
 | BUI-05 | Phase 6 | Complete |
-| TST-01 | Phase 7 | Pending |
-| TST-02 | Phase 7 | Pending |
-| TST-03 | Phase 7 | Pending |
-| TST-04 | Phase 7 | Pending |
+| TST-01 | Phase 7 | Complete |
+| TST-02 | Phase 7 | Complete |
+| TST-03 | Phase 7 | Complete |
+| TST-04 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 20 total

@@ -16,7 +16,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling. (completed 2026-02-26)
 - [x] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets. (completed 2026-02-26)
 - [x] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts. (completed 2026-02-27)
-- [ ] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates.
+- [x] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates. (completed 2026-02-27)
 
 ## Phase Details
 
@@ -99,7 +99,11 @@ Plans:
   3. test262 reports include discovered/executed/failed counts and explicit skip categories for each tracked run.
   4. New runtime features merged in this phase include at least one positive test and one boundary/error test.
   5. Compatibility snapshots are reproducible and `docs/current-status.md` is updated after major convergence work.
-**Plans**: TBD
+**Plans**: 3/3 plans complete
+Plans:
+- [x] 07-01-PLAN.md - Enforce hard-blocking CI governance gates and PR `1 + 1` runtime test compliance checks.
+- [x] 07-02-PLAN.md - Upgrade test262 reporting to fixed JSON/Markdown schema with explicit skip categories.
+- [x] 07-03-PLAN.md - Establish reproducible baseline/stress snapshot governance and manifest-backed status updates.
 
 ## Progress
 
@@ -111,4 +115,4 @@ Plans:
 | 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
-| 7. Compatibility and Governance Gates | 0/TBD | Not started | - |
+| 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
