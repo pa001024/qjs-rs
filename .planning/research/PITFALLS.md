@@ -1,176 +1,218 @@
 # Pitfalls Research
 
-**Domain:** Pure Rust JavaScript runtime library aligned with QuickJS semantics (brownfield)
-**Researched:** 2026-02-25
+**Domain:** qjs-rs v1.1 performance acceleration for a semantics-stable pure Rust JS runtime
+**Researched:** 2026-02-27
 **Confidence:** HIGH
 
 ## Critical Pitfalls
 
-### Pitfall 1: Planning From Outdated Baseline Instead of Current Brownfield State
+### Pitfall 1: Apples-to-Oranges Benchmark Contract Across Engines
 
 **What goes wrong:**
-Roadmap phases repeat already-finished scaffolding and miss current blockers (modules, microtasks, semantic edge hardening), wasting milestone capacity.
+`qjs-rs` appears faster or slower for the wrong reasons because each engine is measured under a different execution model (e.g., one re-parses/re-evals every iteration while another precompiles once).
 
 **Why it happens:**
-Phase descriptions in strategy docs look linear, but real progress has moved far beyond early-phase assumptions.
+Cross-engine benchmark harnesses often drift into implementation-convenient paths instead of equivalent semantic paths.
 
 **How to avoid:**
-Use `docs/current-status.md` and `.planning/codebase/CONCERNS.md` as mandatory inputs for each new milestone. Require every phase to declare which current gaps it closes and which already-complete work it depends on.
+Define a benchmark contract before tuning: parse/compile scope, warmup policy, iteration semantics, and output validation must be equivalent for `qjs-rs`, `boa-engine`, `quickjs-c`, and `nodejs`. Require per-case checksum parity and explicit “compile-included vs execute-only” modes.
 
 **Warning signs:**
-- New phases still include workspace/bootstrap tasks.
-- Milestone goals do not reference current test262 snapshots.
-- Tasks mention “start parser/vm chain” even though chain is already running.
+- Large delta between "execute-only" and "eval-per-iteration" numbers.
+- Performance claims based only on aggregate mean.
+- Comparator engines use different code paths (`eval` loop vs reusable callable) without documentation.
 
 **Phase to address:**
-Milestone planning gate before Phase 1 work starts (applies to every new milestone).
+Phase 10 (PERF-01, PERF-02 baseline contract and harness normalization).
 
 ---
 
-### Pitfall 2: Silent Semantic Fallbacks Mask Real Unsupported Behavior
+### Pitfall 2: Benchmark Noise Mistaken for Real Speedup
 
 **What goes wrong:**
-Unsupported syntax/semantic paths (especially loop lowering edge cases) degrade into no-op or wrong runtime behavior instead of explicit failure.
+Optimization decisions are made from noisy samples (thermal throttling, scheduler jitter, background load), producing false wins and flaky CI gates.
 
 **Why it happens:**
-Interim compatibility shortcuts were added to keep execution green while semantics were incomplete.
+Teams add thresholds before stabilizing run conditions and variance budgets.
 
 **How to avoid:**
-Eliminate silent fallbacks in parser/bytecode and replace with explicit early errors when behavior is not implemented. Track every temporary fallback with owner + deadline.
+Capture environment metadata in every report (CPU, governor, toolchain, engine versions), enforce minimum sample size, and gate on median/p95 + variance bounds instead of a single mean number.
 
 **Warning signs:**
-- “Unsupported shape” paths compile to always-false loops.
-- Pass rates improve without corresponding semantic implementation notes.
-- New edge-case tests fail as “unexpected success” or skipped execution.
+- Same commit swings >5-10% across reruns on same machine.
+- Stddev is high but ignored in acceptance decisions.
+- CI fails/pass alternates with no code changes.
 
 **Phase to address:**
-Phase 1-2 hardening track, before broad Phase 7 expansion.
+Phase 10 for reproducibility policy; Phase 12 for CI variance-aware threshold logic.
 
 ---
 
-### Pitfall 3: Promise and Module Work Sequenced Too Late or Inverted
+### Pitfall 3: Optimizing Aggregate Score While Regressing Key Workloads
 
 **What goes wrong:**
-Builtins/async features expand on top of placeholder Promise semantics and no full job queue/module lifecycle, causing expensive rewrites once proper ordering semantics are introduced.
+Aggregate mean improves, but one critical workload (array/object semantics, call-heavy paths, JSON path) regresses materially.
 
 **Why it happens:**
-Local feature wins (individual builtins) are easier to ship than foundational async runtime architecture.
+Single leaderboard metric hides per-case regressions; weighted mix is undefined.
 
 **How to avoid:**
-Treat “Promise job queue + host callback contract + module instantiate/evaluate flow” as prerequisites for any major async/builtin expansion. Make this a blocking milestone gate.
+Track dual gates: (1) aggregate target (`qjs-rs <= boa-engine`) and (2) per-case non-regression bands. Make case-level deltas first-class in PR evidence.
 
 **Warning signs:**
-- Promise constructor still behaves as placeholder in core paths.
-- test262 module/strict/include-dependent suites remain broadly skipped.
-- Async-related failures cluster around execution ordering/reentrancy.
+- “Overall faster” PRs with one or more cases >10% slower.
+- Repeated optimization on one microbench family only.
+- Hot-path tuning notes mention only total score.
 
 **Phase to address:**
-Phase 6 should start before second-wave builtin expansion and before Phase 7 full compatibility push.
+Phase 11 (optimization acceptance criteria) and Phase 12 (per-case CI thresholds).
 
 ---
 
-### Pitfall 4: GC Correctness Regressions Hidden by Stress-Only Validation
+### Pitfall 4: Semantic Drift From Fast Paths That Bypass Spec Operations
 
 **What goes wrong:**
-GC appears healthy under stress profile snapshots, but production/default profile root-lifetime bugs remain (stale handles, shadow-root restore mismatches, rare UnknownObject failures).
+Fast paths skip observable JS semantics (`ToNumber`, `valueOf`/`toString` effects, hole handling, exception ordering), creating silent conformance regressions.
 
 **Why it happens:**
-Stress mode catches throughput pressure, but lifecycle correctness bugs often appear in mixed/default execution and uncommon control-flow paths.
+After semantic closure, optimization work tends to assume monomorphic primitives and forgets dynamic object behavior.
 
 **How to avoid:**
-Keep dual-profile gates: default correctness invariants + stress reclamation invariants. Add targeted regression suites for caller-state restore, unwind paths, and handle generation reuse.
+Require fast-path guard design docs: guard conditions, deopt fallback, and semantic equivalence tests for side-effectful/coercion-heavy edge cases.
 
 **Warning signs:**
-- Intermittent panics around caller shadow-root expectations.
-- GC stats drift between default and stress without code changes.
-- Fixes rely on ad hoc root pinning without invariant tests.
+- Benchmarks improve but test262-lite edge suites dip.
+- New opcode shortcuts bypass existing helper paths that encoded semantics.
+- Bugs reported as “only wrong when objects override coercion hooks”.
 
 **Phase to address:**
-Phase 4 continuation with carry-over gates into Phase 7 nightly stability.
+Phase 11 (hot-path implementation with semantic guardrails), validated again in Phase 12 with full non-regression gates.
 
 ---
 
-### Pitfall 5: Builtin Constructor Aliasing Becomes Permanent Technical Debt
+### Pitfall 5: Invalid Inline Caches / Hidden-Class Assumptions in a Dynamic Runtime
 
 **What goes wrong:**
-WeakMap/WeakSet/typed-array families remain wired to baseline constructors, producing deep semantic drift (internal slots, key constraints, coercion, iteration behavior).
+Property access/call caches become stale after prototype/shape mutation, returning stale values or wrong method targets.
 
 **Why it happens:**
-Alias wiring provides fast green-path progress and can survive too long if not explicitly retired.
+Caching is introduced without robust invalidation and without mutation-heavy regression tests.
 
 **How to avoid:**
-Create a de-alias schedule with per-constructor completion criteria (internal slots, brand checks, descriptor behavior, test262 directory targets). Ban new alias shortcuts unless temporary with expiry.
+Introduce versioned shape/prototype invalidation strategy first, then cache. Add dedicated mutation stress tests (prototype swaps, defineProperty changes, accessor transitions).
 
 **Warning signs:**
-- Multiple globals intentionally mapped to one constructor path.
-- “Passes smoke tests” but fails directory-specific test262 semantics.
-- Adding one builtin breaks another due shared internals.
+- Heisenbugs that disappear when cache is disabled.
+- Wrong behavior after `Object.setPrototypeOf` or descriptor redefinition.
+- Fixes rely on broad cache flushes that erase wins.
 
 **Phase to address:**
-Phase 5 first half, before broadening language surface further.
+Phase 11 (cache design + invalidation), with Phase 12 soak runs for mutation scenarios.
 
 ---
 
-### Pitfall 6: Monolithic VM File Prevents Safe Parallel Evolution
+### Pitfall 6: CPU Wins That Secretly Increase GC/Allocation Cost
 
 **What goes wrong:**
-Core runtime work accumulates in a ~22k-line file, increasing merge conflicts, review blind spots, and cross-feature regressions.
+Interpreter loop looks faster, but allocation churn or longer object lifetimes increase GC pause time and hurt end-to-end latency.
 
 **Why it happens:**
-Fast semantic convergence favored single-file edits; modularization kept getting deferred.
+Optimization reviews look at CPU-only microbench numbers and ignore allocation/GC telemetry.
 
 **How to avoid:**
-Schedule a structural refactor milestone: split VM domains (`call`, `objects`, `gc`, `regexp`, builtin wiring) with ownership boundaries and per-module tests before adding major new subsystems.
+Every optimization PR must include allocation count and GC event deltas on benchmark cases. Reject wins that shift cost into GC unless total latency still improves within budget.
 
 **Warning signs:**
-- High conflict rate on `crates/vm/src/lib.rs`.
-- “Small” fixes require large unrelated diff context.
-- Regression root cause analysis repeatedly crosses unrelated runtime areas.
+- Throughput improves on short runs but worsens on longer iteration counts.
+- GC frequency/pause duration rises after a “speedup” PR.
+- Memory usage trends upward across samples.
 
 **Phase to address:**
-Late Phase 3 / early Phase 5 as an enabling refactor before heavy Phase 6-7 work.
+Phase 11 (optimization evidence requirements), Phase 12 (nightly trend regression checks).
 
 ---
 
-### Pitfall 7: Compatibility Metrics Look Green While Coverage Ceiling Stays Low
+### Pitfall 7: Architecture Erosion From Cross-Layer Micro-Optimizations
 
 **What goes wrong:**
-Pass percentage looks strong on sampled/allowed suites, but large semantic surfaces remain unexecuted due skip policy (`module`, `onlyStrict`, includes/feature flags).
+Performance patches punch through boundaries (`bytecode -> vm -> runtime -> builtins`), creating tightly coupled fast paths that are hard to maintain and risky to evolve.
 
 **Why it happens:**
-Progress reporting emphasizes passed/failed counts without enough attention to discovered-vs-executed ratios and skip categories.
+Short-term speed pressure rewards local hacks over systemic design.
 
 **How to avoid:**
-Promote coverage-execution ratios to first-class milestone KPIs. For each milestone, require explicit reduction of skip buckets, not just lower failure counts.
+Add a “performance change architecture checklist” to PR review: boundary touched, API leakage, rollback plan, and ownership approval. Keep optimization localized or explicitly refactor layer contracts first.
 
 **Warning signs:**
-- Executed case count plateaus while discovered grows.
-- “0 failures” appears only on constrained subsets.
-- Missing host features are tracked as skips for multiple milestones.
+- Fast-path code duplicates semantics across crates.
+- Large optimization diffs combine unrelated layers.
+- Review comments repeatedly mention “temporary shortcut”.
 
 **Phase to address:**
-Phase 7 planning and reporting governance (with prerequisites from Phase 6).
+Phase 11 (PERF-05 maintainability boundary enforcement).
 
 ---
 
-### Pitfall 8: Panic-Based Invariants Leak Into Public Runtime Surface
+### Pitfall 8: CI Thresholds That Are Either Too Brittle or Too Loose
 
 **What goes wrong:**
-Invariant assumptions (`expect`, `unreachable`, panic-driven argument handling) can crash embedders under unexpected input paths.
+Brittle gates block healthy PRs due to normal noise; loose gates allow meaningful regressions to ship.
 
 **Why it happens:**
-Internal assertions remain in production paths as implementation velocity outruns hardening.
+Thresholds are set once from a single run and treated as universal truth.
 
 **How to avoid:**
-Convert reachable panic sites to typed compile/runtime errors; isolate hard panics to truly impossible states. Add fuzz/property tests around parser->bytecode->vm boundaries.
+Use rolling baseline windows, per-case guard bands, and explicit rerun policy. Separate PR gate (coarse) from nightly gate (strict + trend-based). Store threshold rationale with owner and expiry review date.
 
 **Warning signs:**
-- User-controlled inputs can trigger process abort.
-- Bug reports include panic backtraces instead of JS/Rust error values.
-- New invariants are added without negative tests.
+- Frequent manual retries to “get green”.
+- Threshold updates happen ad hoc without rationale.
+- Regressions discovered only after merge.
 
 **Phase to address:**
-Phase 3 reliability hardening and Phase 7 robustness gate.
+Phase 12 (TST-06 governance and threshold lifecycle policy).
+
+---
+
+### Pitfall 9: Baseline Drift From Unpinned Comparator Versions
+
+**What goes wrong:**
+`boa-engine`, `nodejs`, `quickjs-c`, or toolchain updates change performance baseline independently of qjs-rs changes, confusing trend interpretation.
+
+**Why it happens:**
+External engine/tool versions are not pinned and not recorded as contract inputs.
+
+**How to avoid:**
+Pin comparator versions in benchmark metadata + docs, and treat version bumps as explicit baseline reset events requiring before/after dual-run evidence.
+
+**Warning signs:**
+- Sudden benchmark shift with no meaningful qjs-rs code change.
+- Reports omit comparator and rustc versions.
+- Historical trend breaks without migration notes.
+
+**Phase to address:**
+Phase 10 (baseline metadata contract) and Phase 12 (baseline reset governance).
+
+---
+
+### Pitfall 10: Verification Blind Spot — Performance Evidence Without Semantic Counter-Evidence
+
+**What goes wrong:**
+A PR is accepted as “faster” with benchmark artifacts, but semantic/governance suites are narrowed, skipped, or not tied to optimization diffs.
+
+**Why it happens:**
+Performance milestones bias review toward speed charts and away from full correctness matrix.
+
+**How to avoid:**
+Make optimization acceptance contingent on both: benchmark deltas and unchanged/expanded semantic gates (`cargo test`, lint/fmt, test262-lite governance, targeted edge regressions). Block merges if either side is missing.
+
+**Warning signs:**
+- “Perf-only” PRs without semantic non-regression artifact links.
+- CI workflow adds benchmark step but weakens existing correctness gates.
+- New fast paths lack dedicated edge-case tests.
+
+**Phase to address:**
+Phase 12 (dual-gate merge policy) with Phase 11 test additions per optimized hotspot.
 
 ## Technical Debt Patterns
 
@@ -178,10 +220,10 @@ Shortcuts that seem reasonable but create long-term problems.
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Alias missing builtins to existing constructors | Fast compatibility progress | Deep semantic drift and rewrite cost | Only with explicit deprecation deadline |
-| Silent parser fallback for unsupported forms | Keeps pipeline green | Hidden behavior mismatch and false confidence | Never |
-| Keep all VM logic in single file | Low coordination cost initially | High coupling, conflict-heavy delivery | Temporary only during short stabilization windows |
-| Manual builtin metadata tables | Quick feature increments | Descriptor/attribute mismatches and omission risk | Acceptable only with generated validation checks |
+| Hardcode benchmark scripts to a narrow microbench set | Quick scoreboard movement | Overfits optimizer to synthetic patterns, misses real workloads | Only as temporary smoke suite, never as sole gate |
+| Add cross-layer "fast helper" bypassing existing semantic helpers | Immediate latency drop | Semantic drift + duplicated logic across crates | Only with explicit deopt + removal ticket |
+| Tune with magic constants (cache sizes/thresholds) without telemetry | Easy local improvements | Unexplainable regressions on different machines | Acceptable only if constants are surfaced and benchmarked across profiles |
+| Disable expensive checks in release for speed without alternative guardrails | Better benchmark numbers | Hard-to-debug correctness failures in production | Almost never; only with equivalent invariant checks elsewhere |
 
 ## Integration Gotchas
 
@@ -189,9 +231,11 @@ Common mistakes when connecting to external services.
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| QuickJS semantic alignment workflow | Translating C implementation details literally | Align observable semantics first; allow Rust-native internals |
-| test262 harness integration | Using subset pass rate as readiness signal | Track discovered/executed/failed/skip buckets together |
-| Host embedding API | Letting engine panics propagate to host process | Return typed engine errors; isolate fatal faults |
+| `boa-engine` comparator | Compare against a floating crate version | Pin version + record in report metadata; bump via explicit baseline-reset PR |
+| `quickjs-c` comparator via WSL/path | Assume fixed local path and shell behavior | Parameterize executable path and validate availability in harness preflight |
+| `nodejs` comparator | Use host-global Node version without capture | Record Node version per run and fail fast if missing or unexpected |
+| GitHub Actions runners | Treat cloud runner numbers as reproducible perf truth | Use CI for coarse non-regression; keep authoritative baseline on controlled runner/nightly |
+| Existing governance pipeline | Add perf gates that bypass semantic gates | Keep performance checks additive; never replace fmt/clippy/test/test262-lite gates |
 
 ## Performance Traps
 
@@ -199,10 +243,11 @@ Patterns that work at small scale but fail as usage grows.
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Runtime GC stress knobs reused in normal runs | 10x-50x latency growth and noisy stats | Separate stress guard profile from default profile | Any sustained script workload |
-| Regex compile-on-match path | Repeated regex-heavy code slows unpredictably | Cache compiled regex by `(pattern, flags)` | Medium-size regexp workloads |
-| `fancy-regex` worst-case backtracking | Latency spikes / potential DoS | Add time or step budgets and safe fallbacks | Adversarial patterns/inputs |
-| Per-case thread spawn in harness | High overhead in large suites | Use worker pool with panic isolation boundaries | Thousands of cases/nightly runs |
+| Re-parsing/re-compiling inside timed loop for some engines but not others | Misleading winner/loser ordering | Separate compile-cost and execute-cost modes consistently for all engines | Immediately once script complexity grows beyond trivial |
+| Cold-cache measurements presented as steady-state wins | First run faster/slower than subsequent runs, noisy medians | Warmup policy + discard first N samples | Usually visible at 5+ samples per case |
+| Single aggregate KPI gate | Hidden regressions in one workload family | Add per-case guardrails and weighted aggregate policy | Common once suite has 4+ heterogeneous cases |
+| Optimizing tiny loops while ignoring allocation-heavy paths | CPU microbench improves, end-to-end latency stagnates | Include allocation/GC telemetry and long-run cases | Breaks on JSON/object-heavy workloads and longer runs |
+| Thresholds calibrated on one machine profile | PR flakiness and repeated reruns | Calibrate by environment class and store guard bands | Breaks when runner class/toolchain changes |
 
 ## Security Mistakes
 
@@ -210,9 +255,9 @@ Domain-specific security issues beyond general web security.
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Panic on malformed external input | Process-level denial of service | Replace panic paths with structured errors and stable exit codes |
-| Unbounded regex execution | Algorithmic complexity attacks | Enforce regex budget/timeout; reject risky patterns in untrusted contexts |
-| Missing resource limits in host hooks | Host starvation or runaway execution | Add execution/queue/memory budgets and host interrupts |
+| Removing runtime limits to improve benchmark numbers | Potential CPU/memory exhaustion under hostile scripts | Keep configurable execution/resource limits and exclude them only in explicit benchmark mode |
+| Introducing unchecked arithmetic/unsafe assumptions in fast paths | Panic or undefined behavior risk in edge inputs | Preserve safe Rust semantics; add overflow and edge-case tests on optimized paths |
+| Caching without invalidation under user-controlled prototype mutation | Incorrect execution that can bypass expected checks | Implement robust invalidation + mutation fuzz tests |
 
 ## UX Pitfalls
 
@@ -220,19 +265,20 @@ Common user experience mistakes in this domain.
 
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| Partial features without explicit capability signaling | Users cannot tell supported semantics boundary | Expose feature flags and compatibility matrix per release |
-| Silent unsupported syntax behavior | Debugging becomes expensive and confusing | Fail fast with actionable syntax/runtime errors |
-| Inconsistent error typing/messages | Hard to integrate in production tooling | Stabilize error taxonomy and map internals to user-facing errors |
+| Performance gate fails without reproducibility context | Contributors cannot debug why CI failed | Attach benchmark JSON + environment metadata artifact on every perf gate failure |
+| Metric definitions change silently between phases | Team cannot compare trends across time | Version benchmark schema/metric definitions and announce changes in roadmap notes |
+| “Beat boa” headline without per-case detail | Misaligned optimization effort and trust erosion | Publish per-case table + aggregate + variance in every milestone report |
 
 ## "Looks Done But Isn't" Checklist
 
 Things that appear complete but are missing critical pieces.
 
-- [ ] **Promise support:** Often missing real settlement + microtask ordering - verify queue semantics with ordering tests.
-- [ ] **Module support:** Often missing instantiate/evaluate lifecycle - verify cyclic dependency and live binding behavior.
-- [ ] **GC stability:** Often missing default-profile invariants - verify no stale-handle/unknown-object regressions in long runs.
-- [ ] **Compatibility health:** Often missing discovered-vs-executed transparency - verify skip buckets shrink milestone over milestone.
-- [ ] **Builtin completeness:** Often missing descriptor/internal-slot edge semantics - verify per-directory test262 closure, not just aggregate pass rate.
+- [ ] **Benchmark baseline:** Often missing fairness contract — verify compile/execute equivalence across all engines.
+- [ ] **Optimization PR:** Often missing semantic edge tests — verify coercion/prototype mutation/error-order regressions were added.
+- [ ] **CI threshold gate:** Often missing variance policy — verify rerun rules and guard bands are documented.
+- [ ] **Comparator evidence:** Often missing version pinning — verify node/boa/quickjs/rustc versions are stored in artifact.
+- [ ] **Performance win claim:** Often missing memory/GC impact — verify allocation + GC trend deltas are included.
+- [ ] **Governance integration:** Often missing additive correctness gates — verify existing semantic gates remain unchanged or stronger.
 
 ## Recovery Strategies
 
@@ -240,12 +286,12 @@ When pitfalls occur despite prevention, how to recover.
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Outdated-baseline roadmap | MEDIUM | Re-baseline from `current-status`, cancel duplicate phases, re-sequence by dependency |
-| Silent fallback shipped | HIGH | Replace fallback with explicit error, backfill regression tests, rerun affected test262 directories |
-| Promise/module sequencing error | HIGH | Freeze async feature additions, implement queue+module foundations, then replay regressions |
-| GC lifecycle regression | HIGH | Reproduce with dual-profile harness, audit root ownership transitions, add targeted invariant tests before reopen |
-| Builtin alias debt explosion | MEDIUM | Prioritize de-alias by highest semantic risk (WeakMap/WeakSet/typed arrays), lock alias creation policy |
-| Monolithic VM merge instability | MEDIUM | Branch-protect refactor plan, split modules incrementally with test parity checkpoints |
+| Apples-to-oranges benchmark contract | HIGH | Freeze optimization merges, normalize harness contract, regenerate baseline artifacts, invalidate prior comparisons |
+| Noise-driven optimization decisions | MEDIUM | Re-run on controlled host with larger sample set, recompute thresholds using variance-aware policy |
+| Semantic drift from fast paths | HIGH | Roll back optimization toggle, add guard/deopt fallback, backfill targeted semantic regressions, rerun full gates |
+| Cache invalidation bugs | HIGH | Disable cache behind feature flag, implement shape/prototype versioning, add mutation stress suite before re-enable |
+| Brittle/loose CI thresholds | MEDIUM | Split PR vs nightly policies, recalibrate guard bands from historical window, document threshold ownership |
+| Baseline drift from version changes | MEDIUM | Pin versions, mark baseline-reset commit, publish before/after with old and new comparator stacks |
 
 ## Pitfall-to-Phase Mapping
 
@@ -253,22 +299,25 @@ How roadmap phases should address these pitfalls.
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| Outdated baseline planning | Milestone planning gate (pre-Phase 1) | Every phase links to current gap IDs and latest snapshots |
-| Silent semantic fallbacks | Phase 1-2 hardening | No unsupported path compiles silently; explicit error tests pass |
-| Promise/module sequencing inversion | Phase 6 foundation | Promise ordering and module lifecycle suites run with expected semantics |
-| GC correctness blind spots | Phase 4 + Phase 7 stability | Default + stress GC invariants both green in CI/nightly |
-| Builtin constructor alias debt | Phase 5 early | Alias inventory trends to zero for high-risk globals |
-| VM monolith coupling | Late Phase 3 / early Phase 5 refactor | `vm/lib.rs` size and conflict hotspots decrease; module tests isolated |
-| Coverage illusion from skips | Phase 7 governance | Discovered/executed ratio and skip buckets improve each milestone |
-| Panic leakage to embedders | Phase 3 reliability + Phase 7 robustness | Panic sites in public paths replaced by typed errors; fuzz regressions green |
+| Apples-to-oranges benchmark contract | Phase 10 (PERF-01/02) | Harness spec + parity checks + dual mode (compile vs execute) report present |
+| Benchmark noise mistaken for speedup | Phase 10, Phase 12 | Report includes variance metrics and environment metadata; rerun stability passes |
+| Aggregate-only optimization bias | Phase 11, Phase 12 | Per-case non-regression gates + aggregate target both enforced |
+| Semantic drift from fast paths | Phase 11 | Optimized hotspots have deopt tests and semantic edge regressions; test262-lite unchanged/stronger |
+| Invalid cache assumptions | Phase 11 | Mutation-heavy regression pack and cache-disable parity checks pass |
+| CPU win but GC loss | Phase 11, Phase 12 | Benchmark artifacts include allocation/GC deltas and long-run latency trend |
+| Cross-layer optimization debt | Phase 11 (PERF-05) | PR architecture checklist approved; layering boundaries preserved |
+| Brittle or loose thresholds | Phase 12 (TST-06) | Threshold policy, owner, guard bands, and rerun protocol are documented and enforced |
+| Baseline drift from unpinned comparators | Phase 10, Phase 12 | Comparator versions pinned + baseline reset procedure tested |
+| Perf evidence without semantic counter-evidence | Phase 12 (TST-05/TST-06) | Merge requires both performance artifacts and full semantic/governance gate success |
 
 ## Sources
 
 - `.planning/PROJECT.md`
-- `.planning/codebase/CONCERNS.md`
-- `docs/current-status.md`
+- `.planning/REQUIREMENTS.md`
+- `crates/benchmarks/src/main.rs`
+- `.github/workflows/ci.yml`
 - `AGENTS.md`
 
 ---
-*Pitfalls research for: pure Rust JavaScript runtime aligned with QuickJS semantics*
-*Researched: 2026-02-25*
+*Pitfalls research for: qjs-rs v1.1 performance acceleration (semantics-stable runtime)*
+*Researched: 2026-02-27*

@@ -1,120 +1,117 @@
 # Feature Research
 
-**Domain:** Pure Rust embeddable JavaScript runtime engine (QuickJS-aligned semantics)
-**Researched:** 2026-02-25
+**Domain:** qjs-rs v1.1 JavaScript runtime performance acceleration milestone
+**Researched:** 2026-02-27
 **Confidence:** HIGH
 
 ## Feature Landscape
 
 ### Table Stakes (Users Expect These)
 
-Features users assume exist. Missing these = product feels incomplete.
+Features users assume exist for a serious runtime performance milestone. Missing these means optimization claims are not trusted.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| ECMAScript core execution correctness (scope, strict mode, closures, exceptions, eval/with edges) | Engine credibility is judged first by language-correct behavior, not API surface | HIGH | Depends on parser/bytecode/vm/runtime semantic alignment; still active in local status docs |
-| Object model + prototype chain + property descriptor invariants | Most built-ins and user code behavior depend on `[[Get]]/[[Set]]`, descriptors, and inheritance rules | HIGH | Prerequisite for reliable `Object.*`, `Reflect.*`, class behavior, and Proxy invariants |
-| ES Module lifecycle (`parse -> instantiate -> evaluate`) | Modern JS projects expect standards-compliant module loading semantics | HIGH | Requires module records, resolver hooks, and error propagation compatible with spec |
-| Promise and microtask job queue semantics | Async correctness is table stakes for modern JS execution | HIGH | Requires host job queue hooks, ordering guarantees, and exception propagation |
-| Core built-ins coverage (`Object`, `Function`, `Array`, `String`, `Number`, `Boolean`, `Math`, `Date`, `Error`, `JSON`, `RegExp`, `Map/Set`, weak collections) | Users expect built-ins to work before advanced platform APIs | HIGH | Requires internal slots + descriptor correctness + iterator protocol + GC-aware object model |
-| test262-driven compatibility pipeline with CI gates | Modern engines are expected to prove correctness against shared conformance baselines | MEDIUM | Depends on stable harness, reproducible snapshots, and clear skip policy |
-| GC correctness + root strategy under stress | Long-running embedded hosts require memory safety and predictable reclamation behavior | HIGH | Requires robust root accounting (stack/globals/modules/jobs) and stale handle safety |
-| Embeddable host API (library-first context/realm, host functions/modules, execution interrupt hooks) | Engine projects are expected to be integrable into larger hosts | MEDIUM | Keep host boundary explicit and minimal; avoid coupling runtime core to product-specific APIs |
-| Debuggability (error locations, stack traces, bytecode/semantic diagnostics) | Teams need actionable failure signals to ship/maintain engine integrations | MEDIUM | Strongly improves velocity in compatibility bug closure and regression triage |
+| Reproducible cross-engine benchmark harness (`qjs-rs`, `boa-engine`, `quickjs-c`, `nodejs`) | Performance milestones are only credible with consistent external baselines | MEDIUM | Maps to PERF-01; must emit machine-readable JSON + human-readable report artifacts |
+| Representative hot-path benchmark suite (arith loop, call-heavy, array workload, JSON roundtrip) | "Faster" must reflect real runtime hotspots, not one synthetic micro-bench | MEDIUM | Maps to PERF-02; keep case set stable to preserve trend comparability |
+| Hotspot attribution + before/after evidence for each optimization | High-quality milestones show where time moved, not just final score | MEDIUM | Pair profiling output with per-case delta table for every optimized path |
+| Semantic non-regression safety net on every optimization iteration | Runtime users expect speedups without behavioral drift | HIGH | Maps to TST-05; `cargo test` + governance/test262-lite must stay green |
+| CI performance regression gate with explicit thresholds | Performance work regresses quickly without automated guards | MEDIUM | Maps to TST-06; publish deterministic artifact paths and failure criteria |
+| Architecture-bound optimization scope (bytecode/vm/runtime hot paths only) | Teams expect maintainable acceleration, not milestone-breaking rewrites | MEDIUM | Maps to PERF-05; no runtime-core C FFI, no semantic-layer destabilization |
 
 ### Differentiators (Competitive Advantage)
 
-Features that set the product apart. Not required, but valuable.
+Features that can make qjs-rs v1.1 stand out while staying correctness-first.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| QuickJS semantic parity program with explicit mapping/checklists and delta tracking | Reduces ambiguity by turning "compatible enough" into auditable, per-feature parity targets | MEDIUM | Build on existing docs (`quickjs-mapping`, `semantics-checklist`) and keep automated evidence in snapshots |
-| Conformance-first governance (test262 clusters + GC guard baselines in CI) | Gives maintainers confidence that semantic and memory regressions are caught early | MEDIUM | Use existing harness momentum and make gate thresholds explicit per milestone |
-| GC observability profiles (default, stress, runtime safety-point) | Enables production-like confidence and faster root-cause analysis for memory bugs | MEDIUM | Extend current GC stats/baselines into standardized perf+correctness dashboards |
-| Rust-native host extensibility without runtime-core C FFI | Strong safety/portability story for Rust embedders and easier ownership reasoning | HIGH | Keep runtime core Rust-only; expose host extension points via traits/interfaces |
-| Fail-loud semantic policy for unsupported forms | Avoids dangerous silent divergence and simplifies downstream debugging | LOW | Replace compatibility shortcuts with explicit syntax/runtime errors where unsupported |
-| Modular crate boundaries with selective embedding options | Lets adopters use only needed layers (parser/harness/runtime subsets) and lowers integration cost | MEDIUM | Continue splitting VM hot spots into focused modules to reduce coupling and merge risk |
+| Dual-gate workflow: performance delta + semantic delta in one PR contract | Makes optimization work auditable and safe; avoids "fast but wrong" merges | MEDIUM | Every perf PR should include benchmark diff and semantic gate evidence |
+| Hot-path optimization playbook by layer (`bytecode -> vm -> runtime`) | Improves iteration speed and lowers regression blast radius | MEDIUM | Encodes repeatable patterns (dispatch tightening, allocation reduction, call-path trimming) |
+| Stable benchmark evidence pack in-repo (JSON, markdown report, chart) | Lets maintainers compare results over time and across machines consistently | LOW | Already aligned with `docs/engine-benchmarks.md` + report pipeline |
+| Semantics-preserving fast paths with explicit fallback/deopt paths | Captures real wins without changing observable behavior | HIGH | Fast path must route to generic spec-correct path when preconditions fail |
+| Performance SLO anchored to external engine (`qjs-rs <= boa-engine` aggregate) | Clear market-facing milestone definition instead of vague "faster" language | HIGH | Maps to PERF-03; keep threshold tied to tracked case portfolio |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
-Features that seem good but create problems.
+Features that seem attractive but are likely to hurt semantic stability in this milestone.
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| Early JIT/AOT tiering before semantic closure | Seen as the fastest path to benchmark wins | High complexity and regression risk while semantics and built-ins are still moving | Finish semantic closure and compatibility gates first, then add focused optimization workstreams |
-| Full Node/Web API parity inside runtime core | Users want "drop-in runtime" convenience | Blurs engine-vs-host boundary and explodes scope (networking, timers, filesystem, policy) | Keep core as ECMAScript engine; provide optional host/runtime adapter crates |
-| Silent parser/runtime fallbacks for unsupported language forms | Makes progress look fast in early phases | Creates hidden incompatibilities and hard-to-debug production behavior | Fail loudly with explicit `SyntaxError`/`TypeError` until proper semantics are implemented |
-| Monolithic VM growth as a single-file implementation strategy | Feels faster for short-term iteration | Increases change coupling, review risk, and regression blast radius | Modularize VM by domain (objects/calls/gc/regexp/control-flow) with targeted tests |
-| Unsafe-by-default memory tricks as primary strategy | Promises smaller/faster value representation quickly | Safety/debuggability cost is high without mature invariants and fuzz coverage | Keep safe baseline first; introduce optional, benchmark-validated optimizations behind flags |
+| Benchmark-specific special-casing (recognize exact scripts/opcode shapes) | Produces quick headline wins | Overfits to suite, hides real-world regressions, and corrupts trust in metrics | Optimize generic execution paths backed by varied representative cases |
+| Large value-representation rewrite (e.g., full NaN-boxing migration) inside v1.1 | Promises broad speedups | High semantic and memory-safety risk; too much blast radius for one milestone | Keep representation stable; pursue focused hot-path wins first, isolate representation experiments to v1.2+ |
+| Relaxed semantics mode as default (skip checks/coercions/errors for speed) | Appears to improve benchmark numbers immediately | Violates QuickJS-aligned correctness contract and causes hard-to-debug behavior drift | Preserve strict semantics; only optimize with equivalent observable behavior |
+| Mixing major feature expansion (new language surfaces) into perf milestone | "Ship more while touching runtime anyway" | Adds confounding variables, slows validation, and increases regression probability | Keep v1.1 scope on performance and governance only; defer feature expansion |
+| Turning off semantic/governance gates in perf branches | Reduces short-term CI friction | Allows silent correctness regressions and invalidates performance conclusions | Keep gates mandatory; if needed split perf jobs (fast smoke + nightly full) but do not remove checks |
 
 ## Feature Dependencies
 
 ```text
-Core semantics (scope/closures/descriptors/eval)
-    -> required by Built-ins correctness
-        -> required by High test262 pass rates
+Reproducible benchmark harness (PERF-01)
+    -> required by Reliable hotspot attribution
+        -> required by Targeted optimization evidence (PERF-04)
+            -> required by Aggregate <= boa-engine claim (PERF-03)
 
-ES Modules lifecycle
-    -> requires Realm/environment model
-    -> requires Module resolver hooks
-    -> requires Promise job queue for async module paths
+Representative benchmark suite (PERF-02)
+    -> required by Meaningful CI regression thresholds (TST-06)
 
-Promise and microtasks
-    -> requires Host job executor hooks
-    -> required by async language and runtime behavior
+Semantic non-regression gate (TST-05)
+    -> required by Safe fast-path rollout
 
-GC root strategy and handle safety
-    -> required by long-running embedding stability
-    -> enhances conformance reliability under stress modes
+Architecture-bound optimization scope (PERF-05)
+    -> constrains -> Large representation rewrite (anti-feature)
 
-Library-first minimal core boundary
-    -> conflicts with Full Node/Web API-in-core approach
+Benchmark special-casing (anti-feature)
+    -> conflicts with -> Cross-engine credibility + reproducibility
 ```
 
 ### Dependency Notes
 
-- **Built-ins correctness requires core semantics:** most built-ins exercise descriptor/prototype and completion semantics, so language-core bugs leak into built-ins quickly.
-- **ES Modules require job queue integration:** async loading/evaluation and dynamic import behavior need a reliable microtask/job executor contract.
-- **GC safety underpins everything stateful:** weak collections, closures, iterators, and module caches all rely on correct root management.
-- **Conformance rate depends on feature ordering:** closing parser/vm/runtime semantic gaps before broad API expansion improves pass-rate efficiency.
-- **Minimal core boundary conflicts with host-API sprawl:** mixing host platform APIs into core will slow milestone velocity and weaken maintainability.
+- **PERF-03 depends on PERF-01 + PERF-02 + PERF-04:** You cannot credibly claim parity/superiority vs boa-engine without stable baselines, representative workloads, and attributable optimizations.
+- **TST-06 depends on stable suite definition:** Thresholds are only useful if benchmark cases/configuration are controlled and versioned.
+- **Safe fast paths depend on TST-05:** Any optimization that bypasses generic logic must be continuously validated against semantic tests.
+- **PERF-05 conflicts with large architectural rewrites:** v1.1 should improve existing layers, not destabilize them with broad representation/GC model changes.
+- **Anti-feature special-casing conflicts with milestone goal:** It may improve one chart while reducing general runtime quality and long-term competitiveness.
 
 ## MVP Definition
 
 ### Launch With (v1)
 
-Minimum viable product for the next milestone gate in this brownfield project.
+Minimum viable v1.1 performance milestone scope.
 
-- [ ] Language-core semantic closure for highest-impact gaps (`eval`/`with`/strict interactions, descriptor edges, object invariants)
-- [ ] Spec-correct Promise job queue and microtask ordering
-- [ ] ES Module parse/instantiate/evaluate path with host loader hooks
-- [ ] Core built-ins behavior closure for current high-failure clusters
-- [ ] GC stress stability gates (root correctness + baseline regression checks)
+- [ ] Cross-engine reproducible benchmark pipeline + artifacts (PERF-01)
+- [ ] Representative hot-path benchmark portfolio with configurable run controls (PERF-02)
+- [ ] At least two targeted, measured hot-path optimizations in VM/runtime/bytecode paths (PERF-04)
+- [ ] Aggregate benchmark mean latency no worse than boa-engine on tracked suite (PERF-03)
+- [ ] Semantic/governance gates and CI perf regression guardrails remain green and enforced (TST-05, TST-06)
 
 ### Add After Validation (v1.x)
 
-- [ ] Advanced diagnostics polish (improved traces, richer failure clustering) once semantic closure is stable
-- [ ] Optional host runtime adapters (timers/fetch-like APIs) outside runtime core boundary
-- [ ] Focused performance tuning on measured hotspots (regex, GC cadence, VM dispatch)
+Features to add once MVP performance closure is stable.
+
+- [ ] Extend benchmark corpus (typed-array-heavy, object-shape churn, exception-heavy paths) — trigger: v1.1 parity sustained for 2+ cycles
+- [ ] Introduce deeper profiling automation (flamegraph/per-case instruction counters) — trigger: current top hotspots reduced and next bottlenecks unclear
+- [ ] Add optional experimental fast paths behind feature flags — trigger: baseline CI/perf governance proven reliable
 
 ### Future Consideration (v2+)
 
-- [ ] Optional optimization tier (JIT/AOT experiments) after conformance and API stability goals are met
-- [ ] Broader platform conformance programs (e.g., larger Web API/WPT-aligned surfaces via adapters)
-- [ ] Advanced parallel/shared-memory features when host threading model is ready
+Features to defer until semantic/perf governance matures beyond v1.1.
+
+- [ ] Value-representation overhaul (e.g., NaN-boxing or equivalent) — defer due to high semantic + memory-model risk
+- [ ] Tiered execution (baseline interpreter + JIT/AOT experiments) — defer until stable optimization telemetry and correctness envelope exist
+- [ ] GC strategy redesign (incremental/parallel tuning) — defer until current hotspot and allocation profile plateaus are demonstrated
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Core semantics closure (`eval`/`with`/strict/descriptors) | HIGH | HIGH | P1 |
-| Promise job queue + microtasks | HIGH | HIGH | P1 |
-| ES Modules lifecycle | HIGH | HIGH | P1 |
-| Built-ins closure for remaining major gaps | HIGH | HIGH | P1 |
-| GC root/stress hardening | HIGH | HIGH | P1 |
-| Conformance automation and failure clustering | HIGH | MEDIUM | P1 |
-| Host adapter ecosystem (outside core) | MEDIUM | MEDIUM | P2 |
-| Optimization-tier experiments (JIT/AOT) | MEDIUM | HIGH | P3 |
+| Reproducible cross-engine benchmark harness + artifacts | HIGH | MEDIUM | P1 |
+| Representative hot-path suite + run controls | HIGH | MEDIUM | P1 |
+| Targeted VM/runtime/bytecode hot-path optimizations | HIGH | HIGH | P1 |
+| Semantic + governance non-regression enforcement during perf work | HIGH | MEDIUM | P1 |
+| CI performance threshold gate and artifact publication | HIGH | MEDIUM | P1 |
+| Optimization playbook + attribution instrumentation | MEDIUM | MEDIUM | P2 |
+| Expanded benchmark corpus and profiling depth | MEDIUM | MEDIUM | P2 |
+| Representation/JIT/GC redesign experiments | MEDIUM | HIGH | P3 |
 
 **Priority key:**
 - P1: Must have for launch
@@ -125,22 +122,18 @@ Minimum viable product for the next milestone gate in this brownfield project.
 
 | Feature | Competitor A | Competitor B | Our Approach |
 |---------|--------------|--------------|--------------|
-| Conformance signaling | QuickJS reports near-100% ES2023 test-suite pass and Annex B breadth | Boa reports 90%+ conformance and publishes release-level gains | Keep transparent test262 snapshots and failure-cluster burn-down in-repo |
-| Embedding model | QuickJS exposes runtime/context/class C API and interrupt hooks | Boa emphasizes Rust embedding APIs and async job/module integration | Provide Rust-native host hooks with explicit boundaries and no runtime-core C FFI |
-| Runtime scope | QuickJS keeps a small embeddable core plus minimal standard modules | Boa is adding optional runtime APIs (`fetch`, timers, `queueMicrotask`) | Keep engine core minimal; move host APIs into optional adapter crates |
-| Memory/perf strategy | QuickJS highlights small footprint and deterministic GC behavior | Boa v0.21 moved `JsValue` default to NaN boxing and raised conformance/perf | Keep correctness-first baseline, then add benchmark-proven optimizations incrementally |
+| Baseline performance reference point | `quickjs-c` serves as strong low-latency interpreter reference in current benchmark reports | `boa-engine` is direct Rust-engine parity target for v1.1 | Keep both in every benchmark run, plus `nodejs`, so qjs-rs decisions are evidence-driven |
+| Milestone success criterion | QuickJS(C) shows what optimized interpreter paths can achieve | Boa offers realistic near-term parity target for Rust runtime architecture | Use staged targeting: first `qjs-rs <= boa-engine`, then iterate toward QuickJS(C) gap closure |
+| Perf-vs-correctness discipline | QuickJS value is tightly tied to semantic reliability | Boa comparability is meaningful only if semantics are preserved | Treat semantic gates as hard constraints; no perf-only shortcuts that alter observable behavior |
 
 ## Sources
 
-- Local project context: `AGENTS.md`, `.planning/PROJECT.md`, `.planning/codebase/ARCHITECTURE.md`, `.planning/codebase/CONCERNS.md`, `docs/current-status.md`
-- QuickJS documentation and feature claims: https://bellard.org/quickjs/quickjs.html
-- QuickJS release/news page: https://www.bellard.org/quickjs/
-- Boa repository README and crate/runtime/conformance references: https://github.com/boa-dev/boa
-- Boa site summary (conformance posture): https://boajs.dev/
-- Boa v0.21 release details (conformance delta, job executor/module loader/runtime APIs): https://boajs.dev/blog/2025/10/22/boa-release-21
-- test262 official suite scope and role: https://github.com/tc39/test262
-- Brimstone (Rust engine ecosystem comparator): https://github.com/Hans-Halverson/brimstone
+- `.planning/PROJECT.md` (v1.1 goal, constraints, milestone context)
+- `.planning/REQUIREMENTS.md` (PERF-01..05, TST-05..06)
+- `docs/engine-benchmarks.md` (cross-engine benchmark workflow and artifacts)
+- `docs/reports/engine-benchmark-report.md` (current baseline deltas vs `boa-engine`, `quickjs-c`, `nodejs`)
+- `AGENTS.md` (project-wide priority ordering and runtime boundaries)
 
 ---
-*Feature research for: Pure Rust JavaScript runtime engine ecosystem*
-*Researched: 2026-02-25*
+*Feature research for: qjs-rs v1.1 performance acceleration milestone*
+*Researched: 2026-02-27*

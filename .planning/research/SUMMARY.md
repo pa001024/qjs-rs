@@ -1,165 +1,147 @@
 # Project Research Summary
 
 **Project:** qjs-rs
-**Domain:** Pure Rust embeddable JavaScript runtime aligned with QuickJS semantics
-**Researched:** 2026-02-25
-**Confidence:** HIGH
+**Domain:** Pure-Rust JavaScript runtime (v1.1 performance acceleration milestone)
+**Researched:** 2026-02-27
+**Confidence:** HIGH (with execution-time validation gaps noted)
 
 ## Executive Summary
 
-qjs-rs is a language-engine product, not a host-platform runtime, and the research consistently points to a correctness-first build strategy used by mature engine teams: stable layered architecture (`parser -> bytecode -> vm -> runtime -> builtins`), strict conformance gates, and explicit compatibility tracking against shared baselines (test262 plus targeted QuickJS behavior diffing).
+qjs-rs v1.1 is a performance-acceleration milestone on top of a completed v1.0 semantic baseline. The research strongly supports an evidence-first optimization strategy: stabilize a reproducible cross-engine benchmark contract, instrument hotspot attribution, then apply guarded optimizations in `bytecode -> vm -> runtime` without changing observable JavaScript behavior.
 
-The recommended approach is to keep the current stable workspace boundaries and drive the next milestones through semantic closure before surface-area expansion. In practical terms, that means eliminating silent fallbacks, hardening object/descriptor invariants, landing Promise microtask semantics with host queue hooks, then implementing full ESM instantiate/evaluate flow before broad builtin expansion and performance tuning.
+The recommended approach is to treat performance as a governed pipeline, not isolated code tuning. That means pinned comparator versions (`boa-engine`, `quickjs-c`, `nodejs`), versioned benchmark schemas/artifacts, optimization-on/off semantic parity checks, and CI policy gates that enforce both performance and correctness. This is the shortest path to the milestone goal (`qjs-rs <= boa-engine` aggregate latency) while preserving QuickJS-aligned semantics.
 
-The largest risks are sequencing and signal-quality risks: planning from outdated project status, shipping placeholder async/module behavior, and over-trusting narrow pass-rate metrics. These are mitigated by dependency-ordered phases, dual-profile GC gates (default + stress), and roadmap KPIs that track executed coverage and skip-bucket reduction, not just failure counts.
+The main risks are benchmark invalidity (apples-to-oranges runs), noise-driven decisions, and semantic drift from aggressive fast paths. Mitigation is explicit: benchmark fairness contract, variance-aware threshold policy, fast-path guard+fallback design, and mandatory dual-gate evidence (perf + semantic) for every optimization PR.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The current stack is already the right foundation for this project: stable Rust (Edition 2024), Cargo workspace modularity, strict CI gates (`fmt`, `clippy -D warnings`, `test`), and conformance-first validation with test262 plus QuickJS comparison. This directly matches the project's hard constraints (pure Rust runtime core, semantics first).
+Use the existing `crates/benchmarks` harness as the control plane and extend it rather than replacing it. Pair statistical benchmarking (`criterion`) with deterministic instruction-level checks (`iai-callgrind`) and keep profiling/instrumentation (`pprof`, `tracing`) feature-gated for investigation rather than always-on CI.
 
-Recommended additions are selective and phase-gated: property/snapshot testing (`proptest`, `insta`) for semantic hardening, structured reporting (`serde/serde_json`) for compatibility and GC telemetry, and `criterion` for later performance work. None of these should displace core semantic gates.
+Optimization libraries (`smallvec`, `rustc-hash`, `bumpalo`) should be introduced only with measured hotspot evidence, not preemptively. Comparator/toolchain versions must be pinned and stored in artifacts to prevent baseline drift.
 
 **Core technologies:**
-- Rust stable (Edition 2024): runtime core implementation - aligns with safety, maintainability, and current CI baseline.
-- Cargo workspace (`resolver = 2`): modular engine evolution - preserves clear crate boundaries and incremental delivery.
-- test262 + QuickJS behavioral diffing: semantic verification - provides auditable compatibility signals.
-- GitHub Actions quality gates: continuous enforcement - prevents silent regressions in semantics and GC behavior.
+- Existing `crates/benchmarks` harness + schema v1: reproducible cross-engine macrobench runner — lowest integration risk and already aligned with repo workflow.
+- `criterion 0.8.2`: statistical microbenchmarks for VM/runtime hot paths — robust variance handling and standard Rust ecosystem choice.
+- `iai-callgrind 0.16.1`: deterministic instruction/regression signal — reduces CI noise and catches non-time regressions.
 
 ### Expected Features
 
-Research converges on five launch-critical capabilities: core language semantic closure, correct object/prototype/descriptor behavior, Promise microtask semantics, ESM lifecycle support, and GC/root correctness under sustained execution. These are table stakes for an embeddable JS engine.
+v1.1 should be framed as performance governance + targeted optimization, not architecture rewrite.
 
 **Must have (table stakes):**
-- Core semantics closure (`eval`/`with`/strict mode interactions, closures, exceptions) - users expect correct language behavior.
-- Object model and descriptor invariants - required for almost all builtin and userland correctness.
-- Promise microtask queue semantics - required for modern async behavior.
-- ES Module lifecycle (`parse -> instantiate -> evaluate`) - expected in modern JS usage.
-- Builtins correctness for core globals (`Object`, `Function`, `Array`, `Error`, `JSON`, etc.) - required for practical compatibility.
-- GC root strategy and safety under default + stress profiles - required for embeddability and stability.
+- Reproducible cross-engine baseline harness with machine-readable artifacts — required for credible milestone claims.
+- Representative hot-path suite (arith/array/call/JSON families) with stable run controls — required for meaningful trend and threshold gates.
+- Targeted VM/runtime/bytecode optimizations with before/after hotspot evidence and semantic non-regression proof.
+- CI perf regression gates with explicit thresholds while preserving existing semantic/governance gates.
 
 **Should have (competitive):**
-- Explicit QuickJS parity tracking (mapping/checklist + deltas) - clearer compatibility governance.
-- Strong diagnostics (error locations, stack traces, bytecode diagnostics) - faster triage and integration.
-- Rust-native host hook APIs for jobs/modules - better embedding ergonomics without violating core boundaries.
+- Dual-gate PR contract (perf delta + semantic delta) as a merge requirement.
+- Layered optimization playbook (`bytecode -> vm -> runtime`) to improve iteration speed and rollback safety.
+- Stable in-repo evidence pack (JSON + markdown + chart) for auditability and long-term trend tracking.
 
 **Defer (v2+):**
-- JIT/AOT optimization tiers - high complexity before semantic closure.
-- Node/Web API parity inside runtime core - scope blow-up and boundary erosion.
-- Aggressive unsafe/NaN-boxing-first redesign - premature until invariants and conformance stabilize.
+- Value representation overhaul (e.g., NaN-boxing migration).
+- Tiered execution/JIT experiments.
+- GC strategy redesign beyond telemetry-backed incremental tuning.
 
 ### Architecture Approach
 
-The preferred architecture remains layered and explicit: frontend and compilation feed a VM semantic engine backed by runtime state (values, objects, realms), with GC/observability as a first-class layer. Promise jobs and ESM must be treated as explicit subsystems with host-boundary traits, not implicit side effects.
+Adopt a control-plane architecture around the existing engine execution pipeline: benchmark/instrument/report/gate layers wrap (not replace) `parser -> bytecode -> vm -> runtime -> builtins`. New work should be localized to `bytecode` opt passes, `vm` perf counters/fast paths, benchmark adapters/schema, and CI gate scripts, with differential semantic validation between optimized and non-optimized execution.
 
 **Major components:**
-1. Frontend + compiler (`lexer/parser/bytecode`) - parses source and emits stable VM contract.
-2. VM semantic engine (`exec/env/call`) - executes opcodes and ECMAScript operations.
-3. Runtime state (`JsValue`, object model, descriptors, realms) - owns canonical semantic data model.
-4. Async/module subsystems (`jobs`, `modules`, host hooks) - enforces Promise ordering and ESM lifecycle.
-5. Memory + observability (`gc`, root manager, telemetry) - guarantees correctness under long-running workloads.
+1. Benchmark & instrumentation control plane (`crates/benchmarks`, schema, adapters, reporters) — reproducible evidence generation.
+2. Engine optimization plane (`crates/bytecode/src/opt`, `crates/vm/src/fast_path`, `crates/vm/src/perf`) — guarded semantics-preserving acceleration.
+3. Governance gate layer (`perf_gate.py`, CI job ordering, baseline policy docs) — enforce thresholds and prevent correctness regressions.
 
 ### Critical Pitfalls
 
-1. **Outdated-baseline planning** - always gate roadmap phases against `docs/current-status.md` and active concern files.
-2. **Silent semantic fallbacks** - replace fallback behavior with explicit parse/runtime errors plus regression tests.
-3. **Promise/module sequencing drift** - land job queue + host hooks before major async/builtin expansion.
-4. **GC blind spots in default profile** - keep dual-profile correctness gates (default + stress), not stress-only checks.
-5. **Monolithic VM coupling** - split VM domains before heavy Phase 6/7 feature waves.
+1. **Apples-to-oranges cross-engine benchmarking** — define and enforce compile/execute fairness contract + parity checks before tuning.
+2. **Noise mistaken for speedup** — require environment metadata, minimum sample policy, and variance-aware thresholds.
+3. **Semantic drift from fast paths** — enforce guard/deopt design and optimization on/off differential semantic tests.
+4. **Aggregate-only KPI bias** — gate both aggregate target and per-case non-regression bands.
+5. **Brittle or loose CI thresholds / baseline drift** — pin comparator versions and manage threshold policy lifecycle (owner, rationale, expiry, reset procedure).
 
 ## Implications for Roadmap
 
 Based on research, suggested phase structure:
 
-### Phase 1: Brownfield Re-baseline and Semantic Hardening
-**Rationale:** current codebase already passed scaffold stage; immediate value is closing high-impact semantic gaps.
-**Delivers:** status-linked gap inventory, removal of silent fallbacks, explicit unsupported-path errors, targeted semantic regressions.
-**Addresses:** core semantics closure and object invariant correctness.
-**Avoids:** outdated-baseline planning and silent-fallback pitfalls.
+### Phase 10: Baseline Contract & Benchmark Normalization
+**Rationale:** No optimization evidence is trustworthy until benchmark fairness and reproducibility are standardized.
+**Delivers:** Versioned benchmark schema, case catalog, engine adapters parity, pinned comparator metadata, baseline snapshots (`local-dev`, `ci-linux`).
+**Addresses:** PERF-01, PERF-02.
+**Avoids:** Pitfall 1, Pitfall 2, Pitfall 9.
 
-### Phase 2: VM Domain Modularization and Descriptor Integrity
-**Rationale:** reducing VM coupling lowers regression blast radius before async/module foundations.
-**Delivers:** VM split by ownership (`exec/env/call/gc/regexp`), descriptor invariant test pack, clearer module boundaries.
-**Uses:** existing Rust workspace + strict CI + snapshot/property testing additions.
-**Implements:** architecture separation between runtime data model and semantic execution paths.
+### Phase 11: Instrumentation + Semantic Parity Harness
+**Rationale:** Hotspot attribution and semantic safety must exist before introducing aggressive optimizations.
+**Delivers:** VM perf counters/snapshots, bytecode pass framework, optimization on/off differential test harness, hotspot evidence format.
+**Uses:** `tracing`/`pprof` (diagnostic), pass budgeting/feature flags.
+**Implements:** Architecture control-plane to execution-plane observability bridge.
 
-### Phase 3: Promise Job Queue Foundation
-**Rationale:** async semantics are table stakes and a prerequisite for broader compatibility expansion.
-**Delivers:** spec-ordered microtask queue, host enqueue/drain hooks, Promise settlement ordering regressions.
-**Uses:** runtime host boundary patterns and conformance harness gates.
-**Implements:** explicit jobs subsystem.
+### Phase 12: Targeted Hot-Path Optimization Wave
+**Rationale:** After measurement and safety rails are in place, optimize one workload family at a time for clear attribution/rollback.
+**Delivers:** At least two measured optimizations across arithmetic loops, array operations, and call-heavy paths; per-case + aggregate delta reports; allocation/GC side-effect checks.
+**Uses:** `criterion`, `iai-callgrind`, and optional `smallvec`/`rustc-hash`/`bumpalo` only when profile-backed.
+**Implements:** Guarded fast-path + canonical fallback architecture pattern.
 
-### Phase 4: ES Module Lifecycle and Loader Contract
-**Rationale:** module support depends on stable realm + job queue behavior.
-**Delivers:** parse/instantiate/evaluate lifecycle, module graph cache, loader error propagation and cyclic tests.
-**Uses:** host resolver interface and VM/runtime module boundaries.
-**Implements:** explicit modules subsystem.
-
-### Phase 5: Builtins De-alias and Compatibility Expansion
-**Rationale:** constructor alias debt blocks high-value conformance gains.
-**Delivers:** de-alias schedule execution (WeakMap/WeakSet/typed arrays priorities), internal slot correctness, directory-level test262 closure targets.
-**Uses:** declarative builtin/descriptor tables.
-**Implements:** builtin surface completion with stable semantics.
-
-### Phase 6: GC Robustness and Coverage Governance
-**Rationale:** long-run stability and trustworthy metrics are release-critical.
-**Delivers:** default+stress invariant gates, stale-handle regression suite, discovered/executed/skip KPI reporting, nightly stability policy.
-**Uses:** structured harness telemetry and CI governance.
-**Implements:** memory/observability hardening and compatibility signal quality controls.
+### Phase 13: CI Perf Governance & Release Gate Hardening
+**Rationale:** Convert milestone wins into durable regression protection without introducing flaky gates.
+**Delivers:** `perf_gate.py` threshold policy (PR coarse + nightly strict), artifact publication, baseline reset protocol, merge rule requiring both perf and semantic evidence.
+**Addresses:** TST-05, TST-06.
+**Avoids:** Pitfall 8, Pitfall 10.
 
 ### Phase Ordering Rationale
 
-- Async and module work is intentionally sequenced after VM modularization to avoid compounding regressions in a monolithic core.
-- Builtins expansion is sequenced after Promise/ESM foundations because many failures are dependency-driven, not isolated API bugs.
-- GC and coverage governance are treated as release gates, ensuring pass-rate improvements represent real semantic closure.
+- Benchmark contract and metadata pinning come first because all later optimization decisions depend on trustworthy evidence.
+- Instrumentation/parity harness precedes optimization to prevent semantic regressions and to improve causal confidence of each speedup.
+- CI gating comes after initial stabilization so thresholds can be calibrated from real variance data, reducing flake risk.
+- This ordering preserves layered architecture ownership and avoids cross-layer optimization debt.
 
 ### Research Flags
 
 Phases likely needing deeper research during planning:
-- **Phase 3:** Promise job ordering edge cases and host scheduler contract details.
-- **Phase 4:** ESM cyclic dependency semantics, loader failure modes, and top-level async interactions.
-- **Phase 5:** High-risk builtin internal-slot behavior and de-alias migration sequencing.
+- **Phase 10:** Cross-platform comparator execution contract (especially `quickjs-c` path/WSL behavior) and compile-vs-execute equivalence details.
+- **Phase 12:** Cache invalidation and mutation-heavy semantics for any property/call caching fast paths.
+- **Phase 13:** Threshold calibration windows, rerun policy, and baseline reset governance tuned from observed CI variance.
 
 Phases with standard patterns (skip research-phase):
-- **Phase 1:** Re-baseline + fallback removal is direct from existing status/concern docs.
-- **Phase 2:** VM modularization and descriptor hardening follow established engine refactor patterns.
+- **Phase 11:** Rust instrumentation modules, pass manager scaffolding, and differential testing are established implementation patterns.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | Core choices already validated by current repo and CI; only optional additions are medium-risk. |
-| Features | HIGH | Table-stakes set is consistent across local research and external engine practice. |
-| Architecture | HIGH | Layered boundaries and explicit jobs/modules map cleanly to current structure and known gaps. |
-| Pitfalls | HIGH | Risks are directly evidenced in current status and concern patterns. |
+| Stack | HIGH | Versions and tool fit are validated; integration path aligns with existing repo structure. |
+| Features | HIGH | Must/should/defer boundaries are consistent with v1.1 goal and constraints. |
+| Architecture | HIGH | Layered control-plane approach matches current system and minimizes blast radius. |
+| Pitfalls | HIGH | Risks are concrete, recurring in perf milestones, and mapped to prevention phases. |
 
-**Overall confidence:** HIGH
+**Overall confidence:** HIGH (execution risk remains in hotspot discovery quality and CI variance calibration).
 
 ### Gaps to Address
 
-- Host API contract granularity: define exact trait surface and lifecycle guarantees during Phase 3/4 planning.
-- Regex safety/performance policy: formalize timeout/budget strategy before broader untrusted-input scenarios.
-- Builtin completion criteria: publish per-constructor exit checks to prevent alias debt recurrence.
-- Performance baseline scope: lock benchmark corpus only after semantic gates stabilize.
+- **Hotspot ranking is not yet empirical:** finalize priority only after Phase 10/11 instrumentation data on current baseline.
+- **Threshold numbers are not finalized:** derive from rolling benchmark history, not one-off runs.
+- **GC/allocation telemetry contract is incomplete:** define required counters and reporting schema before broad optimization rollout.
+- **Comparator availability in CI (especially quickjs-c pathing):** validate runner setup and fallback behavior early.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- `.planning/research/STACK.md` - recommended stack, tooling, constraints.
-- `.planning/research/FEATURES.md` - feature prioritization and dependency map.
-- `.planning/research/ARCHITECTURE.md` - architecture patterns, component boundaries, build order.
-- `.planning/research/PITFALLS.md` - risk catalog and prevention/recovery strategies.
-- `docs/current-status.md` - current brownfield status baseline for roadmap sequencing.
+- `.planning/research/STACK.md` — tooling/version recommendations and stack constraints.
+- `.planning/research/FEATURES.md` — must/should/defer feature groups and dependency chain.
+- `.planning/research/ARCHITECTURE.md` — component model, data flow, and build-order rationale.
+- `.planning/research/PITFALLS.md` — failure modes, warning signs, and phase-level mitigations.
+- `.planning/PROJECT.md` — milestone scope, goals, and non-negotiable constraints.
 
 ### Secondary (MEDIUM confidence)
-- QuickJS docs and release notes - reference for semantic/embedding expectations.
-- Boa project docs and release notes - comparative pure-Rust engine architecture and conformance trajectory.
-- test262 project docs - conformance-suite role and scope.
+- `docs/engine-benchmarks.md` and `docs/reports/engine-benchmark-report.md` — current benchmark process and baseline evidence shape.
+- `.github/workflows/ci.yml`, `crates/benchmarks/src/main.rs` — existing implementation baseline and integration reality.
 
 ### Tertiary (LOW confidence)
-- Ecosystem comparator discussions (non-primary summaries) - directional context only; validate before policy changes.
+- Inferred phase naming alignment (Phase 10-13) based on research documents; exact numbering should be confirmed during roadmap drafting.
 
 ---
-*Research completed: 2026-02-25*
+*Research completed: 2026-02-27*
 *Ready for roadmap: yes*

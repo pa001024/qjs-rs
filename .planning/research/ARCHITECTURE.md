@@ -1,7 +1,7 @@
 # Architecture Research
 
-**Domain:** Pure Rust JavaScript runtime library aligned to QuickJS semantics
-**Researched:** 2026-02-25
+**Domain:** qjs-rs v1.1 Performance Acceleration (instrumentation + optimization + gating)
+**Researched:** 2026-02-27
 **Confidence:** HIGH
 
 ## Standard Architecture
@@ -9,207 +9,240 @@
 ### System Overview
 
 ```text
-+------------------------------------------------------------------+
-|                    Conformance and Host Layer                    |
-| test-harness API, test262 runner, CI gates, embedder entrypoints |
-+-------------------------------+----------------------------------+
-                                |
-+-------------------------------v----------------------------------+
-|                 Frontend and Compilation Layer                   |
-| lexer -> parser -> AST checks -> bytecode compiler              |
-+-------------------------------+----------------------------------+
-                                |
-+-------------------------------v----------------------------------+
-|                    Execution Semantics Layer                     |
-| VM interpreter, call frames, lexical envs, completion records   |
-| Promise reaction dispatch, module evaluate entry                 |
-+-------------------------------+----------------------------------+
-                                |
-+-------------------------------v----------------------------------+
-|                      Runtime State Layer                         |
-| JsValue handles, object model, descriptors, realms, intrinsics  |
-| module registry, job queue, host hooks                           |
-+-------------------------------+----------------------------------+
-                                |
-+-------------------------------v----------------------------------+
-|                  Memory and Observability Layer                  |
-| mark-sweep GC, root manager, weak references, GC telemetry      |
-+------------------------------------------------------------------+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                    Governance & Regression Gate Layer                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  CI perf gate job  │ semantic non-regression check │ baseline policy docs  │
+└───────────────┬───────────────────────────────┬─────────────────────────────┘
+                │                               │
+┌───────────────v───────────────────────────────v─────────────────────────────┐
+│                 Benchmark & Instrumentation Control Plane                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  benchmarks crate (runner)  │ perf schema/manifest  │ report renderer       │
+│  engine adapters            │ threshold evaluator   │ hotspot summarizer    │
+└───────────────┬───────────────────────────────┬─────────────────────────────┘
+                │                               │
+┌───────────────v───────────────────────────────v─────────────────────────────┐
+│                 Engine Execution Plane (existing core pipeline)              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ parser -> bytecode -> vm -> runtime -> builtins                              │
+│           (opt passes)    (fast paths + counters)                             │
+└───────────────┬───────────────────────────────┬─────────────────────────────┘
+                │                               │
+┌───────────────v───────────────────────────────v─────────────────────────────┐
+│                         Artifact & History Layer                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ target/benchmarks/*.json │ docs/reports/*.md,*.svg │ baseline snapshots     │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Component Responsibilities
 
-| Component | Responsibility | Typical Implementation |
-|-----------|----------------|------------------------|
-| `crates/lexer` | Tokenize source text | Stateless scanner with context flags (regexp/template/strict hints) |
-| `crates/parser` | Build AST and enforce early errors | Recursive descent parser + strict/early validation passes |
-| `crates/bytecode` | Lower AST to VM contract | Opcode enum + chunk builder + control-flow patch tables |
-| `crates/runtime` | Own canonical runtime data model | `JsValue` + object handles + realm/intrinsic descriptors |
-| `crates/vm` | Execute opcodes and semantic operations | Interpreter loop + env records + property algorithm paths |
-| `crates/builtins` | Install and version intrinsic objects | Declarative builtin tables + realm bootstrap installer |
-| `jobs subsystem` | Promise job queue and host scheduling boundary | Queue abstraction + host callback interface + drain loop |
-| `modules subsystem` | ESM parse/instantiate/evaluate lifecycle | Module graph cache + link/eval state machine |
-| `crates/test-harness` | Compatibility and regression gating | Script runner + test262 adapter + GC/perf summary reporting |
+| Component | Change Type (v1.1) | Responsibility | Typical Implementation |
+|-----------|---------------------|----------------|------------------------|
+| `crates/benchmarks` | **Modified** | Own reproducible benchmark execution across `qjs-rs`, `boa-engine`, `quickjs-c`, `nodejs` | Deterministic case catalog + engine adapters + JSON output schema |
+| `crates/vm` instrumentation module (`src/perf/*`) | **New** | Capture opcode/call/property/alloc counters with near-zero semantic impact | Feature-gated counters, monotonic snapshots, no behavioral branching |
+| `crates/vm` hot-path execution | **Modified** | Add guarded fast paths for arithmetic loops, array access, call-heavy paths | Guard -> fast path -> fallback to existing slow/spec path |
+| `crates/bytecode` optimization pass layer (`src/opt/*`) | **New** | Run semantics-preserving bytecode-level optimizations before execution | Small pass manager (`Pass` trait) + pass ordering + opt-debug dump |
+| `crates/test-harness` perf-semantic bridge | **Modified** | Provide differential checks proving optimized path == baseline semantics | Shared script matrix executed with optimization on/off |
+| `.github/scripts/perf_gate.py` | **New** | Enforce threshold-based non-regression in CI using benchmark JSON | Compare latest JSON vs checked-in baseline profile + fail on drift |
+| `.github/workflows/ci.yml` perf jobs | **Modified** | Run benchmark-gate and semantic safety gate in strict order | Dedicated job stage with artifacts upload |
+| `docs/reports/*` + `docs/engine-benchmarks.md` | **Modified** | Human-visible evidence and governance policy | Rendered report + threshold rationale + update process |
 
 ## Recommended Project Structure
 
 ```text
 crates/
-├── lexer/                       # lexical analysis
-├── parser/                      # AST + early error rules
-├── ast/                         # syntax tree types
-├── bytecode/                    # AST -> opcode contract
-├── runtime/                     # value/object/realm core
+├── bytecode/
 │   └── src/
-│       ├── value/               # JsValue and numeric/string primitives
-│       ├── object/              # object slots, descriptors, prototype links
-│       ├── realm/               # realm state and intrinsic registry
-│       └── host/                # host hook traits (timers, jobs, modules)
-├── vm/                          # semantic execution engine
+│       ├── lib.rs                  # existing compiler entry
+│       └── opt/                    # NEW: optimization pass pipeline
+│           ├── mod.rs
+│           ├── pass.rs             # pass trait + context
+│           ├── peephole.rs         # local instruction rewrites
+│           └── const_fold.rs       # guarded constant folding
+├── vm/
 │   └── src/
-│       ├── exec/                # interpreter loop and opcode dispatch
-│       ├── env/                 # lexical/variable/global environment records
-│       ├── call/                # call/construct/this/super mechanics
-│       ├── gc/                  # root marking and sweep integration
-│       ├── jobs/                # microtask queue integration
-│       ├── modules/             # ESM execution bridge
-│       └── regexp/              # regexp compile/cache/exec path
-├── builtins/                    # intrinsic constructors/prototypes
+│       ├── lib.rs                  # existing VM
+│       ├── perf/                   # NEW: instrumentation data model
+│       │   ├── mod.rs
+│       │   ├── counters.rs
+│       │   └── snapshot.rs
+│       └── fast_path/              # NEW: guarded hot-path helpers
+│           ├── mod.rs
+│           ├── arithmetic.rs
+│           ├── array_ops.rs
+│           └── calls.rs
+├── benchmarks/
 │   └── src/
-│       ├── tables/              # declarative metadata per builtin
-│       └── installers/          # realm bootstrap logic
-└── test-harness/                # test262 + regression orchestration
+│       ├── main.rs                 # existing CLI runner
+│       ├── cases.rs                # NEW: benchmark case registry
+│       ├── adapters/               # NEW: engine-specific runners
+│       └── schema.rs               # NEW: stable JSON report model
+└── test-harness/
+    └── src/
+        └── perf_semantic.rs        # NEW: optimization parity helpers
+
+.github/
+├── scripts/
+│   └── perf_gate.py                # NEW: threshold comparator
+└── workflows/
+    └── ci.yml                      # MODIFIED: perf-gate stage
+
+docs/
+├── engine-benchmarks.md            # MODIFIED: runbook + policy
+└── reports/
+    ├── engine-benchmark-report.md  # generated
+    └── engine-benchmark-chart.svg  # generated
+
+benchmarks/
+└── baselines/
+    ├── local-dev.json              # NEW: developer reference baseline
+    ├── ci-linux.json               # NEW: CI-target baseline
+    └── policy.toml                 # NEW: thresholds, variance bounds, opt-in cases
 ```
 
 ### Structure Rationale
 
-- **Keep crate boundaries stable (`lexer/parser/bytecode/runtime/vm/builtins/test-harness`):** avoids cross-cutting rewrites while compatibility grows.
-- **Modularize inside `crates/vm` first, then extract crates only if needed:** current main risk is a single-file VM hotspot, not missing crates.
-- **Move builtin metadata to declarative tables:** reduces descriptor drift and makes phased feature landing measurable.
-- **Make `jobs` and `modules` explicit subdomains:** Promise and ESM are the main architectural gap to full compatibility.
+- **Keep optimization code close to owners (`bytecode`, `vm`)**: avoids creating cross-crate optimization glue that erodes existing architecture.
+- **Introduce a control plane, not a semantic plane**: benchmarks/instrumentation/reporting sit *around* engine core and do not redefine runtime behavior.
+- **Separate baseline artifacts by environment**: avoids invalid CI failures due to host variance while keeping regression tracking deterministic.
+- **Pair perf changes with semantic parity helpers**: each optimization must ship with a direct parity check target.
 
 ## Architectural Patterns
 
-### Pattern 1: Stable Bytecode Contract Boundary
+### Pattern 1: Guarded Fast Path + Canonical Slow Path
 
-**What:** Keep parser/AST evolution decoupled from VM internals through a stable opcode and chunk contract.
-**When to use:** Always; especially when new syntax features are landing in parallel.
-**Trade-offs:** Slightly more compiler work up front, much lower VM regression blast radius.
-
-**Example:**
-```rust
-let ast = parser::parse_script(source)?;
-let chunk = bytecode::compile_script(&ast)?;
-let result = vm.execute_in_realm(&chunk, realm)?;
-```
-
-### Pattern 2: Declarative Intrinsics and Descriptor Tables
-
-**What:** Define builtin methods/properties and attributes in data tables, then install into a realm.
-**When to use:** For all builtins beyond minimal bootstrap, especially Object/Array/Function families.
-**Trade-offs:** More schema discipline; easier audits and test262 correlation.
+**What:** Implement optimization as a strict guard around existing semantics implementation.
+**When to use:** Arithmetic opcodes, array indexing, common function-call patterns.
+**Trade-offs:** Slightly more code paths; much safer semantic behavior under edge cases.
 
 **Example:**
 ```rust
-BuiltinSpec::new("Array.prototype.map")
-    .arity(1)
-    .attributes(Attrs::WRITABLE | Attrs::CONFIGURABLE)
-    .native(NativeFunction::ArrayPrototypeMap);
-```
-
-### Pattern 3: Explicit Host Boundary for Async and Modules
-
-**What:** VM schedules jobs and module resolution through host traits, not hidden globals.
-**When to use:** Before shipping Promise microtasks, ESM loading, and top-level-await behavior.
-**Trade-offs:** More interfaces to maintain; clear embedder behavior and deterministic tests.
-
-**Example:**
-```rust
-trait HostHooks {
-    fn enqueue_promise_job(&mut self, job: Job);
-    fn resolve_module(&mut self, referrer: ModuleId, specifier: &str) -> Result<ModuleId, HostError>;
+fn add(lhs: JsValue, rhs: JsValue) -> Result<JsValue, VmError> {
+    if let (JsValue::Number(a), JsValue::Number(b)) = (&lhs, &rhs) {
+        return Ok(JsValue::Number(a + b));
+    }
+    self.add_slow_path(lhs, rhs) // existing spec-aligned logic
 }
 ```
+
+### Pattern 2: Two-Stage Measurement Pipeline (Collect -> Evaluate)
+
+**What:** VM/test runner emits raw benchmark JSON; gate logic evaluates thresholds in a separate script.
+**When to use:** CI/perf governance where threshold policy changes faster than runtime code.
+**Trade-offs:** Extra artifact step; clean policy evolution without touching engine execution.
+
+**Example:**
+```bash
+cargo run -p benchmarks --release -- --output target/benchmarks/engine-comparison.json
+python .github/scripts/perf_gate.py \
+  --input target/benchmarks/engine-comparison.json \
+  --baseline benchmarks/baselines/ci-linux.json \
+  --policy benchmarks/baselines/policy.toml
+```
+
+### Pattern 3: Differential Optimization Verification
+
+**What:** Run identical scripts with optimization disabled/enabled and assert identical observable outputs/errors.
+**When to use:** Every new optimization pass or VM fast path.
+**Trade-offs:** More test time; strongest protection against semantic drift.
+
+**Example:**
+```rust
+let baseline = run_script_with_opts(script, VmPerfOptions::disabled())?;
+let optimized = run_script_with_opts(script, VmPerfOptions::enabled())?;
+assert_eq!(baseline.observable_result, optimized.observable_result);
+assert_eq!(baseline.error_shape, optimized.error_shape);
+```
+
+### Pattern 4: Pass Budgeting and Feature Flags
+
+**What:** Keep optimization passes individually toggleable and measurable.
+**When to use:** During milestone bring-up and regression triage.
+**Trade-offs:** Slight config complexity; dramatically better bisectability.
 
 ## Data Flow
 
 ### Request Flow
 
 ```text
-[Source JS]
-    ->
-[lexer/parser] -> [AST validations] -> [bytecode compile] -> [VM execute]
-    ->                                                |
-[Result/Exception] <- [realm + builtins bootstrap] <-+
+[Benchmark Case Catalog]
+    ↓
+[benchmarks runner] → [parser] → [bytecode + opt passes] → [vm fast path + counters] → [runtime/builtins]
+    ↓                                                                                  ↓
+[raw perf JSON artifact] ← [result normalizer] ← [engine adapters (boa/node/quickjs-c)]
+    ↓
+[perf gate evaluator] → [CI pass/fail + report links]
 ```
 
 ### State Management
 
 ```text
-[Realm]
-  |- Intrinsics table
-  |- Global object
-  |- Module registry
-  |- Promise job queue
-  |- Host hooks
-        |
-        v
-[VM]
-  |- Call stack
-  |- Lexical env stack
-  |- Object store handles
-  |- GC roots and stats
+[Perf Config]
+    ↓
+[Pass Manager + VM Perf Options] → [Execution]
+    ↓                                   ↓
+[Perf Snapshot Buffer]             [Semantic Result]
+    ↓                                   ↓
+[Benchmark JSON] ----------------> [Differential Semantic Check]
 ```
 
 ### Key Data Flows
 
-1. **Script execution flow:** source -> parse -> compile -> execute -> completion value/error; this is already stable and should remain the baseline path.
-2. **Promise microtask flow:** runtime operation creates reactions -> enqueue job -> host drains microtask queue -> VM executes reaction closures until queue empty.
-3. **ESM lifecycle flow:** module parse -> dependency graph resolution -> instantiate environments -> evaluate in dependency order -> expose live bindings and completion state.
+1. **Instrumentation flow:** VM emits counters/snapshots keyed by case + sample; artifacts are persisted without mutating runtime semantics.
+2. **Optimization flow:** bytecode and VM fast paths run under explicit flags; parity harness compares outputs against non-optimized execution.
+3. **Regression-gate flow:** CI evaluates benchmark aggregate and per-case thresholds against baseline policy, then only marks success if semantic suite stays green.
 
-## Build-Order Implications
+## Build/Order Rationale (v1.1)
 
-| Build Order Step | Why It Must Precede | Roadmap Implication |
-|------------------|---------------------|---------------------|
-| 1. VM internal modularization (`exec/env/call/gc`) | Current VM concentration is the highest regression multiplier | Do this before major Promise/ESM feature waves |
-| 2. Descriptor/object invariant hardening | Builtins correctness depends on object/descriptor semantics | Finish critical Object/Function edges before broad builtin expansion |
-| 3. GC root and weak-reference correctness | WeakMap/WeakSet and promise reaction retention depend on GC semantics | Keep GC quality gates active while adding async features |
-| 4. Promise jobs subsystem | Async semantics require deterministic microtask scheduling | Land queue API + host hooks before full Promise test262 enabling |
-| 5. ESM subsystem (parse/instantiate/evaluate) | Module execution requires stable realm/jobs interfaces | Build module graph only after jobs + realm boundaries are explicit |
-| 6. Compatibility expansion (`onlyStrict`, `module`, `includes`) | Coverage should open only after runtime paths exist | Expand harness skip policy in lockstep with feature readiness |
+| Order | Step | Why this order is required |
+|------:|------|----------------------------|
+| 1 | Stabilize benchmark schema + artifacts | Needed before any optimization so before/after is comparable. |
+| 2 | Add VM/bytecode instrumentation hooks | Hotspot evidence must come from real execution paths. |
+| 3 | Add differential semantic harness (opt off/on) | Prevents introducing optimization debt without safety net. |
+| 4 | Land guarded optimization passes (one family at a time) | Enables focused rollback and attribution per pass. |
+| 5 | Freeze CI baseline profile + policy thresholds | Baselines are meaningful only after first stable optimized run. |
+| 6 | Enable CI perf gate (non-blocking soak -> blocking) | Reduces flake risk and false failures during initial stabilization. |
 
 ## Scaling Considerations
 
 | Scale | Architecture Adjustments |
 |-------|--------------------------|
-| Current -> ~5k passing subsets | Keep current crates; split VM internals into modules; preserve end-to-end harness as single truth path |
-| ~5k -> ~20k broader subsets | Add declarative builtin specs, stronger invariant tests, and queue/module boundaries with feature flags |
-| Full-compatibility target (language + built-ins + module/async) | Stabilize host interfaces, enable strict/module suites, and maintain CI snapshots for semantic and GC regressions |
+| 4-8 microbench cases (current) | Keep single benchmark binary, strict deterministic case scripts, full cross-engine run on demand. |
+| 10-30 cases (milestone growth) | Split suite into tiers (`core-hotpath`, `json`, `collections`, `calls`) and run subset on PR, full suite nightly. |
+| 30+ cases / multi-host | Add manifest-driven suite sharding and baseline per host class; keep gate metric on normalized ratios, not absolute time only. |
 
 ### Scaling Priorities
 
-1. **First bottleneck:** VM change coupling in a monolithic implementation. Fix by module boundaries and ownership per semantic domain.
-2. **Second bottleneck:** Missing async/module execution boundaries. Fix by explicit job queue + module graph interfaces before expanding coverage gates.
+1. **First bottleneck:** benchmark runtime in PR CI. Fix with tiered suites and cached engine setup.
+2. **Second bottleneck:** noisy thresholds across hosts. Fix with environment-tagged baselines + rolling variance windows.
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Permanent Monolithic VM File
+### Anti-Pattern 1: Semantic Shortcuts as “Optimization”
 
-**What people do:** Keep all runtime semantics in one giant source file for short-term speed.
-**Why it's wrong:** Merge conflicts, fragile invariants, and high regression probability across unrelated features.
-**Do this instead:** Split by semantic ownership (`env`, `call`, `gc`, `jobs`, `modules`, `regexp`) and require focused tests per module.
+**What people do:** Replace spec path logic with simplified assumptions (e.g., treating all adds as numeric).
+**Why it's wrong:** Breaks language behavior and masks drift behind throughput gains.
+**Do this instead:** Always guard fast paths and fall back to canonical slow path.
 
-### Anti-Pattern 2: Silent Semantic Fallbacks
+### Anti-Pattern 2: Benchmark Harness Owning Semantics
 
-**What people do:** Downgrade unsupported syntax/semantics into no-op behavior to keep tests running.
-**Why it's wrong:** Produces false green signals and delays detection of spec gaps.
-**Do this instead:** Emit explicit parse/runtime errors for unsupported paths until correct semantics are implemented.
+**What people do:** Put ad-hoc parser/vm behavior toggles directly in benchmark runner.
+**Why it's wrong:** Creates a second execution semantics plane and invalid comparisons.
+**Do this instead:** Benchmarks call the same public engine path as tests; only control flags may differ.
 
-### Anti-Pattern 3: Placeholder Builtins as Long-Term Design
+### Anti-Pattern 3: Hard-Coding One-Machine Thresholds
 
-**What people do:** Keep constructor aliases or stub behavior (for Promise/Weak collections/typed arrays) indefinitely.
-**Why it's wrong:** Hidden incompatibility accumulates and makes later corrections disruptive.
-**Do this instead:** Track placeholder surfaces explicitly and replace with dedicated internal slots + behavior tables in planned phases.
+**What people do:** Use absolute millisecond limits copied from a single developer machine.
+**Why it's wrong:** CI flakiness and false negatives/positives.
+**Do this instead:** Gate with ratio-based thresholds against environment-specific baselines.
+
+### Anti-Pattern 4: Overfitting Optimizations to Four Cases
+
+**What people do:** Tune exactly for current microbench scripts and regress broader workloads.
+**Why it's wrong:** Non-representative wins do not improve real engine quality.
+**Do this instead:** Scale benchmark suite by workload family and keep per-family non-regression metrics.
 
 ## Integration Points
 
@@ -217,31 +250,32 @@ trait HostHooks {
 
 | Service | Integration Pattern | Notes |
 |---------|---------------------|-------|
-| test262 corpus | Local fixture + harness adapter | Keep skip policy explicit and shrink it per feature milestone |
-| QuickJS reference engine | Behavioral diff and targeted fixture comparison | Use for edge-case confirmation, not source-level translation |
-| Embedding host application | Trait-based runtime hooks | Core runtime stays pure Rust, no C FFI in runtime core |
+| `boa-engine` (Rust crate) | In-process adapter from `crates/benchmarks` | Pin version in Cargo.lock for reproducibility. |
+| `nodejs` binary | Subprocess adapter (`node -e`) | Capture version in report; isolate process startup from inner-loop timing policy. |
+| `quickjs-c` binary | WSL subprocess adapter | Keep path/config explicit and fail with actionable diagnostics when unavailable. |
+| GitHub Actions artifacts | Upload benchmark JSON/report on gate runs | Required for auditability and trend debugging. |
 
 ### Internal Boundaries
 
 | Boundary | Communication | Notes |
 |----------|---------------|-------|
-| `parser` <-> `bytecode` | Typed AST structures | Parser owns syntax/early errors; compiler owns lowering only |
-| `bytecode` <-> `vm` | Opcode/chunk contract | Keep contract versioned and testable via disassembly snapshots |
-| `runtime` <-> `vm` | Handle/object/realm APIs | Runtime owns data model; VM owns semantic operations |
-| `builtins` <-> `vm` | Native function IDs + installer APIs | Builtins declare surfaces; VM executes native semantics |
-| `vm` <-> `jobs/modules` | Queue and loader interfaces | Enables deterministic Promise/ESM behavior and host integration |
-| `test-harness` <-> engine | Public run APIs + suite summaries | Single conformance gate for roadmap decisions |
+| `bytecode(opt)` ↔ `vm` | Existing `Chunk` contract + optional pass metadata | Do not expose VM internals to bytecode passes. |
+| `vm(perf)` ↔ `test-harness` | Snapshot DTOs + execution result | Perf counters are observational; harness remains semantic source of truth. |
+| `benchmarks` ↔ engine crates | Public parse/compile/execute APIs | No benchmark-only semantic API forks. |
+| `perf_gate.py` ↔ benchmark artifacts | Versioned JSON schema | Add schema version to prevent silent parser drift. |
+| CI perf gate ↔ semantic gates | Job dependency ordering | Perf pass is valid only if semantic gates pass first. |
 
 ## Sources
 
 - `.planning/PROJECT.md`
+- `.planning/REQUIREMENTS.md`
+- `.planning/STATE.md`
 - `.planning/codebase/ARCHITECTURE.md`
-- `.planning/codebase/STRUCTURE.md`
-- `.planning/codebase/CONCERNS.md`
-- `docs/current-status.md`
-- `docs/quickjs-mapping.md` (project reference map)
-- `docs/semantics-checklist.md` (project semantic target checklist)
+- `docs/engine-benchmarks.md`
+- `docs/reports/engine-benchmark-report.md`
+- `crates/benchmarks/src/main.rs`
+- `.github/workflows/ci.yml`
 
 ---
-*Architecture research for: pure Rust JavaScript runtime aligned with QuickJS*
-*Researched: 2026-02-25*
+*Architecture research for: qjs-rs v1.1 performance acceleration*
+*Researched: 2026-02-27*
