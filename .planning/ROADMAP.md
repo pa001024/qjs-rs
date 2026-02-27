@@ -17,6 +17,8 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets. (completed 2026-02-26)
 - [x] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts. (completed 2026-02-27)
 - [x] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates. (completed 2026-02-27)
+- [ ] **Phase 8: Async and Module Builtins Integration Closure** - Close module-evaluation builtin wiring gaps and re-validate Promise queue semantics through module execution paths.
+- [ ] **Phase 9: Verification Traceability Normalization** - Normalize verification schema and automation contracts so requirement coverage is machine-verifiable end-to-end.
 
 ## Phase Details
 
@@ -105,6 +107,35 @@ Plans:
 - [x] 07-02-PLAN.md - Upgrade test262 reporting to fixed JSON/Markdown schema with explicit skip categories.
 - [x] 07-03-PLAN.md - Establish reproducible baseline/stress snapshot governance and manifest-backed status updates.
 
+### Phase 8: Async and Module Builtins Integration Closure
+**Goal**: Module execution paths preserve baseline builtin availability and Promise behavior so async/module flows are end-to-end deterministic.
+**Depends on**: Phase 7
+**Requirements**: ASY-01, ASY-02
+**Gap Closure**: Closes v1.0 audit requirement gaps (`ASY-01`, `ASY-02`) plus reported module/builtins E2E break.
+**Success Criteria** (what must be TRUE):
+  1. Module evaluation path exposes required baseline globals (including Promise) with deterministic behavior parity to script path.
+  2. Promise `then/catch/finally` ordering and host queue hooks are validated through module-executed scenarios, not only script-only scenarios.
+  3. Regression tests reproduce and then close the reported `ModuleLifecycle:EvaluateFailed` Promise usage flow gap.
+**Plans**: 3 plans
+Plans:
+- [ ] 08-01-PLAN.md - Reproduce and fix module realm baseline builtin availability gaps.
+- [ ] 08-02-PLAN.md - Add module-path Promise queue regression matrix for ASY-01/ASY-02 semantics.
+- [ ] 08-03-PLAN.md - Wire Phase 8 E2E module+async gates into harness/CI with deterministic evidence output.
+
+### Phase 9: Verification Traceability Normalization
+**Goal**: Verification artifacts and tooling contracts are schema-consistent so requirement coverage auditing is automated and reproducible.
+**Depends on**: Phase 8
+**Requirements**: None (audit integration debt closure)
+**Gap Closure**: Closes v1.0 audit integration gaps on verification schema alignment and manual fallback paths.
+**Success Criteria** (what must be TRUE):
+  1. All phase verification files expose consistent machine-parseable requirement mapping fields.
+  2. Requirement traceability checks no longer rely on manual fallback for frontmatter/schema mismatches.
+  3. Milestone audit rerun can compute requirement coverage directly from standardized verification artifacts.
+**Plans**: 2 plans
+Plans:
+- [ ] 09-01-PLAN.md - Standardize verification report schema and update legacy phase artifacts.
+- [ ] 09-02-PLAN.md - Align verification tooling parsers and add schema conformance checks in CI.
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -116,3 +147,5 @@ Plans:
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
+| 8. Async and Module Builtins Integration Closure | 0/3 | Not started | - |
+| 9. Verification Traceability Normalization | 0/2 | Not started | - |
