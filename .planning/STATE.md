@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 5
-current_phase_name: Core Builtins Baseline
-current_plan: Not started
-status: completed
-stopped_at: Phase 6 context gathered
-last_updated: "2026-02-26T20:13:36.880Z"
-last_activity: 2026-02-26
+current_phase: 6
+current_phase_name: Collection and RegExp Semantics
+current_plan: 02
+status: in_progress
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-02-27T04:21:32.553Z"
+last_activity: 2026-02-27
 progress:
   total_phases: 7
   completed_phases: 5
-  total_plans: 15
-  completed_plans: 15
-  percent: 100
+  total_plans: 18
+  completed_plans: 16
+  percent: 89
 ---
 
 # Project State
@@ -24,19 +24,19 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-02-25)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.
-**Current focus:** Phase 5 - Core Builtins Baseline
+**Current focus:** Phase 6 - Collection and RegExp Semantics
 
 ## Current Position
 
-**Current Phase:** 5
-**Current Phase Name:** Core Builtins Baseline
+**Current Phase:** 6
+**Current Phase Name:** Collection and RegExp Semantics
 **Total Phases:** 7
-**Current Plan:** Not started
+**Current Plan:** 02
 **Total Plans in Phase:** 3
-**Status:** Milestone complete
-**Last Activity:** 2026-02-26
-**Last Activity Description:** Phase 5 complete
-**Progress:** [██████████] 100%
+**Status:** In progress
+**Last Activity:** 2026-02-27
+**Last Activity Description:** Completed 06-01 plan
+**Progress:** [█████████░] 89%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 05 P01 | 11 min | 3 tasks | 7 files |
 | Phase 05 P02 | 10 min | 3 tasks | 9 files |
 | Phase 05 P03 | 9 min | 3 tasks | 14 files |
+| Phase 06 P01 | 5 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 05]: Use runtime ToString coercion in Function constructor argument/body assembly. — Preserves throwable coercion semantics in constructor edge cases while keeping dynamic function assembly deterministic.
 - [Phase 05]: Expand Number static predicates and missing Math callable surface in VM native dispatch. — Removes targeted NotCallable clusters for the phase subset without broad architectural churn.
 - [Phase 05]: Normalize Date string output to UTC RFC1123-style text for baseline gates. — Avoids locale-fragile CI assertions while preserving deterministic parse/UTC/getTime behavior.
+- [Phase 06]: Use dedicated WeakMap/WeakSet constructors and prototypes instead of Map/Set alias paths. — Closes BUI-04 by giving weak collections distinct constructor identity and prototype chains.
+- [Phase 06]: Enforce WeakMap/WeakSet non-object key TypeError behavior in constructor iterable ingestion and method dispatch. — Locks deterministic weak-key semantics and fail-fast behavior for phase-6 collection gates.
 
 ### Pending Todos
 
@@ -103,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-26T20:13:36.878Z
-**Stopped at:** Phase 6 context gathered
-**Resume file:** .planning/phases/06-collection-and-regexp-semantics/06-CONTEXT.md
+**Last session:** 2026-02-27T04:21:32.553Z
+**Stopped at:** Completed 06-01-PLAN.md
+**Resume file:** None

@@ -85,7 +85,7 @@ Plans:
   3. Collection and RegExp regression suites pass in CI alongside prior builtin coverage.
 **Plans**: 3 plans
 Plans:
-- [ ] 06-01-PLAN.md - De-alias weak collections and lock Map/Set/WeakMap/WeakSet dedicated runtime semantics.
+- [x] 06-01-PLAN.md - De-alias weak collections and lock Map/Set/WeakMap/WeakSet dedicated runtime semantics.
 - [ ] 06-02-PLAN.md - Close RegExp constructor/exec/test/toString semantics with shared lastIndex behavior and deterministic errors.
 - [ ] 06-03-PLAN.md - Wire Phase 6 collection/RegExp regression gates into test262-lite, CI, and baseline docs.
 
@@ -110,5 +110,5 @@ Plans:
 | 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
 | 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
-| 6. Collection and RegExp Semantics | 0/3 | Not started | - |
+| 6. Collection and RegExp Semantics | 1/3 | In Progress | - |
 | 7. Compatibility and Governance Gates | 0/TBD | Not started | - |
