@@ -61,6 +61,21 @@ rg --line-number "Skipped Categories|discovered|executed|failed" target/test262-
 - Phase 6 命令是 Phase 5 合约的增量门禁，不替代既有 `core_builtins_*` 与 `core_builtins_subset` gate。
 - 后续更新必须同时保持 Phase 5 与 Phase 6 gate 全绿，避免通过缩减子集来“修复”回归。
 
+## Phase 7 Snapshot Governance Contract（2026-02-27）
+
+为 MEM-03 与 TST-04 在 Phase 7 的兼容性治理契约，固定执行以下命令：
+
+```powershell
+python .github/scripts/run_compat_snapshot.py --phase 07 --milestone v1.0 --manifest docs/compatibility/phase7-snapshots.json --output-dir target/compatibility --allow-dirty
+python .github/scripts/sync_current_status.py --manifest docs/compatibility/phase7-snapshots.json --status-doc docs/current-status.md --mode check
+```
+
+契约要求：
+- snapshot 同时产出 `baseline` 与 `stress` 两种 profile 的 JSON + Markdown 报告。
+- `test262-run` 输出必须包含 `gc_drift.status`（`ok|warning|blocking`）、`anomaly_streak`、`investigation_required`。
+- 当 `status=blocking` 或 `investigation_required=true` 时，CI 必须失败。
+- `docs/current-status.md` 必须与 `docs/compatibility/phase7-snapshots.json` 的机器渲染结果保持一致（`--mode check` 为硬门禁）。
+
 测试语料：
 - 仓库：`d:\dev\test262`
 - 用例根目录：`d:\dev\test262\test`

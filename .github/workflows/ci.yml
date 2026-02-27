@@ -65,3 +65,10 @@ jobs:
             --manifest docs/compatibility/phase7-snapshots.json \
             --output-dir target/compatibility \
             --allow-dirty
+
+      - name: Current Status Drift Gate
+        run: |
+          python .github/scripts/sync_current_status.py \
+            --manifest docs/compatibility/phase7-snapshots.json \
+            --status-doc docs/current-status.md \
+            --mode check
