@@ -1,10 +1,9 @@
 ---
 phase: 02-runtime-safety-and-root-integrity
-phase_number: 02
+phase_number: "02"
+verified: 2026-02-26T00:00:00Z
 status: passed
 score: 100
-verified_at: 2026-02-26
-verifier: codex (gsd-verifier role)
 requirements_checked:
   - MEM-01
   - MEM-02

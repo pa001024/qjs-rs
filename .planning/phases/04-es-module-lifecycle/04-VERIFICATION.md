@@ -1,10 +1,9 @@
 ---
 phase: 04-es-module-lifecycle
-phase_number: 04
+phase_number: "04"
+verified: 2026-02-26T00:00:00Z
 status: passed
 score: 100
-verified_at: 2026-02-26
-verifier: codex (gsd-verifier role)
 requirements_checked:
   - MOD-01
   - MOD-02

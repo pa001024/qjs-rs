@@ -1,19 +1,12 @@
 ---
 phase: 08-async-and-module-builtins-integration-closure
-phase_number: 08
-verified_at: 2026-02-27T18:53:31.2953851+08:00
+phase_number: "08"
+verified: 2026-02-27T18:53:31.2953851+08:00
 status: passed
-goal_status: achieved
+score: 3/3 plan must-haves satisfied
 requirements_checked:
   - ASY-01
   - ASY-02
-plan_must_haves:
-  - plan: 08-01
-    status: satisfied
-  - plan: 08-02
-    status: satisfied
-  - plan: 08-03
-    status: satisfied
 ---
 
 # Phase 8 Verification Report (Re-run)
