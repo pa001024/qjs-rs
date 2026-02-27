@@ -79,6 +79,14 @@ fn load_number_export(exports: &BTreeMap<String, JsValue>, name: &str) -> f64 {
     }
 }
 
+fn load_string_export(exports: &BTreeMap<String, JsValue>, name: &str) -> String {
+    let value = exports.get(name).cloned().unwrap_or(JsValue::Undefined);
+    match value {
+        JsValue::String(text) => text,
+        other => panic!("expected string export {name}, got {other:?}"),
+    }
+}
+
 #[test]
 fn module_state_transition_guards() {
     let mut host =
@@ -206,6 +214,25 @@ fn module_graph_instantiate_evaluate() {
         vm.module_state("entry.js"),
         Some(ModuleLifecycleState::Evaluated)
     );
+}
+
+#[test]
+fn module_promise_builtin_parity() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "const direct = Promise;\n\
+         const chained = Promise.resolve(20).then(function (value) { return value + 22; });\n\
+         export const promise_type = typeof direct;\n\
+         export const chained_type = typeof chained;\n\
+         export const has_then = typeof chained.then;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("module Promise usage should evaluate successfully");
+    assert_eq!(load_string_export(&exports, "promise_type"), "function");
+    assert_eq!(load_string_export(&exports, "chained_type"), "object");
+    assert_eq!(load_string_export(&exports, "has_then"), "function");
 }
 
 #[test]

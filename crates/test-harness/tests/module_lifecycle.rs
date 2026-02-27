@@ -67,6 +67,13 @@ fn expect_number(exports: &BTreeMap<String, JsValue>, key: &str) -> f64 {
     }
 }
 
+fn expect_string(exports: &BTreeMap<String, JsValue>, key: &str) -> String {
+    match exports.get(key).cloned().unwrap_or(JsValue::Undefined) {
+        JsValue::String(text) => text,
+        other => panic!("expected string export {key}, got {other:?}"),
+    }
+}
+
 #[test]
 fn evaluates_static_module_graph_baseline() {
     let exports = run_module_entry(
@@ -81,6 +88,25 @@ fn evaluates_static_module_graph_baseline() {
     )
     .expect("module graph should evaluate");
     assert_eq!(expect_number(&exports, "answer"), 42.0);
+}
+
+#[test]
+fn module_entry_promise_builtin_parity() {
+    let exports = run_module_entry(
+        "entry.js",
+        &[(
+            "entry.js",
+            "const direct = Promise;\n\
+             const chained = Promise.resolve(20).then(function (value) { return value + 22; });\n\
+             export const promise_type = typeof direct;\n\
+             export const chained_type = typeof chained;\n\
+             export const has_then = typeof chained.then;\n",
+        )],
+    )
+    .expect("module entry Promise usage should evaluate");
+    assert_eq!(expect_string(&exports, "promise_type"), "function");
+    assert_eq!(expect_string(&exports, "chained_type"), "object");
+    assert_eq!(expect_string(&exports, "has_then"), "function");
 }
 
 #[test]
