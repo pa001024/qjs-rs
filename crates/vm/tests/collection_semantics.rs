@@ -159,3 +159,61 @@ fn collection_semantics_same_value_zero_and_live_iteration() {
     let mut vm = Vm::default();
     assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
 }
+
+#[test]
+fn weak_collection_iterable_fail_fast_stops_before_third_pull() {
+    let script = parse_script(
+        "var weakMapPulls = 0; \
+         var weakMapFailFast = false; \
+         var weakMapIterable = { \
+           [Symbol.iterator]: function() { \
+             return { \
+               next: function() { \
+                 weakMapPulls = weakMapPulls + 1; \
+                 if (weakMapPulls === 1) return { value: [{}, 1], done: false }; \
+                 if (weakMapPulls === 2) return { value: 1, done: false }; \
+                 return { value: undefined, done: true }; \
+               } \
+             }; \
+           } \
+         }; \
+         try { new WeakMap(weakMapIterable); } catch (e) { weakMapFailFast = e instanceof TypeError; } \
+         var weakSetPulls = 0; \
+         var weakSetFailFast = false; \
+         var weakSetIterable = { \
+           [Symbol.iterator]: function() { \
+             return { \
+               next: function() { \
+                 weakSetPulls = weakSetPulls + 1; \
+                 if (weakSetPulls === 1) return { value: {}, done: false }; \
+                 if (weakSetPulls === 2) return { value: 1, done: false }; \
+                 return { value: undefined, done: true }; \
+               } \
+             }; \
+           } \
+         }; \
+         try { new WeakSet(weakSetIterable); } catch (e) { weakSetFailFast = e instanceof TypeError; } \
+         weakMapFailFast && weakMapPulls === 2 && weakSetFailFast && weakSetPulls === 2;",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+    let mut realm = Realm::default();
+    realm.define_global(
+        "WeakSet",
+        JsValue::NativeFunction(NativeFunction::WeakSetConstructor),
+    );
+    realm.define_global(
+        "WeakMap",
+        JsValue::NativeFunction(NativeFunction::WeakMapConstructor),
+    );
+    realm.define_global(
+        "Symbol",
+        JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+    );
+    realm.define_global(
+        "TypeError",
+        JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+    );
+    let mut vm = Vm::default();
+    assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+}
