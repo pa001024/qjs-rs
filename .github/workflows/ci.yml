@@ -19,6 +19,22 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Governance Gates
+        run: |
+          python .github/scripts/validate_governance.py \
+            --exceptions .github/governance/exceptions.json \
+            --check-template .github/PULL_REQUEST_TEMPLATE.md \
+            --repo-root . \
+            --self-test
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            python .github/scripts/validate_governance.py \
+              --exceptions .github/governance/exceptions.json \
+              --check-template .github/PULL_REQUEST_TEMPLATE.md \
+              --validate-pr-event "${GITHUB_EVENT_PATH}" \
+              --repo-root . \
+              --require-test-reference-exists
+          fi
+
       - name: Format
         run: cargo fmt --check
 
