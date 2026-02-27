@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use test_harness::test262::{SuiteOptions, SuiteSummary, run_suite};
+use test_harness::test262::{run_suite, SuiteOptions, SuiteSummary};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct GcExpectations {
@@ -176,6 +176,7 @@ fn main() {
     let mut fail_fast = false;
     let mut allow_failures = false;
     let mut json: Option<PathBuf> = None;
+    let mut markdown: Option<PathBuf> = None;
     let mut show_failures = 0usize;
     let mut auto_gc = false;
     let mut auto_gc_threshold: Option<usize> = None;
@@ -218,6 +219,13 @@ fn main() {
                     panic!("--json requires a path argument");
                 });
                 json = Some(PathBuf::from(value));
+            }
+            "--markdown" => {
+                i += 1;
+                let value = args.get(i).unwrap_or_else(|| {
+                    panic!("--markdown requires a path argument");
+                });
+                markdown = Some(PathBuf::from(value));
             }
             "--show-failures" => {
                 i += 1;
@@ -353,6 +361,14 @@ fn main() {
             panic!("failed to write json summary to {}: {err}", path.display());
         });
     }
+    if let Some(path) = markdown {
+        write_summary_markdown(&path, &summary).unwrap_or_else(|err| {
+            panic!(
+                "failed to write markdown summary to {}: {err}",
+                path.display()
+            );
+        });
+    }
 
     if !summary.failures.is_empty() {
         println!("sample failures:");
@@ -370,7 +386,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>] [--show-failures N] [--auto-gc] [--auto-gc-threshold N] [--runtime-gc] [--runtime-gc-interval N] [--show-gc] [--expect-gc-baseline <path>] [--expect-collections-total-min N] [--expect-runtime-collections-min N] [--expect-runtime-ratio-min R] [--expect-reclaimed-objects-min N]"
+        "Usage: cargo run -p test-harness --bin test262-run -- --root <path> [--max-cases N] [--fail-fast] [--allow-failures] [--json <path>] [--markdown <path>] [--show-failures N] [--auto-gc] [--auto-gc-threshold N] [--runtime-gc] [--runtime-gc-interval N] [--show-gc] [--expect-gc-baseline <path>] [--expect-collections-total-min N] [--expect-runtime-collections-min N] [--expect-runtime-ratio-min R] [--expect-reclaimed-objects-min N]"
     );
 }
 
@@ -381,6 +397,10 @@ fn print_summary(summary: &SuiteSummary, show_gc: bool) {
     println!("  skipped:    {}", summary.skipped);
     println!("  passed:     {}", summary.passed);
     println!("  failed:     {}", summary.failed);
+    println!("  skipped categories:");
+    for (name, value) in skip_category_rows(summary) {
+        println!("    {name}: {value}");
+    }
     if show_gc {
         println!("gc summary:");
         println!("  collections_total: {}", summary.gc.collections_total);
@@ -395,28 +415,125 @@ fn print_summary(summary: &SuiteSummary, show_gc: bool) {
     }
 }
 
-fn write_summary_json(path: &PathBuf, summary: &SuiteSummary) -> Result<(), String> {
-    let json = format!(
-        "{{\n  \"discovered\": {},\n  \"executed\": {},\n  \"skipped\": {},\n  \"passed\": {},\n  \"failed\": {},\n  \"gc\": {{\n    \"collections_total\": {},\n    \"boundary_collections\": {},\n    \"runtime_collections\": {},\n    \"reclaimed_objects\": {},\n    \"mark_duration_ns\": {},\n    \"sweep_duration_ns\": {}\n  }}\n}}\n",
+fn skip_category_rows(summary: &SuiteSummary) -> [(&'static str, usize); 7] {
+    [
+        ("fixture_file", summary.skipped_categories.fixture_file),
+        ("flag_module", summary.skipped_categories.flag_module),
+        (
+            "flag_only_strict",
+            summary.skipped_categories.flag_only_strict,
+        ),
+        ("flag_async", summary.skipped_categories.flag_async),
+        (
+            "requires_includes",
+            summary.skipped_categories.requires_includes,
+        ),
+        (
+            "requires_feature",
+            summary.skipped_categories.requires_feature,
+        ),
+        (
+            "requires_harness_global_262",
+            summary.skipped_categories.requires_harness_global_262,
+        ),
+    ]
+}
+
+fn format_summary_json(summary: &SuiteSummary) -> String {
+    format!(
+        "{{\n  \"discovered\": {},\n  \"executed\": {},\n  \"skipped\": {},\n  \"passed\": {},\n  \"failed\": {},\n  \"skipped_categories\": {{\n    \"fixture_file\": {},\n    \"flag_module\": {},\n    \"flag_only_strict\": {},\n    \"flag_async\": {},\n    \"requires_includes\": {},\n    \"requires_feature\": {},\n    \"requires_harness_global_262\": {}\n  }},\n  \"gc\": {{\n    \"collections_total\": {},\n    \"boundary_collections\": {},\n    \"runtime_collections\": {},\n    \"reclaimed_objects\": {},\n    \"mark_duration_ns\": {},\n    \"sweep_duration_ns\": {}\n  }}\n}}\n",
         summary.discovered,
         summary.executed,
         summary.skipped,
         summary.passed,
         summary.failed,
+        summary.skipped_categories.fixture_file,
+        summary.skipped_categories.flag_module,
+        summary.skipped_categories.flag_only_strict,
+        summary.skipped_categories.flag_async,
+        summary.skipped_categories.requires_includes,
+        summary.skipped_categories.requires_feature,
+        summary.skipped_categories.requires_harness_global_262,
         summary.gc.collections_total,
         summary.gc.boundary_collections,
         summary.gc.runtime_collections,
         summary.gc.reclaimed_objects,
         summary.gc.mark_duration_ns,
         summary.gc.sweep_duration_ns
-    );
-    std::fs::write(path, json).map_err(|err| err.to_string())
+    )
+}
+
+fn format_summary_markdown(summary: &SuiteSummary) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Test262 Summary Report\n\n");
+    markdown.push_str("## Totals\n\n");
+    markdown.push_str("| Metric | Value |\n");
+    markdown.push_str("| --- | ---: |\n");
+    markdown.push_str(&format!("| discovered | {} |\n", summary.discovered));
+    markdown.push_str(&format!("| executed | {} |\n", summary.executed));
+    markdown.push_str(&format!("| skipped | {} |\n", summary.skipped));
+    markdown.push_str(&format!("| passed | {} |\n", summary.passed));
+    markdown.push_str(&format!("| failed | {} |\n\n", summary.failed));
+
+    markdown.push_str("## Skipped Categories\n\n");
+    markdown.push_str("| Category | Count |\n");
+    markdown.push_str("| --- | ---: |\n");
+    for (name, value) in skip_category_rows(summary) {
+        markdown.push_str(&format!("| {name} | {value} |\n"));
+    }
+    markdown.push_str(&format!("| total | {} |\n\n", summary.skipped));
+
+    markdown.push_str("## GC Summary\n\n");
+    markdown.push_str("| Metric | Value |\n");
+    markdown.push_str("| --- | ---: |\n");
+    markdown.push_str(&format!(
+        "| collections_total | {} |\n",
+        summary.gc.collections_total
+    ));
+    markdown.push_str(&format!(
+        "| boundary_collections | {} |\n",
+        summary.gc.boundary_collections
+    ));
+    markdown.push_str(&format!(
+        "| runtime_collections | {} |\n",
+        summary.gc.runtime_collections
+    ));
+    markdown.push_str(&format!(
+        "| reclaimed_objects | {} |\n",
+        summary.gc.reclaimed_objects
+    ));
+    markdown.push_str(&format!(
+        "| mark_duration_ns | {} |\n",
+        summary.gc.mark_duration_ns
+    ));
+    markdown.push_str(&format!(
+        "| sweep_duration_ns | {} |\n",
+        summary.gc.sweep_duration_ns
+    ));
+    markdown
+}
+
+fn write_summary_json(path: &Path, summary: &SuiteSummary) -> Result<(), String> {
+    write_output(path, &format_summary_json(summary))
+}
+
+fn write_summary_markdown(path: &Path, summary: &SuiteSummary) -> Result<(), String> {
+    write_output(path, &format_summary_markdown(summary))
+}
+
+fn write_output(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+    }
+    std::fs::write(path, content).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        GcExpectations, check_gc_expectations, merge_gc_expectations, parse_gc_expectations_str,
+        check_gc_expectations, merge_gc_expectations, parse_gc_expectations_str, GcExpectations,
     };
     use test_harness::test262::SuiteSummary;
 

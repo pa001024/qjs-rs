@@ -42,6 +42,21 @@ cargo test -p test-harness --test test262_lite collection_and_regexp_subset -- -
 - `regexp_semantics`（integration）: 4 passed, 0 failed
 - `collection_and_regexp_subset`（test262-lite families）: 5/5 families passed, 0 failed
 
+## Phase 7 test262 Reporting Contract（2026-02-27）
+
+为 TST-02 在 Phase 7 的报告契约，固定执行以下命令（单次运行同时产出 JSON + Markdown）：
+
+```powershell
+cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --max-cases 50 --allow-failures --json target/test262-phase7-report.json --markdown target/test262-phase7-report.md
+rg --line-number "\"discovered\"|\"executed\"|\"failed\"|\"skipped_categories\"" target/test262-phase7-report.json
+rg --line-number "Skipped Categories|discovered|executed|failed" target/test262-phase7-report.md
+```
+
+报告文件约定：
+- `target/test262-phase7-report.json`: 固定字段 `discovered/executed/skipped/passed/failed/skipped_categories/gc`。
+- `target/test262-phase7-report.md`: 包含 `Totals` 与 `Skipped Categories` 两个稳定章节。
+- `skipped` 必须等于 `skipped_categories` 各分类计数总和。
+
 非回归要求：
 - Phase 6 命令是 Phase 5 合约的增量门禁，不替代既有 `core_builtins_*` 与 `core_builtins_subset` gate。
 - 后续更新必须同时保持 Phase 5 与 Phase 6 gate 全绿，避免通过缩减子集来“修复”回归。
