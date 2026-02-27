@@ -7,7 +7,9 @@ use bytecode::{compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};
 use std::collections::BTreeMap;
-use vm::{ModuleHost, ModuleHostError, Vm};
+use vm::{
+    ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobHostHooks, Vm, VmError,
+};
 
 pub fn run_expression(source: &str) -> Result<JsValue, String> {
     run_expression_with_globals(source, &[])
@@ -32,6 +34,35 @@ pub fn run_module_entry(
     entry: &str,
     modules: &[(&str, &str)],
 ) -> Result<BTreeMap<String, JsValue>, String> {
+    run_module_entry_with_vm(entry, modules).map(|execution| execution.exports)
+}
+
+pub struct ModuleEntryExecution {
+    pub exports: BTreeMap<String, JsValue>,
+    vm: Vm,
+    drain_realm: Realm,
+}
+
+impl ModuleEntryExecution {
+    pub fn pending_promise_job_count(&self) -> usize {
+        self.vm.pending_promise_job_count()
+    }
+
+    pub fn drain_promise_jobs_with_host_hooks(
+        &mut self,
+        budget: usize,
+        caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<PromiseJobDrainReport, VmError> {
+        self.vm
+            .drain_promise_jobs_with_host_hooks(budget, &self.drain_realm, caller_strict, hooks)
+    }
+}
+
+pub fn run_module_entry_with_vm(
+    entry: &str,
+    modules: &[(&str, &str)],
+) -> Result<ModuleEntryExecution, String> {
     let mut host = InMemoryModuleHost::default();
     for (key, source) in modules {
         host.modules
@@ -40,8 +71,14 @@ pub fn run_module_entry(
     let mut vm = Vm::default();
     // Keep harness module execution routed through VM lifecycle entry so
     // builtin/module parity assertions exercise the real module path.
-    vm.evaluate_module_entry(entry, &mut host)
-        .map_err(|err| format!("{err:?}"))
+    let exports = vm
+        .evaluate_module_entry(entry, &mut host)
+        .map_err(|err| format!("{err:?}"))?;
+    Ok(ModuleEntryExecution {
+        exports,
+        vm,
+        drain_realm: Realm::default(),
+    })
 }
 
 fn execute_chunk_with_globals(

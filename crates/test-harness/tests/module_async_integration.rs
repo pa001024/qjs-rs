@@ -1,48 +1,10 @@
 #![forbid(unsafe_code)]
 
-use runtime::{JsValue, Realm};
-use std::collections::BTreeMap;
+use runtime::JsValue;
+use test_harness::{ModuleEntryExecution, run_module_entry_with_vm};
 use vm::{
-    ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobDrainStopReason,
-    PromiseJobHostHooks, Vm, VmError,
+    PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks, VmError,
 };
-
-#[derive(Debug, Default)]
-struct InMemoryModuleHost {
-    modules: BTreeMap<String, String>,
-}
-
-impl InMemoryModuleHost {
-    fn with_module(mut self, key: &str, source: &str) -> Self {
-        self.modules.insert(key.to_string(), source.to_string());
-        self
-    }
-}
-
-impl ModuleHost for InMemoryModuleHost {
-    fn resolve(
-        &mut self,
-        referrer: Option<&str>,
-        specifier: &str,
-    ) -> Result<String, ModuleHostError> {
-        if let Some(specifier) = specifier.strip_prefix("./") {
-            if let Some(referrer) = referrer {
-                if let Some((prefix, _)) = referrer.rsplit_once('/') {
-                    return Ok(format!("{prefix}/{specifier}"));
-                }
-            }
-            return Ok(specifier.to_string());
-        }
-        Ok(specifier.to_string())
-    }
-
-    fn load(&mut self, canonical_key: &str) -> Result<String, ModuleHostError> {
-        self.modules
-            .get(canonical_key)
-            .cloned()
-            .ok_or(ModuleHostError::LoadFailed)
-    }
-}
 
 #[derive(Default)]
 struct RecordingHooks {
@@ -81,36 +43,35 @@ impl PromiseJobHostHooks for RecordingHooks {
     }
 }
 
-fn evaluate_module_with_async_chains() -> Vm {
-    let mut host = InMemoryModuleHost::default().with_module(
+fn evaluate_module_with_async_chains() -> ModuleEntryExecution {
+    let execution = run_module_entry_with_vm(
         "entry.js",
-        "async function base() { return 1; }\n\
-         const first = base();\n\
-         const second = first.then(function (value) { return value + 1; });\n\
-         const third = second.catch(function (reason) { return reason; });\n\
-         third.finally(function () { return 0; });\n\
-         export const promise_type = typeof third.then;\n",
-    );
-    let mut vm = Vm::default();
-    let exports = vm
-        .evaluate_module_entry("entry.js", &mut host)
-        .expect("module async graph should evaluate");
+        &[(
+            "entry.js",
+            "async function base() { return 1; }\n\
+             const first = base();\n\
+             const second = first.then(function (value) { return value + 1; });\n\
+             const third = second.catch(function (reason) { return reason; });\n\
+             third.finally(function () { return 0; });\n\
+             export const promise_type = typeof third.then;\n",
+        )],
+    )
+    .expect("module async graph should evaluate");
     assert_eq!(
-        exports.get("promise_type"),
+        execution.exports.get("promise_type"),
         Some(&JsValue::String("function".to_string()))
     );
-    vm
+    execution
 }
 
 #[test]
 fn module_then_catch_finally_ordering() {
-    let mut vm = evaluate_module_with_async_chains();
-    let realm = Realm::default();
+    let mut execution = evaluate_module_with_async_chains();
     let mut hooks = RecordingHooks::default();
 
-    assert_eq!(vm.pending_promise_job_count(), 1);
-    let first = vm
-        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+    assert_eq!(execution.pending_promise_job_count(), 1);
+    let first = execution
+        .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect("first drain should process async chain head");
     assert_eq!(
         first,
@@ -120,8 +81,8 @@ fn module_then_catch_finally_ordering() {
             stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
         }
     );
-    let second = vm
-        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+    let second = execution
+        .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect("second drain should process then/catch link");
     assert_eq!(
         second,
@@ -131,9 +92,9 @@ fn module_then_catch_finally_ordering() {
             stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
         }
     );
-    let tail = vm
-        .drain_promise_jobs_with_host_hooks(8, &realm, false, &mut hooks)
-        .expect("tail drain should process finally jobs");
+    let tail = execution
+        .drain_promise_jobs_with_host_hooks(8, false, &mut hooks)
+        .expect("tail drain should process finally job");
     assert_eq!(
         tail,
         PromiseJobDrainReport {
@@ -159,38 +120,36 @@ fn module_then_catch_finally_ordering() {
 
 #[test]
 fn module_host_hook_visibility() {
-    let realm = Realm::default();
-
-    let mut vm = evaluate_module_with_async_chains();
+    let mut execution = evaluate_module_with_async_chains();
     let mut hooks = RecordingHooks {
         fail_on_enqueue: true,
         ..RecordingHooks::default()
     };
-    let err = vm
-        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+    let err = execution
+        .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect_err("nested enqueue callback failure should be typed");
     assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed"));
 
-    let mut vm = evaluate_module_with_async_chains();
+    let mut execution = evaluate_module_with_async_chains();
     let mut hooks = RecordingHooks {
         fail_on_drain_start: true,
         ..RecordingHooks::default()
     };
-    let err = vm
-        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+    let err = execution
+        .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect_err("drain-start callback failure should be typed");
     assert_eq!(
         err,
         VmError::TypeError("PromiseJobQueue:HostOnDrainStartFailed")
     );
 
-    let mut vm = evaluate_module_with_async_chains();
+    let mut execution = evaluate_module_with_async_chains();
     let mut hooks = RecordingHooks {
         fail_on_drain_end: true,
         ..RecordingHooks::default()
     };
-    let err = vm
-        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+    let err = execution
+        .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect_err("drain-end callback failure should be typed");
     assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed"));
 }
