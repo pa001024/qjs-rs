@@ -18,7 +18,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts. (completed 2026-02-27)
 - [x] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates. (completed 2026-02-27)
 - [x] **Phase 8: Async and Module Builtins Integration Closure** - Close module-evaluation builtin wiring gaps and re-validate Promise queue semantics through module execution paths. (completed 2026-02-27)
-- [ ] **Phase 9: Verification Traceability Normalization** - Normalize verification schema and automation contracts so requirement coverage is machine-verifiable end-to-end.
+- [x] **Phase 9: Verification Traceability Normalization** - Normalize verification schema and automation contracts so requirement coverage is machine-verifiable end-to-end. (completed 2026-02-27)
 
 ## Phase Details
 
@@ -131,10 +131,10 @@ Plans:
   1. All phase verification files expose consistent machine-parseable requirement mapping fields.
   2. Requirement traceability checks no longer rely on manual fallback for frontmatter/schema mismatches.
   3. Milestone audit rerun can compute requirement coverage directly from standardized verification artifacts.
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans complete
 Plans:
 - [x] 09-01-PLAN.md - Standardize verification report schema and update legacy phase artifacts.
-- [ ] 09-02-PLAN.md - Align verification tooling parsers and add schema conformance checks in CI.
+- [x] 09-02-PLAN.md - Align verification tooling parsers and add schema conformance checks in CI.
 
 ## Progress
 
@@ -148,4 +148,4 @@ Plans:
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
 | 8. Async and Module Builtins Integration Closure | 3/3 | Complete    | 2026-02-27 |
-| 9. Verification Traceability Normalization | 1/2 | In Progress | - |
+| 9. Verification Traceability Normalization | 2/2 | Complete    | 2026-02-27 |

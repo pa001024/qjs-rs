@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: verification traceability normalization
 current_plan: 2
-status: executing
-stopped_at: Completed 09-01-PLAN.md
-last_updated: "2026-02-27T11:44:47.963Z"
+status: verifying
+stopped_at: Completed 09-02-PLAN.md
+last_updated: "2026-02-27T11:58:57.149Z"
 last_activity: 2026-02-27
 progress:
   total_phases: 9
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 26
-  completed_plans: 25
-  percent: 96
+  completed_plans: 26
+  percent: 100
 ---
 
 # Project State
@@ -33,10 +33,10 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Total Phases:** 9
 **Current Plan:** 2
 **Total Plans in Phase:** 2
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-02-27
-**Last Activity Description:** Completed 09-01-PLAN.md (verification schema normalized)
-**Progress:** [██████████] 96%
+**Last Activity Description:** Completed 09-02-PLAN.md (traceability checker, CI gate, and audit rerun evidence published)
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 08 P02 | 5 min | 3 tasks | 5 files |
 | Phase 08 P03 | 6 min | 3 tasks | 3 files |
 | Phase 09 P01 | 4 min | 3 tasks | 10 files |
+| Phase 09 P02 | 5 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Encode ASY requirement mapping in verification frontmatter with machine-parseable command/artifact/key-link fields. — Closes ASY-01/ASY-02 orphaning and enables automated requirement coverage checks.
 - [Phase 09]: Normalize verification machine keys to phase/phase_number/verified/status/score/requirements_checked — Eliminates schema drift across phase verification artifacts and enables one parser path
 - [Phase 09]: Derive requirements_checked strictly from REQUIREMENTS traceability ownership — Prevents manual fallback/body parsing and keeps requirement coverage deterministic
+- [Phase 09]: Use a repo-local traceability checker to enforce canonical verification fields and REQUIREMENTS-driven coverage computation. — Replacing manual fallback parsing with one deterministic checker path closes audit integration drift and keeps coverage reproducible in local and CI runs.
+- [Phase 09]: Run checker self-tests only against deterministic fixtures copied under target/. — Fixture-isolated self-tests prevent coupling to live planning files and fail loudly when negative detection paths regress.
+- [Phase 09]: Gate CI with a dedicated verification traceability command that always writes target/verification-traceability.json and .md. — Stable output artifacts provide direct milestone audit rerun evidence without ad hoc narrative interpretation.
 
 ### Pending Todos
 
@@ -128,6 +132,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-27T11:44:47.961Z
-**Stopped at:** Completed 09-01-PLAN.md
+**Last session:** 2026-02-27T11:58:13.946Z
+**Stopped at:** Completed 09-02-PLAN.md
 **Resume file:** None
