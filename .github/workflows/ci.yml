@@ -54,6 +54,15 @@ jobs:
           cargo test -p test-harness --test regexp_semantics
           cargo test -p test-harness --test test262_lite collection_and_regexp_subset -- --exact
 
+      - name: Phase 8 Async and Module Integration Gates
+        run: |
+          cargo test -p vm module_promise_builtin_parity -- --exact
+          cargo test -p vm module_promise_queue_semantics -- --exact
+          cargo test -p vm module_host_hook_drain_through_module_jobs -- --exact
+          cargo test -p test-harness --test module_lifecycle
+          cargo test -p test-harness --test module_async_integration
+          cargo test -p test-harness --test promise_job_queue module_path_promise_queue_matrix -- --exact
+
       - name: GC Guard Stress Gate
         run: cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --auto-gc --auto-gc-threshold 1 --runtime-gc --runtime-gc-interval 1 --show-gc --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline
 
