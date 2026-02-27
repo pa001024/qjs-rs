@@ -131,9 +131,9 @@ Plans:
   1. All phase verification files expose consistent machine-parseable requirement mapping fields.
   2. Requirement traceability checks no longer rely on manual fallback for frontmatter/schema mismatches.
   3. Milestone audit rerun can compute requirement coverage directly from standardized verification artifacts.
-**Plans**: 2 plans
+**Plans**: 1/2 plans executed
 Plans:
-- [ ] 09-01-PLAN.md - Standardize verification report schema and update legacy phase artifacts.
+- [x] 09-01-PLAN.md - Standardize verification report schema and update legacy phase artifacts.
 - [ ] 09-02-PLAN.md - Align verification tooling parsers and add schema conformance checks in CI.
 
 ## Progress
@@ -148,4 +148,4 @@ Plans:
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
 | 8. Async and Module Builtins Integration Closure | 3/3 | Complete    | 2026-02-27 |
-| 9. Verification Traceability Normalization | 0/2 | Not started | - |
+| 9. Verification Traceability Normalization | 1/2 | In Progress | - |
