@@ -4,7 +4,10 @@ phase_number: "05"
 verified: 2026-02-26T18:23:13.8214985Z
 status: passed
 score: 9/9 must-haves verified
-requirements_checked: []
+requirements_checked:
+  - BUI-01
+  - BUI-02
+  - BUI-03
 ---
 
 # Phase 5: Core Builtins Baseline Verification Report

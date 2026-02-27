@@ -4,7 +4,11 @@ phase_number: "01"
 verified: 2026-02-25T00:00:00Z
 status: passed
 score: 98/100
-requirements_checked: []
+requirements_checked:
+  - SEM-01
+  - SEM-02
+  - SEM-03
+  - SEM-04
 ---
 
 # Phase 01 Verification Report
