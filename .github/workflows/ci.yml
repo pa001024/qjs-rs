@@ -28,5 +28,15 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Phase 6 Collection and RegExp Gates
+        run: |
+          cargo test -p vm weak_collection_constructor_identity -- --exact
+          cargo test -p vm collection_semantics_same_value_zero_and_live_iteration -- --exact
+          cargo test -p vm regexp_last_index_transition_matrix -- --exact
+          cargo test -p vm regexp_exec_capture_and_constructor_errors -- --exact
+          cargo test -p test-harness --test collection_semantics
+          cargo test -p test-harness --test regexp_semantics
+          cargo test -p test-harness --test test262_lite collection_and_regexp_subset -- --exact
+
       - name: GC Guard Stress Gate
         run: cargo run -p test-harness --bin test262-run -- --root crates/test-harness/fixtures/test262-lite --auto-gc --auto-gc-threshold 1 --runtime-gc --runtime-gc-interval 1 --show-gc --expect-gc-baseline crates/test-harness/fixtures/test262-lite/gc-guard.baseline
