@@ -98,11 +98,11 @@ pub fn install_baseline(realm: &mut Realm) {
     );
     realm.define_global(
         "WeakMap",
-        JsValue::NativeFunction(NativeFunction::MapConstructor),
+        JsValue::NativeFunction(NativeFunction::WeakMapConstructor),
     );
     realm.define_global(
         "WeakSet",
-        JsValue::NativeFunction(NativeFunction::SetConstructor),
+        JsValue::NativeFunction(NativeFunction::WeakSetConstructor),
     );
     realm.define_global(
         "Date",

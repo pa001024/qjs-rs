@@ -45,6 +45,8 @@ pub enum NativeFunction {
     DataViewConstructor,
     MapConstructor,
     SetConstructor,
+    WeakMapConstructor,
+    WeakSetConstructor,
     ProxyConstructor,
     PromiseConstructor,
     PromiseThen,

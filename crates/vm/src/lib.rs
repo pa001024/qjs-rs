@@ -172,6 +172,14 @@ enum FunctionMethod {
     Bind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollectionAddMode {
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum HostFunction {
     BoundMethod {
@@ -231,6 +239,10 @@ enum HostFunction {
     MapForEachThis,
     MapSizeGetterThis,
     MapIteratorNextThis,
+    WeakMapSetThis,
+    WeakMapGetThis,
+    WeakMapHasThis,
+    WeakMapDeleteThis,
     SetAddThis,
     SetDeleteThis,
     SetHasThis,
@@ -240,6 +252,9 @@ enum HostFunction {
     SetForEachThis,
     SetSizeGetterThis,
     SetIteratorNextThis,
+    WeakSetAddThis,
+    WeakSetDeleteThis,
+    WeakSetHasThis,
     ProxyRevocable,
     ProxyRevoke {
         proxy: JsValue,
@@ -611,6 +626,8 @@ pub struct Vm {
     data_view_prototype_id: Option<ObjectId>,
     map_prototype_id: Option<ObjectId>,
     set_prototype_id: Option<ObjectId>,
+    weak_map_prototype_id: Option<ObjectId>,
+    weak_set_prototype_id: Option<ObjectId>,
     promise_prototype_id: Option<ObjectId>,
     uint8_array_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
@@ -697,6 +714,8 @@ impl Vm {
         self.data_view_prototype_id = None;
         self.map_prototype_id = None;
         self.set_prototype_id = None;
+        self.weak_map_prototype_id = None;
+        self.weak_set_prototype_id = None;
         self.promise_prototype_id = None;
         self.uint8_array_prototype_id = None;
         self.with_objects.clear();
@@ -1594,6 +1613,8 @@ impl Vm {
             self.data_view_prototype_id,
             self.map_prototype_id,
             self.set_prototype_id,
+            self.weak_map_prototype_id,
+            self.weak_set_prototype_id,
             self.promise_prototype_id,
             self.uint8_array_prototype_id,
         ]
@@ -1834,6 +1855,10 @@ impl Vm {
             | HostFunction::MapForEachThis
             | HostFunction::MapSizeGetterThis
             | HostFunction::MapIteratorNextThis
+            | HostFunction::WeakMapSetThis
+            | HostFunction::WeakMapGetThis
+            | HostFunction::WeakMapHasThis
+            | HostFunction::WeakMapDeleteThis
             | HostFunction::SetAddThis
             | HostFunction::SetDeleteThis
             | HostFunction::SetHasThis
@@ -1843,6 +1868,9 @@ impl Vm {
             | HostFunction::SetForEachThis
             | HostFunction::SetSizeGetterThis
             | HostFunction::SetIteratorNextThis
+            | HostFunction::WeakSetAddThis
+            | HostFunction::WeakSetDeleteThis
+            | HostFunction::WeakSetHasThis
             | HostFunction::ProxyRevocable
             | HostFunction::BooleanToString
             | HostFunction::BooleanValueOf
@@ -3487,6 +3515,8 @@ impl Vm {
                 | NativeFunction::DataViewConstructor
                 | NativeFunction::MapConstructor
                 | NativeFunction::SetConstructor
+                | NativeFunction::WeakMapConstructor
+                | NativeFunction::WeakSetConstructor
                 | NativeFunction::ProxyConstructor
                 | NativeFunction::PromiseConstructor
                 | NativeFunction::Uint8ArrayConstructor
@@ -4251,6 +4281,17 @@ impl Vm {
         }
     }
 
+    fn strict_this_weak_map(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__weakMapTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError(
+                "WeakMap.prototype method called on incompatible",
+            )),
+        }
+    }
+
     fn read_map_entries(
         &self,
         map_id: ObjectId,
@@ -4456,6 +4497,33 @@ impl Vm {
             _ => Err(VmError::TypeError(
                 "Set.prototype method called on incompatible",
             )),
+        }
+    }
+
+    fn strict_this_weak_set(&self, this_arg: Option<JsValue>) -> Result<ObjectId, VmError> {
+        match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) if self.has_object_marker(object_id, "__weakSetTag")? => {
+                Ok(object_id)
+            }
+            _ => Err(VmError::TypeError(
+                "WeakSet.prototype method called on incompatible",
+            )),
+        }
+    }
+
+    fn require_weak_collection_object_key(
+        &self,
+        key: &JsValue,
+        type_name: &'static str,
+    ) -> Result<(), VmError> {
+        if Self::is_object_like_value(key) {
+            Ok(())
+        } else {
+            Err(VmError::TypeError(match type_name {
+                "WeakMap" => "WeakMap keys must be objects",
+                "WeakSet" => "WeakSet values must be objects",
+                _ => "Weak collection keys must be objects",
+            }))
         }
     }
 
@@ -6862,6 +6930,66 @@ impl Vm {
                 Ok(JsValue::Number(self.map_size_for_object(receiver_id)?))
             }
             HostFunction::MapIteratorNextThis => self.execute_map_iterator_next(this_arg),
+            HostFunction::WeakMapSetThis => {
+                let receiver_id = self.strict_this_weak_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&key, "WeakMap")?;
+                let value = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                let mut entries = self.read_map_entries(receiver_id)?;
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                }) {
+                    entries[index] = Some((key, value));
+                } else {
+                    entries.push(Some((key, value)));
+                }
+                self.write_map_entries(receiver_id, entries)?;
+                Ok(JsValue::Object(receiver_id))
+            }
+            HostFunction::WeakMapGetThis => {
+                let receiver_id = self.strict_this_weak_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&key, "WeakMap")?;
+                let entries = self.read_map_entries(receiver_id)?;
+                for entry in entries {
+                    if let Some((current_key, current_value)) = entry {
+                        if self.same_value_zero(&current_key, &key) {
+                            return Ok(current_value);
+                        }
+                    }
+                }
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::WeakMapHasThis => {
+                let receiver_id = self.strict_this_weak_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&key, "WeakMap")?;
+                let entries = self.read_map_entries(receiver_id)?;
+                Ok(JsValue::Bool(entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                })))
+            }
+            HostFunction::WeakMapDeleteThis => {
+                let receiver_id = self.strict_this_weak_map(this_arg)?;
+                let key = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&key, "WeakMap")?;
+                let mut entries = self.read_map_entries(receiver_id)?;
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|(current_key, _)| self.same_value_zero(current_key, &key))
+                }) {
+                    entries[index] = None;
+                    self.write_map_entries(receiver_id, entries)?;
+                    Ok(JsValue::Bool(true))
+                } else {
+                    Ok(JsValue::Bool(false))
+                }
+            }
             HostFunction::SetAddThis => {
                 let receiver_id = self.strict_this_set(this_arg)?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
@@ -6952,6 +7080,49 @@ impl Vm {
                 Ok(JsValue::Number(self.set_size_for_object(receiver_id)?))
             }
             HostFunction::SetIteratorNextThis => self.execute_set_iterator_next(this_arg),
+            HostFunction::WeakSetAddThis => {
+                let receiver_id = self.strict_this_weak_set(this_arg)?;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&value, "WeakSet")?;
+                let mut entries = self.read_set_entries(receiver_id)?;
+                if !entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                }) {
+                    entries.push(Some(value));
+                    self.write_set_entries(receiver_id, entries)?;
+                }
+                Ok(JsValue::Object(receiver_id))
+            }
+            HostFunction::WeakSetDeleteThis => {
+                let receiver_id = self.strict_this_weak_set(this_arg)?;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&value, "WeakSet")?;
+                let mut entries = self.read_set_entries(receiver_id)?;
+                if let Some(index) = entries.iter().position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                }) {
+                    entries[index] = None;
+                    self.write_set_entries(receiver_id, entries)?;
+                    Ok(JsValue::Bool(true))
+                } else {
+                    Ok(JsValue::Bool(false))
+                }
+            }
+            HostFunction::WeakSetHasThis => {
+                let receiver_id = self.strict_this_weak_set(this_arg)?;
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                self.require_weak_collection_object_key(&value, "WeakSet")?;
+                let entries = self.read_set_entries(receiver_id)?;
+                Ok(JsValue::Bool(entries.iter().any(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|current| self.same_value_zero(current, &value))
+                })))
+            }
             HostFunction::ProxyRevocable => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let handler = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -7604,6 +7775,12 @@ impl Vm {
             }
             NativeFunction::SetConstructor => {
                 self.execute_set_constructor(&args, realm, called_with_new)
+            }
+            NativeFunction::WeakMapConstructor => {
+                self.execute_weak_map_constructor(&args, realm, called_with_new)
+            }
+            NativeFunction::WeakSetConstructor => {
+                self.execute_weak_set_constructor(&args, realm, called_with_new)
             }
             NativeFunction::ProxyConstructor => {
                 self.execute_proxy_constructor(&args, called_with_new)
@@ -10039,7 +10216,13 @@ impl Vm {
             if !Self::is_callable_value(&adder) {
                 return Err(VmError::TypeError("Map constructor set must be callable"));
             }
-            self.add_collection_entries_from_iterable(map.clone(), iterable, adder, true, realm)?;
+            self.add_collection_entries_from_iterable(
+                map.clone(),
+                iterable,
+                adder,
+                CollectionAddMode::Map,
+                realm,
+            )?;
         }
 
         Ok(map)
@@ -10085,10 +10268,114 @@ impl Vm {
             if !Self::is_callable_value(&adder) {
                 return Err(VmError::TypeError("Set constructor add must be callable"));
             }
-            self.add_collection_entries_from_iterable(set.clone(), iterable, adder, false, realm)?;
+            self.add_collection_entries_from_iterable(
+                set.clone(),
+                iterable,
+                adder,
+                CollectionAddMode::Set,
+                realm,
+            )?;
         }
 
         Ok(set)
+    }
+
+    fn execute_weak_map_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        called_with_new: bool,
+    ) -> Result<JsValue, VmError> {
+        if !called_with_new {
+            return Err(VmError::TypeError("WeakMap constructor requires 'new'"));
+        }
+        if self.weak_map_prototype_id.is_none() {
+            let _ = self.weak_map_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let weak_map = JsValue::Object(object_id);
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.weak_map_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__weakMapTag".to_string(), JsValue::Bool(true));
+        }
+        self.write_map_entries(object_id, Vec::new())?;
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
+            let adder = self.get_property_from_receiver(weak_map.clone(), "set", realm)?;
+            if !Self::is_callable_value(&adder) {
+                return Err(VmError::TypeError("WeakMap constructor set must be callable"));
+            }
+            self.add_collection_entries_from_iterable(
+                weak_map.clone(),
+                iterable,
+                adder,
+                CollectionAddMode::WeakMap,
+                realm,
+            )?;
+        }
+
+        Ok(weak_map)
+    }
+
+    fn execute_weak_set_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        called_with_new: bool,
+    ) -> Result<JsValue, VmError> {
+        if !called_with_new {
+            return Err(VmError::TypeError("WeakSet constructor requires 'new'"));
+        }
+        if self.weak_set_prototype_id.is_none() {
+            let _ = self.weak_set_prototype_value();
+        }
+        let object = self.create_object_value();
+        let object_id = match object {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let weak_set = JsValue::Object(object_id);
+        {
+            let target = self
+                .objects
+                .get_mut(&object_id)
+                .ok_or(VmError::UnknownObject(object_id))?;
+            target.prototype = self.weak_set_prototype_id;
+            target.prototype_value = None;
+            target
+                .properties
+                .insert("__weakSetTag".to_string(), JsValue::Bool(true));
+        }
+        self.write_set_entries(object_id, Vec::new())?;
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
+            let adder = self.get_property_from_receiver(weak_set.clone(), "add", realm)?;
+            if !Self::is_callable_value(&adder) {
+                return Err(VmError::TypeError("WeakSet constructor add must be callable"));
+            }
+            self.add_collection_entries_from_iterable(
+                weak_set.clone(),
+                iterable,
+                adder,
+                CollectionAddMode::WeakSet,
+                realm,
+            )?;
+        }
+
+        Ok(weak_set)
     }
 
     fn add_collection_entries_from_iterable(
@@ -10096,7 +10383,7 @@ impl Vm {
         collection: JsValue,
         iterable: JsValue,
         adder: JsValue,
-        map_mode: bool,
+        mode: CollectionAddMode,
         realm: &Realm,
     ) -> Result<(), VmError> {
         let iterator_record = self.create_for_of_runtime_iterator_record(iterable, realm)?;
@@ -10115,34 +10402,50 @@ impl Vm {
                     return Err(err);
                 }
             };
-            let call_result = if map_mode {
-                if !Self::is_object_like_value(&next) {
-                    Err(VmError::TypeError("Map iterable entries must be object"))
-                } else {
-                    let key = self.get_property_from_receiver(next.clone(), "0", realm);
-                    let value = self.get_property_from_receiver(next, "1", realm);
-                    match (key, value) {
-                        (Ok(key), Ok(value)) => self
-                            .execute_callable(
-                                adder.clone(),
-                                Some(collection.clone()),
-                                vec![key, value],
-                                realm,
-                                false,
-                            )
-                            .map(|_| ()),
-                        (Err(err), _) | (_, Err(err)) => Err(err),
+            let call_result = match mode {
+                CollectionAddMode::Map | CollectionAddMode::WeakMap => {
+                    if !Self::is_object_like_value(&next) {
+                        Err(VmError::TypeError(match mode {
+                            CollectionAddMode::Map => "Map iterable entries must be object",
+                            CollectionAddMode::WeakMap => {
+                                "WeakMap iterable entries must be object"
+                            }
+                            _ => unreachable!(),
+                        }))
+                    } else {
+                        let key = self.get_property_from_receiver(next.clone(), "0", realm);
+                        let value = self.get_property_from_receiver(next, "1", realm);
+                        match (key, value) {
+                            (Ok(key), Ok(value)) => {
+                                if matches!(mode, CollectionAddMode::WeakMap) {
+                                    self.require_weak_collection_object_key(&key, "WeakMap")?;
+                                }
+                                self.execute_callable(
+                                    adder.clone(),
+                                    Some(collection.clone()),
+                                    vec![key, value],
+                                    realm,
+                                    false,
+                                )
+                                .map(|_| ())
+                            }
+                            (Err(err), _) | (_, Err(err)) => Err(err),
+                        }
                     }
                 }
-            } else {
-                self.execute_callable(
-                    adder.clone(),
-                    Some(collection.clone()),
-                    vec![next],
-                    realm,
-                    false,
-                )
-                .map(|_| ())
+                CollectionAddMode::Set | CollectionAddMode::WeakSet => {
+                    if matches!(mode, CollectionAddMode::WeakSet) {
+                        self.require_weak_collection_object_key(&next, "WeakSet")?;
+                    }
+                    self.execute_callable(
+                        adder.clone(),
+                        Some(collection.clone()),
+                        vec![next],
+                        realm,
+                        false,
+                    )
+                    .map(|_| ())
+                }
             };
             if let Err(err) = call_result {
                 let _ = self.execute_object_for_of_close(&[iterator_record.clone()], realm);
@@ -16533,6 +16836,100 @@ impl Vm {
         prototype
     }
 
+    fn weak_map_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.weak_map_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let set = self.create_host_function_value(HostFunction::WeakMapSetThis);
+            let get = self.create_host_function_value(HostFunction::WeakMapGetThis);
+            let has = self.create_host_function_value(HostFunction::WeakMapHasThis);
+            let delete = self.create_host_function_value(HostFunction::WeakMapDeleteThis);
+            self.set_builtin_function_length(&set, 2.0);
+            self.set_builtin_function_name(&set, "set");
+            self.set_builtin_function_length(&get, 1.0);
+            self.set_builtin_function_name(&get, "get");
+            self.set_builtin_function_length(&has, 1.0);
+            self.set_builtin_function_name(&has, "has");
+            self.set_builtin_function_length(&delete, 1.0);
+            self.set_builtin_function_name(&delete, "delete");
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::WeakMapConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for (name, value) in [("set", set), ("get", get), ("has", has), ("delete", delete)]
+                {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.weak_map_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn weak_set_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.weak_set_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let add = self.create_host_function_value(HostFunction::WeakSetAddThis);
+            let delete = self.create_host_function_value(HostFunction::WeakSetDeleteThis);
+            let has = self.create_host_function_value(HostFunction::WeakSetHasThis);
+            self.set_builtin_function_length(&add, 1.0);
+            self.set_builtin_function_name(&add, "add");
+            self.set_builtin_function_length(&delete, 1.0);
+            self.set_builtin_function_name(&delete, "delete");
+            self.set_builtin_function_length(&has, 1.0);
+            self.set_builtin_function_name(&has, "has");
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::WeakSetConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                for (name, value) in [("add", add), ("delete", delete), ("has", has)] {
+                    object.properties.insert(name.to_string(), value);
+                    object.property_attributes.insert(
+                        name.to_string(),
+                        PropertyAttributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    );
+                }
+            }
+            self.weak_set_prototype_id = Some(id);
+        }
+        prototype
+    }
+
     fn promise_prototype_value(&mut self) -> JsValue {
         if let Some(id) = self.promise_prototype_id {
             return JsValue::Object(id);
@@ -18601,6 +18998,8 @@ impl Vm {
                 | (NativeFunction::DataViewConstructor, "prototype")
                 | (NativeFunction::MapConstructor, "prototype")
                 | (NativeFunction::SetConstructor, "prototype")
+                | (NativeFunction::WeakMapConstructor, "prototype")
+                | (NativeFunction::WeakSetConstructor, "prototype")
                 | (NativeFunction::PromiseConstructor, "prototype")
                 | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
@@ -19933,6 +20332,8 @@ impl Vm {
             NativeFunction::BooleanConstructor => "Boolean",
             NativeFunction::MapConstructor => "Map",
             NativeFunction::SetConstructor => "Set",
+            NativeFunction::WeakMapConstructor => "WeakMap",
+            NativeFunction::WeakSetConstructor => "WeakSet",
             NativeFunction::ProxyConstructor => "Proxy",
             NativeFunction::PromiseConstructor => "Promise",
             NativeFunction::PromiseThen => "then",
@@ -20183,6 +20584,8 @@ impl Vm {
             (NativeFunction::DataViewConstructor, "prototype") => self.data_view_prototype_value(),
             (NativeFunction::MapConstructor, "prototype") => self.map_prototype_value(),
             (NativeFunction::SetConstructor, "prototype") => self.set_prototype_value(),
+            (NativeFunction::WeakMapConstructor, "prototype") => self.weak_map_prototype_value(),
+            (NativeFunction::WeakSetConstructor, "prototype") => self.weak_set_prototype_value(),
             (NativeFunction::PromiseConstructor, "prototype") => self.promise_prototype_value(),
             (NativeFunction::Uint8ArrayConstructor, "prototype") => {
                 self.uint8_array_prototype_value()
@@ -20317,6 +20720,8 @@ impl Vm {
             (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
             (NativeFunction::MapConstructor, "length")
             | (NativeFunction::SetConstructor, "length")
+            | (NativeFunction::WeakMapConstructor, "length")
+            | (NativeFunction::WeakSetConstructor, "length")
             | (NativeFunction::PromiseConstructor, "length")
             | (NativeFunction::ArrayBufferConstructor, "length")
             | (NativeFunction::DataViewConstructor, "length")
@@ -25093,16 +25498,39 @@ slots[1][2].value + slots[2][0].value;
     }
 
     #[test]
-    fn weakmap_constructor_requires_new_target_baseline() {
+    fn weak_collection_constructor_identity() {
         let script = parse_script(
-            "let threw = false; try { WeakMap(); } catch (e) { threw = e instanceof TypeError; } threw;",
+            "var ok = true; \
+             ok = ok && WeakMap !== Map && WeakSet !== Set; \
+             ok = ok && WeakMap.name === 'WeakMap' && WeakSet.name === 'WeakSet'; \
+             ok = ok && WeakMap.prototype !== Map.prototype && WeakSet.prototype !== Set.prototype; \
+             ok = ok && WeakMap.prototype.constructor === WeakMap && WeakSet.prototype.constructor === WeakSet; \
+             ok = ok && typeof WeakMap.prototype.set === 'function' && typeof WeakMap.prototype.get === 'function' && typeof WeakMap.prototype.has === 'function' && typeof WeakMap.prototype.delete === 'function'; \
+             ok = ok && typeof WeakSet.prototype.add === 'function' && typeof WeakSet.prototype.has === 'function' && typeof WeakSet.prototype.delete === 'function'; \
+             var weakMapRequiresNew = false; \
+             var weakSetRequiresNew = false; \
+             try { WeakMap(); } catch (e) { weakMapRequiresNew = e instanceof TypeError; } \
+             try { WeakSet(); } catch (e) { weakSetRequiresNew = e instanceof TypeError; } \
+             ok && weakMapRequiresNew && weakSetRequiresNew;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(
-            "WeakMap",
+            "Map",
             JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        realm.define_global(
+            "Set",
+            JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        realm.define_global(
+            "WeakMap",
+            JsValue::NativeFunction(NativeFunction::WeakMapConstructor),
+        );
+        realm.define_global(
+            "WeakSet",
+            JsValue::NativeFunction(NativeFunction::WeakSetConstructor),
         );
         realm.define_global(
             "TypeError",
@@ -25113,16 +25541,112 @@ slots[1][2].value + slots[2][0].value;
     }
 
     #[test]
-    fn weakset_constructor_iterable_supports_has_and_delete() {
+    fn collection_semantics_same_value_zero_and_live_iteration() {
         let script = parse_script(
-            "var key = {}; var s = new WeakSet([key]); var removed = s.delete(key); removed && s.has(key) === false;",
+            "var ok = true; \
+             var map = new Map(); \
+             var nan = 0 / 0; \
+             map.set(nan, 'nan'); \
+             map.set(-0, 'zero'); \
+             ok = ok && map.has(nan) && map.get(nan) === 'nan' && map.get(+0) === 'zero'; \
+             var mapOrder = []; \
+             var map2 = new Map([['a', 1], ['b', 2]]); \
+             map2.set('a', 3); \
+             map2.delete('a'); \
+             map2.set('a', 4); \
+             map2.forEach(function(value, key) { \
+               mapOrder.push(key + ':' + value); \
+               if (key === 'b') { map2.set('c', 5); } \
+             }); \
+             ok = ok && mapOrder.length === 3 && mapOrder[0] === 'b:2' && mapOrder[1] === 'a:4' && mapOrder[2] === 'c:5'; \
+             var set = new Set([nan, -0]); \
+             var setSeen = []; \
+             set.forEach(function(value) { \
+               setSeen.push(value); \
+               if (setSeen.length === 1) { set.add(1); } \
+             }); \
+             ok = ok && set.has(nan) && set.has(+0) && setSeen.length === 3 && setSeen[2] === 1; \
+             var wm = new WeakMap(); \
+             var ws = new WeakSet(); \
+             var key = {}; \
+             wm.set(key, 42); \
+             ws.add(key); \
+             ok = ok && wm.get(key) === 42 && wm.has(key) && wm.delete(key) && !wm.has(key); \
+             ok = ok && ws.has(key) && ws.delete(key) && !ws.has(key); \
+             var weakMapSetTypeError = false; \
+             var weakMapGetTypeError = false; \
+             var weakMapHasTypeError = false; \
+             var weakMapDeleteTypeError = false; \
+             try { wm.set(1, 1); } catch (e) { weakMapSetTypeError = e instanceof TypeError; } \
+             try { wm.get(1); } catch (e) { weakMapGetTypeError = e instanceof TypeError; } \
+             try { wm.has(1); } catch (e) { weakMapHasTypeError = e instanceof TypeError; } \
+             try { wm.delete(1); } catch (e) { weakMapDeleteTypeError = e instanceof TypeError; } \
+             var weakSetAddTypeError = false; \
+             var weakSetHasTypeError = false; \
+             var weakSetDeleteTypeError = false; \
+             try { ws.add(1); } catch (e) { weakSetAddTypeError = e instanceof TypeError; } \
+             try { ws.has(1); } catch (e) { weakSetHasTypeError = e instanceof TypeError; } \
+             try { ws.delete(1); } catch (e) { weakSetDeleteTypeError = e instanceof TypeError; } \
+             ok = ok && weakMapSetTypeError && weakMapGetTypeError && weakMapHasTypeError && weakMapDeleteTypeError; \
+             ok = ok && weakSetAddTypeError && weakSetHasTypeError && weakSetDeleteTypeError; \
+             var weakMapPulls = 0; \
+             var weakMapFailFast = false; \
+             var weakMapIterable = { \
+               [Symbol.iterator]: function() { \
+                 return { \
+                   next: function() { \
+                     weakMapPulls = weakMapPulls + 1; \
+                     if (weakMapPulls === 1) return { value: [{}, 1], done: false }; \
+                     if (weakMapPulls === 2) return { value: 1, done: false }; \
+                     return { value: undefined, done: true }; \
+                   } \
+                 }; \
+               } \
+             }; \
+             try { new WeakMap(weakMapIterable); } catch (e) { weakMapFailFast = e instanceof TypeError; } \
+             var weakSetPulls = 0; \
+             var weakSetFailFast = false; \
+             var weakSetIterable = { \
+               [Symbol.iterator]: function() { \
+                 return { \
+                   next: function() { \
+                     weakSetPulls = weakSetPulls + 1; \
+                     if (weakSetPulls === 1) return { value: {}, done: false }; \
+                     if (weakSetPulls === 2) return { value: 1, done: false }; \
+                     return { value: undefined, done: true }; \
+                   } \
+                 }; \
+               } \
+             }; \
+             try { new WeakSet(weakSetIterable); } catch (e) { weakSetFailFast = e instanceof TypeError; } \
+             ok && weakMapFailFast && weakMapPulls === 2 && weakSetFailFast && weakSetPulls === 2;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(
-            "WeakSet",
+            "Map",
+            JsValue::NativeFunction(NativeFunction::MapConstructor),
+        );
+        realm.define_global(
+            "Set",
             JsValue::NativeFunction(NativeFunction::SetConstructor),
+        );
+        realm.define_global(
+            "WeakSet",
+            JsValue::NativeFunction(NativeFunction::WeakSetConstructor),
+        );
+        realm.define_global(
+            "WeakMap",
+            JsValue::NativeFunction(NativeFunction::WeakMapConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
