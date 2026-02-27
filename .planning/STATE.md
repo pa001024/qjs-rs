@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 08
 current_phase_name: Async and Module Builtins Integration Closure
 current_plan: 3
-status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-02-27T10:38:03.073Z"
+status: verifying
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-02-27T10:46:55.524Z"
 last_activity: 2026-02-27
 progress:
   total_phases: 9
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 24
-  completed_plans: 23
-  percent: 96
+  completed_plans: 24
+  percent: 100
 ---
 
 # Project State
@@ -33,10 +33,10 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Total Phases:** 9
 **Current Plan:** 3
 **Total Plans in Phase:** 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-02-27
-**Last Activity Description:** Phase 08 Plan 02 complete
-**Progress:** [██████████] 96%
+**Last Activity Description:** Phase 08 Plan 03 complete
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 06 P03 | 5 min | 3 tasks | 8 files |
 | Phase 08 P01 | 4 min | 3 tasks | 5 files |
 | Phase 08 P02 | 5 min | 3 tasks | 5 files |
+| Phase 08 P03 | 6 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Use constructor-based Promise + then chain in parity tests to validate supported async surface deterministically. — Promise.resolve is not yet implemented in this runtime surface, so constructor-based chaining is the correct deterministic parity probe.
 - [Phase 08]: Execute module chunks on the active VM and seed module scope from realm globals so module-originated Promise jobs stay visible to shared host hooks. — Module jobs created during evaluation must land in the same queue observed by host enqueue/drain hooks to directly evidence ASY-01 and ASY-02.
 - [Phase 08]: Validate module async behavior through host-driven drain reports/events instead of relying on synchronous export snapshots. — Queue stop reasons and hook events are the deterministic contract surface for module-path Promise semantics; export snapshots cannot observe queued microtasks.
+- [Phase 08]: Keep Phase 8 gate step additive in CI and do not replace existing Phase 6/7 governance gates. — Preserves cumulative non-regression quality contracts while adding module+async closure checks.
+- [Phase 08]: Use exact-name deterministic command chain as single source of truth across CI, docs, and verification. — Prevents evidence drift and keeps audit evidence reproducible across operational artifacts.
+- [Phase 08]: Encode ASY requirement mapping in verification frontmatter with machine-parseable command/artifact/key-link fields. — Closes ASY-01/ASY-02 orphaning and enables automated requirement coverage checks.
 
 ### Pending Todos
 
@@ -121,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-27T10:37:20.522Z
-**Stopped at:** Completed 08-02-PLAN.md
+**Last session:** 2026-02-27T10:46:55.522Z
+**Stopped at:** Completed 08-03-PLAN.md
 **Resume file:** None
