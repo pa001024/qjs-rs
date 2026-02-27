@@ -557,7 +557,7 @@ fn main() {
         .map(|path| load_gc_expectations(path).unwrap_or_else(|err| panic!("{err}")))
         .unwrap_or_default();
     let gc_expectations = merge_gc_expectations(baseline_expectations, gc_expectation_overrides);
-    let profile = profile.unwrap_or_else(|| {
+    let profile = profile.unwrap_or({
         if runtime_gc || auto_gc {
             RunProfile::Stress
         } else {
