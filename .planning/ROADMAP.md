@@ -7,7 +7,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Milestones
 
 - ✅ **v1.0 milestone** — Phases 1-9 shipped on 2026-02-27. Archive: `.planning/milestones/v1.0-ROADMAP.md`
-- 📋 **v1.1 milestone** — Performance Acceleration roadmap planned (Phases 10-12)
+- 🚧 **v1.1 milestone** — Performance Acceleration execution in progress (Plan 10-01 completed on 2026-02-27)
 
 ## Phases
 
@@ -59,4 +59,4 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | Not started | 0/3 | 0 |
+| v1.1 | In Progress | 0/3 | 1/3 |
