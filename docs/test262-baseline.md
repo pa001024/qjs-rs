@@ -76,6 +76,33 @@ python .github/scripts/sync_current_status.py --manifest docs/compatibility/phas
 - 当 `status=blocking` 或 `investigation_required=true` 时，CI 必须失败。
 - `docs/current-status.md` 必须与 `docs/compatibility/phase7-snapshots.json` 的机器渲染结果保持一致（`--mode check` 为硬门禁）。
 
+## Phase 8 Async and Module Integration Contract（2026-02-27）
+
+为 ASY-01 与 ASY-02 在 Phase 8 的闭环契约，固定执行以下命令（与 `.github/workflows/ci.yml` 的 `Phase 8 Async and Module Integration Gates` 保持完全一致）：
+
+```powershell
+cargo test -p vm module_promise_builtin_parity -- --exact
+cargo test -p vm module_promise_queue_semantics -- --exact
+cargo test -p vm module_host_hook_drain_through_module_jobs -- --exact
+cargo test -p test-harness --test module_lifecycle
+cargo test -p test-harness --test module_async_integration
+cargo test -p test-harness --test promise_job_queue module_path_promise_queue_matrix -- --exact
+```
+
+通过信号（deterministic pass contract）：
+- 三个 VM exact-name 命令必须执行到至少 1 个匹配测试（非零 case），并全部通过。
+- `module_lifecycle`、`module_async_integration`、`module_path_promise_queue_matrix` 相关 harness 用例必须全部通过。
+- 任何命令返回非零退出码均视为 Phase 8 gate 失败。
+
+证据产物（供 verification 引用）：
+- CI 产物：`Phase 8 Async and Module Integration Gates` step 日志（包含六条命令及通过结果）。
+- 计划证据：`.planning/phases/08-async-and-module-builtins-integration-closure/08-01-SUMMARY.md`、`.planning/phases/08-async-and-module-builtins-integration-closure/08-02-SUMMARY.md`。
+- 验证归档：`.planning/phases/08-async-and-module-builtins-integration-closure/08-VERIFICATION.md`。
+
+范围声明：
+- 本节用于闭合模块路径 Promise 与 host-hook parity 的 ASY-01/ASY-02 证据链路。
+- 本节不代表已开启全面 test262 `flags: [module]` 执行能力。
+
 测试语料：
 - 仓库：`d:\dev\test262`
 - 用例根目录：`d:\dev\test262\test`
