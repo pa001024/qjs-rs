@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 pub const SCHEMA_VERSION: &str = "bench.v1";
+pub const GUARD_CHECKSUM_MODE: &str = "value-checksum-v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -254,6 +255,11 @@ pub struct CaseEngineResult {
     pub max_ms: f64,
     pub stddev_ms: f64,
     pub throughput_ops_per_sec: f64,
+    pub guard_checksum_mode: &'static str,
+    pub warmup_guard_checksum: f64,
+    pub sample_guard_checksums: Vec<f64>,
+    pub mean_guard_checksum: f64,
+    pub guard_checksum_consistent: bool,
 }
 
 #[derive(Debug, Serialize)]

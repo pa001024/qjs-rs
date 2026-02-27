@@ -8,8 +8,8 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use contract::{
     AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult, EngineKind,
-    EnvironmentInfo, ReproducibilityMetadata, RequiredCaseDefinition, SCHEMA_VERSION, help_text,
-    parse_cli_args, required_case_catalog,
+    EnvironmentInfo, GUARD_CHECKSUM_MODE, ReproducibilityMetadata, RequiredCaseDefinition,
+    SCHEMA_VERSION, TimingMode, help_text, parse_cli_args, required_case_catalog,
 };
 use parser::parse_script;
 use runtime::JsValue;
@@ -107,9 +107,27 @@ fn extract_number(value: &JsValue) -> f64 {
     }
 }
 
-fn run_qjs_rs(script: &str, iterations: usize) -> Result<f64> {
-    let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
-    let chunk = compile_script(&parsed);
+fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -> f64 {
+    if let Some(number) = number {
+        number
+    } else if boolean.unwrap_or(false) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn timing_mode_for_engine(_engine: EngineKind, run_timing_mode: TimingMode) -> TimingMode {
+    run_timing_mode
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SampleMeasurement {
+    elapsed_ms: f64,
+    guard_checksum: f64,
+}
+
+fn run_qjs_rs_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
     let mut realm = runtime::Realm::default();
     install_baseline(&mut realm);
     let mut vm = Vm::default();
@@ -117,33 +135,43 @@ fn run_qjs_rs(script: &str, iterations: usize) -> Result<f64> {
     let start = Instant::now();
     let mut checksum = 0.0;
     for _ in 0..iterations {
+        let parsed =
+            parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
+        let chunk = compile_script(&parsed);
         let value = vm
             .execute_in_realm(&chunk, &realm)
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
         checksum += extract_number(&value);
     }
     std::hint::black_box(checksum);
-    Ok(start.elapsed().as_secs_f64() * 1000.0)
+    Ok(SampleMeasurement {
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+        guard_checksum: checksum,
+    })
 }
 
-fn run_boa_engine(script: &str, iterations: usize) -> Result<f64> {
+fn run_boa_engine_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
     let mut context = BoaContext::default();
     let start = Instant::now();
-    let mut checksum = 0usize;
+    let mut checksum = 0.0;
     for _ in 0..iterations {
         let value = context
             .eval(Source::from_bytes(script.as_bytes()))
             .map_err(|e| anyhow!("boa-engine error: {e}"))?;
-        std::hint::black_box(&value);
-        checksum = checksum.wrapping_add(1);
+        let normalized = guard_delta_from_number_or_bool(value.as_number(), value.as_boolean());
+        checksum += normalized;
     }
     std::hint::black_box(checksum);
-    Ok(start.elapsed().as_secs_f64() * 1000.0)
+    Ok(SampleMeasurement {
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+        guard_checksum: checksum,
+    })
 }
 
 #[derive(Debug, Deserialize)]
 struct NodeResult {
     elapsed_ms: f64,
+    guard: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,7 +180,7 @@ struct NodePayload<'a> {
     iterations: usize,
 }
 
-fn run_nodejs(script: &str, iterations: usize) -> Result<f64> {
+fn run_nodejs_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
     let payload = serde_json::to_string(&NodePayload { script, iterations })?;
     let node_snippet = r#"
 const payload = JSON.parse(process.argv[1]);
@@ -186,10 +214,13 @@ process.stdout.write(JSON.stringify({
     }
     let result: NodeResult = serde_json::from_slice(&output.stdout)
         .context("failed to parse nodejs benchmark output (expected json with elapsed_ms field)")?;
-    Ok(result.elapsed_ms)
+    Ok(SampleMeasurement {
+        elapsed_ms: result.elapsed_ms,
+        guard_checksum: result.guard,
+    })
 }
 
-fn run_quickjs_c(script: &str, iterations: usize) -> Result<f64> {
+fn run_quickjs_c_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
     let script_json = serde_json::to_string(script)?;
     let quickjs_code = format!(
         "const code = {script_json};\
@@ -226,15 +257,26 @@ fn run_quickjs_c(script: &str, iterations: usize) -> Result<f64> {
         .find(|line| line.contains("elapsed_ms"))
         .ok_or_else(|| anyhow!("quickjs-c output missing elapsed_ms json: {stdout}"))?;
     let result: NodeResult = serde_json::from_str(line)?;
-    Ok(result.elapsed_ms)
+    Ok(SampleMeasurement {
+        elapsed_ms: result.elapsed_ms,
+        guard_checksum: result.guard,
+    })
 }
 
-fn run_engine_case(engine: EngineKind, script: &str, iterations: usize) -> Result<f64> {
-    match engine {
-        EngineKind::QjsRs => run_qjs_rs(script, iterations),
-        EngineKind::BoaEngine => run_boa_engine(script, iterations),
-        EngineKind::NodeJs => run_nodejs(script, iterations),
-        EngineKind::QuickJsC => run_quickjs_c(script, iterations),
+fn run_engine_case(
+    engine: EngineKind,
+    timing_mode: TimingMode,
+    script: &str,
+    iterations: usize,
+) -> Result<SampleMeasurement> {
+    let adapter_mode = timing_mode_for_engine(engine, timing_mode);
+    match adapter_mode {
+        TimingMode::EvalPerIteration => match engine {
+            EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(script, iterations),
+            EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
+            EngineKind::NodeJs => run_nodejs_eval_per_iteration(script, iterations),
+            EngineKind::QuickJsC => run_quickjs_c_eval_per_iteration(script, iterations),
+        },
     }
 }
 
@@ -261,21 +303,46 @@ fn stddev(values: &[f64], mean: f64) -> f64 {
     variance.sqrt()
 }
 
-fn summarize(samples: Vec<f64>, iterations: usize) -> CaseEngineResult {
-    let mean_ms = samples.iter().sum::<f64>() / samples.len() as f64;
-    let median_ms = median(&samples);
-    let min_ms = samples.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_ms = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let stddev_ms = stddev(&samples, mean_ms);
+fn summarize(
+    sample_measurements: Vec<SampleMeasurement>,
+    iterations: usize,
+    warmup_guard_checksum: f64,
+) -> CaseEngineResult {
+    let sample_ms: Vec<f64> = sample_measurements
+        .iter()
+        .map(|sample| sample.elapsed_ms)
+        .collect();
+    let sample_guard_checksums: Vec<f64> = sample_measurements
+        .iter()
+        .map(|sample| sample.guard_checksum)
+        .collect();
+
+    let mean_ms = sample_ms.iter().sum::<f64>() / sample_ms.len() as f64;
+    let median_ms = median(&sample_ms);
+    let min_ms = sample_ms.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_ms = sample_ms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let stddev_ms = stddev(&sample_ms, mean_ms);
     let throughput_ops_per_sec = (iterations as f64) / (mean_ms / 1000.0);
+    let mean_guard_checksum =
+        sample_guard_checksums.iter().sum::<f64>() / sample_guard_checksums.len() as f64;
+    let guard_checksum_consistent = sample_guard_checksums.windows(2).all(|pair| {
+        let left = pair[0];
+        let right = pair[1];
+        (left - right).abs() <= 0.000_001
+    });
     CaseEngineResult {
-        sample_ms: samples,
+        sample_ms,
         mean_ms,
         median_ms,
         min_ms,
         max_ms,
         stddev_ms,
         throughput_ops_per_sec,
+        guard_checksum_mode: GUARD_CHECKSUM_MODE,
+        warmup_guard_checksum,
+        sample_guard_checksums,
+        mean_guard_checksum,
+        guard_checksum_consistent,
     }
 }
 
@@ -368,6 +435,33 @@ fn shell_escape_single(input: &str) -> String {
     format!("'{}'", input.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(test)]
+#[test]
+fn adapter_timing_mode_is_uniform() {
+    let selected_mode = TimingMode::EvalPerIteration;
+    for engine in EngineKind::all_required() {
+        assert_eq!(
+            timing_mode_for_engine(engine, selected_mode),
+            selected_mode,
+            "engine {} diverged from run timing mode",
+            engine.as_str()
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn adapter_checksum_parity_is_value_based() {
+    let mut checksum = 0.0;
+    checksum += guard_delta_from_number_or_bool(Some(40.0), Some(false));
+    checksum += guard_delta_from_number_or_bool(None, Some(true));
+    checksum += guard_delta_from_number_or_bool(None, Some(false));
+    checksum += guard_delta_from_number_or_bool(None, None);
+
+    assert_eq!(checksum, 41.0);
+    assert_ne!(checksum, 4.0, "checksum must not degrade to loop counters");
+}
+
 fn main() -> Result<()> {
     let cli = match parse_cli_args(env::args().skip(1))? {
         CliParseResult::Help => {
@@ -396,14 +490,19 @@ fn main() -> Result<()> {
         let mut engines = BTreeMap::new();
 
         for engine in EngineKind::all_required() {
-            let _ = run_engine_case(engine, &wrapped, cli.config.warmup_iterations)?;
+            let warmup = run_engine_case(
+                engine,
+                cli.timing_mode,
+                &wrapped,
+                cli.config.warmup_iterations,
+            )?;
 
             let mut samples = Vec::with_capacity(cli.config.samples);
             for _ in 0..cli.config.samples {
-                let elapsed_ms = run_engine_case(engine, &wrapped, cli.config.iterations)?;
-                samples.push(elapsed_ms);
+                let sample = run_engine_case(engine, cli.timing_mode, &wrapped, cli.config.iterations)?;
+                samples.push(sample);
             }
-            let summary = summarize(samples, cli.config.iterations);
+            let summary = summarize(samples, cli.config.iterations, warmup.guard_checksum);
             println!(
                 "  - {:<11} mean={:>8.3}ms median={:>8.3}ms throughput={:>10.2} ops/s",
                 engine.as_str(),
