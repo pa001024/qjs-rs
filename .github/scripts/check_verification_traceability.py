@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -433,13 +434,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--requirements",
         type=Path,
-        required=True,
         help="Path to .planning/REQUIREMENTS.md",
     )
     parser.add_argument(
         "--phases-dir",
         type=Path,
-        required=True,
         help="Path to .planning/phases directory",
     )
     parser.add_argument(
@@ -454,6 +453,14 @@ def parse_args() -> argparse.Namespace:
         default=Path("target/verification-traceability.md"),
         help="Output path for human-readable report markdown",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "Run deterministic checker self-tests against repository fixtures without "
+            "reading live .planning phase artifacts"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -464,8 +471,113 @@ def run_check(requirements_path: Path, phases_dir: Path) -> dict[str, Any]:
     return build_report(requirements_map, entries, requirements_path, phases_dir)
 
 
+def _copy_fixture_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+
+
+def _expect_failure(report: dict[str, Any], expected_error_fragment: str, scenario: str) -> None:
+    if report["status"] != "failed":
+        raise TraceabilityError(f"self-test '{scenario}' expected failure but checker passed")
+    if not any(expected_error_fragment in error for error in report["errors"]):
+        raise TraceabilityError(
+            f"self-test '{scenario}' failed for an unexpected reason: {report['errors']}"
+        )
+
+
+def run_self_test(script_root: Path, repo_root: Path) -> None:
+    fixture_root = script_root / "verification_traceability" / "fixtures"
+    requirements_fixture = fixture_root / "requirements_traceability_sample.md"
+    phase01_fixture = fixture_root / "phase01-verification-valid.md"
+    phase03_fixture = fixture_root / "phase03-verification-missing-reqs.md"
+    phase08_fixture = fixture_root / "phase08-verification-valid.md"
+
+    required_fixtures = (
+        requirements_fixture,
+        phase01_fixture,
+        phase03_fixture,
+        phase08_fixture,
+    )
+    missing_fixtures = [path for path in required_fixtures if not path.is_file()]
+    if missing_fixtures:
+        joined = ", ".join(path.as_posix() for path in missing_fixtures)
+        raise TraceabilityError(f"self-test fixture(s) missing: {joined}")
+
+    temp_root = repo_root / "target" / "verification-traceability-self-test"
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    # Positive scenario: valid canonical coverage.
+    positive_phases = temp_root / "positive" / "phases"
+    _copy_fixture_file(
+        phase01_fixture,
+        positive_phases / "01-semantic-core-closure" / "01-VERIFICATION.md",
+    )
+    _copy_fixture_file(
+        phase08_fixture,
+        positive_phases / "08-async-and-module-builtins-integration-closure" / "08-VERIFICATION.md",
+    )
+    positive_report = run_check(requirements_fixture, positive_phases)
+    if positive_report["status"] != "passed":
+        raise TraceabilityError(
+            f"self-test 'positive' expected pass but failed: {positive_report['errors']}"
+        )
+
+    # Negative scenario: schema regression must catch missing requirements_checked.
+    missing_field_phases = temp_root / "missing-field" / "phases"
+    _copy_fixture_file(
+        phase01_fixture,
+        missing_field_phases / "01-semantic-core-closure" / "01-VERIFICATION.md",
+    )
+    _copy_fixture_file(
+        phase03_fixture,
+        missing_field_phases / "03-promise-job-queue-semantics" / "03-VERIFICATION.md",
+    )
+    _copy_fixture_file(
+        phase08_fixture,
+        missing_field_phases / "08-async-and-module-builtins-integration-closure" / "08-VERIFICATION.md",
+    )
+    missing_field_report = run_check(requirements_fixture, missing_field_phases)
+    _expect_failure(
+        missing_field_report,
+        "missing required frontmatter field 'requirements_checked'",
+        "missing-field",
+    )
+
+    # Negative scenario: canonical requirement coverage must fail when one requirement is unclaimed.
+    missing_coverage_phases = temp_root / "missing-coverage" / "phases"
+    _copy_fixture_file(
+        phase01_fixture,
+        missing_coverage_phases / "01-semantic-core-closure" / "01-VERIFICATION.md",
+    )
+    missing_coverage_report = run_check(requirements_fixture, missing_coverage_phases)
+    _expect_failure(
+        missing_coverage_report,
+        "missing canonical requirement coverage",
+        "missing-coverage",
+    )
+
+
 def main() -> int:
     args = parse_args()
+
+    if args.self_test:
+        try:
+            run_self_test(script_root=Path(__file__).resolve().parent, repo_root=Path(".").resolve())
+        except TraceabilityError as exc:
+            print(f"verification traceability self-test failed: {exc}", file=sys.stderr)
+            return 1
+        print("verification traceability self-test passed")
+        return 0
+
+    if args.requirements is None or args.phases_dir is None:
+        print(
+            "verification traceability check failed: --requirements and --phases-dir are required "
+            "unless --self-test is used",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         report = run_check(args.requirements, args.phases_dir)
