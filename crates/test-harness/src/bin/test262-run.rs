@@ -533,9 +533,10 @@ fn write_output(path: &Path, content: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_gc_expectations, merge_gc_expectations, parse_gc_expectations_str, GcExpectations,
+        check_gc_expectations, format_summary_json, format_summary_markdown, merge_gc_expectations,
+        parse_gc_expectations_str, skip_category_rows, GcExpectations,
     };
-    use test_harness::test262::SuiteSummary;
+    use test_harness::test262::{SuiteSkipCategories, SuiteSummary};
 
     fn summary_with_gc(
         collections_total: usize,
@@ -547,6 +548,25 @@ mod tests {
         summary.gc.runtime_collections = runtime_collections;
         summary.gc.boundary_collections = collections_total.saturating_sub(runtime_collections);
         summary.gc.reclaimed_objects = reclaimed_objects;
+        summary
+    }
+
+    fn summary_with_phase7_counts() -> SuiteSummary {
+        let mut summary = summary_with_gc(10, 7, 50);
+        summary.discovered = 22;
+        summary.executed = 14;
+        summary.passed = 13;
+        summary.failed = 1;
+        summary.skipped = 8;
+        summary.skipped_categories = SuiteSkipCategories {
+            fixture_file: 1,
+            flag_module: 1,
+            flag_only_strict: 1,
+            flag_async: 1,
+            requires_includes: 1,
+            requires_feature: 1,
+            requires_harness_global_262: 2,
+        };
         summary
     }
 
@@ -692,5 +712,58 @@ reclaimed_objects_min=1
                 "expected gc.reclaimed_objects >= 1, got 0",
             ]
         );
+    }
+
+    #[test]
+    fn json_report_schema_includes_phase7_required_fields() {
+        let summary = summary_with_phase7_counts();
+        let json = format_summary_json(&summary);
+
+        assert!(json.contains("\"discovered\": 22"));
+        assert!(json.contains("\"executed\": 14"));
+        assert!(json.contains("\"failed\": 1"));
+        assert!(json.contains("\"skipped_categories\": {"));
+        assert!(json.contains("\"fixture_file\": 1"));
+        assert!(json.contains("\"flag_module\": 1"));
+        assert!(json.contains("\"flag_only_strict\": 1"));
+        assert!(json.contains("\"flag_async\": 1"));
+        assert!(json.contains("\"requires_includes\": 1"));
+        assert!(json.contains("\"requires_feature\": 1"));
+        assert!(json.contains("\"requires_harness_global_262\": 2"));
+    }
+
+    #[test]
+    fn markdown_report_contains_deterministic_phase7_sections() {
+        let summary = summary_with_phase7_counts();
+        let markdown = format_summary_markdown(&summary);
+
+        let totals_index = markdown
+            .find("## Totals")
+            .expect("markdown should include Totals heading");
+        let skipped_index = markdown
+            .find("## Skipped Categories")
+            .expect("markdown should include Skipped Categories heading");
+        let gc_index = markdown
+            .find("## GC Summary")
+            .expect("markdown should include GC Summary heading");
+        assert!(totals_index < skipped_index);
+        assert!(skipped_index < gc_index);
+
+        assert!(markdown.contains("| discovered | 22 |"));
+        assert!(markdown.contains("| executed | 14 |"));
+        assert!(markdown.contains("| failed | 1 |"));
+        assert!(markdown.contains("| fixture_file | 1 |"));
+        assert!(markdown.contains("| requires_harness_global_262 | 2 |"));
+        assert!(markdown.contains("| total | 8 |"));
+    }
+
+    #[test]
+    fn skipped_category_rows_sum_to_skipped_total() {
+        let summary = summary_with_phase7_counts();
+        let categorized_total: usize = skip_category_rows(&summary)
+            .into_iter()
+            .map(|(_, count)| count)
+            .sum();
+        assert_eq!(summary.skipped, categorized_total);
     }
 }
