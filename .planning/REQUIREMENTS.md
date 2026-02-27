@@ -51,9 +51,11 @@
 
 **Coverage:**
 - v1.1 requirements: 7 total
-- Mapped to phases: 7
+- Mapped to phases (exactly once): 7/7 (100%)
 - Unmapped: 0 ✓
+- Multi-mapped: 0 ✓
 - Checked off: 0/7
 
 ---
 *Requirements defined: 2026-02-27 for milestone v1.1*
+*Roadmap alignment updated: 2026-02-27*
