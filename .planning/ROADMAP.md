@@ -15,7 +15,7 @@ This roadmap closes remaining v1 semantic/runtime gaps first, then lands async a
 - [x] **Phase 3: Promise Job Queue Semantics** - Deliver deterministic microtask behavior and host queue hooks. (completed 2026-02-26)
 - [x] **Phase 4: ES Module Lifecycle** - Implement parse/instantiate/evaluate flow with deterministic cache and cycle handling. (completed 2026-02-26)
 - [x] **Phase 5: Core Builtins Baseline** - Bring core constructors, error hierarchy, and JSON to target CI subsets. (completed 2026-02-26)
-- [ ] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts.
+- [x] **Phase 6: Collection and RegExp Semantics** - Complete dedicated Map/Set and RegExp behavior without alias shortcuts. (completed 2026-02-27)
 - [ ] **Phase 7: Compatibility and Governance Gates** - Lock telemetry, reporting, and release-governance quality gates.
 
 ## Phase Details
@@ -83,11 +83,11 @@ Plans:
   1. `Map/Set/WeakMap/WeakSet` constructors and methods use dedicated internal semantics rather than alias shortcuts.
   2. `RegExp` constructor and `exec/test/toString` preserve flags and supported-pattern match behavior.
   3. Collection and RegExp regression suites pass in CI alongside prior builtin coverage.
-**Plans**: 3 plans
+**Plans**: 3/3 plans complete
 Plans:
 - [x] 06-01-PLAN.md - De-alias weak collections and lock Map/Set/WeakMap/WeakSet dedicated runtime semantics.
 - [x] 06-02-PLAN.md - Close RegExp constructor/exec/test/toString semantics with shared lastIndex behavior and deterministic errors.
-- [ ] 06-03-PLAN.md - Wire Phase 6 collection/RegExp regression gates into test262-lite, CI, and baseline docs.
+- [x] 06-03-PLAN.md - Wire Phase 6 collection/RegExp regression gates into test262-lite, CI, and baseline docs.
 
 ### Phase 7: Compatibility and Governance Gates
 **Goal**: Compatibility reporting and quality governance are repeatable, measurable, and enforceable.
@@ -110,5 +110,5 @@ Plans:
 | 3. Promise Job Queue Semantics | 3/3 | Complete    | 2026-02-26 |
 | 4. ES Module Lifecycle | 3/3 | Complete    | 2026-02-26 |
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
-| 6. Collection and RegExp Semantics | 2/3 | In Progress | - |
+| 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 0/TBD | Not started | - |
