@@ -118,7 +118,7 @@ Plans:
   3. Regression tests reproduce and then close the reported `ModuleLifecycle:EvaluateFailed` Promise usage flow gap.
 **Plans**: 3 plans
 Plans:
-- [ ] 08-01-PLAN.md - Reproduce and fix module realm baseline builtin availability gaps.
+- [x] 08-01-PLAN.md - Reproduce and fix module realm baseline builtin availability gaps.
 - [ ] 08-02-PLAN.md - Add module-path Promise queue regression matrix for ASY-01/ASY-02 semantics.
 - [ ] 08-03-PLAN.md - Wire Phase 8 E2E module+async gates into harness/CI with deterministic evidence output.
 
@@ -147,5 +147,5 @@ Plans:
 | 5. Core Builtins Baseline | 3/3 | Complete    | 2026-02-26 |
 | 6. Collection and RegExp Semantics | 3/3 | Complete    | 2026-02-27 |
 | 7. Compatibility and Governance Gates | 3/3 | Complete    | 2026-02-27 |
-| 8. Async and Module Builtins Integration Closure | 0/3 | Not started | - |
+| 8. Async and Module Builtins Integration Closure | 1/3 | In Progress | - |
 | 9. Verification Traceability Normalization | 0/2 | Not started | - |

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 07
-current_phase_name: Compatibility and Governance Gates
-current_plan: Not started
-status: completed
-stopped_at: Completed Phase 07 execution and verification
-last_updated: "2026-02-27T08:44:29.354Z"
+current_phase: 08
+current_phase_name: Async and Module Builtins Integration Closure
+current_plan: 2
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-02-27T10:12:50.295Z"
 last_activity: 2026-02-27
 progress:
-  total_phases: 7
+  total_phases: 9
   completed_phases: 7
-  total_plans: 21
-  completed_plans: 21
-  percent: 100
+  total_plans: 24
+  completed_plans: 22
+  percent: 92
 ---
 
 # Project State
@@ -24,19 +24,19 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-02-25)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.
-**Current focus:** Phase 7 - Compatibility and Governance Gates
+**Current focus:** Phase 8 - Async and Module Builtins Integration Closure
 
 ## Current Position
 
-**Current Phase:** 07
-**Current Phase Name:** Compatibility and Governance Gates
-**Total Phases:** 7
-**Current Plan:** Not started
+**Current Phase:** 08
+**Current Phase Name:** Async and Module Builtins Integration Closure
+**Total Phases:** 9
+**Current Plan:** 2
 **Total Plans in Phase:** 3
-**Status:** Milestone complete
+**Status:** Ready to execute
 **Last Activity:** 2026-02-27
-**Last Activity Description:** Phase 07 complete
-**Progress:** [██████████] 100%
+**Last Activity Description:** Phase 08 Plan 01 complete
+**Progress:** [█████████░] 92%
 
 ## Performance Metrics
 
@@ -65,6 +65,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 06 P01 | 5 min | 3 tasks | 5 files |
 | Phase 06 P02 | 9 min | 3 tasks | 2 files |
 | Phase 06 P03 | 5 min | 3 tasks | 8 files |
+| Phase 08 P01 | 4 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,9 @@ Recent decisions affecting current work:
 - [Phase 06]: Use a single exact-name collection_and_regexp_subset gate to execute all Phase 6 test262-lite families. — Keeps CI command contract deterministic and prevents zero-test exact-name drift.
 - [Phase 06]: Keep Phase 6 CI gates additive to existing workspace and Phase 5 gates. — Preserves non-regression guarantees and avoids replacing prior quality contracts.
 - [Phase 06]: Mirror CI command chains in baseline documentation with measured expected outcomes. — Makes future regression triage reproducible and blocks silent gate scope relaxation.
+- [Phase 08]: Install baseline globals in module realm initialization via builtins::install_baseline before module chunk execution. — Module realm should match script baseline globals to close Promise availability parity without adding path-specific shims.
+- [Phase 08]: Keep ModuleLifecycle typed error mapping unchanged and only close missing-builtin behavior. — Plan acceptance requires deterministic ParseFailed/EvaluateFailed/host contract tokens to remain stable after wiring changes.
+- [Phase 08]: Use constructor-based Promise + then chain in parity tests to validate supported async surface deterministically. — Promise.resolve is not yet implemented in this runtime surface, so constructor-based chaining is the correct deterministic parity probe.
 
 ### Pending Todos
 
@@ -114,6 +118,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-27T08:44:29.352Z
-**Stopped at:** Completed Phase 07 execution and verification
+**Last session:** 2026-02-27T10:12:50.292Z
+**Stopped at:** Completed 08-01-PLAN.md
 **Resume file:** None
