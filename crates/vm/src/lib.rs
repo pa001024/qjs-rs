@@ -4,6 +4,7 @@ use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
     VariableDeclaration,
 };
+use builtins::install_baseline;
 use bytecode::{
     Chunk, CompiledFunction, CompiledModule, Opcode, compile_expression, compile_module,
     compile_script,
@@ -1221,6 +1222,7 @@ impl Vm {
         };
 
         let mut realm = Realm::default();
+        install_baseline(&mut realm);
         for (index, import) in compiled.imports.iter().enumerate() {
             let dependency_key = record
                 .resolved_dependencies

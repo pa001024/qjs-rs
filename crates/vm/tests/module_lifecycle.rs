@@ -221,7 +221,8 @@ fn module_promise_builtin_parity() {
     let mut host = MemoryModuleHost::default().with_module(
         "entry.js",
         "const direct = Promise;\n\
-         const chained = Promise.resolve(20).then(function (value) { return value + 22; });\n\
+         const seed = new Promise(function (resolve) { resolve(20); });\n\
+         const chained = seed.then(function (value) { return value + 22; });\n\
          export const promise_type = typeof direct;\n\
          export const chained_type = typeof chained;\n\
          export const has_then = typeof chained.then;\n",
