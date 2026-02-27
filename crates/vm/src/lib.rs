@@ -1210,22 +1210,24 @@ impl Vm {
     }
 
     fn execute_module_record(
-        &self,
+        &mut self,
         canonical_key: &str,
     ) -> Result<BTreeMap<String, JsValue>, VmError> {
-        let record = self
-            .module_records
-            .get(canonical_key)
-            .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
-        let Some(compiled) = record.compiled.as_ref() else {
-            return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+        let (compiled, resolved_dependencies) = {
+            let record = self
+                .module_records
+                .get(canonical_key)
+                .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+            let Some(compiled) = record.compiled.clone() else {
+                return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+            };
+            (compiled, record.resolved_dependencies.clone())
         };
 
         let mut realm = Realm::default();
         install_baseline(&mut realm);
         for (index, import) in compiled.imports.iter().enumerate() {
-            let dependency_key = record
-                .resolved_dependencies
+            let dependency_key = resolved_dependencies
                 .get(index)
                 .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
             let dependency = self
@@ -1248,14 +1250,13 @@ impl Vm {
             }
         }
 
-        let mut module_vm = Vm::default();
-        let result = module_vm
-            .execute_in_realm(&compiled.chunk, &realm)
+        let result = self
+            .execute_module_chunk_inline(&compiled.chunk, &realm)
             .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
         if compiled.exports.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let snapshot = module_vm
+        let snapshot = self
             .snapshot_object_properties(&result)
             .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
         let mut exports = BTreeMap::new();
@@ -1270,6 +1271,59 @@ impl Vm {
             );
         }
         Ok(exports)
+    }
+
+    fn execute_module_chunk_inline(
+        &mut self,
+        chunk: &Chunk,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let module_global = self.create_object_value();
+        if let JsValue::Object(global_object_id) = module_global.clone() {
+            self.global_object_id = Some(global_object_id);
+            if let Some(global_object) = self.objects.get_mut(&global_object_id) {
+                for (name, value) in realm.globals_entries() {
+                    global_object
+                        .properties
+                        .insert(name.to_string(), value.clone());
+                }
+                global_object
+                    .properties
+                    .insert("globalThis".to_string(), module_global.clone());
+            }
+        }
+        let mut module_scope = BTreeMap::new();
+        module_scope.insert(
+            "globalThis".to_string(),
+            self.create_binding(module_global, true),
+        );
+        for (name, value) in realm.globals_entries() {
+            let binding_id = self.create_binding(value.clone(), true);
+            module_scope.insert(name.to_string(), binding_id);
+        }
+        let saved_scopes = std::mem::replace(
+            &mut self.scopes,
+            vec![Rc::new(RefCell::new(module_scope))],
+        );
+        let saved_with_objects = std::mem::take(&mut self.with_objects);
+        let saved_var_scope_stack = std::mem::take(&mut self.var_scope_stack);
+        let saved_eval_contexts = std::mem::take(&mut self.eval_contexts);
+        let saved_eval_deletable_binding_depth = self.eval_deletable_binding_depth;
+        let saved_annex_b_contexts = std::mem::take(&mut self.annex_b_eval_var_function_contexts);
+        let saved_param_init_body_scopes = std::mem::take(&mut self.param_init_body_scopes);
+        self.eval_deletable_binding_depth = 0;
+
+        let result = self.execute_inline_chunk(chunk, realm, false);
+
+        self.scopes = saved_scopes;
+        self.with_objects = saved_with_objects;
+        self.var_scope_stack = saved_var_scope_stack;
+        self.eval_contexts = saved_eval_contexts;
+        self.eval_deletable_binding_depth = saved_eval_deletable_binding_depth;
+        self.annex_b_eval_var_function_contexts = saved_annex_b_contexts;
+        self.param_init_body_scopes = saved_param_init_body_scopes;
+
+        result
     }
 
     fn snapshot_object_properties(

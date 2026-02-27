@@ -2,7 +2,10 @@
 
 use runtime::{JsValue, ModuleLifecycleState, Realm};
 use std::collections::{BTreeMap, BTreeSet};
-use vm::{ModuleHost, ModuleHostError, Vm, VmError};
+use vm::{
+    ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobDrainStopReason,
+    PromiseJobHostHooks, Vm, VmError,
+};
 
 #[derive(Debug, Default)]
 struct MemoryModuleHost {
@@ -85,6 +88,60 @@ fn load_string_export(exports: &BTreeMap<String, JsValue>, name: &str) -> String
         JsValue::String(text) => text,
         other => panic!("expected string export {name}, got {other:?}"),
     }
+}
+
+#[derive(Default)]
+struct RecordingHooks {
+    events: Vec<String>,
+    fail_on_enqueue: bool,
+    fail_on_drain_start: bool,
+    fail_on_drain_end: bool,
+}
+
+impl PromiseJobHostHooks for RecordingHooks {
+    fn on_enqueue(&mut self, pending_jobs: usize) -> Result<(), VmError> {
+        self.events.push(format!("enqueue:{pending_jobs}"));
+        if self.fail_on_enqueue {
+            return Err(VmError::RuntimeIntegrity("enqueue callback failed"));
+        }
+        Ok(())
+    }
+
+    fn on_drain_start(&mut self, pending_jobs: usize) -> Result<(), VmError> {
+        self.events.push(format!("drain_start:{pending_jobs}"));
+        if self.fail_on_drain_start {
+            return Err(VmError::RuntimeIntegrity("drain_start callback failed"));
+        }
+        Ok(())
+    }
+
+    fn on_drain_end(&mut self, report: &PromiseJobDrainReport) -> Result<(), VmError> {
+        self.events.push(format!(
+            "drain_end:{}:{}:{:?}",
+            report.processed, report.remaining, report.stop_reason
+        ));
+        if self.fail_on_drain_end {
+            return Err(VmError::RuntimeIntegrity("drain_end callback failed"));
+        }
+        Ok(())
+    }
+}
+
+fn evaluate_module_with_nested_promise_chain() -> Vm {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "async function base() { return 1; }\n\
+         const first = base();\n\
+         const second = first.then(function (value) { return value + 1; });\n\
+         second.then(function (value) { return value + 1; });\n\
+         export const promise_type = typeof Promise;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("module evaluation should succeed");
+    assert_eq!(load_string_export(&exports, "promise_type"), "function");
+    vm
 }
 
 #[test]
@@ -234,6 +291,89 @@ fn module_promise_builtin_parity() {
     assert_eq!(load_string_export(&exports, "promise_type"), "function");
     assert_eq!(load_string_export(&exports, "chained_type"), "object");
     assert_eq!(load_string_export(&exports, "has_then"), "function");
+}
+
+#[test]
+fn module_promise_queue_semantics() {
+    let mut vm = evaluate_module_with_nested_promise_chain();
+    let realm = Realm::default();
+    let mut hooks = RecordingHooks::default();
+
+    assert_eq!(vm.pending_promise_job_count(), 1);
+    let first = vm
+        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+        .expect("first drain should enqueue follow-up reaction");
+    assert_eq!(
+        first,
+        PromiseJobDrainReport {
+            processed: 1,
+            remaining: 1,
+            stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
+        }
+    );
+    assert_eq!(vm.pending_promise_job_count(), 1);
+
+    let second = vm
+        .drain_promise_jobs_with_host_hooks(8, &realm, false, &mut hooks)
+        .expect("second drain should consume remaining nested work");
+    assert_eq!(
+        second,
+        PromiseJobDrainReport {
+            processed: 1,
+            remaining: 0,
+            stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+        }
+    );
+    assert_eq!(vm.pending_promise_job_count(), 0);
+    assert_eq!(
+        hooks.events,
+        vec![
+            "drain_start:1".to_string(),
+            "enqueue:1".to_string(),
+            "drain_end:1:1:BudgetExhausted".to_string(),
+            "drain_start:1".to_string(),
+            "drain_end:1:0:QueueEmpty".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn module_host_hook_drain_through_module_jobs() {
+    let realm = Realm::default();
+
+    let mut vm = evaluate_module_with_nested_promise_chain();
+    let mut hooks = RecordingHooks {
+        fail_on_drain_start: true,
+        ..RecordingHooks::default()
+    };
+    let err = vm
+        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+        .expect_err("drain-start callback failure should be typed");
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnDrainStartFailed")
+    );
+    assert_eq!(vm.pending_promise_job_count(), 1);
+
+    let mut vm = evaluate_module_with_nested_promise_chain();
+    let mut hooks = RecordingHooks {
+        fail_on_enqueue: true,
+        ..RecordingHooks::default()
+    };
+    let err = vm
+        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+        .expect_err("nested enqueue callback failure should be typed");
+    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed"));
+
+    let mut vm = evaluate_module_with_nested_promise_chain();
+    let mut hooks = RecordingHooks {
+        fail_on_drain_end: true,
+        ..RecordingHooks::default()
+    };
+    let err = vm
+        .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+        .expect_err("drain-end callback failure should be typed");
+    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed"));
 }
 
 #[test]
