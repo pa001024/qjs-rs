@@ -97,7 +97,8 @@ fn module_entry_promise_builtin_parity() {
         &[(
             "entry.js",
             "const direct = Promise;\n\
-             const chained = Promise.resolve(20).then(function (value) { return value + 22; });\n\
+             const seed = new Promise(function (resolve) { resolve(20); });\n\
+             const chained = seed.then(function (value) { return value + 22; });\n\
              export const promise_type = typeof direct;\n\
              export const chained_type = typeof chained;\n\
              export const has_then = typeof chained.then;\n",
@@ -115,7 +116,12 @@ fn reimport_reuses_cache_without_duplicate_execution() {
         .with_module("dep.js", "export const inc = 41;\n")
         .with_module(
             "entry.js",
-            "import { inc } from './dep.js';\nexport const answer = inc + 1;\n",
+            "import { inc } from './dep.js';\n\
+             const seed = new Promise(function (resolve) { resolve(inc); });\n\
+             const chained = seed.then(function (value) { return value + 1; });\n\
+             export const answer = inc + 1;\n\
+             export const promise_type = typeof Promise;\n\
+             export const chained_type = typeof chained;\n",
         );
     let mut vm = Vm::default();
     let first = vm
@@ -126,6 +132,10 @@ fn reimport_reuses_cache_without_duplicate_execution() {
         .expect("second import should reuse cache");
     assert_eq!(expect_number(&first, "answer"), 42.0);
     assert_eq!(expect_number(&second, "answer"), 42.0);
+    assert_eq!(expect_string(&first, "promise_type"), "function");
+    assert_eq!(expect_string(&first, "chained_type"), "object");
+    assert_eq!(expect_string(&second, "promise_type"), "function");
+    assert_eq!(expect_string(&second, "chained_type"), "object");
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
     assert_eq!(vm.module_evaluation_count("entry.js"), Some(1));
@@ -159,4 +169,28 @@ fn cycle_and_failure_paths_are_deterministic() {
         .expect_err("reimport should keep deterministic failure category");
     assert_eq!(first_err, VmError::TypeError("ModuleLifecycle:LoadFailed"));
     assert_eq!(second_err, VmError::TypeError("ModuleLifecycle:LoadFailed"));
+
+    let mut evaluate_fail_host = HarnessModuleHost::default()
+        .with_module("ns.js", "export const value = 1;\n")
+        .with_module(
+            "entry.js",
+            "import * as ns from './ns.js';\nexport const value = 1;\n",
+        );
+    let mut vm = Vm::default();
+    let first_eval_err = vm
+        .evaluate_module_entry("entry.js", &mut evaluate_fail_host)
+        .expect_err("unsupported namespace import should fail deterministically");
+    let second_eval_err = vm
+        .evaluate_module_entry("entry.js", &mut evaluate_fail_host)
+        .expect_err("failed module should replay evaluate failure token");
+    assert_eq!(
+        first_eval_err,
+        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
+    );
+    assert_eq!(
+        second_eval_err,
+        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
+    );
+    assert_eq!(evaluate_fail_host.load_count("entry.js"), 1);
+    assert_eq!(evaluate_fail_host.load_count("ns.js"), 1);
 }

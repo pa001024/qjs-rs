@@ -38,6 +38,8 @@ pub fn run_module_entry(
             .insert((*key).to_string(), (*source).to_string());
     }
     let mut vm = Vm::default();
+    // Keep harness module execution routed through VM lifecycle entry so
+    // builtin/module parity assertions exercise the real module path.
     vm.evaluate_module_entry(entry, &mut host)
         .map_err(|err| format!("{err:?}"))
 }
