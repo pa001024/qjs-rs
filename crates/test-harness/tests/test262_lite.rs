@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
-use test_harness::test262::{parse_test262_case, run_suite, should_skip, SuiteOptions};
+use test_harness::test262::{SuiteOptions, parse_test262_case, run_suite, should_skip};
 
 #[test]
 fn runs_test262_lite_suite_in_default_profile() {

@@ -92,6 +92,18 @@ type BindingId = u64;
 type ObjectId = u64;
 type Scope = BTreeMap<String, BindingId>;
 type ScopeRef = Rc<RefCell<Scope>>;
+type PromiseHandlers = (Option<JsValue>, Option<JsValue>);
+type PropertyDescriptorTuple = (
+    bool,
+    JsValue,
+    bool,
+    JsValue,
+    bool,
+    JsValue,
+    Option<bool>,
+    Option<bool>,
+    Option<bool>,
+);
 
 #[derive(Debug, Clone, PartialEq)]
 struct RegExpMatchResult {
@@ -988,7 +1000,7 @@ impl Vm {
     ) -> Result<BTreeMap<String, JsValue>, VmError> {
         let canonical_key = self.resolve_module_key(None, specifier, host)?;
         self.instantiate_module_graph(&canonical_key, host)?;
-        self.evaluate_module_graph(&canonical_key, host)?;
+        self.evaluate_module_graph(&canonical_key)?;
         self.module_records
             .get(&canonical_key)
             .map(|record| record.exports.clone())
@@ -1138,19 +1150,11 @@ impl Vm {
         Ok(())
     }
 
-    fn evaluate_module_graph(
-        &mut self,
-        canonical_key: &str,
-        host: &mut dyn ModuleHost,
-    ) -> Result<(), VmError> {
-        self.evaluate_module_recursive(canonical_key, host)
+    fn evaluate_module_graph(&mut self, canonical_key: &str) -> Result<(), VmError> {
+        self.evaluate_module_recursive(canonical_key)
     }
 
-    fn evaluate_module_recursive(
-        &mut self,
-        canonical_key: &str,
-        host: &mut dyn ModuleHost,
-    ) -> Result<(), VmError> {
+    fn evaluate_module_recursive(&mut self, canonical_key: &str) -> Result<(), VmError> {
         let Some(state) = self
             .module_records
             .get(canonical_key)
@@ -1181,7 +1185,7 @@ impl Vm {
             .map(|record| record.resolved_dependencies.clone())
             .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
         for dependency in dependencies {
-            if let Err(err) = self.evaluate_module_recursive(&dependency, host) {
+            if let Err(err) = self.evaluate_module_recursive(&dependency) {
                 self.cache_module_error(canonical_key, err.clone());
                 return Err(err);
             }
@@ -2160,7 +2164,7 @@ impl Vm {
                                 return Err(VmError::UnknownIdentifier(name.clone()));
                             }
                             if !binding.mutable {
-                                if !(binding.sloppy_readonly_write_ignored && !strict) {
+                                if !binding.sloppy_readonly_write_ignored || strict {
                                     return Err(VmError::ImmutableBinding(name.clone()));
                                 }
                             } else {
@@ -2308,10 +2312,7 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.properties.insert(name.clone(), value);
-                    object
-                        .property_attributes
-                        .entry(name.clone())
-                        .or_insert_with(PropertyAttributes::default);
+                    object.property_attributes.entry(name.clone()).or_default();
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineProtoProperty => {
@@ -3948,10 +3949,7 @@ impl Vm {
                     for (index, arg) in args.iter().enumerate() {
                         let key = index.to_string();
                         object.properties.insert(key.clone(), arg.clone());
-                        object
-                            .property_attributes
-                            .entry(key.clone())
-                            .or_insert_with(PropertyAttributes::default);
+                        object.property_attributes.entry(key.clone()).or_default();
                         if mapped_arguments_enabled {
                             if let Some(binding_id) = param_binding_ids.get(index) {
                                 object.argument_mappings.insert(key, *binding_id);
@@ -4061,7 +4059,7 @@ impl Vm {
                 if is_async_function {
                     let rejection = match &err {
                         VmError::UncaughtException(exception) => Some(exception.clone()),
-                        other => self.runtime_error_exception_value(&other),
+                        other => self.runtime_error_exception_value(other),
                     };
                     if let Some(rejection) = rejection {
                         async_rejection = Some(rejection);
@@ -4714,7 +4712,15 @@ impl Vm {
         if date_fields.next().is_some() || !(1..=12).contains(&month) || day == 0 {
             return None;
         }
-        Some(Self::make_date_timestamp_ms(year, month - 1, day, 0, 0, 0, 0))
+        Some(Self::make_date_timestamp_ms(
+            year,
+            month - 1,
+            day,
+            0,
+            0,
+            0,
+            0,
+        ))
     }
 
     fn parse_rfc_utc_date_string(text: &str) -> Option<f64> {
@@ -5192,7 +5198,7 @@ impl Vm {
         }
 
         let source =
-            self.to_object_for_object_builtins(items, "Array.from items must be coercible")?;
+            self.coerce_object_for_object_builtins(items, "Array.from items must be coercible")?;
         let length_value = self.get_property_from_receiver(source.clone(), "length", realm)?;
         let raw_length = self.to_number(&length_value);
         let source_length = if raw_length.is_finite() && raw_length > 0.0 {
@@ -6780,7 +6786,7 @@ impl Vm {
                     None | Some(JsValue::Undefined) => None,
                     Some(value) => {
                         let digits = self.to_number(value);
-                        if !digits.is_finite() || digits < 0.0 || digits > 100.0 {
+                        if !digits.is_finite() || !(0.0..=100.0).contains(&digits) {
                             return Err(VmError::UncaughtException(self.create_error_exception(
                                 NativeFunction::RangeErrorConstructor,
                                 "RangeError",
@@ -6848,11 +6854,9 @@ impl Vm {
                 let receiver_id = self.strict_this_map(this_arg)?;
                 let key = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let entries = self.read_map_entries(receiver_id)?;
-                for entry in entries {
-                    if let Some((current_key, current_value)) = entry {
-                        if self.same_value_zero(&current_key, &key) {
-                            return Ok(current_value);
-                        }
+                for (current_key, current_value) in entries.into_iter().flatten() {
+                    if self.same_value_zero(&current_key, &key) {
+                        return Ok(current_value);
                     }
                 }
                 Ok(JsValue::Undefined)
@@ -6886,9 +6890,7 @@ impl Vm {
             HostFunction::MapClearThis => {
                 let receiver_id = self.strict_this_map(this_arg)?;
                 let mut entries = self.read_map_entries(receiver_id)?;
-                for entry in &mut entries {
-                    *entry = None;
-                }
+                entries.fill(None);
                 self.write_map_entries(receiver_id, entries)?;
                 Ok(JsValue::Undefined)
             }
@@ -6960,11 +6962,9 @@ impl Vm {
                 let key = args.first().cloned().unwrap_or(JsValue::Undefined);
                 self.require_weak_collection_object_key(&key, "WeakMap")?;
                 let entries = self.read_map_entries(receiver_id)?;
-                for entry in entries {
-                    if let Some((current_key, current_value)) = entry {
-                        if self.same_value_zero(&current_key, &key) {
-                            return Ok(current_value);
-                        }
+                for (current_key, current_value) in entries.into_iter().flatten() {
+                    if self.same_value_zero(&current_key, &key) {
+                        return Ok(current_value);
                     }
                 }
                 Ok(JsValue::Undefined)
@@ -7040,9 +7040,7 @@ impl Vm {
             HostFunction::SetClearThis => {
                 let receiver_id = self.strict_this_set(this_arg)?;
                 let mut entries = self.read_set_entries(receiver_id)?;
-                for entry in &mut entries {
-                    *entry = None;
-                }
+                entries.fill(None);
                 self.write_set_entries(receiver_id, entries)?;
                 Ok(JsValue::Undefined)
             }
@@ -7179,9 +7177,7 @@ impl Vm {
                 Ok(JsValue::Bool(value))
             }
             HostFunction::FunctionPrototype => Ok(JsValue::Undefined),
-            HostFunction::JsonStringify => {
-                self.execute_json_stringify(&args, realm, caller_strict)
-            }
+            HostFunction::JsonStringify => self.execute_json_stringify(&args, realm, caller_strict),
             HostFunction::JsonParse => self.execute_json_parse(&args, realm, caller_strict),
             HostFunction::ArrayPushThis => {
                 self.execute_array_push_this(this_arg, &args, realm, caller_strict)
@@ -7372,11 +7368,7 @@ impl Vm {
                 let mut values = Vec::with_capacity(1 + match_result.captures.len());
                 values.push(JsValue::String(match_result.full_match));
                 for capture in match_result.captures {
-                    values.push(
-                        capture
-                            .map(JsValue::String)
-                            .unwrap_or(JsValue::Undefined),
-                    );
+                    values.push(capture.map(JsValue::String).unwrap_or(JsValue::Undefined));
                 }
                 let value = self.create_array_from_values(values)?;
                 if let JsValue::Object(object_id) = value.clone() {
@@ -7831,9 +7823,11 @@ impl Vm {
                     .unwrap_or(f64::NAN);
                 Ok(JsValue::Number(parsed))
             }
-            NativeFunction::DateUtc => Ok(JsValue::Number(
-                self.date_utc_from_components(&args, realm, caller_strict)?,
-            )),
+            NativeFunction::DateUtc => Ok(JsValue::Number(self.date_utc_from_components(
+                &args,
+                realm,
+                caller_strict,
+            )?)),
             NativeFunction::DatePrototypeMethod => Ok(JsValue::Number(f64::NAN)),
             NativeFunction::MathAbs => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -8041,7 +8035,7 @@ impl Vm {
                 let mut output = String::new();
                 for value in args {
                     let number = self.coerce_number_runtime(value, realm, caller_strict)?;
-                    let code = (Self::to_uint32_number(number) & 0xFFFF) as u32;
+                    let code = Self::to_uint32_number(number) & 0xFFFF;
                     if let Some(ch) = char::from_u32(code) {
                         output.push(ch);
                     } else {
@@ -8196,11 +8190,12 @@ impl Vm {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
-            NativeFunction::ReferenceErrorConstructor => match self.reference_error_prototype_value()
-            {
-                JsValue::Object(id) => Some(id),
-                _ => None,
-            },
+            NativeFunction::ReferenceErrorConstructor => {
+                match self.reference_error_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                }
+            }
             NativeFunction::SyntaxErrorConstructor => match self.syntax_error_prototype_value() {
                 JsValue::Object(id) => Some(id),
                 _ => None,
@@ -8727,21 +8722,22 @@ impl Vm {
                         continue;
                     }
                 }
-                if next == 'c' && !unicode && in_character_class {
-                    if let Some(control_char) = chars.get(index + 2)
-                        && (control_char.is_ascii_alphabetic()
-                            || control_char.is_ascii_digit()
-                            || *control_char == '_')
-                    {
-                        let control_value = (*control_char as u32) % 32;
-                        Self::push_regex_literal_code_unit(
-                            &mut normalized,
-                            control_value,
-                            in_character_class,
-                        );
-                        index += 3;
-                        continue;
-                    }
+                if next == 'c'
+                    && !unicode
+                    && in_character_class
+                    && let Some(control_char) = chars.get(index + 2)
+                    && (control_char.is_ascii_alphabetic()
+                        || control_char.is_ascii_digit()
+                        || *control_char == '_')
+                {
+                    let control_value = (*control_char as u32) % 32;
+                    Self::push_regex_literal_code_unit(
+                        &mut normalized,
+                        control_value,
+                        in_character_class,
+                    );
+                    index += 3;
+                    continue;
                 }
                 if next == 'u' {
                     if let Some((code_point, consumed)) = Self::parse_regex_u_escape(&chars, index)
@@ -8946,7 +8942,7 @@ impl Vm {
     }
 
     fn push_regex_literal_code_unit(target: &mut String, code_unit: u32, in_character_class: bool) {
-        if code_unit <= 0xFF && code_unit < 0x20 {
+        if code_unit < 0x20 {
             target.push('\\');
             target.push('x');
             const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -9008,10 +9004,8 @@ impl Vm {
                 index += 1;
                 continue;
             }
-            if ch == '(' {
-                if chars.get(index + 1) != Some(&'?') {
-                    count += 1;
-                }
+            if ch == '(' && chars.get(index + 1) != Some(&'?') {
+                count += 1;
             }
             index += 1;
         }
@@ -10434,7 +10428,9 @@ impl Vm {
         if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
             let adder = self.get_property_from_receiver(weak_map.clone(), "set", realm)?;
             if !Self::is_callable_value(&adder) {
-                return Err(VmError::TypeError("WeakMap constructor set must be callable"));
+                return Err(VmError::TypeError(
+                    "WeakMap constructor set must be callable",
+                ));
             }
             self.add_collection_entries_from_iterable(
                 weak_map.clone(),
@@ -10483,7 +10479,9 @@ impl Vm {
         if !matches!(iterable, JsValue::Undefined | JsValue::Null) {
             let adder = self.get_property_from_receiver(weak_set.clone(), "add", realm)?;
             if !Self::is_callable_value(&adder) {
-                return Err(VmError::TypeError("WeakSet constructor add must be callable"));
+                return Err(VmError::TypeError(
+                    "WeakSet constructor add must be callable",
+                ));
             }
             self.add_collection_entries_from_iterable(
                 weak_set.clone(),
@@ -10507,7 +10505,8 @@ impl Vm {
     ) -> Result<(), VmError> {
         let iterator_record = self.create_for_of_runtime_iterator_record(iterable, realm)?;
         loop {
-            let step = self.execute_object_for_of_step(&[iterator_record.clone()], realm)?;
+            let step =
+                self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
             let done = self
                 .get_property_from_receiver(step.clone(), "done", realm)
                 .map(|value| self.is_truthy(&value))?;
@@ -10517,7 +10516,8 @@ impl Vm {
             let next = match self.get_property_from_receiver(step, "value", realm) {
                 Ok(value) => value,
                 Err(err) => {
-                    let _ = self.execute_object_for_of_close(&[iterator_record.clone()], realm);
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
                     return Err(err);
                 }
             };
@@ -10526,9 +10526,7 @@ impl Vm {
                     if !Self::is_object_like_value(&next) {
                         Err(VmError::TypeError(match mode {
                             CollectionAddMode::Map => "Map iterable entries must be object",
-                            CollectionAddMode::WeakMap => {
-                                "WeakMap iterable entries must be object"
-                            }
+                            CollectionAddMode::WeakMap => "WeakMap iterable entries must be object",
                             _ => unreachable!(),
                         }))
                     } else {
@@ -10567,7 +10565,8 @@ impl Vm {
                 }
             };
             if let Err(err) = call_result {
-                let _ = self.execute_object_for_of_close(&[iterator_record.clone()], realm);
+                let _ =
+                    self.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
                 return Err(err);
             }
         }
@@ -10778,10 +10777,11 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let mut then_args = Vec::with_capacity(3);
-        then_args.push(args.first().cloned().unwrap_or(JsValue::Undefined));
-        then_args.push(JsValue::Undefined);
-        then_args.push(args.get(1).cloned().unwrap_or(JsValue::Undefined));
+        let then_args = vec![
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            JsValue::Undefined,
+            args.get(1).cloned().unwrap_or(JsValue::Undefined),
+        ];
         self.execute_promise_then(&then_args, realm, caller_strict)
     }
 
@@ -10872,9 +10872,7 @@ impl Vm {
 
     fn create_pending_promise(&mut self) -> Result<ObjectId, VmError> {
         let object_id = self.create_promise_object()?;
-        self.pending_promise_records
-            .entry(object_id)
-            .or_insert_with(PendingPromiseRecord::default);
+        self.pending_promise_records.entry(object_id).or_default();
         Ok(object_id)
     }
 
@@ -11076,8 +11074,7 @@ impl Vm {
                 on_rejected,
             } => self.apply_then_reaction(
                 settlement,
-                on_fulfilled,
-                on_rejected,
+                (on_fulfilled, on_rejected),
                 reaction.result_promise_id,
                 realm,
                 caller_strict,
@@ -11097,13 +11094,13 @@ impl Vm {
     fn apply_then_reaction(
         &mut self,
         settlement: PromiseSettlement,
-        on_fulfilled: Option<JsValue>,
-        on_rejected: Option<JsValue>,
+        handlers: PromiseHandlers,
         result_promise_id: ObjectId,
         realm: &Realm,
         caller_strict: bool,
         hooks: &mut dyn PromiseJobHostHooks,
     ) -> Result<(), VmError> {
+        let (on_fulfilled, on_rejected) = handlers;
         let next_settlement = match settlement {
             PromiseSettlement::Fulfilled(value) => {
                 if let Some(handler) = on_fulfilled {
@@ -11323,7 +11320,7 @@ impl Vm {
         target.prototype = prototype;
         target.prototype_value = prototype_value;
         if !matches!(args.get(1), None | Some(JsValue::Undefined)) {
-            let descriptors = self.to_object_for_object_builtins(
+            let descriptors = self.coerce_object_for_object_builtins(
                 args.get(1).cloned().unwrap_or(JsValue::Undefined),
                 "Object.create properties must be coercible",
             )?;
@@ -11338,7 +11335,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.assign target must be coercible",
         )?;
@@ -11347,8 +11344,10 @@ impl Vm {
             if matches!(source, JsValue::Null | JsValue::Undefined) {
                 continue;
             }
-            let source_object = self
-                .to_object_for_object_builtins(source, "Object.assign source must be coercible")?;
+            let source_object = self.coerce_object_for_object_builtins(
+                source,
+                "Object.assign source must be coercible",
+            )?;
             let keys = self.collect_own_property_keys(&source_object, true)?;
 
             for key in keys {
@@ -11360,7 +11359,7 @@ impl Vm {
         Ok(target)
     }
 
-    fn to_object_for_object_builtins(
+    fn coerce_object_for_object_builtins(
         &mut self,
         value: JsValue,
         null_undefined_error: &'static str,
@@ -11981,10 +11980,13 @@ impl Vm {
                 .unwrap_or(0.0)
         } else if args.len() == 1 {
             match args.first().cloned().unwrap_or(JsValue::Undefined) {
-                JsValue::String(text) => {
-                    Self::time_clip(self.parse_date_string_baseline(text.trim()).unwrap_or(f64::NAN))
+                JsValue::String(text) => Self::time_clip(
+                    self.parse_date_string_baseline(text.trim())
+                        .unwrap_or(f64::NAN),
+                ),
+                value => {
+                    Self::time_clip(self.coerce_number_runtime(value, realm, caller_strict)?)
                 }
-                value => Self::time_clip(self.coerce_number_runtime(value, realm, caller_strict)?),
             }
         } else {
             self.date_utc_from_components(args, realm, caller_strict)?
@@ -12060,20 +12062,7 @@ impl Vm {
         &mut self,
         descriptor: JsValue,
         realm: &Realm,
-    ) -> Result<
-        (
-            bool,
-            JsValue,
-            bool,
-            JsValue,
-            bool,
-            JsValue,
-            Option<bool>,
-            Option<bool>,
-            Option<bool>,
-        ),
-        VmError,
-    > {
+    ) -> Result<PropertyDescriptorTuple, VmError> {
         let descriptor = match descriptor {
             value @ (JsValue::Object(_)
             | JsValue::Function(_)
@@ -12147,20 +12136,7 @@ impl Vm {
         ))
     }
 
-    fn materialize_property_descriptor(
-        &mut self,
-        descriptor: &(
-            bool,
-            JsValue,
-            bool,
-            JsValue,
-            bool,
-            JsValue,
-            Option<bool>,
-            Option<bool>,
-            Option<bool>,
-        ),
-    ) -> JsValue {
+    fn materialize_property_descriptor(&mut self, descriptor: &PropertyDescriptorTuple) -> JsValue {
         let (has_value, value, has_get, get, has_set, set, writable, enumerable, configurable) =
             descriptor;
         let mut entries = Vec::new();
@@ -12525,7 +12501,7 @@ impl Vm {
                 *object = target_object;
                 if let Some((array_length_value, length_writable)) = pending_array_length_update {
                     let requested_length =
-                        self.to_valid_array_length_or_throw(array_length_value, realm, false)?;
+                        self.coerce_valid_array_length_or_throw(array_length_value, realm, false)?;
                     if length_writable == Some(false) {
                         if let Some(object) = self.objects.get_mut(&target_id) {
                             let attributes = object
@@ -12571,7 +12547,7 @@ impl Vm {
     }
 
     fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.keys target must be object",
         )?;
@@ -12594,7 +12570,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.entries target must be object",
         )?;
@@ -12619,7 +12595,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.values target must be object",
         )?;
@@ -12641,7 +12617,7 @@ impl Vm {
         &mut self,
         args: &[JsValue],
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.getOwnPropertyNames target must be object",
         )?;
@@ -12661,7 +12637,7 @@ impl Vm {
                 "Object.defineProperties target must be object",
             ));
         }
-        let descriptors = self.to_object_for_object_builtins(
+        let descriptors = self.coerce_object_for_object_builtins(
             args.get(1).cloned().unwrap_or(JsValue::Undefined),
             "Object.defineProperties descriptors must be object",
         )?;
@@ -13039,7 +13015,7 @@ impl Vm {
             array_object
                 .property_attributes
                 .entry(index_key)
-                .or_insert_with(PropertyAttributes::default);
+                .or_default();
         }
         array_object
             .properties
@@ -13060,7 +13036,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.getOwnPropertyDescriptor target must be object",
         )?;
@@ -13091,7 +13067,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.getOwnPropertyDescriptors target must be object",
         )?;
@@ -13478,7 +13454,7 @@ impl Vm {
     }
 
     fn execute_object_get_prototype_of(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = self.to_object_for_object_builtins(
+        let target = self.coerce_object_for_object_builtins(
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.getPrototypeOf target must be object",
         )?;
@@ -14680,10 +14656,7 @@ impl Vm {
                     self.native_function_default_property_attributes(native, &property);
                 let object = self.native_function_objects.entry(native).or_default();
                 object.properties.insert(property.clone(), value.clone());
-                let attributes = object
-                    .property_attributes
-                    .entry(property)
-                    .or_insert_with(PropertyAttributes::default);
+                let attributes = object.property_attributes.entry(property).or_default();
                 if !own_exists {
                     if let Some(default_attributes) = default_attributes {
                         *attributes = default_attributes;
@@ -16419,11 +16392,7 @@ impl Vm {
         prototype
     }
 
-    fn native_error_prototype_value(
-        &mut self,
-        constructor: NativeFunction,
-        name: &str,
-    ) -> JsValue {
+    fn native_error_prototype_value(&mut self, constructor: NativeFunction, name: &str) -> JsValue {
         let cached_id = match constructor {
             NativeFunction::TypeErrorConstructor => self.type_error_prototype_id,
             NativeFunction::ReferenceErrorConstructor => self.reference_error_prototype_id,
@@ -16487,7 +16456,10 @@ impl Vm {
     }
 
     fn reference_error_prototype_value(&mut self) -> JsValue {
-        self.native_error_prototype_value(NativeFunction::ReferenceErrorConstructor, "ReferenceError")
+        self.native_error_prototype_value(
+            NativeFunction::ReferenceErrorConstructor,
+            "ReferenceError",
+        )
     }
 
     fn syntax_error_prototype_value(&mut self) -> JsValue {
@@ -17352,7 +17324,7 @@ impl Vm {
         null_undefined_error: &'static str,
     ) -> Result<JsValue, VmError> {
         let value = this_arg.unwrap_or(JsValue::Undefined);
-        self.to_object_for_object_builtins(value, null_undefined_error)
+        self.coerce_object_for_object_builtins(value, null_undefined_error)
     }
 
     fn object_to_string_tag(
@@ -18424,7 +18396,7 @@ impl Vm {
         if self.is_array_length_tracking_object(object_id)? {
             if property == "length" {
                 let requested_length =
-                    self.to_valid_array_length_or_throw(value.clone(), realm, false)?;
+                    self.coerce_valid_array_length_or_throw(value.clone(), realm, false)?;
                 self.set_array_length_property(object_id, requested_length, false)?;
                 return Ok(value);
             }
@@ -18441,7 +18413,7 @@ impl Vm {
         object
             .property_attributes
             .entry(property.clone())
-            .or_insert_with(PropertyAttributes::default);
+            .or_default();
         self.sync_global_binding_from_property_write(object_id, &property, &value)?;
         Ok(value)
     }
@@ -19185,7 +19157,7 @@ impl Vm {
         Some(index as usize)
     }
 
-    fn to_valid_array_length_or_throw(
+    fn coerce_valid_array_length_or_throw(
         &mut self,
         value: JsValue,
         realm: &Realm,
@@ -19307,10 +19279,7 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         object.properties.insert(property.clone(), value);
-        object
-            .property_attributes
-            .entry(property)
-            .or_insert_with(PropertyAttributes::default);
+        object.property_attributes.entry(property).or_default();
         if next_length != current_length {
             object
                 .properties
@@ -19378,10 +19347,7 @@ impl Vm {
             .ok_or(VmError::UnknownObject(object_id))?;
         let key = index.to_string();
         object.properties.insert(key.clone(), value);
-        object
-            .property_attributes
-            .entry(key)
-            .or_insert_with(PropertyAttributes::default);
+        object.property_attributes.entry(key).or_default();
         object
             .properties
             .insert("length".to_string(), JsValue::Number((index + 1) as f64));
@@ -20693,9 +20659,7 @@ impl Vm {
             (NativeFunction::RangeErrorConstructor, "prototype") => {
                 self.range_error_prototype_value()
             }
-            (NativeFunction::URIErrorConstructor, "prototype") => {
-                self.uri_error_prototype_value()
-            }
+            (NativeFunction::URIErrorConstructor, "prototype") => self.uri_error_prototype_value(),
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::ArrayBufferConstructor, "prototype") => {
                 self.array_buffer_prototype_value()
@@ -20834,8 +20798,9 @@ impl Vm {
             | (NativeFunction::ArrayIsArray, "length")
             | (NativeFunction::DateParse, "length")
             | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
-            (NativeFunction::DateConstructor, "length")
-            | (NativeFunction::DateUtc, "length") => JsValue::Number(7.0),
+            (NativeFunction::DateConstructor, "length") | (NativeFunction::DateUtc, "length") => {
+                JsValue::Number(7.0)
+            }
             (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
             (NativeFunction::MapConstructor, "length")
             | (NativeFunction::SetConstructor, "length")
@@ -21275,8 +21240,7 @@ impl Vm {
             &mut stack,
             "",
             &context,
-            realm,
-            caller_strict,
+            (realm, caller_strict),
         )?;
         Ok(serialized
             .map(JsValue::String)
@@ -21300,8 +21264,7 @@ impl Vm {
         if Self::is_callable_value(&reviver) {
             let holder = self.create_object_value();
             self.create_data_property_or_throw(holder.clone(), String::new(), result, realm)?;
-            result =
-                self.json_internalize_property(holder, "", reviver, realm, caller_strict)?;
+            result = self.json_internalize_property(holder, "", reviver, realm, caller_strict)?;
         }
         Ok(result)
     }
@@ -21345,10 +21308,7 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     target.properties.insert(key.clone(), converted);
-                    target
-                        .property_attributes
-                        .entry(key)
-                        .or_insert_with(PropertyAttributes::default);
+                    target.property_attributes.entry(key).or_default();
                 }
                 Ok(JsValue::Object(object_id))
             }
@@ -21417,7 +21377,7 @@ impl Vm {
         object
             .property_attributes
             .entry(key.to_string())
-            .or_insert_with(PropertyAttributes::default);
+            .or_default();
     }
 
     fn json_stringify_cycle_error(&mut self) -> VmError {
@@ -21494,9 +21454,9 @@ impl Vm {
         stack: &mut Vec<ObjectId>,
         indent: &str,
         context: &JsonStringifyContext,
-        realm: &Realm,
-        caller_strict: bool,
+        call_context: (&Realm, bool),
     ) -> Result<Option<String>, VmError> {
+        let (realm, caller_strict) = call_context;
         let mut value = self.get_property_from_receiver(holder.clone(), key, realm)?;
         if Self::is_object_like_value(&value) {
             let to_json = self.get_property_from_receiver(value.clone(), "toJSON", realm)?;
@@ -21542,14 +21502,9 @@ impl Vm {
             JsValue::String(string) => {
                 Ok(Some(format!("\"{}\"", Self::escape_json_string(&string))))
             }
-            JsValue::Object(object_id) => self.json_stringify_object(
-                object_id,
-                stack,
-                indent,
-                context,
-                realm,
-                caller_strict,
-            ),
+            JsValue::Object(object_id) => {
+                self.json_stringify_object(object_id, stack, indent, context, realm, caller_strict)
+            }
         }
     }
 
@@ -21580,8 +21535,7 @@ impl Vm {
                     stack,
                     &next_indent,
                     context,
-                    realm,
-                    caller_strict,
+                    (realm, caller_strict),
                 )?;
                 partial.push(element.unwrap_or_else(|| "null".to_string()));
             }
@@ -21609,8 +21563,7 @@ impl Vm {
                     stack,
                     &next_indent,
                     context,
-                    realm,
-                    caller_strict,
+                    (realm, caller_strict),
                 )? {
                     let escaped_key = Self::escape_json_string(&key);
                     let member = if context.gap.is_empty() {

@@ -29,6 +29,13 @@ const CLASS_CONSTRUCTOR_SUPER_BASE_BINDING: &str = "$__qjs_super_base__$";
 static NEXT_TAGGED_TEMPLATE_SITE_ID: AtomicU64 = AtomicU64::new(1);
 
 type DefaultParameterInitializer = (Identifier, Expr);
+type ParsedParameterList = (
+    Vec<Identifier>,
+    bool,
+    Vec<DefaultParameterInitializer>,
+    Vec<Stmt>,
+);
+type ParsedTemplateLiteralParts = (Vec<StringLiteral>, Vec<StringLiteral>, Vec<bool>, Vec<Expr>);
 
 fn next_tagged_template_site_id() -> u64 {
     NEXT_TAGGED_TEMPLATE_SITE_ID.fetch_add(1, Ordering::Relaxed)
@@ -4432,17 +4439,7 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_parameter_list(
-        &mut self,
-    ) -> Result<
-        (
-            Vec<Identifier>,
-            bool,
-            Vec<DefaultParameterInitializer>,
-            Vec<Stmt>,
-        ),
-        ParseError,
-    > {
+    fn parse_parameter_list(&mut self) -> Result<ParsedParameterList, ParseError> {
         let mut params = Vec::new();
         let mut synthetic_index = 0usize;
         let mut simple_parameters = true;
@@ -6144,9 +6141,7 @@ impl Parser {
         }
     }
 
-    fn parse_template_literal_parts(
-        &mut self,
-    ) -> Result<(Vec<StringLiteral>, Vec<StringLiteral>, Vec<bool>, Vec<Expr>), ParseError> {
+    fn parse_template_literal_parts(&mut self) -> Result<ParsedTemplateLiteralParts, ParseError> {
         let mut quasis = Vec::new();
         let mut raw_quasis = Vec::new();
         let mut invalid_quasis = Vec::new();

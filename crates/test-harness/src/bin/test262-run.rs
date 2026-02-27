@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use test_harness::test262::{run_suite, SuiteOptions, SuiteSummary};
+use test_harness::test262::{SuiteOptions, SuiteSummary, run_suite};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct GcExpectations {
@@ -533,8 +533,8 @@ fn write_output(path: &Path, content: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_gc_expectations, format_summary_json, format_summary_markdown, merge_gc_expectations,
-        parse_gc_expectations_str, skip_category_rows, GcExpectations,
+        GcExpectations, check_gc_expectations, format_summary_json, format_summary_markdown,
+        merge_gc_expectations, parse_gc_expectations_str, skip_category_rows,
     };
     use test_harness::test262::{SuiteSkipCategories, SuiteSummary};
 
