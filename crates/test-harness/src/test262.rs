@@ -68,10 +68,68 @@ pub struct SuiteSummary {
     pub discovered: usize,
     pub executed: usize,
     pub skipped: usize,
+    pub skipped_categories: SuiteSkipCategories,
     pub passed: usize,
     pub failed: usize,
     pub failures: Vec<FailureDetail>,
     pub gc: SuiteGcSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SuiteSkipCategories {
+    pub fixture_file: usize,
+    pub flag_module: usize,
+    pub flag_only_strict: usize,
+    pub flag_async: usize,
+    pub requires_includes: usize,
+    pub requires_feature: usize,
+    pub requires_harness_global_262: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipCategory {
+    FixtureFile,
+    FlagModule,
+    FlagOnlyStrict,
+    FlagAsync,
+    RequiresIncludes,
+    RequiresFeature,
+    RequiresHarnessGlobal262,
+}
+
+impl SuiteSkipCategories {
+    pub fn total(&self) -> usize {
+        self.fixture_file
+            + self.flag_module
+            + self.flag_only_strict
+            + self.flag_async
+            + self.requires_includes
+            + self.requires_feature
+            + self.requires_harness_global_262
+    }
+
+    fn record(&mut self, category: SkipCategory) {
+        match category {
+            SkipCategory::FixtureFile => self.fixture_file += 1,
+            SkipCategory::FlagModule => self.flag_module += 1,
+            SkipCategory::FlagOnlyStrict => self.flag_only_strict += 1,
+            SkipCategory::FlagAsync => self.flag_async += 1,
+            SkipCategory::RequiresIncludes => self.requires_includes += 1,
+            SkipCategory::RequiresFeature => self.requires_feature += 1,
+            SkipCategory::RequiresHarnessGlobal262 => self.requires_harness_global_262 += 1,
+        }
+    }
+}
+
+impl SuiteSummary {
+    fn record_skip(&mut self, category: SkipCategory) {
+        self.skipped += 1;
+        self.skipped_categories.record(category);
+    }
+
+    pub fn has_balanced_skip_totals(&self) -> bool {
+        self.skipped == self.skipped_categories.total()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -121,23 +179,55 @@ pub fn expected_outcome(frontmatter: &Test262Frontmatter) -> ExpectedOutcome {
 }
 
 pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
+    classify_frontmatter_skip(frontmatter).is_some()
+}
+
+fn classify_frontmatter_skip(frontmatter: &Test262Frontmatter) -> Option<SkipCategory> {
     // Current engine is script-only, non-strict baseline without harness includes.
-    if frontmatter
-        .flags
-        .iter()
-        .any(|flag| matches!(flag.as_str(), "module" | "onlyStrict" | "async"))
-    {
-        return true;
+    if frontmatter.flags.iter().any(|flag| flag == "module") {
+        return Some(SkipCategory::FlagModule);
     }
+    if frontmatter.flags.iter().any(|flag| flag == "onlyStrict") {
+        return Some(SkipCategory::FlagOnlyStrict);
+    }
+    if frontmatter.flags.iter().any(|flag| flag == "async") {
+        return Some(SkipCategory::FlagAsync);
+    }
+
     if !frontmatter.includes.is_empty() {
-        return true;
+        return Some(SkipCategory::RequiresIncludes);
     }
+
     // Feature-gated tests are skipped until corresponding features land.
-    !frontmatter.features.is_empty()
+    if !frontmatter.features.is_empty() {
+        return Some(SkipCategory::RequiresFeature);
+    }
+
+    None
 }
 
 fn requires_unsupported_harness_globals(source: &str) -> bool {
     source.contains("$262")
+}
+
+fn classify_skip(
+    path: &Path,
+    frontmatter: &Test262Frontmatter,
+    source: &str,
+) -> Option<SkipCategory> {
+    if is_fixture_file(path) {
+        return Some(SkipCategory::FixtureFile);
+    }
+
+    if let Some(category) = classify_frontmatter_skip(frontmatter) {
+        return Some(category);
+    }
+
+    if requires_unsupported_harness_globals(source) {
+        return Some(SkipCategory::RequiresHarnessGlobal262);
+    }
+
+    None
 }
 
 fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
@@ -276,7 +366,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         }
 
         if is_fixture_file(&file) {
-            summary.skipped += 1;
+            summary.record_skip(SkipCategory::FixtureFile);
             continue;
         }
 
@@ -286,8 +376,8 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
 
         let expected = expected_outcome(&case.frontmatter);
-        if should_skip(&case.frontmatter) || requires_unsupported_harness_globals(case.body) {
-            summary.skipped += 1;
+        if let Some(skip_category) = classify_skip(&file, &case.frontmatter, case.body) {
+            summary.record_skip(skip_category);
             continue;
         }
 
@@ -345,6 +435,14 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                 actual
             ));
         }
+    }
+
+    if !summary.has_balanced_skip_totals() {
+        return Err(format!(
+            "internal skip accounting mismatch: skipped={}, categorized={}",
+            summary.skipped,
+            summary.skipped_categories.total()
+        ));
     }
 
     Ok(summary)
@@ -490,10 +588,12 @@ fn visit_dir(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionOutcome, ExpectedOutcome, NegativePhase, SuiteOptions, expected_outcome,
-        parse_test262_case, run_suite, should_skip,
+        ExecutionOutcome, ExpectedOutcome, NegativePhase, SkipCategory, SuiteOptions,
+        expected_outcome, parse_test262_case, run_suite, should_skip,
     };
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_frontmatter_sections() {
@@ -570,6 +670,103 @@ import "x";
     }
 
     #[test]
+    fn classifies_skip_reasons_in_deterministic_priority_order() {
+        let module_case =
+            parse_test262_case("/*---\nflags: [module]\nincludes: [sta.js]\n---*/\n$262.gc();")
+                .expect("frontmatter parse should succeed");
+        assert_eq!(
+            super::classify_frontmatter_skip(&module_case.frontmatter),
+            Some(SkipCategory::FlagModule),
+        );
+
+        let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert_eq!(
+            super::classify_frontmatter_skip(&strict_case.frontmatter),
+            Some(SkipCategory::FlagOnlyStrict),
+        );
+
+        let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert_eq!(
+            super::classify_frontmatter_skip(&async_case.frontmatter),
+            Some(SkipCategory::FlagAsync),
+        );
+
+        let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert_eq!(
+            super::classify_frontmatter_skip(&includes_case.frontmatter),
+            Some(SkipCategory::RequiresIncludes),
+        );
+
+        let features_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert_eq!(
+            super::classify_frontmatter_skip(&features_case.frontmatter),
+            Some(SkipCategory::RequiresFeature),
+        );
+    }
+
+    #[test]
+    fn run_suite_tracks_all_skip_categories_and_balances_totals() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(root.join("cases")).expect("temporary fixture dir should exist");
+
+        fs::write(root.join("cases").join("fixture_FIXTURE.js"), "1;")
+            .expect("fixture file should be written");
+        fs::write(
+            root.join("cases").join("flag-module.js"),
+            "/*---\nflags: [module]\n---*/\nimport 'x';\n",
+        )
+        .expect("module file should be written");
+        fs::write(
+            root.join("cases").join("flag-only-strict.js"),
+            "/*---\nflags: [onlyStrict]\n---*/\n1;\n",
+        )
+        .expect("strict file should be written");
+        fs::write(
+            root.join("cases").join("flag-async.js"),
+            "/*---\nflags: [async]\n---*/\n1;\n",
+        )
+        .expect("async file should be written");
+        fs::write(
+            root.join("cases").join("requires-includes.js"),
+            "/*---\nincludes: [sta.js]\n---*/\n1;\n",
+        )
+        .expect("includes file should be written");
+        fs::write(
+            root.join("cases").join("requires-feature.js"),
+            "/*---\nfeatures: [BigInt]\n---*/\n1;\n",
+        )
+        .expect("feature file should be written");
+        fs::write(
+            root.join("cases").join("requires-harness-global.js"),
+            "$262.gc();\n",
+        )
+        .expect("harness-global file should be written");
+        fs::write(root.join("cases").join("executed-pass.js"), "1 + 1;\n")
+            .expect("pass file should be written");
+
+        let summary =
+            run_suite(&root, SuiteOptions::default()).expect("suite execution should succeed");
+
+        assert_eq!(summary.skipped, 7);
+        assert_eq!(summary.skipped_categories.fixture_file, 1);
+        assert_eq!(summary.skipped_categories.flag_module, 1);
+        assert_eq!(summary.skipped_categories.flag_only_strict, 1);
+        assert_eq!(summary.skipped_categories.flag_async, 1);
+        assert_eq!(summary.skipped_categories.requires_includes, 1);
+        assert_eq!(summary.skipped_categories.requires_feature, 1);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 1);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert!(summary.has_balanced_skip_totals());
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
     fn detects_unsupported_harness_globals_in_body() {
         assert!(!super::requires_unsupported_harness_globals(
             "assert(true);"
@@ -640,8 +837,17 @@ import "x";
         assert!(summary.discovered > 0);
         assert!(summary.executed > 0);
         assert_eq!(summary.failed, 0);
+        assert!(summary.has_balanced_skip_totals());
         assert_eq!(summary.gc.collections_total, 0);
         assert_eq!(summary.gc.runtime_collections, 0);
         assert_eq!(summary.gc.boundary_collections, 0);
+    }
+
+    fn unique_temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("qjs-rs-test262-skip-{nanos}"))
     }
 }
