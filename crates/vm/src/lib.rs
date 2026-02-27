@@ -8226,6 +8226,7 @@ impl Vm {
             let _ = self.regexp_prototype_value();
         }
         self.validate_regexp_compile_inputs(&pattern, &flags)?;
+        let normalized_flags = Self::normalize_regexp_flags(&flags);
         let object = self.create_object_value();
         let object_id = match object {
             JsValue::Object(id) => id,
@@ -8250,7 +8251,7 @@ impl Vm {
                 },
             );
         }
-        self.apply_regexp_slots_and_surface(object_id, &pattern, &flags);
+        self.apply_regexp_slots_and_surface(object_id, &pattern, &normalized_flags);
         let target = self
             .objects
             .get_mut(&object_id)
@@ -8458,6 +8459,13 @@ impl Vm {
         Ok(())
     }
 
+    fn normalize_regexp_flags(flags: &str) -> String {
+        ['g', 'i', 'm', 's', 'u', 'y']
+            .into_iter()
+            .filter(|flag| flags.contains(*flag))
+            .collect()
+    }
+
     fn validate_regexp_compile_inputs(
         &mut self,
         pattern: &str,
@@ -8527,7 +8535,8 @@ impl Vm {
         };
 
         self.validate_regexp_compile_inputs(&pattern, &flags)?;
-        self.apply_regexp_slots_and_surface(receiver_id, &pattern, &flags);
+        let normalized_flags = Self::normalize_regexp_flags(&flags);
+        self.apply_regexp_slots_and_surface(receiver_id, &pattern, &normalized_flags);
         self.ensure_assign_target_writable(&JsValue::Object(receiver_id), "lastIndex")?;
         self.set_object_property(
             receiver_id,
@@ -22245,6 +22254,40 @@ fn regexp_last_index_transition_matrix() {
          var failureTypeError = false; \
          try { frozenFailure.exec('abc'); } catch (e) { failureTypeError = e instanceof TypeError; } \
          ok && successTypeError && failureTypeError && frozenSuccess.lastIndex === 0 && frozenFailure.lastIndex === 2;",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+    let mut vm = Vm::default();
+    assert_eq!(
+        vm.execute_in_realm(&chunk, &regexp_base_realm()),
+        Ok(JsValue::Bool(true))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn regexp_exec_capture_and_constructor_errors() {
+    let script = parser::parse_script(
+        "var ok = true; \
+         var matcher = new RegExp('(a)(b)?', 'g'); \
+         var first = matcher.exec('ab a'); \
+         ok = ok && first !== null && first[0] === 'ab' && first[1] === 'a' && first[2] === 'b'; \
+         ok = ok && first.index === 0 && first.input === 'ab a' && matcher.lastIndex === 2; \
+         var second = matcher.exec('ab a'); \
+         ok = ok && second !== null && second[0] === 'a' && second[1] === 'a' && second[2] === undefined; \
+         ok = ok && second.index === 3 && second.input === 'ab a' && matcher.lastIndex === 4; \
+         var cloned = new RegExp(/foo/gi); \
+         ok = ok && cloned.toString() === '/foo/gi' && cloned.global && cloned.ignoreCase; \
+         var overridden = new RegExp(/foo/gi, 'ym'); \
+         ok = ok && overridden.toString() === '/foo/my' && overridden.multiline && overridden.sticky && !overridden.global; \
+         var supportsAllFlags = new RegExp('x', 'ygmius').toString() === '/x/gimsuy'; \
+         var invalidFlag = false; \
+         var duplicateFlag = false; \
+         var invalidPattern = false; \
+         try { new RegExp('a', 'z'); } catch (e) { invalidFlag = e instanceof SyntaxError; } \
+         try { new RegExp('a', 'gg'); } catch (e) { duplicateFlag = e instanceof SyntaxError; } \
+         try { new RegExp('('); } catch (e) { invalidPattern = e instanceof SyntaxError; } \
+         ok && supportsAllFlags && invalidFlag && duplicateFlag && invalidPattern;",
     )
     .expect("script should parse");
     let chunk = compile_script(&script);
