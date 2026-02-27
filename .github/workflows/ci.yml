@@ -35,6 +35,14 @@ jobs:
               --require-test-reference-exists
           fi
 
+      - name: Verification Traceability Gate
+        run: |
+          python .github/scripts/check_verification_traceability.py \
+            --requirements .planning/REQUIREMENTS.md \
+            --phases-dir .planning/phases \
+            --out-json target/verification-traceability.json \
+            --out-md target/verification-traceability.md
+
       - name: Format
         run: cargo fmt --check
 
