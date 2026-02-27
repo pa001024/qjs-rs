@@ -33,7 +33,7 @@ Requirements for the next roadmap cycle. Each maps to exactly one roadmap phase.
 - [x] **BUI-02**: Error hierarchy (`Error` plus standard subclasses) exposes expected constructor/prototype behavior and stringification.
 - [x] **BUI-03**: `JSON.parse` and `JSON.stringify` support baseline interoperability scenarios used by harness and integration tests.
 - [x] **BUI-04**: `Map/Set/WeakMap/WeakSet` use dedicated semantics (no baseline constructor alias shortcuts).
-- [ ] **BUI-05**: RegExp constructor and prototype methods (`exec/test/toString`) preserve flags and match behavior for supported patterns.
+- [x] **BUI-05**: RegExp constructor and prototype methods (`exec/test/toString`) preserve flags and match behavior for supported patterns.
 
 ### Conformance and Governance
 
@@ -90,7 +90,7 @@ Roadmap mapping table. Updated during roadmap creation.
 | BUI-02 | Phase 5 | Complete |
 | BUI-03 | Phase 5 | Complete |
 | BUI-04 | Phase 6 | Complete |
-| BUI-05 | Phase 6 | Pending |
+| BUI-05 | Phase 6 | Complete |
 | TST-01 | Phase 7 | Pending |
 | TST-02 | Phase 7 | Pending |
 | TST-03 | Phase 7 | Pending |

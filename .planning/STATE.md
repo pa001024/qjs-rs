@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 6
 current_phase_name: Collection and RegExp Semantics
-current_plan: 02
-status: in_progress
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-02-27T04:21:32.553Z"
+current_plan: 3
+status: executing
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-02-27T04:36:58.072Z"
 last_activity: 2026-02-27
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 18
-  completed_plans: 16
-  percent: 89
+  completed_plans: 17
+  percent: 94
 ---
 
 # Project State
@@ -31,12 +31,12 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 **Current Phase:** 6
 **Current Phase Name:** Collection and RegExp Semantics
 **Total Phases:** 7
-**Current Plan:** 02
+**Current Plan:** 3
 **Total Plans in Phase:** 3
-**Status:** In progress
+**Status:** Ready to execute
 **Last Activity:** 2026-02-27
-**Last Activity Description:** Completed 06-01 plan
-**Progress:** [█████████░] 89%
+**Last Activity Description:** Completed 06-02 plan
+**Progress:** [█████████░] 94%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ See: `.planning/PROJECT.md` (updated 2026-02-25)
 | Phase 05 P02 | 10 min | 3 tasks | 9 files |
 | Phase 05 P03 | 9 min | 3 tasks | 14 files |
 | Phase 06 P01 | 5 min | 3 tasks | 5 files |
+| Phase 06 P02 | 9 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Normalize Date string output to UTC RFC1123-style text for baseline gates. — Avoids locale-fragile CI assertions while preserving deterministic parse/UTC/getTime behavior.
 - [Phase 06]: Use dedicated WeakMap/WeakSet constructors and prototypes instead of Map/Set alias paths. — Closes BUI-04 by giving weak collections distinct constructor identity and prototype chains.
 - [Phase 06]: Enforce WeakMap/WeakSet non-object key TypeError behavior in constructor iterable ingestion and method dispatch. — Locks deterministic weak-key semantics and fail-fast behavior for phase-6 collection gates.
+- [Phase 06]: Route RegExp.prototype.exec and RegExp.prototype.test through a single VM match helper that also owns lastIndex transitions. — Shared matching logic prevents drift between exec and test and makes lastIndex behavior deterministic across global/sticky/default paths.
+- [Phase 06]: Canonicalize supported flags to gimsuy before surfacing flags and toString output to keep constructor state deterministic. — Canonical flag ordering stabilizes observable output and avoids non-deterministic flag-string drift when constructors receive equivalent unordered flag sets.
+- [Phase 06]: Add exact-name top-level VM tests so plan verification commands using --exact always execute concrete tests. — The plan contract requires strict --exact command targets; top-level matching names prevent false-green verification runs with zero executed tests.
 
 ### Pending Todos
 
@@ -106,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-**Last session:** 2026-02-27T04:21:32.553Z
-**Stopped at:** Completed 06-01-PLAN.md
+**Last session:** 2026-02-27T04:36:58.070Z
+**Stopped at:** Completed 06-02-PLAN.md
 **Resume file:** None
