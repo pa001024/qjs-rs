@@ -19,6 +19,33 @@ cargo test -p test-harness --test test262_lite core_builtins_subset -- --exact
 - `core_builtins_baseline`（integration）: all passed
 - `core_builtins_subset`（test262-lite families）: 8/8 families passed, 0 failed
 
+## Phase 6 Collection and RegExp Subset Contract（2026-02-27）
+
+为 BUI-04 和 BUI-05 在 Phase 6 的 CI 约束，固定执行以下命令：
+
+```powershell
+cargo test -p vm weak_collection_constructor_identity -- --exact
+cargo test -p vm collection_semantics_same_value_zero_and_live_iteration -- --exact
+cargo test -p vm regexp_last_index_transition_matrix -- --exact
+cargo test -p vm regexp_exec_capture_and_constructor_errors -- --exact
+cargo test -p test-harness --test collection_semantics
+cargo test -p test-harness --test regexp_semantics
+cargo test -p test-harness --test test262_lite collection_and_regexp_subset -- --exact
+```
+
+当前基线结果：
+- `weak_collection_constructor_identity`: 1 passed, 0 failed
+- `collection_semantics_same_value_zero_and_live_iteration`: 1 passed, 0 failed
+- `regexp_last_index_transition_matrix`: 1 passed, 0 failed
+- `regexp_exec_capture_and_constructor_errors`: 1 passed, 0 failed
+- `collection_semantics`（integration）: 4 passed, 0 failed
+- `regexp_semantics`（integration）: 4 passed, 0 failed
+- `collection_and_regexp_subset`（test262-lite families）: 5/5 families passed, 0 failed
+
+非回归要求：
+- Phase 6 命令是 Phase 5 合约的增量门禁，不替代既有 `core_builtins_*` 与 `core_builtins_subset` gate。
+- 后续更新必须同时保持 Phase 5 与 Phase 6 gate 全绿，避免通过缩减子集来“修复”回归。
+
 测试语料：
 - 仓库：`d:\dev\test262`
 - 用例根目录：`d:\dev\test262\test`
