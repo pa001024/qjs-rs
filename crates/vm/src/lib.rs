@@ -94,6 +94,13 @@ type Scope = BTreeMap<String, BindingId>;
 type ScopeRef = Rc<RefCell<Scope>>;
 
 #[derive(Debug, Clone, PartialEq)]
+struct RegExpMatchResult {
+    index: usize,
+    full_match: String,
+    captures: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct Binding {
     value: JsValue,
     mutable: bool,
@@ -7347,7 +7354,9 @@ impl Vm {
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let matched = self.execute_regexp_match(receiver_id, &input)?.is_some();
+                let matched = self
+                    .execute_regexp_match(receiver_id, &input, realm)?
+                    .is_some();
                 Ok(JsValue::Bool(matched))
             }
             HostFunction::RegExpExecThis => {
@@ -7356,15 +7365,25 @@ impl Vm {
                     || "undefined".to_string(),
                     |value| self.coerce_to_string(value),
                 );
-                let Some((index, matched)) = self.execute_regexp_match(receiver_id, &input)? else {
+                let Some(match_result) = self.execute_regexp_match(receiver_id, &input, realm)?
+                else {
                     return Ok(JsValue::Null);
                 };
-                let value = self.create_array_from_values(vec![JsValue::String(matched)])?;
+                let mut values = Vec::with_capacity(1 + match_result.captures.len());
+                values.push(JsValue::String(match_result.full_match));
+                for capture in match_result.captures {
+                    values.push(
+                        capture
+                            .map(JsValue::String)
+                            .unwrap_or(JsValue::Undefined),
+                    );
+                }
+                let value = self.create_array_from_values(values)?;
                 if let JsValue::Object(object_id) = value.clone() {
                     self.set_object_property(
                         object_id,
                         "index".to_string(),
-                        JsValue::Number(index as f64),
+                        JsValue::Number(match_result.index as f64),
                         realm,
                     )?;
                     self.set_object_property(
@@ -8141,12 +8160,7 @@ impl Vm {
                 &args,
             )),
             NativeFunction::RegExpConstructor => {
-                let pattern = args
-                    .first()
-                    .map_or(String::new(), |value| self.coerce_to_string(value));
-                let flags = args
-                    .get(1)
-                    .map_or(String::new(), |value| self.coerce_to_string(value));
+                let (pattern, flags) = self.resolve_regexp_constructor_inputs(&args)?;
                 self.create_regexp_value(pattern, flags)
             }
         }
@@ -8253,6 +8267,36 @@ impl Vm {
             },
         );
         Ok(JsValue::Object(object_id))
+    }
+
+    fn resolve_regexp_constructor_inputs(
+        &self,
+        args: &[JsValue],
+    ) -> Result<(String, String), VmError> {
+        let pattern_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let flags_arg = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+
+        if let JsValue::Object(pattern_id) = pattern_arg.clone() {
+            if self.has_object_marker(pattern_id, "__regexpTag")? {
+                let (source, pattern_flags) = self.regexp_slot_strings(pattern_id)?;
+                if matches!(flags_arg, JsValue::Undefined) {
+                    return Ok((source, pattern_flags));
+                }
+                return Ok((source, self.coerce_to_string(&flags_arg)));
+            }
+        }
+
+        let pattern = if matches!(pattern_arg, JsValue::Undefined) {
+            String::new()
+        } else {
+            self.coerce_to_string(&pattern_arg)
+        };
+        let flags = if matches!(flags_arg, JsValue::Undefined) {
+            String::new()
+        } else {
+            self.coerce_to_string(&flags_arg)
+        };
+        Ok((pattern, flags))
     }
 
     fn regexp_slot_strings(&self, object_id: ObjectId) -> Result<(String, String), VmError> {
@@ -8499,29 +8543,55 @@ impl Vm {
         Ok(format!("/{source}/{flags}"))
     }
 
-    fn execute_regexp_match(
-        &self,
+    fn set_regexp_last_index(
+        &mut self,
         object_id: ObjectId,
-        input: &str,
-    ) -> Result<Option<(usize, String)>, VmError> {
+        value: usize,
+        realm: &Realm,
+    ) -> Result<(), VmError> {
+        let receiver = JsValue::Object(object_id);
+        self.ensure_assign_target_writable(&receiver, "lastIndex")?;
+        self.set_object_property(
+            object_id,
+            "lastIndex".to_string(),
+            JsValue::Number(value as f64),
+            realm,
+        )?;
+        Ok(())
+    }
+
+    fn read_regexp_last_index(&self, object_id: ObjectId) -> Result<usize, VmError> {
         let object = self
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        let (pattern, flags) = self.regexp_slot_strings(object_id)?;
-        let last_index = object
+        let number = object
             .properties
             .get("lastIndex")
             .map(|value| self.to_number(value))
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| value as usize)
-            .unwrap_or(0usize);
+            .unwrap_or(0.0);
+        Ok(Self::to_length_from_number(number) as usize)
+    }
 
+    fn execute_regexp_match(
+        &mut self,
+        object_id: ObjectId,
+        input: &str,
+        realm: &Realm,
+    ) -> Result<Option<RegExpMatchResult>, VmError> {
+        let (pattern, flags) = self.regexp_slot_strings(object_id)?;
+        let global = flags.contains('g');
         let sticky = flags.contains('y');
+        let use_last_index = global || sticky;
         let unicode = flags.contains('u');
         let normalized_pattern = match Self::normalize_regexp_pattern(&pattern, unicode) {
             Ok(value) => value,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                if use_last_index {
+                    self.set_regexp_last_index(object_id, 0, realm)?;
+                }
+                return Ok(None);
+            }
         };
         let normalized_input = if unicode {
             Self::normalize_regexp_input_for_unicode(input)
@@ -8529,22 +8599,62 @@ impl Vm {
             input.to_string()
         };
         let Ok(regex) = Self::build_regexp_matcher(&normalized_pattern, &flags) else {
+            if use_last_index {
+                self.set_regexp_last_index(object_id, 0, realm)?;
+            }
             return Ok(None);
         };
-
-        if sticky {
-            match regex.find_from_pos(&normalized_input, last_index) {
-                Ok(Some(matched)) if matched.start() == last_index => {
-                    Ok(Some((matched.start(), matched.as_str().to_string())))
-                }
-                Ok(_) | Err(_) => Ok(None),
-            }
+        let start_index = if use_last_index {
+            self.read_regexp_last_index(object_id)?
         } else {
-            match regex.find(&normalized_input) {
-                Ok(Some(matched)) => Ok(Some((matched.start(), matched.as_str().to_string()))),
-                Ok(None) | Err(_) => Ok(None),
-            }
+            0
+        };
+        if use_last_index && start_index > normalized_input.len() {
+            self.set_regexp_last_index(object_id, 0, realm)?;
+            return Ok(None);
         }
+
+        let capture_result = if use_last_index {
+            regex.captures_from_pos(&normalized_input, start_index)
+        } else {
+            regex.captures(&normalized_input)
+        };
+        let captures = match capture_result {
+            Ok(Some(captures)) => captures,
+            Ok(None) | Err(_) => {
+                if use_last_index {
+                    self.set_regexp_last_index(object_id, 0, realm)?;
+                }
+                return Ok(None);
+            }
+        };
+        let Some(full_match) = captures.get(0) else {
+            if use_last_index {
+                self.set_regexp_last_index(object_id, 0, realm)?;
+            }
+            return Ok(None);
+        };
+        if sticky && full_match.start() != start_index {
+            if use_last_index {
+                self.set_regexp_last_index(object_id, 0, realm)?;
+            }
+            return Ok(None);
+        }
+
+        if use_last_index {
+            self.set_regexp_last_index(object_id, full_match.end(), realm)?;
+        }
+
+        let mut capture_groups = Vec::with_capacity(captures.len().saturating_sub(1));
+        for index in 1..captures.len() {
+            capture_groups.push(captures.get(index).map(|value| value.as_str().to_string()));
+        }
+
+        Ok(Some(RegExpMatchResult {
+            index: full_match.start(),
+            full_match: full_match.as_str().to_string(),
+            captures: capture_groups,
+        }))
     }
 
     fn build_regexp_matcher(pattern: &str, flags: &str) -> Result<Regex, ()> {
@@ -22081,6 +22191,71 @@ impl Vm {
 }
 
 #[cfg(test)]
+fn regexp_base_realm() -> Realm {
+    let mut realm = Realm::default();
+    realm.define_global(
+        "RegExp",
+        JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+    );
+    realm.define_global(
+        "Object",
+        JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+    );
+    realm.define_global(
+        "TypeError",
+        JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+    );
+    realm.define_global(
+        "SyntaxError",
+        JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
+    );
+    realm
+}
+
+#[cfg(test)]
+#[test]
+fn regexp_last_index_transition_matrix() {
+    let script = parser::parse_script(
+        "var ok = true; \
+         var global = /a/g; \
+         global.lastIndex = 1; \
+         var globalHit = global.exec('ba'); \
+         ok = ok && globalHit !== null && globalHit.index === 1 && global.lastIndex === 2; \
+         var globalMiss = global.exec('ba'); \
+         ok = ok && globalMiss === null && global.lastIndex === 0; \
+         global.lastIndex = 1; \
+         ok = ok && global.test('ba') === true && global.lastIndex === 2; \
+         ok = ok && global.test('ba') === false && global.lastIndex === 0; \
+         var sticky = /a/y; \
+         sticky.lastIndex = 1; \
+         ok = ok && sticky.test('ba') === true && sticky.lastIndex === 2; \
+         sticky.lastIndex = 0; \
+         ok = ok && sticky.exec('ba') === null && sticky.lastIndex === 0; \
+         var plain = /a/; \
+         plain.lastIndex = 1; \
+         var plainHit = plain.exec('ba'); \
+         ok = ok && plainHit !== null && plainHit.index === 1 && plain.lastIndex === 1; \
+         ok = ok && plain.test('ba') === true && plain.lastIndex === 1; \
+         var frozenSuccess = /a/g; \
+         Object.defineProperty(frozenSuccess, 'lastIndex', { value: 0, writable: false }); \
+         var successTypeError = false; \
+         try { frozenSuccess.test('a'); } catch (e) { successTypeError = e instanceof TypeError; } \
+         var frozenFailure = /z/g; \
+         Object.defineProperty(frozenFailure, 'lastIndex', { value: 2, writable: false }); \
+         var failureTypeError = false; \
+         try { frozenFailure.exec('abc'); } catch (e) { failureTypeError = e instanceof TypeError; } \
+         ok && successTypeError && failureTypeError && frozenSuccess.lastIndex === 0 && frozenFailure.lastIndex === 2;",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+    let mut vm = Vm::default();
+    assert_eq!(
+        vm.execute_in_realm(&chunk, &regexp_base_realm()),
+        Ok(JsValue::Bool(true))
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         GcStats, PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks,
@@ -24679,6 +24854,58 @@ mod tests {
              var threw = false; \
              try { r.compile(/updated/gi); } catch (e) { threw = e instanceof TypeError; } \
              threw && r.toString() === '/updated/gi' && r.lastIndex === 45;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn regexp_last_index_transition_matrix() {
+        let script = parse_script(
+            "var ok = true; \
+             var global = /a/g; \
+             global.lastIndex = 1; \
+             var globalHit = global.exec('ba'); \
+             ok = ok && globalHit !== null && globalHit.index === 1 && global.lastIndex === 2; \
+             var globalMiss = global.exec('ba'); \
+             ok = ok && globalMiss === null && global.lastIndex === 0; \
+             global.lastIndex = 1; \
+             ok = ok && global.test('ba') === true && global.lastIndex === 2; \
+             ok = ok && global.test('ba') === false && global.lastIndex === 0; \
+             var sticky = /a/y; \
+             sticky.lastIndex = 1; \
+             ok = ok && sticky.test('ba') === true && sticky.lastIndex === 2; \
+             sticky.lastIndex = 0; \
+             ok = ok && sticky.exec('ba') === null && sticky.lastIndex === 0; \
+             var plain = /a/; \
+             plain.lastIndex = 1; \
+             var plainHit = plain.exec('ba'); \
+             ok = ok && plainHit !== null && plainHit.index === 1 && plain.lastIndex === 1; \
+             ok = ok && plain.test('ba') === true && plain.lastIndex === 1; \
+             var frozenSuccess = /a/g; \
+             Object.defineProperty(frozenSuccess, 'lastIndex', { value: 0, writable: false }); \
+             var successTypeError = false; \
+             try { frozenSuccess.test('a'); } catch (e) { successTypeError = e instanceof TypeError; } \
+             var frozenFailure = /z/g; \
+             Object.defineProperty(frozenFailure, 'lastIndex', { value: 2, writable: false }); \
+             var failureTypeError = false; \
+             try { frozenFailure.exec('abc'); } catch (e) { failureTypeError = e instanceof TypeError; } \
+             ok && successTypeError && failureTypeError && frozenSuccess.lastIndex === 0 && frozenFailure.lastIndex === 2;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
