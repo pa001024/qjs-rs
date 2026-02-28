@@ -53,6 +53,19 @@ fn benchmark_report_contract_envelope_fields() {
             mean_ms_per_engine: BTreeMap::new(),
             relative_to_qjs_rs: BTreeMap::new(),
         },
+        perf_target: contract::PerfTargetMetadata {
+            policy_id: contract::PERF_TARGET_POLICY_ID,
+            authoritative_run_profile: contract::PERF_TARGET_AUTHORITY_PROFILE,
+            authoritative_timing_mode: contract::PERF_TARGET_AUTHORITY_TIMING_MODE,
+            same_host_required: true,
+            host_fingerprint: "test-host|linux|x86_64|8".to_string(),
+            optimization_mode: contract::OptimizationMode::Baseline,
+            optimization_tag: "phase11-baseline".to_string(),
+            packet_id: None,
+            required_comparators: contract::REQUIRED_CLOSURE_COMPARATORS.to_vec(),
+            optional_comparators: contract::OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
+        },
+        qjs_rs_hotspot_attribution: None,
     };
 
     let serialized: Value = serde_json::to_value(report).expect("report should serialize");
@@ -71,6 +84,7 @@ fn benchmark_report_contract_envelope_fields() {
         "environment",
         "cases",
         "aggregate",
+        "perf_target",
     ] {
         assert!(
             serialized.get(field).is_some(),
@@ -122,5 +136,33 @@ fn benchmark_report_contract_envelope_fields() {
     assert_eq!(
         required_case_ids,
         vec!["arith-loop", "fib-iterative", "array-sum", "json-roundtrip"]
+    );
+
+    let perf_target = serialized
+        .get("perf_target")
+        .and_then(Value::as_object)
+        .expect("perf_target must be object");
+    assert_eq!(
+        perf_target.get("policy_id").and_then(Value::as_str),
+        Some("phase11-perf03-local-dev-eval-per-iteration")
+    );
+    assert_eq!(
+        perf_target
+            .get("authoritative_run_profile")
+            .and_then(Value::as_str),
+        Some("local-dev")
+    );
+    assert_eq!(
+        perf_target
+            .get("authoritative_timing_mode")
+            .and_then(Value::as_str),
+        Some("eval-per-iteration")
+    );
+    assert_eq!(
+        perf_target
+            .get("required_comparators")
+            .and_then(Value::as_array)
+            .map(|entries| entries.len()),
+        Some(2)
     );
 }

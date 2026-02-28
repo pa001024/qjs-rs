@@ -6,6 +6,9 @@ use std::str::FromStr;
 
 pub const SCHEMA_VERSION: &str = "bench.v1";
 pub const GUARD_CHECKSUM_MODE: &str = "value-checksum-v1";
+pub const PERF_TARGET_POLICY_ID: &str = "phase11-perf03-local-dev-eval-per-iteration";
+pub const PERF_TARGET_AUTHORITY_PROFILE: RunProfile = RunProfile::LocalDev;
+pub const PERF_TARGET_AUTHORITY_TIMING_MODE: TimingMode = TimingMode::EvalPerIteration;
 pub const ENV_NODE_COMMAND: &str = "BENCH_NODE_COMMAND";
 pub const ENV_NODE_PATH: &str = "BENCH_NODE_PATH";
 pub const ENV_NODE_WORKDIR: &str = "BENCH_NODE_WORKDIR";
@@ -13,6 +16,8 @@ pub const ENV_QUICKJS_COMMAND: &str = "BENCH_QUICKJS_COMMAND";
 pub const ENV_QUICKJS_PATH: &str = "BENCH_QUICKJS_PATH";
 pub const ENV_QUICKJS_WORKDIR: &str = "BENCH_QUICKJS_WORKDIR";
 pub const ENV_STRICT_COMPARATORS: &str = "BENCH_STRICT_COMPARATORS";
+pub const REQUIRED_CLOSURE_COMPARATORS: [&str; 2] = ["qjs-rs", "boa-engine"];
+pub const OPTIONAL_CLOSURE_COMPARATORS: [&str; 2] = ["quickjs-c", "nodejs"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -106,6 +111,52 @@ pub enum TimingMode {
     EvalPerIteration,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OptimizationMode {
+    Baseline,
+    Packet,
+    Unspecified,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PerfTargetMetadata {
+    pub policy_id: &'static str,
+    pub authoritative_run_profile: RunProfile,
+    pub authoritative_timing_mode: TimingMode,
+    pub same_host_required: bool,
+    pub host_fingerprint: String,
+    pub optimization_mode: OptimizationMode,
+    pub optimization_tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_id: Option<String>,
+    pub required_comparators: Vec<&'static str>,
+    pub optional_comparators: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HotspotAttributionCounters {
+    pub numeric_ops: u64,
+    pub identifier_resolution: u64,
+    pub array_indexed_property_get: u64,
+    pub array_indexed_property_set: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HotspotAttributionSnapshot {
+    pub enabled: bool,
+    pub source: &'static str,
+    pub total: HotspotAttributionCounters,
+    pub per_case: BTreeMap<String, HotspotAttributionCounters>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimizationDescriptor {
+    pub mode: OptimizationMode,
+    pub tag: String,
+    pub packet_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RequiredCaseDefinition {
     pub id: &'static str,
@@ -186,6 +237,7 @@ pub struct CliArgs {
     pub config: BenchmarkConfig,
     pub timing_mode: TimingMode,
     pub comparators: ComparatorConfig,
+    pub hotspot_attribution_override: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -218,6 +270,7 @@ where
     let mut quickjs_path: Option<PathBuf> = None;
     let mut quickjs_workdir: Option<PathBuf> = None;
     let mut strict_override: Option<bool> = None;
+    let mut hotspot_attribution_override: Option<bool> = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -302,6 +355,12 @@ where
             "--allow-missing-comparators" => {
                 strict_override = Some(false);
             }
+            "--hotspot-attribution" => {
+                hotspot_attribution_override = Some(true);
+            }
+            "--no-hotspot-attribution" => {
+                hotspot_attribution_override = Some(false);
+            }
             "--help" | "-h" => return Ok(CliParseResult::Help),
             unknown => bail!("unknown argument: {unknown}"),
         }
@@ -353,6 +412,7 @@ where
             quickjs,
             strict_external,
         },
+        hotspot_attribution_override,
     }))
 }
 
@@ -369,7 +429,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-    "Usage: cargo run -p benchmarks -- [--profile local-dev|ci-linux] [--iterations N] [--samples N] [--warmup-iterations N] [--output FILE] [--node-command CMD] [--node-path PATH] [--node-workdir DIR] [--quickjs-command CMD] [--quickjs-path PATH] [--quickjs-workdir DIR] [--strict-comparators|--allow-missing-comparators]"
+    "Usage: cargo run -p benchmarks -- [--profile local-dev|ci-linux] [--iterations N] [--samples N] [--warmup-iterations N] [--output FILE] [--node-command CMD] [--node-path PATH] [--node-workdir DIR] [--quickjs-command CMD] [--quickjs-path PATH] [--quickjs-workdir DIR] [--strict-comparators|--allow-missing-comparators] [--hotspot-attribution|--no-hotspot-attribution]"
 }
 
 #[derive(Debug, Serialize)]
@@ -546,4 +606,39 @@ pub struct BenchmarkReport {
     pub environment: EnvironmentInfo,
     pub cases: Vec<CaseReport>,
     pub aggregate: AggregateReport,
+    pub perf_target: PerfTargetMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qjs_rs_hotspot_attribution: Option<HotspotAttributionSnapshot>,
+}
+
+pub fn infer_optimization_descriptor(output_path: &Path) -> OptimizationDescriptor {
+    let filename = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if let Some(index) = filename.find("packet-") {
+        let raw_packet = &filename[index..];
+        let packet_id = raw_packet.trim_end_matches(".json").to_string();
+        return OptimizationDescriptor {
+            mode: OptimizationMode::Packet,
+            tag: packet_id.clone(),
+            packet_id: Some(packet_id),
+        };
+    }
+
+    if filename.contains("phase11-baseline") {
+        return OptimizationDescriptor {
+            mode: OptimizationMode::Baseline,
+            tag: "phase11-baseline".to_string(),
+            packet_id: None,
+        };
+    }
+
+    OptimizationDescriptor {
+        mode: OptimizationMode::Unspecified,
+        tag: "unlabeled".to_string(),
+        packet_id: None,
+    }
 }

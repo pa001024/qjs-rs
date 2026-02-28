@@ -10,8 +10,10 @@ use contract::{
     help_text, parse_cli_args, required_case_catalog, AggregateReport, BenchmarkReport,
     CaseEngineResult, CaseReport, CliParseResult, ComparatorConfig, ComparatorTarget,
     EngineAvailabilityStatus, EngineExecutionMetadata, EngineKind, EnvironmentInfo,
+    HotspotAttributionCounters, HotspotAttributionSnapshot, OptimizationMode, PerfTargetMetadata,
     ReproducibilityMetadata, RequiredCaseDefinition, TimingMode, GUARD_CHECKSUM_MODE,
-    SCHEMA_VERSION,
+    OPTIONAL_CLOSURE_COMPARATORS, PERF_TARGET_AUTHORITY_PROFILE, PERF_TARGET_AUTHORITY_TIMING_MODE,
+    PERF_TARGET_POLICY_ID, REQUIRED_CLOSURE_COMPARATORS, SCHEMA_VERSION,
 };
 use parser::parse_script;
 use runtime::JsValue;
@@ -23,7 +25,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
-use vm::Vm;
+use vm::{perf::HotspotAttribution, Vm};
 
 #[derive(Debug, Clone)]
 struct BenchCase {
@@ -130,12 +132,19 @@ pub(crate) fn timing_mode_for_engine(
 struct SampleMeasurement {
     elapsed_ms: f64,
     guard_checksum: f64,
+    hotspot_attribution: Option<HotspotAttribution>,
 }
 
-fn run_qjs_rs_eval_per_iteration(script: &str, iterations: usize) -> Result<SampleMeasurement> {
+fn run_qjs_rs_eval_per_iteration(
+    script: &str,
+    iterations: usize,
+    hotspot_attribution_enabled: bool,
+) -> Result<SampleMeasurement> {
     let mut realm = runtime::Realm::default();
     install_baseline(&mut realm);
-    let mut vm = Vm::default();
+    let mut vm = Vm::with_perf_from_env();
+    vm.set_hotspot_attribution_enabled(hotspot_attribution_enabled);
+    vm.reset_hotspot_attribution();
 
     let start = Instant::now();
     let mut checksum = 0.0;
@@ -152,6 +161,7 @@ fn run_qjs_rs_eval_per_iteration(script: &str, iterations: usize) -> Result<Samp
     Ok(SampleMeasurement {
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
         guard_checksum: checksum,
+        hotspot_attribution: vm.hotspot_attribution_snapshot(),
     })
 }
 
@@ -170,6 +180,7 @@ fn run_boa_engine_eval_per_iteration(script: &str, iterations: usize) -> Result<
     Ok(SampleMeasurement {
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
         guard_checksum: checksum,
+        hotspot_attribution: None,
     })
 }
 
@@ -230,6 +241,7 @@ process.stdout.write(JSON.stringify({
     Ok(SampleMeasurement {
         elapsed_ms: result.elapsed_ms,
         guard_checksum: result.guard,
+        hotspot_attribution: None,
     })
 }
 
@@ -277,6 +289,7 @@ fn run_quickjs_c_eval_per_iteration(
     Ok(SampleMeasurement {
         elapsed_ms: result.elapsed_ms,
         guard_checksum: result.guard,
+        hotspot_attribution: None,
     })
 }
 
@@ -286,11 +299,14 @@ fn run_engine_case(
     script: &str,
     iterations: usize,
     comparators: &ComparatorConfig,
+    hotspot_attribution_enabled: bool,
 ) -> Result<SampleMeasurement> {
     let adapter_mode = timing_mode_for_engine(engine, timing_mode);
     match adapter_mode {
         TimingMode::EvalPerIteration => match engine {
-            EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(script, iterations),
+            EngineKind::QjsRs => {
+                run_qjs_rs_eval_per_iteration(script, iterations, hotspot_attribution_enabled)
+            }
             EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
             EngineKind::NodeJs => {
                 run_nodejs_eval_per_iteration(script, iterations, &comparators.node)
@@ -593,6 +609,61 @@ fn collect_environment(engine_metadata: &[EngineExecutionMetadata]) -> Environme
     }
 }
 
+fn host_fingerprint(environment: &EnvironmentInfo) -> String {
+    let host_name = env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown-host".to_string());
+    format!(
+        "{host_name}|{}|{}|{}",
+        environment.os, environment.arch, environment.cpu_parallelism
+    )
+}
+
+fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool {
+    if let Some(override_value) = cli.hotspot_attribution_override {
+        return override_value;
+    }
+    let descriptor = contract::infer_optimization_descriptor(&cli.output);
+    matches!(descriptor.mode, OptimizationMode::Baseline | OptimizationMode::Packet)
+}
+
+fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
+    HotspotAttributionCounters {
+        numeric_ops: value.numeric_ops,
+        identifier_resolution: value.identifier_resolution,
+        array_indexed_property_get: value.array_indexed_property_get,
+        array_indexed_property_set: value.array_indexed_property_set,
+    }
+}
+
+fn merge_hotspot_counters(
+    target: &mut HotspotAttributionCounters,
+    source: &HotspotAttributionCounters,
+) {
+    target.numeric_ops = target.numeric_ops.saturating_add(source.numeric_ops);
+    target.identifier_resolution = target
+        .identifier_resolution
+        .saturating_add(source.identifier_resolution);
+    target.array_indexed_property_get = target
+        .array_indexed_property_get
+        .saturating_add(source.array_indexed_property_get);
+    target.array_indexed_property_set = target
+        .array_indexed_property_set
+        .saturating_add(source.array_indexed_property_set);
+}
+
+fn aggregate_case_hotspot_attribution(samples: &[SampleMeasurement]) -> Option<HotspotAttributionCounters> {
+    let mut aggregate = HotspotAttribution::default();
+    let mut found = false;
+    for sample in samples {
+        if let Some(snapshot) = sample.hotspot_attribution {
+            aggregate.merge(snapshot);
+            found = true;
+        }
+    }
+    found.then_some(to_hotspot_counters(aggregate))
+}
+
 fn aggregate(cases: &[CaseReport]) -> AggregateReport {
     let mut totals: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for case in cases {
@@ -748,12 +819,29 @@ fn main() -> Result<()> {
 
     let cases = benchmark_cases();
     let preflight_metadata = preflight_engine_execution(&cli.comparators)?;
+    let environment = collect_environment(&preflight_metadata);
+    let optimization_descriptor = contract::infer_optimization_descriptor(&cli.output);
+    let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
+    let perf_target = PerfTargetMetadata {
+        policy_id: PERF_TARGET_POLICY_ID,
+        authoritative_run_profile: PERF_TARGET_AUTHORITY_PROFILE,
+        authoritative_timing_mode: PERF_TARGET_AUTHORITY_TIMING_MODE,
+        same_host_required: true,
+        host_fingerprint: host_fingerprint(&environment),
+        optimization_mode: optimization_descriptor.mode,
+        optimization_tag: optimization_descriptor.tag.clone(),
+        packet_id: optimization_descriptor.packet_id.clone(),
+        required_comparators: REQUIRED_CLOSURE_COMPARATORS.to_vec(),
+        optional_comparators: OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
+    };
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={}: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} optimization_tag={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
+        hotspot_attribution_enabled,
+        perf_target.optimization_tag,
         cases.len(),
         EngineKind::all_required().len(),
         cli.config.samples,
@@ -771,6 +859,7 @@ fn main() -> Result<()> {
     }
 
     let mut case_reports = Vec::with_capacity(cases.len());
+    let mut hotspot_per_case: BTreeMap<String, HotspotAttributionCounters> = BTreeMap::new();
     for case in &cases {
         println!("[case:{}] {}", case.definition.id, case.definition.title);
         let wrapped = wrap_script(case.script_body);
@@ -790,6 +879,7 @@ fn main() -> Result<()> {
                 &wrapped,
                 cli.config.warmup_iterations,
                 &cli.comparators,
+                hotspot_attribution_enabled,
             )?;
 
             let mut samples = Vec::with_capacity(cli.config.samples);
@@ -800,8 +890,15 @@ fn main() -> Result<()> {
                     &wrapped,
                     cli.config.iterations,
                     &cli.comparators,
+                    hotspot_attribution_enabled,
                 )?;
                 samples.push(sample);
+            }
+            if engine == EngineKind::QjsRs
+                && hotspot_attribution_enabled
+                && let Some(case_snapshot) = aggregate_case_hotspot_attribution(&samples)
+            {
+                hotspot_per_case.insert(case.definition.id.to_string(), case_snapshot);
             }
             let summary = summarize(samples, cli.config.iterations, warmup.guard_checksum);
             println!(
@@ -822,6 +919,26 @@ fn main() -> Result<()> {
         });
     }
 
+    let qjs_hotspot_attribution = if hotspot_per_case.is_empty() {
+        None
+    } else {
+        let mut total = HotspotAttributionCounters {
+            numeric_ops: 0,
+            identifier_resolution: 0,
+            array_indexed_property_get: 0,
+            array_indexed_property_set: 0,
+        };
+        for counters in hotspot_per_case.values() {
+            merge_hotspot_counters(&mut total, counters);
+        }
+        Some(HotspotAttributionSnapshot {
+            enabled: hotspot_attribution_enabled,
+            source: "vm-hotspot-attribution-v1",
+            total,
+            per_case: hotspot_per_case,
+        })
+    };
+
     let report = BenchmarkReport {
         schema_version: SCHEMA_VERSION,
         generated_at_utc: generated_at_utc(),
@@ -834,9 +951,11 @@ fn main() -> Result<()> {
             cli.comparators.strict_external,
             preflight_metadata.clone(),
         ),
-        environment: collect_environment(&preflight_metadata),
+        environment,
         aggregate: aggregate(&case_reports),
         cases: case_reports,
+        perf_target,
+        qjs_rs_hotspot_attribution: qjs_hotspot_attribution,
     };
 
     ensure_output_dir(&cli.output)?;

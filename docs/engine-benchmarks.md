@@ -49,6 +49,11 @@ python .github/scripts/check_engine_benchmark_contract.py \
   --input target/benchmarks/engine-comparison.local-dev.phase11-baseline.json
 ```
 
+Phase 11 artifacts now embed:
+
+- `perf_target` metadata (closure policy, optimization tag/packet id, host fingerprint, comparator policy)
+- optional `qjs_rs_hotspot_attribution` counters for packet-level hotspot auditing
+
 ## CI Baseline Workflow (`ci-linux`)
 
 `ci-linux` defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`, strict comparators.
