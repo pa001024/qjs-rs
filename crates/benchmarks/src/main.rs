@@ -147,7 +147,7 @@ fn run_qjs_rs_eval_per_iteration(
     let mut checksum = 0.0;
     for _ in 0..iterations {
         let value = vm
-            .execute_in_realm(&chunk, &realm)
+            .execute_in_realm_persistent(&chunk, &realm)
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
         checksum += extract_number(&value);
     }

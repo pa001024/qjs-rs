@@ -621,7 +621,7 @@ struct PacketBDenseArrayGuardState {
 pub struct Vm {
     stack: Vec<JsValue>,
     scopes: Vec<ScopeRef>,
-    bindings: BTreeMap<BindingId, Binding>,
+    bindings: Vec<Option<Binding>>,
     next_binding_id: BindingId,
     objects: BTreeMap<ObjectId, JsObject>,
     next_object_slot: u32,
@@ -913,6 +913,53 @@ impl Vm {
                 );
             }
         }
+
+        let strict = self.code_is_strict(&chunk.code);
+        self.var_scope_stack.push(0);
+        let pushed_annex_b_context =
+            match self.push_annex_b_var_function_context_for_code(&chunk.code, strict, &[]) {
+                Ok(pushed) => pushed,
+                Err(err) => {
+                    let _ = self.var_scope_stack.pop();
+                    return Err(err);
+                }
+            };
+        let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
+        if pushed_annex_b_context {
+            self.annex_b_eval_var_function_contexts.pop();
+        }
+        let _ = self.var_scope_stack.pop();
+        if signal.is_ok() {
+            self.collect_garbage_if_needed(realm, false);
+        }
+        match signal? {
+            ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
+            ExecutionSignal::Return => Err(VmError::TopLevelReturn),
+        }
+    }
+
+    pub fn execute_in_realm_persistent(
+        &mut self,
+        chunk: &Chunk,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if self.global_object_id.is_none() || self.scopes.is_empty() {
+            let bootstrap = Chunk {
+                code: vec![Opcode::LoadUndefined, Opcode::Halt],
+                functions: Vec::new(),
+            };
+            let _ = self.execute_in_realm(&bootstrap, realm)?;
+        }
+
+        self.stack.clear();
+        self.with_objects.clear();
+        self.identifier_references.clear();
+        self.exception_handlers.clear();
+        self.pending_exception = None;
+        self.eval_contexts.clear();
+        self.eval_deletable_binding_depth = 0;
+        self.annex_b_eval_var_function_contexts.clear();
+        self.param_init_body_scopes.clear();
 
         let strict = self.code_is_strict(&chunk.code);
         self.var_scope_stack.push(0);
@@ -1898,7 +1945,7 @@ impl Vm {
     fn collect_roots_from_scopes(&self, scopes: &[ScopeRef], roots: &mut Vec<JsValue>) {
         for scope_ref in scopes {
             for binding_id in scope_ref.borrow().values() {
-                if let Some(binding) = self.bindings.get(binding_id) {
+                if let Some(binding) = self.binding(*binding_id) {
                     roots.push(binding.value.clone());
                 }
             }
@@ -1955,7 +2002,7 @@ impl Vm {
                     for scope_ref in closure.captured_scopes {
                         let binding_ids: Vec<_> = scope_ref.borrow().values().copied().collect();
                         for binding_id in binding_ids {
-                            if let Some(binding) = self.bindings.get(&binding_id) {
+                            if let Some(binding) = self.binding(binding_id) {
                                 self.gc_mark_stack.push(binding.value.clone());
                             }
                         }
@@ -2225,10 +2272,8 @@ impl Vm {
                         if let Some(binding_id) =
                             self.resolve_binding_id_with_fast_path(name, identifier_slot)
                         {
-                            let binding = self
-                                .bindings
-                                .get(&binding_id)
-                                .ok_or(VmError::ScopeUnderflow)?;
+                            let binding =
+                                self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                             if matches!(binding.value, JsValue::Uninitialized) {
                                 Err(VmError::UnknownIdentifier(name.clone()))
                             } else {
@@ -2260,8 +2305,7 @@ impl Vm {
                     };
                     if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
-                            .bindings
-                            .get(&existing_binding_id)
+                            .binding(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
@@ -2293,8 +2337,7 @@ impl Vm {
                     };
                     if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
-                            .bindings
-                            .get_mut(&existing_binding_id)
+                            .binding_mut(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
@@ -2331,8 +2374,7 @@ impl Vm {
                     };
                     if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
-                            .bindings
-                            .get_mut(&existing_binding_id)
+                            .binding_mut(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
@@ -2371,8 +2413,7 @@ impl Vm {
                         let mut wrote_binding = false;
                         {
                             let binding = self
-                                .bindings
-                                .get_mut(&binding_id)
+                                .binding_mut(binding_id)
                                 .ok_or(VmError::ScopeUnderflow)?;
                             if matches!(binding.value, JsValue::Uninitialized) {
                                 return Err(VmError::UnknownIdentifier(name.clone()));
@@ -2919,14 +2960,18 @@ impl Vm {
                     }
                 }
                 Opcode::EnterScope => {
-                    self.invalidate_binding_fast_path_cache();
                     self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
                 }
                 Opcode::ExitScope => {
-                    if self.scopes.pop().is_none() || self.scopes.is_empty() {
+                    let Some(exited_scope) = self.scopes.pop() else {
+                        return Err(VmError::ScopeUnderflow);
+                    };
+                    if self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
                     }
-                    self.invalidate_binding_fast_path_cache();
+                    if !exited_scope.borrow().is_empty() {
+                        self.invalidate_binding_fast_path_cache();
+                    }
                 }
                 Opcode::EnterParamInitScope => {
                     if self.scopes.len() < 2 {
@@ -3199,10 +3244,7 @@ impl Vm {
                     let value = if let Some(binding_id) =
                         self.resolve_binding_id_with_fast_path(name, identifier_slot)
                     {
-                        let binding = self
-                            .bindings
-                            .get(&binding_id)
-                            .ok_or(VmError::ScopeUnderflow)?;
+                        let binding = self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                         binding.value.clone()
                     } else if name == "undefined" {
                         JsValue::Undefined
@@ -3860,8 +3902,7 @@ impl Vm {
             .resolve_binding_id("this")
             .ok_or_else(|| VmError::UnknownIdentifier("this".to_string()))?;
         let this_value = self
-            .bindings
-            .get(&this_binding_id)
+            .binding(this_binding_id)
             .map(|binding| binding.value.clone())
             .ok_or(VmError::ScopeUnderflow)?;
         let already_initialized = !matches!(this_value, JsValue::Uninitialized);
@@ -3869,8 +3910,7 @@ impl Vm {
         let pending_this = self
             .resolve_binding_id(DERIVED_THIS_BINDING)
             .and_then(|binding_id| {
-                self.bindings
-                    .get(&binding_id)
+                self.binding(binding_id)
                     .map(|binding| binding.value.clone())
             })
             .unwrap_or(JsValue::Undefined);
@@ -3969,8 +4009,7 @@ impl Vm {
         }
 
         let this_binding = self
-            .bindings
-            .get_mut(&this_binding_id)
+            .binding_mut(this_binding_id)
             .ok_or(VmError::ScopeUnderflow)?;
         this_binding.value = initialized_this.clone();
         Ok(initialized_this)
@@ -4404,7 +4443,7 @@ impl Vm {
                         return Err(VmError::UnknownIdentifier("this".to_string()));
                     }
                 };
-                let this_value = match self.bindings.get(&this_binding_id) {
+                let this_value = match self.binding(this_binding_id) {
                     Some(binding) => binding.value.clone(),
                     None => {
                         self.restore_caller_state(
@@ -12766,7 +12805,7 @@ impl Vm {
 
             if has_value {
                 if let Some(binding_id) = mapped_binding_id {
-                    if let Some(binding) = self.bindings.get_mut(&binding_id) {
+                    if let Some(binding) = self.binding_mut(binding_id) {
                         binding.value = desc_value;
                     }
                 }
@@ -12774,7 +12813,7 @@ impl Vm {
             if remove_mapping {
                 if !has_get && !has_set && !has_value {
                     if let Some(binding_id) = mapped_binding_id {
-                        if let Some(binding) = self.bindings.get(&binding_id) {
+                        if let Some(binding) = self.binding(binding_id) {
                             target_object
                                 .properties
                                 .insert(property.clone(), binding.value.clone());
@@ -14352,16 +14391,28 @@ impl Vm {
     ) -> BindingId {
         let id = self.next_binding_id;
         self.next_binding_id += 1;
-        self.bindings.insert(
-            id,
-            Binding {
-                value,
-                mutable,
-                deletable,
-                sloppy_readonly_write_ignored,
-            },
-        );
+        self.bindings.push(Some(Binding {
+            value,
+            mutable,
+            deletable,
+            sloppy_readonly_write_ignored,
+        }));
         id
+    }
+
+    fn binding(&self, binding_id: BindingId) -> Option<&Binding> {
+        let index: usize = binding_id.try_into().ok()?;
+        self.bindings.get(index)?.as_ref()
+    }
+
+    fn binding_mut(&mut self, binding_id: BindingId) -> Option<&mut Binding> {
+        let index: usize = binding_id.try_into().ok()?;
+        self.bindings.get_mut(index)?.as_mut()
+    }
+
+    fn remove_binding_entry(&mut self, binding_id: BindingId) -> Option<Binding> {
+        let index: usize = binding_id.try_into().ok()?;
+        self.bindings.get_mut(index)?.take()
     }
 
     fn create_object_value(&mut self) -> JsValue {
@@ -14538,8 +14589,7 @@ impl Vm {
         let existing_binding_id = var_scope.borrow().get(name).copied();
         if let Some(binding_id) = existing_binding_id {
             let binding = self
-                .bindings
-                .get_mut(&binding_id)
+                .binding_mut(binding_id)
                 .ok_or(VmError::ScopeUnderflow)?;
             if !binding.mutable {
                 return Err(VmError::ImmutableBinding(name.to_string()));
@@ -14854,8 +14904,7 @@ impl Vm {
 
     fn delete_binding_reference(&mut self, binding_id: BindingId) -> bool {
         let deletable = self
-            .bindings
-            .get(&binding_id)
+            .binding(binding_id)
             .is_some_and(|binding| binding.deletable);
         if !deletable {
             return false;
@@ -14866,7 +14915,7 @@ impl Vm {
                 .retain(|_, current_id| *current_id != binding_id);
         }
         self.invalidate_binding_fast_path_cache();
-        self.bindings.remove(&binding_id);
+        self.remove_binding_entry(binding_id);
         true
     }
 
@@ -15643,7 +15692,7 @@ impl Vm {
             .get(&object_id)
             .and_then(|object| object.argument_mappings.get(property).copied());
         if let Some(binding_id) = mapped_binding {
-            if let Some(binding) = self.bindings.get(&binding_id) {
+            if let Some(binding) = self.binding(binding_id) {
                 return Ok(binding.value.clone());
             }
         }
@@ -16032,10 +16081,7 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match reference {
             IdentifierReference::Binding { name, binding_id } => {
-                let binding = self
-                    .bindings
-                    .get(binding_id)
-                    .ok_or(VmError::ScopeUnderflow)?;
+                let binding = self.binding(*binding_id).ok_or(VmError::ScopeUnderflow)?;
                 if matches!(binding.value, JsValue::Uninitialized) {
                     return Err(VmError::UnknownIdentifier(name.clone()));
                 }
@@ -16117,10 +16163,7 @@ impl Vm {
         match reference {
             IdentifierReference::Binding { name, binding_id } => {
                 let should_write = {
-                    let binding = self
-                        .bindings
-                        .get(&binding_id)
-                        .ok_or(VmError::ScopeUnderflow)?;
+                    let binding = self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                     if matches!(binding.value, JsValue::Uninitialized) {
                         return Err(VmError::UnknownIdentifier(name));
                     }
@@ -16137,8 +16180,7 @@ impl Vm {
                 self.maybe_set_inferred_function_name(&value, &name);
                 if should_write {
                     let binding = self
-                        .bindings
-                        .get_mut(&binding_id)
+                        .binding_mut(binding_id)
                         .ok_or(VmError::ScopeUnderflow)?;
                     binding.value = value.clone();
                     self.sync_global_property_from_binding(&name, binding_id)?;
@@ -16266,8 +16308,7 @@ impl Vm {
             return Ok(());
         };
         let value = self
-            .bindings
-            .get(&binding_id)
+            .binding(binding_id)
             .map(|binding| binding.value.clone())
             .unwrap_or(JsValue::Undefined);
         let already_defined = self
@@ -16314,8 +16355,7 @@ impl Vm {
             return Ok(());
         }
         let value = self
-            .bindings
-            .get(&binding_id)
+            .binding(binding_id)
             .map(|binding| binding.value.clone())
             .ok_or(VmError::ScopeUnderflow)?;
         let object = self
@@ -16345,8 +16385,7 @@ impl Vm {
             return Ok(());
         };
         let binding = self
-            .bindings
-            .get_mut(&binding_id)
+            .binding_mut(binding_id)
             .ok_or(VmError::ScopeUnderflow)?;
         if binding.mutable {
             binding.value = value.clone();
@@ -19133,7 +19172,7 @@ impl Vm {
             .get(&object_id)
             .and_then(|object| object.argument_mappings.get(property).copied());
         if let Some(binding_id) = mapped_binding {
-            if let Some(binding) = self.bindings.get(&binding_id) {
+            if let Some(binding) = self.binding(binding_id) {
                 return Ok(binding.value.clone());
             }
         }
@@ -19282,7 +19321,7 @@ impl Vm {
         }
 
         if let Some(binding_id) = mapped_binding_id {
-            if let Some(binding) = self.bindings.get_mut(&binding_id) {
+            if let Some(binding) = self.binding_mut(binding_id) {
                 binding.value = value.clone();
             }
         }
@@ -22912,7 +22951,7 @@ impl Vm {
 
     fn resolve_super_base_value(&self) -> Option<JsValue> {
         let binding_id = self.resolve_binding_id("this")?;
-        let this_value = self.bindings.get(&binding_id)?.value.clone();
+        let this_value = self.binding(binding_id)?.value.clone();
         match this_value {
             JsValue::Object(object_id) => {
                 let object = self.objects.get(&object_id)?;
@@ -27457,6 +27496,56 @@ dense + accessorRead + inherited + sparseRead + sparseLength + holeIsUndefined +
         assert!(fast_counters.dense_array_set_guard_hits > 0);
         assert!(fast_counters.dense_array_get_guard_misses > 0);
         assert!(fast_counters.dense_array_set_guard_misses > 0);
+    }
+
+    #[test]
+    fn execute_in_realm_persistent_preserves_global_bindings_between_runs() {
+        let source = r#"
+var counter = typeof counter === "undefined" ? 0 : counter;
+counter = counter + 1;
+counter;
+"#;
+        let script = parse_script(source).expect("script should parse");
+        let chunk = compile_script(&script);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+
+        let mut vm = Vm::default();
+        let first = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .expect("first run should execute");
+        let second = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .expect("second run should execute");
+
+        assert_eq!(first, JsValue::Number(1.0));
+        assert_eq!(second, JsValue::Number(2.0));
+    }
+
+    #[test]
+    fn execute_in_realm_keeps_clean_state_between_runs() {
+        let source = r#"
+var counter = typeof counter === "undefined" ? 0 : counter;
+counter = counter + 1;
+counter;
+"#;
+        let script = parse_script(source).expect("script should parse");
+        let chunk = compile_script(&script);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+
+        let mut vm = Vm::default();
+        let first = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("first run should execute");
+        let second = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("second run should execute");
+
+        assert_eq!(first, JsValue::Number(1.0));
+        assert_eq!(second, JsValue::Number(1.0));
     }
 
     #[test]
