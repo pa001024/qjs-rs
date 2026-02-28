@@ -2,18 +2,17 @@
 
 pub(crate) mod contract;
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context as BoaContext, Source};
 use builtins::install_baseline;
 use bytecode::compile_script;
 use contract::{
-    help_text, parse_cli_args, required_case_catalog, AggregateReport, BenchmarkReport,
-    CaseEngineResult, CaseReport, CliParseResult, ComparatorConfig, ComparatorTarget,
-    EngineAvailabilityStatus, EngineExecutionMetadata, EngineKind, EnvironmentInfo,
-    HotspotAttributionCounters, HotspotAttributionSnapshot, OptimizationMode, PerfTargetMetadata,
-    ReproducibilityMetadata, RequiredCaseDefinition, TimingMode, GUARD_CHECKSUM_MODE,
-    OPTIONAL_CLOSURE_COMPARATORS, PERF_TARGET_AUTHORITY_PROFILE, PERF_TARGET_AUTHORITY_TIMING_MODE,
-    PERF_TARGET_POLICY_ID, REQUIRED_CLOSURE_COMPARATORS, SCHEMA_VERSION,
+    AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult,
+    ComparatorConfig, ComparatorTarget, EngineAvailabilityStatus, EngineExecutionMetadata,
+    EngineKind, EnvironmentInfo, GUARD_CHECKSUM_MODE, HotspotAttributionCounters,
+    HotspotAttributionSnapshot, PerfTargetMetadata, ReproducibilityMetadata,
+    RequiredCaseDefinition, SCHEMA_VERSION, TimingMode, help_text, parse_cli_args,
+    required_case_catalog, test_support,
 };
 use parser::parse_script;
 use runtime::JsValue;
@@ -25,7 +24,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
-use vm::{perf::HotspotAttribution, Vm};
+use vm::{Vm, perf::HotspotAttribution};
 
 #[derive(Debug, Clone)]
 struct BenchCase {
@@ -112,20 +111,14 @@ fn extract_number(value: &JsValue) -> f64 {
 }
 
 pub(crate) fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -> f64 {
-    if let Some(number) = number {
-        number
-    } else if boolean.unwrap_or(false) {
-        1.0
-    } else {
-        0.0
-    }
+    test_support::guard_delta_from_number_or_bool(number, boolean)
 }
 
 pub(crate) fn timing_mode_for_engine(
-    _engine: EngineKind,
+    engine: EngineKind,
     run_timing_mode: TimingMode,
 ) -> TimingMode {
-    run_timing_mode
+    test_support::timing_mode_for_engine(engine, run_timing_mode)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -307,14 +300,12 @@ fn run_engine_case(
     let adapter_mode = timing_mode_for_engine(engine, timing_mode);
     match adapter_mode {
         TimingMode::EvalPerIteration => match engine {
-            EngineKind::QjsRs => {
-                run_qjs_rs_eval_per_iteration(
-                    script,
-                    iterations,
-                    hotspot_attribution_enabled,
-                    packet_c_enabled,
-                )
-            }
+            EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(
+                script,
+                iterations,
+                hotspot_attribution_enabled,
+                packet_c_enabled,
+            ),
             EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
             EngineKind::NodeJs => {
                 run_nodejs_eval_per_iteration(script, iterations, &comparators.node)
@@ -617,41 +608,15 @@ fn collect_environment(engine_metadata: &[EngineExecutionMetadata]) -> Environme
     }
 }
 
-fn host_fingerprint(environment: &EnvironmentInfo) -> String {
-    let host_name = env::var("COMPUTERNAME")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "unknown-host".to_string());
-    format!(
-        "{host_name}|{}|{}|{}",
-        environment.os, environment.arch, environment.cpu_parallelism
-    )
-}
-
 pub(crate) fn build_perf_target_metadata(
     output: &Path,
     environment: &EnvironmentInfo,
 ) -> PerfTargetMetadata {
-    let optimization_descriptor = contract::infer_optimization_descriptor(output);
-    PerfTargetMetadata {
-        policy_id: PERF_TARGET_POLICY_ID,
-        authoritative_run_profile: PERF_TARGET_AUTHORITY_PROFILE,
-        authoritative_timing_mode: PERF_TARGET_AUTHORITY_TIMING_MODE,
-        same_host_required: true,
-        host_fingerprint: host_fingerprint(environment),
-        optimization_mode: optimization_descriptor.mode,
-        optimization_tag: optimization_descriptor.tag,
-        packet_id: optimization_descriptor.packet_id,
-        required_comparators: REQUIRED_CLOSURE_COMPARATORS.to_vec(),
-        optional_comparators: OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
-    }
+    test_support::build_perf_target_metadata(output, environment)
 }
 
 pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool {
-    if let Some(override_value) = cli.hotspot_attribution_override {
-        return override_value;
-    }
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    matches!(descriptor.mode, OptimizationMode::Baseline | OptimizationMode::Packet)
+    test_support::infer_hotspot_attribution_default(cli)
 }
 
 pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
@@ -687,7 +652,9 @@ fn merge_hotspot_counters(
         .saturating_add(source.array_indexed_property_set);
 }
 
-fn aggregate_case_hotspot_attribution(samples: &[SampleMeasurement]) -> Option<HotspotAttributionCounters> {
+fn aggregate_case_hotspot_attribution(
+    samples: &[SampleMeasurement],
+) -> Option<HotspotAttributionCounters> {
     let mut aggregate = HotspotAttribution::default();
     let mut found = false;
     for sample in samples {
@@ -858,7 +825,7 @@ fn packet_c_output_path_enables_packet_c_runtime_toggle() {
     )
     .expect("cli args should parse")
     {
-        contract::CliParseResult::Run(cli) => cli,
+        contract::CliParseResult::Run(cli) => *cli,
         contract::CliParseResult::Help => panic!("expected parsed run config"),
     };
 
@@ -874,7 +841,7 @@ fn main() -> Result<()> {
             println!("{}", help_text());
             return Ok(());
         }
-        CliParseResult::Run(args) => args,
+        CliParseResult::Run(args) => *args,
     };
 
     let cases = benchmark_cases();

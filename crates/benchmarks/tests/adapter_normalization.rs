@@ -1,19 +1,23 @@
 use std::path::Path;
 
-#[path = "../src/main.rs"]
-mod benchmark_main;
+#[path = "../src/contract.rs"]
+#[allow(dead_code)]
+mod contract;
 
 #[test]
 fn adapter_normalization_timing_mode_contract_is_shared() {
-    let mode = benchmark_main::contract::TimingMode::EvalPerIteration;
-    for engine in benchmark_main::contract::EngineKind::all_required() {
-        assert_eq!(benchmark_main::timing_mode_for_engine(engine, mode), mode);
+    let mode = contract::TimingMode::EvalPerIteration;
+    for engine in contract::EngineKind::all_required() {
+        assert_eq!(
+            contract::test_support::timing_mode_for_engine(engine, mode),
+            mode
+        );
     }
 }
 
 #[test]
 fn adapter_normalization_command_resolution_honors_precedence() {
-    let parsed = benchmark_main::contract::parse_cli_args_with_env(
+    let parsed = contract::parse_cli_args_with_env(
         vec![
             "--node-command".to_string(),
             "node-from-cli".to_string(),
@@ -30,29 +34,20 @@ fn adapter_normalization_command_resolution_honors_precedence() {
             "--allow-missing-comparators".to_string(),
         ],
         &[
-            (benchmark_main::contract::ENV_NODE_COMMAND, "node-from-env"),
-            (benchmark_main::contract::ENV_NODE_PATH, "env-node-path"),
-            (
-                benchmark_main::contract::ENV_NODE_WORKDIR,
-                "env-node-workdir",
-            ),
-            (
-                benchmark_main::contract::ENV_QUICKJS_COMMAND,
-                "qjs-from-env",
-            ),
-            (benchmark_main::contract::ENV_QUICKJS_PATH, "env-qjs-path"),
-            (
-                benchmark_main::contract::ENV_QUICKJS_WORKDIR,
-                "env-qjs-workdir",
-            ),
-            (benchmark_main::contract::ENV_STRICT_COMPARATORS, "true"),
+            (contract::ENV_NODE_COMMAND, "node-from-env"),
+            (contract::ENV_NODE_PATH, "env-node-path"),
+            (contract::ENV_NODE_WORKDIR, "env-node-workdir"),
+            (contract::ENV_QUICKJS_COMMAND, "qjs-from-env"),
+            (contract::ENV_QUICKJS_PATH, "env-qjs-path"),
+            (contract::ENV_QUICKJS_WORKDIR, "env-qjs-workdir"),
+            (contract::ENV_STRICT_COMPARATORS, "true"),
         ],
     )
     .expect("cli args should parse");
 
     let cli = match parsed {
-        benchmark_main::contract::CliParseResult::Run(cli) => cli,
-        benchmark_main::contract::CliParseResult::Help => panic!("expected run args"),
+        contract::CliParseResult::Run(cli) => cli,
+        contract::CliParseResult::Help => panic!("expected run args"),
     };
 
     assert_eq!(cli.comparators.node.command, "node-from-cli");
@@ -94,23 +89,23 @@ fn adapter_normalization_command_resolution_honors_precedence() {
 
 #[test]
 fn adapter_normalization_reproducibility_metadata_is_complete() {
-    let metadata = benchmark_main::contract::ReproducibilityMetadata::for_run_with_engine_status(
-        benchmark_main::contract::RunProfile::LocalDev,
+    let metadata = contract::ReproducibilityMetadata::for_run_with_engine_status(
+        contract::RunProfile::LocalDev,
         Path::new("target/benchmarks/engine-comparison.local-dev.json"),
         false,
         vec![
-            benchmark_main::contract::EngineExecutionMetadata {
+            contract::EngineExecutionMetadata {
                 engine: "qjs-rs".to_string(),
-                status: benchmark_main::contract::EngineAvailabilityStatus::Available,
+                status: contract::EngineAvailabilityStatus::Available,
                 command: "in-process".to_string(),
                 path: None,
                 workdir: None,
                 version: Some("qjs-rs test".to_string()),
                 reason: None,
             },
-            benchmark_main::contract::EngineExecutionMetadata {
+            contract::EngineExecutionMetadata {
                 engine: "nodejs".to_string(),
-                status: benchmark_main::contract::EngineAvailabilityStatus::Available,
+                status: contract::EngineAvailabilityStatus::Available,
                 command: "node".to_string(),
                 path: Some("/usr/bin/node".to_string()),
                 workdir: Some("/tmp".to_string()),
@@ -139,9 +134,9 @@ fn adapter_normalization_reproducibility_metadata_is_complete() {
 
 #[test]
 fn adapter_normalization_checksum_fold_is_value_based() {
-    let checksum = benchmark_main::guard_delta_from_number_or_bool(Some(10.0), Some(false))
-        + benchmark_main::guard_delta_from_number_or_bool(None, Some(true))
-        + benchmark_main::guard_delta_from_number_or_bool(None, Some(false));
+    let checksum = contract::test_support::guard_delta_from_number_or_bool(Some(10.0), Some(false))
+        + contract::test_support::guard_delta_from_number_or_bool(None, Some(true))
+        + contract::test_support::guard_delta_from_number_or_bool(None, Some(false));
 
     assert_eq!(checksum, 11.0);
     assert_ne!(checksum, 3.0);

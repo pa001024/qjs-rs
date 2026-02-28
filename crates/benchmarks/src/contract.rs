@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -242,7 +242,7 @@ pub struct CliArgs {
 
 #[derive(Debug)]
 pub enum CliParseResult {
-    Run(CliArgs),
+    Run(Box<CliArgs>),
     Help,
 }
 
@@ -379,30 +379,34 @@ where
     config.validate()?;
 
     let node = resolve_comparator_target(
-        node_command,
-        node_path,
-        node_workdir,
-        ENV_NODE_COMMAND,
-        ENV_NODE_PATH,
-        ENV_NODE_WORKDIR,
-        "node",
+        ComparatorTargetResolver {
+            cli_command: node_command,
+            cli_path: node_path,
+            cli_workdir: node_workdir,
+            env_command_key: ENV_NODE_COMMAND,
+            env_path_key: ENV_NODE_PATH,
+            env_workdir_key: ENV_NODE_WORKDIR,
+            default_command: "node",
+        },
         &env_lookup,
     );
     let quickjs = resolve_comparator_target(
-        quickjs_command,
-        quickjs_path,
-        quickjs_workdir,
-        ENV_QUICKJS_COMMAND,
-        ENV_QUICKJS_PATH,
-        ENV_QUICKJS_WORKDIR,
-        "qjs",
+        ComparatorTargetResolver {
+            cli_command: quickjs_command,
+            cli_path: quickjs_path,
+            cli_workdir: quickjs_workdir,
+            env_command_key: ENV_QUICKJS_COMMAND,
+            env_path_key: ENV_QUICKJS_PATH,
+            env_workdir_key: ENV_QUICKJS_WORKDIR,
+            default_command: "qjs",
+        },
         &env_lookup,
     );
     let strict_external = strict_override
         .or_else(|| read_env_bool(ENV_STRICT_COMPARATORS, &env_lookup))
         .unwrap_or_else(|| run_profile.strict_comparators_default());
 
-    Ok(CliParseResult::Run(CliArgs {
+    Ok(CliParseResult::Run(Box::new(CliArgs {
         run_profile,
         output: output.unwrap_or_else(|| run_profile.default_output_path()),
         config,
@@ -413,7 +417,7 @@ where
             strict_external,
         },
         hotspot_attribution_override,
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -570,28 +574,102 @@ where
     })
 }
 
-fn resolve_comparator_target<F>(
+struct ComparatorTargetResolver<'a> {
     cli_command: Option<String>,
     cli_path: Option<PathBuf>,
     cli_workdir: Option<PathBuf>,
-    env_command_key: &str,
-    env_path_key: &str,
-    env_workdir_key: &str,
-    default_command: &str,
+    env_command_key: &'a str,
+    env_path_key: &'a str,
+    env_workdir_key: &'a str,
+    default_command: &'a str,
+}
+
+fn resolve_comparator_target<F>(
+    resolver: ComparatorTargetResolver<'_>,
     env_lookup: &F,
 ) -> ComparatorTarget
 where
     F: Fn(&str) -> Option<String>,
 {
-    let path = cli_path.or_else(|| env_lookup(env_path_key).map(PathBuf::from));
-    let command = cli_command
-        .or_else(|| env_lookup(env_command_key))
-        .unwrap_or_else(|| default_command.to_string());
-    let workdir = cli_workdir.or_else(|| env_lookup(env_workdir_key).map(PathBuf::from));
+    let path = resolver
+        .cli_path
+        .or_else(|| env_lookup(resolver.env_path_key).map(PathBuf::from));
+    let command = resolver
+        .cli_command
+        .or_else(|| env_lookup(resolver.env_command_key))
+        .unwrap_or_else(|| resolver.default_command.to_string());
+    let workdir = resolver
+        .cli_workdir
+        .or_else(|| env_lookup(resolver.env_workdir_key).map(PathBuf::from));
     ComparatorTarget {
         command,
         path,
         workdir,
+    }
+}
+
+pub mod test_support {
+    use super::{
+        CliArgs, EngineKind, EnvironmentInfo, OPTIONAL_CLOSURE_COMPARATORS, OptimizationMode,
+        PERF_TARGET_AUTHORITY_PROFILE, PERF_TARGET_AUTHORITY_TIMING_MODE, PERF_TARGET_POLICY_ID,
+        PerfTargetMetadata, REQUIRED_CLOSURE_COMPARATORS, TimingMode,
+        infer_optimization_descriptor,
+    };
+    use std::env;
+    use std::path::Path;
+
+    pub fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -> f64 {
+        if let Some(number) = number {
+            number
+        } else if boolean.unwrap_or(false) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    pub fn timing_mode_for_engine(_engine: EngineKind, run_timing_mode: TimingMode) -> TimingMode {
+        run_timing_mode
+    }
+
+    fn host_fingerprint(environment: &EnvironmentInfo) -> String {
+        let host_name = env::var("COMPUTERNAME")
+            .or_else(|_| env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown-host".to_string());
+        format!(
+            "{host_name}|{}|{}|{}",
+            environment.os, environment.arch, environment.cpu_parallelism
+        )
+    }
+
+    pub fn build_perf_target_metadata(
+        output: &Path,
+        environment: &EnvironmentInfo,
+    ) -> PerfTargetMetadata {
+        let optimization_descriptor = infer_optimization_descriptor(output);
+        PerfTargetMetadata {
+            policy_id: PERF_TARGET_POLICY_ID,
+            authoritative_run_profile: PERF_TARGET_AUTHORITY_PROFILE,
+            authoritative_timing_mode: PERF_TARGET_AUTHORITY_TIMING_MODE,
+            same_host_required: true,
+            host_fingerprint: host_fingerprint(environment),
+            optimization_mode: optimization_descriptor.mode,
+            optimization_tag: optimization_descriptor.tag,
+            packet_id: optimization_descriptor.packet_id,
+            required_comparators: REQUIRED_CLOSURE_COMPARATORS.to_vec(),
+            optional_comparators: OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
+        }
+    }
+
+    pub fn infer_hotspot_attribution_default(cli: &CliArgs) -> bool {
+        if let Some(override_value) = cli.hotspot_attribution_override {
+            return override_value;
+        }
+        let descriptor = infer_optimization_descriptor(&cli.output);
+        matches!(
+            descriptor.mode,
+            OptimizationMode::Baseline | OptimizationMode::Packet
+        )
     }
 }
 
