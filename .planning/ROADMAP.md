@@ -7,11 +7,11 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Milestones
 
 - ✅ **v1.0 milestone** — Phases 1-9 shipped on 2026-02-27. Archive: `.planning/milestones/v1.0-ROADMAP.md`
-- 🚧 **v1.1 milestone** — Performance Acceleration execution in progress (Plan 10-02 completed on 2026-02-28)
+- 🚧 **v1.1 milestone** — Performance Acceleration execution in progress (Phase 10 completed on 2026-02-28)
 
 ## Phases
 
-- [ ] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`)
+- [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
 - [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`)
 
@@ -59,4 +59,4 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 0/3 | 2/3 |
+| v1.1 | In Progress | 1/3 | 3/3 |
