@@ -43,6 +43,12 @@ jobs:
             --out-json target/verification-traceability.json \
             --out-md target/verification-traceability.md
 
+      - name: Benchmark Contract Gate (fast fixture path)
+        run: |
+          python .github/scripts/check_engine_benchmark_contract.py --self-test
+          python .github/scripts/check_engine_benchmark_contract.py \
+            --input .github/scripts/benchmark_contract/fixtures/benchmark-report-valid.json
+
       - name: Format
         run: cargo fmt --check
 
