@@ -10,6 +10,7 @@ fn run_script(source: &str, packet_a_enabled: bool) -> (JsValue, PacketAFastPath
     let chunk = compile_script(&script);
     let mut vm = Vm::default();
     vm.set_packet_a_fast_path_enabled(packet_a_enabled);
+    vm.set_packet_a_fast_path_metrics_enabled(true);
     let value = vm.execute(&chunk).expect("script should execute");
     (value, vm.packet_a_fast_path_counters())
 }

@@ -682,6 +682,7 @@ pub struct Vm {
     gc_reclaimed_objects_total: usize,
     hotspot_attribution: perf::HotspotAttributionState,
     packet_a_fast_path_disabled: bool,
+    packet_a_fast_path_metrics_enabled: bool,
     packet_a_fast_path: PacketAFastPathState,
 }
 
@@ -936,6 +937,14 @@ impl Vm {
 
     pub fn packet_a_fast_path_enabled(&self) -> bool {
         !self.packet_a_fast_path_disabled
+    }
+
+    pub fn set_packet_a_fast_path_metrics_enabled(&mut self, enabled: bool) {
+        self.packet_a_fast_path_metrics_enabled = enabled;
+    }
+
+    pub fn packet_a_fast_path_metrics_enabled(&self) -> bool {
+        self.packet_a_fast_path_metrics_enabled
     }
 
     pub fn reset_packet_a_fast_path_counters(&mut self) {
@@ -14432,6 +14441,30 @@ impl Vm {
         self.packet_a_fast_path.clear_binding_cache();
     }
 
+    fn record_packet_a_numeric_guard_hit(&mut self) {
+        if self.packet_a_fast_path_metrics_enabled() {
+            self.packet_a_fast_path.record_numeric_guard_hit();
+        }
+    }
+
+    fn record_packet_a_numeric_guard_miss(&mut self) {
+        if self.packet_a_fast_path_metrics_enabled() {
+            self.packet_a_fast_path.record_numeric_guard_miss();
+        }
+    }
+
+    fn record_packet_a_binding_guard_hit(&mut self) {
+        if self.packet_a_fast_path_metrics_enabled() {
+            self.packet_a_fast_path.record_binding_guard_hit();
+        }
+    }
+
+    fn record_packet_a_binding_guard_miss(&mut self) {
+        if self.packet_a_fast_path_metrics_enabled() {
+            self.packet_a_fast_path.record_binding_guard_miss();
+        }
+    }
+
     fn cached_binding_entry_is_valid(
         &self,
         name: &str,
@@ -14443,11 +14476,6 @@ impl Vm {
         };
         if scope_ref.borrow().get(name).copied() != Some(binding_id) {
             return false;
-        }
-        for scope_ref in self.scopes.iter().skip(scope_index.saturating_add(1)) {
-            if scope_ref.borrow().contains_key(name) {
-                return false;
-            }
         }
         true
     }
@@ -14462,22 +14490,25 @@ impl Vm {
     }
 
     fn resolve_binding_id_with_fast_path(&mut self, name: &str) -> Option<BindingId> {
-        if !self.packet_a_fast_path_enabled() || !self.with_objects.is_empty() {
-            if self.packet_a_fast_path_enabled() {
-                self.packet_a_fast_path.record_binding_guard_miss();
+        if !self.packet_a_fast_path_enabled()
+            || !self.packet_a_fast_path_metrics_enabled()
+            || !self.with_objects.is_empty()
+        {
+            if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
+                self.record_packet_a_binding_guard_miss();
             }
             return self.resolve_binding_id(name);
         }
 
         if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
             if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
-                self.packet_a_fast_path.record_binding_guard_hit();
+                self.record_packet_a_binding_guard_hit();
                 return Some(entry.binding_id);
             }
             self.packet_a_fast_path.remove_binding_cache_entry(name);
-            self.packet_a_fast_path.record_binding_guard_miss();
+            self.record_packet_a_binding_guard_miss();
         } else {
-            self.packet_a_fast_path.record_binding_guard_miss();
+            self.record_packet_a_binding_guard_miss();
         }
 
         if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
@@ -15283,8 +15314,8 @@ impl Vm {
             }
             return Ok(None);
         }
-        if self.packet_a_fast_path_enabled() {
-            self.packet_a_fast_path.record_binding_guard_miss();
+        if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
+            self.record_packet_a_binding_guard_miss();
         }
         self.invalidate_binding_fast_path_cache();
 
@@ -21048,10 +21079,10 @@ impl Vm {
         if self.packet_a_fast_path_enabled() {
             if let Some(number) = fast_path::try_numeric_binary(&left, &right, NumericBinaryOp::Add)
             {
-                self.packet_a_fast_path.record_numeric_guard_hit();
+                self.record_packet_a_numeric_guard_hit();
                 return Ok(JsValue::Number(number));
             }
-            self.packet_a_fast_path.record_numeric_guard_miss();
+            self.record_packet_a_numeric_guard_miss();
         }
         let left = self.primitive_for_add(left, realm, caller_strict)?;
         let right = self.primitive_for_add(right, realm, caller_strict)?;
@@ -21096,10 +21127,10 @@ impl Vm {
     ) -> Result<f64, VmError> {
         if self.packet_a_fast_path_enabled() {
             if let Some(number) = fast_path::fast_number_coercion_candidate(&value) {
-                self.packet_a_fast_path.record_numeric_guard_hit();
+                self.record_packet_a_numeric_guard_hit();
                 return Ok(number);
             }
-            self.packet_a_fast_path.record_numeric_guard_miss();
+            self.record_packet_a_numeric_guard_miss();
         }
         let primitive = self.primitive_for_numeric(value, realm, caller_strict)?;
         Ok(self.to_number(&primitive))
@@ -21136,10 +21167,10 @@ impl Vm {
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         if self.packet_a_fast_path_enabled() && let Some(fast_path_op) = fast_path_op {
             if let Some(number) = fast_path::try_numeric_binary(&left, &right, fast_path_op) {
-                self.packet_a_fast_path.record_numeric_guard_hit();
+                self.record_packet_a_numeric_guard_hit();
                 return Ok(number);
             }
-            self.packet_a_fast_path.record_numeric_guard_miss();
+            self.record_packet_a_numeric_guard_miss();
         }
         let left = self.coerce_number_runtime(left, realm, caller_strict)?;
         let right = self.coerce_number_runtime(right, realm, caller_strict)?;

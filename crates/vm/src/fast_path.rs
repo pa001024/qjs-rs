@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use runtime::JsValue;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub type BindingId = u64;
 
@@ -49,7 +49,7 @@ pub struct PacketAFastPathCounters {
 
 #[derive(Debug, Default)]
 pub struct PacketAFastPathState {
-    binding_cache: BTreeMap<String, BindingCacheEntry>,
+    binding_cache: HashMap<String, BindingCacheEntry>,
     counters: PacketAFastPathCounters,
 }
 
@@ -87,19 +87,19 @@ impl PacketAFastPathState {
     }
 
     pub fn record_numeric_guard_hit(&mut self) {
-        self.counters.numeric_guard_hits = self.counters.numeric_guard_hits.saturating_add(1);
+        self.counters.numeric_guard_hits = self.counters.numeric_guard_hits.wrapping_add(1);
     }
 
     pub fn record_numeric_guard_miss(&mut self) {
-        self.counters.numeric_guard_misses = self.counters.numeric_guard_misses.saturating_add(1);
+        self.counters.numeric_guard_misses = self.counters.numeric_guard_misses.wrapping_add(1);
     }
 
     pub fn record_binding_guard_hit(&mut self) {
-        self.counters.binding_guard_hits = self.counters.binding_guard_hits.saturating_add(1);
+        self.counters.binding_guard_hits = self.counters.binding_guard_hits.wrapping_add(1);
     }
 
     pub fn record_binding_guard_miss(&mut self) {
-        self.counters.binding_guard_misses = self.counters.binding_guard_misses.saturating_add(1);
+        self.counters.binding_guard_misses = self.counters.binding_guard_misses.wrapping_add(1);
     }
 
     pub fn counters(&self) -> PacketAFastPathCounters {
