@@ -1,0 +1,108 @@
+#![forbid(unsafe_code)]
+
+use runtime::JsValue;
+use std::collections::BTreeMap;
+
+pub type BindingId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+pub fn fast_number_coercion_candidate(value: &JsValue) -> Option<f64> {
+    match value {
+        JsValue::Number(number) => Some(*number),
+        JsValue::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+pub fn try_numeric_binary(value_left: &JsValue, value_right: &JsValue, op: NumericBinaryOp) -> Option<f64> {
+    let left = fast_number_coercion_candidate(value_left)?;
+    let right = fast_number_coercion_candidate(value_right)?;
+    let output = match op {
+        NumericBinaryOp::Add => left + right,
+        NumericBinaryOp::Sub => left - right,
+        NumericBinaryOp::Mul => left * right,
+        NumericBinaryOp::Div => left / right,
+    };
+    Some(output)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BindingCacheEntry {
+    pub scope_index: usize,
+    pub binding_id: BindingId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketAFastPathCounters {
+    pub numeric_guard_hits: u64,
+    pub numeric_guard_misses: u64,
+    pub binding_guard_hits: u64,
+    pub binding_guard_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketAFastPathState {
+    binding_cache: BTreeMap<String, BindingCacheEntry>,
+    counters: PacketAFastPathCounters,
+}
+
+impl PacketAFastPathState {
+    pub fn reset(&mut self) {
+        self.binding_cache.clear();
+        self.counters = PacketAFastPathCounters::default();
+    }
+
+    pub fn clear_binding_cache(&mut self) {
+        self.binding_cache.clear();
+    }
+
+    pub fn remove_binding_cache_entry(&mut self, name: &str) {
+        self.binding_cache.remove(name);
+    }
+
+    pub fn binding_cache_entry(&self, name: &str) -> Option<BindingCacheEntry> {
+        self.binding_cache.get(name).copied()
+    }
+
+    pub fn remember_binding_cache_entry(
+        &mut self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+    ) {
+        self.binding_cache.insert(
+            name.to_string(),
+            BindingCacheEntry {
+                scope_index,
+                binding_id,
+            },
+        );
+    }
+
+    pub fn record_numeric_guard_hit(&mut self) {
+        self.counters.numeric_guard_hits = self.counters.numeric_guard_hits.saturating_add(1);
+    }
+
+    pub fn record_numeric_guard_miss(&mut self) {
+        self.counters.numeric_guard_misses = self.counters.numeric_guard_misses.saturating_add(1);
+    }
+
+    pub fn record_binding_guard_hit(&mut self) {
+        self.counters.binding_guard_hits = self.counters.binding_guard_hits.saturating_add(1);
+    }
+
+    pub fn record_binding_guard_miss(&mut self) {
+        self.counters.binding_guard_misses = self.counters.binding_guard_misses.saturating_add(1);
+    }
+
+    pub fn counters(&self) -> PacketAFastPathCounters {
+        self.counters
+    }
+}

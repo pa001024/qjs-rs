@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod perf;
+mod fast_path;
+pub use fast_path::PacketAFastPathCounters;
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -20,6 +22,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use crate::fast_path::{NumericBinaryOp, PacketAFastPathState};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -677,6 +681,8 @@ pub struct Vm {
     gc_runtime_collections: usize,
     gc_reclaimed_objects_total: usize,
     hotspot_attribution: perf::HotspotAttributionState,
+    packet_a_fast_path_disabled: bool,
+    packet_a_fast_path: PacketAFastPathState,
 }
 
 impl Vm {
@@ -761,6 +767,7 @@ impl Vm {
         self.gc_boundary_collections = 0;
         self.gc_runtime_collections = 0;
         self.gc_reclaimed_objects_total = 0;
+        self.packet_a_fast_path.reset();
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -921,6 +928,22 @@ impl Vm {
 
     pub fn hotspot_attribution_snapshot(&self) -> Option<perf::HotspotAttribution> {
         self.hotspot_attribution.snapshot()
+    }
+
+    pub fn set_packet_a_fast_path_enabled(&mut self, enabled: bool) {
+        self.packet_a_fast_path_disabled = !enabled;
+    }
+
+    pub fn packet_a_fast_path_enabled(&self) -> bool {
+        !self.packet_a_fast_path_disabled
+    }
+
+    pub fn reset_packet_a_fast_path_counters(&mut self) {
+        self.packet_a_fast_path.reset();
+    }
+
+    pub fn packet_a_fast_path_counters(&self) -> PacketAFastPathCounters {
+        self.packet_a_fast_path.counters()
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -2055,6 +2078,7 @@ impl Vm {
     ) -> Result<ExecutionSignal, VmError> {
         let mut pc = 0usize;
         let check_interval = self.runtime_gc_check_interval.max(1);
+        self.invalidate_binding_fast_path_cache();
         while pc < code.len() {
             if self.runtime_gc_enabled && self.auto_gc_enabled {
                 self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
@@ -2152,6 +2176,7 @@ impl Vm {
                             self.eval_deletable_binding_depth > 0,
                         );
                         let scope_ref = self.current_var_scope_ref()?;
+                        self.invalidate_binding_fast_path_cache();
                         if scope_ref
                             .borrow_mut()
                             .insert(name.clone(), binding_id)
@@ -2189,6 +2214,7 @@ impl Vm {
                     } else {
                         let binding_id = self.create_binding(value, *mutable);
                         let scope_ref = self.current_scope_ref()?;
+                        self.invalidate_binding_fast_path_cache();
                         if scope_ref
                             .borrow_mut()
                             .insert(name.clone(), binding_id)
@@ -2222,6 +2248,7 @@ impl Vm {
                             self.eval_deletable_binding_depth > 0,
                         );
                         let scope_ref = self.current_scope_ref()?;
+                        self.invalidate_binding_fast_path_cache();
                         if scope_ref
                             .borrow_mut()
                             .insert(name.clone(), function_binding)
@@ -2236,7 +2263,7 @@ impl Vm {
                     self.hotspot_attribution.record_identifier_resolution();
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
-                    if let Some(binding_id) = self.resolve_binding_id(name) {
+                    if let Some(binding_id) = self.resolve_binding_id_with_fast_path(name) {
                         let mut wrote_binding = false;
                         {
                             let binding = self
@@ -2259,6 +2286,7 @@ impl Vm {
                             self.sync_global_property_from_binding(name, binding_id)?;
                         }
                     } else {
+                        self.packet_a_fast_path.remove_binding_cache_entry(name);
                         if strict {
                             return Err(VmError::UnknownIdentifier(name.clone()));
                         }
@@ -2276,6 +2304,7 @@ impl Vm {
                                 .cloned()
                                 .ok_or(VmError::ScopeUnderflow)?;
                             let binding_id = self.create_binding(value.clone(), true);
+                            self.invalidate_binding_fast_path_cache();
                             global_scope.borrow_mut().insert(name.clone(), binding_id);
                         }
                     }
@@ -2768,11 +2797,15 @@ impl Vm {
                         }
                     }
                 }
-                Opcode::EnterScope => self.scopes.push(Rc::new(RefCell::new(BTreeMap::new()))),
+                Opcode::EnterScope => {
+                    self.invalidate_binding_fast_path_cache();
+                    self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+                }
                 Opcode::ExitScope => {
                     if self.scopes.pop().is_none() || self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
                     }
+                    self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::EnterParamInitScope => {
                     if self.scopes.len() < 2 {
@@ -2783,6 +2816,7 @@ impl Vm {
                     if let Some(last_var_scope) = self.var_scope_stack.last_mut() {
                         *last_var_scope = self.scopes.len().saturating_sub(1);
                     }
+                    self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::ExitParamInitScope => {
                     let body_scope = self
@@ -2793,14 +2827,18 @@ impl Vm {
                     if let Some(last_var_scope) = self.var_scope_stack.last_mut() {
                         *last_var_scope = self.scopes.len().saturating_sub(1);
                     }
+                    self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::EnterWith => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     match self.with_object_from_value(value) {
-                        Ok(object) => self.with_objects.push(WithFrame {
-                            object,
-                            scope_depth: self.scopes.len(),
-                        }),
+                        Ok(object) => {
+                            self.with_objects.push(WithFrame {
+                                object,
+                                scope_depth: self.scopes.len(),
+                            });
+                            self.invalidate_binding_fast_path_cache();
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -2812,6 +2850,7 @@ impl Vm {
                     if self.with_objects.pop().is_none() {
                         return Err(VmError::ScopeUnderflow);
                     }
+                    self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::Add => {
                     self.hotspot_attribution.record_numeric_op();
@@ -2826,7 +2865,12 @@ impl Vm {
                 }
                 Opcode::Sub => {
                     self.hotspot_attribution.record_numeric_op();
-                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs - rhs) {
+                    match self.eval_numeric_binary(
+                        realm,
+                        strict,
+                        Some(NumericBinaryOp::Sub),
+                        |lhs, rhs| lhs - rhs,
+                    ) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -2837,7 +2881,12 @@ impl Vm {
                 }
                 Opcode::Mul => {
                     self.hotspot_attribution.record_numeric_op();
-                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs * rhs) {
+                    match self.eval_numeric_binary(
+                        realm,
+                        strict,
+                        Some(NumericBinaryOp::Mul),
+                        |lhs, rhs| lhs * rhs,
+                    ) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -2848,7 +2897,12 @@ impl Vm {
                 }
                 Opcode::Div => {
                     self.hotspot_attribution.record_numeric_op();
-                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs / rhs) {
+                    match self.eval_numeric_binary(
+                        realm,
+                        strict,
+                        Some(NumericBinaryOp::Div),
+                        |lhs, rhs| lhs / rhs,
+                    ) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -2859,7 +2913,7 @@ impl Vm {
                 }
                 Opcode::Mod => {
                     self.hotspot_attribution.record_numeric_op();
-                    match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs % rhs) {
+                    match self.eval_numeric_binary(realm, strict, None, |lhs, rhs| lhs % rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3016,7 +3070,7 @@ impl Vm {
                         .push(JsValue::String(self.typeof_value(&value).to_string()));
                 }
                 Opcode::TypeofIdentifier(name) => {
-                    let value = if let Some(binding_id) = self.resolve_binding_id(name) {
+                    let value = if let Some(binding_id) = self.resolve_binding_id_with_fast_path(name) {
                         let binding = self
                             .bindings
                             .get(&binding_id)
@@ -14374,13 +14428,70 @@ impl Vm {
         Ok(None)
     }
 
-    fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
-        for scope_ref in self.scopes.iter().rev() {
+    fn invalidate_binding_fast_path_cache(&mut self) {
+        self.packet_a_fast_path.clear_binding_cache();
+    }
+
+    fn cached_binding_entry_is_valid(
+        &self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+    ) -> bool {
+        let Some(scope_ref) = self.scopes.get(scope_index) else {
+            return false;
+        };
+        if scope_ref.borrow().get(name).copied() != Some(binding_id) {
+            return false;
+        }
+        for scope_ref in self.scopes.iter().skip(scope_index.saturating_add(1)) {
+            if scope_ref.borrow().contains_key(name) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
+        for (scope_index, scope_ref) in self.scopes.iter().enumerate().rev() {
             if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
-                return Some(binding_id);
+                return Some((scope_index, binding_id));
             }
         }
         None
+    }
+
+    fn resolve_binding_id_with_fast_path(&mut self, name: &str) -> Option<BindingId> {
+        if !self.packet_a_fast_path_enabled() || !self.with_objects.is_empty() {
+            if self.packet_a_fast_path_enabled() {
+                self.packet_a_fast_path.record_binding_guard_miss();
+            }
+            return self.resolve_binding_id(name);
+        }
+
+        if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
+            if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                self.packet_a_fast_path.record_binding_guard_hit();
+                return Some(entry.binding_id);
+            }
+            self.packet_a_fast_path.remove_binding_cache_entry(name);
+            self.packet_a_fast_path.record_binding_guard_miss();
+        } else {
+            self.packet_a_fast_path.record_binding_guard_miss();
+        }
+
+        if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+            self.packet_a_fast_path
+                .remember_binding_cache_entry(name, scope_index, binding_id);
+            return Some(binding_id);
+        }
+        self.packet_a_fast_path.remove_binding_cache_entry(name);
+        None
+    }
+
+    fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
+        self.resolve_binding_id_slow(name)
+            .map(|(_, binding_id)| binding_id)
     }
 
     fn delete_binding_reference(&mut self, binding_id: BindingId) -> bool {
@@ -14396,6 +14507,7 @@ impl Vm {
                 .borrow_mut()
                 .retain(|_, current_id| *current_id != binding_id);
         }
+        self.invalidate_binding_fast_path_cache();
         self.bindings.remove(&binding_id);
         true
     }
@@ -15162,12 +15274,27 @@ impl Vm {
         name: &str,
         realm: &Realm,
     ) -> Result<Option<IdentifierReference>, VmError> {
+        if self.with_objects.is_empty() {
+            if let Some(binding_id) = self.resolve_binding_id_with_fast_path(name) {
+                return Ok(Some(IdentifierReference::Binding {
+                    name: name.to_string(),
+                    binding_id,
+                }));
+            }
+            return Ok(None);
+        }
+        if self.packet_a_fast_path_enabled() {
+            self.packet_a_fast_path.record_binding_guard_miss();
+        }
+        self.invalidate_binding_fast_path_cache();
+
         let scope_count = self.scopes.len();
         for scope_index in (0..scope_count).rev() {
             let scope_depth_marker = scope_index + 1;
             if let Some(base) =
                 self.resolve_with_property_base_for_scope_depth(name, realm, scope_depth_marker)?
             {
+                self.packet_a_fast_path.remove_binding_cache_entry(name);
                 return Ok(Some(IdentifierReference::Property {
                     base,
                     property: name.to_string(),
@@ -15188,6 +15315,7 @@ impl Vm {
             }
         }
         if let Some(base) = self.resolve_with_property_base_for_scope_depth(name, realm, 0)? {
+            self.packet_a_fast_path.remove_binding_cache_entry(name);
             return Ok(Some(IdentifierReference::Property {
                 base,
                 property: name.to_string(),
@@ -15210,6 +15338,7 @@ impl Vm {
         if let Some(global_object_id) = self.global_object_id {
             let base = JsValue::Object(global_object_id);
             if self.has_property_on_receiver(&base, name, realm)? {
+                self.packet_a_fast_path.remove_binding_cache_entry(name);
                 return Ok(IdentifierReference::Property {
                     base,
                     property: name.to_string(),
@@ -15218,6 +15347,7 @@ impl Vm {
                 });
             }
         }
+        self.packet_a_fast_path.remove_binding_cache_entry(name);
         Ok(IdentifierReference::Unresolvable {
             name: name.to_string(),
         })
@@ -20915,6 +21045,14 @@ impl Vm {
     fn evaluate_add(&mut self, realm: &Realm, caller_strict: bool) -> Result<JsValue, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        if self.packet_a_fast_path_enabled() {
+            if let Some(number) = fast_path::try_numeric_binary(&left, &right, NumericBinaryOp::Add)
+            {
+                self.packet_a_fast_path.record_numeric_guard_hit();
+                return Ok(JsValue::Number(number));
+            }
+            self.packet_a_fast_path.record_numeric_guard_miss();
+        }
         let left = self.primitive_for_add(left, realm, caller_strict)?;
         let right = self.primitive_for_add(right, realm, caller_strict)?;
         Ok(match (left, right) {
@@ -20956,6 +21094,13 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<f64, VmError> {
+        if self.packet_a_fast_path_enabled() {
+            if let Some(number) = fast_path::fast_number_coercion_candidate(&value) {
+                self.packet_a_fast_path.record_numeric_guard_hit();
+                return Ok(number);
+            }
+            self.packet_a_fast_path.record_numeric_guard_miss();
+        }
         let primitive = self.primitive_for_numeric(value, realm, caller_strict)?;
         Ok(self.to_number(&primitive))
     }
@@ -20984,10 +21129,18 @@ impl Vm {
         &mut self,
         realm: &Realm,
         caller_strict: bool,
+        fast_path_op: Option<NumericBinaryOp>,
         op: impl FnOnce(f64, f64) -> f64,
     ) -> Result<f64, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+        if self.packet_a_fast_path_enabled() && let Some(fast_path_op) = fast_path_op {
+            if let Some(number) = fast_path::try_numeric_binary(&left, &right, fast_path_op) {
+                self.packet_a_fast_path.record_numeric_guard_hit();
+                return Ok(number);
+            }
+            self.packet_a_fast_path.record_numeric_guard_miss();
+        }
         let left = self.coerce_number_runtime(left, realm, caller_strict)?;
         let right = self.coerce_number_runtime(right, realm, caller_strict)?;
         Ok(op(left, right))
