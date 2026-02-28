@@ -21,7 +21,11 @@ pub fn fast_number_coercion_candidate(value: &JsValue) -> Option<f64> {
     }
 }
 
-pub fn try_numeric_binary(value_left: &JsValue, value_right: &JsValue, op: NumericBinaryOp) -> Option<f64> {
+pub fn try_numeric_binary(
+    value_left: &JsValue,
+    value_right: &JsValue,
+    op: NumericBinaryOp,
+) -> Option<f64> {
     let left = fast_number_coercion_candidate(value_left)?;
     let right = fast_number_coercion_candidate(value_right)?;
     let output = match op {
@@ -215,6 +219,83 @@ impl PacketCFastPathState {
     }
 
     pub fn counters(&self) -> PacketCFastPathCounters {
+        self.counters
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketDSlotCacheEntry {
+    pub scope_index: usize,
+    pub binding_id: BindingId,
+    pub scope_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketDFastPathCounters {
+    pub slot_guard_hits: u64,
+    pub slot_guard_misses: u64,
+    pub global_guard_hits: u64,
+    pub global_guard_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketDFastPathState {
+    slot_cache: HashMap<u32, PacketDSlotCacheEntry>,
+    counters: PacketDFastPathCounters,
+}
+
+impl PacketDFastPathState {
+    pub fn reset(&mut self) {
+        self.slot_cache.clear();
+        self.counters = PacketDFastPathCounters::default();
+    }
+
+    pub fn clear_slot_cache(&mut self) {
+        self.slot_cache.clear();
+    }
+
+    pub fn remove_slot_cache_entry(&mut self, slot: u32) {
+        self.slot_cache.remove(&slot);
+    }
+
+    pub fn slot_cache_entry(&self, slot: u32) -> Option<PacketDSlotCacheEntry> {
+        self.slot_cache.get(&slot).copied()
+    }
+
+    pub fn remember_slot_cache_entry(
+        &mut self,
+        slot: u32,
+        scope_index: usize,
+        binding_id: BindingId,
+        scope_generation: u64,
+    ) {
+        self.slot_cache.insert(
+            slot,
+            PacketDSlotCacheEntry {
+                scope_index,
+                binding_id,
+                scope_generation,
+            },
+        );
+    }
+
+    pub fn record_slot_guard_hit(&mut self) {
+        self.counters.slot_guard_hits = self.counters.slot_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_slot_guard_miss(&mut self) {
+        self.counters.slot_guard_misses = self.counters.slot_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_global_guard_hit(&mut self) {
+        self.counters.global_guard_hits = self.counters.global_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_global_guard_miss(&mut self) {
+        self.counters.global_guard_misses = self.counters.global_guard_misses.wrapping_add(1);
+    }
+
+    pub fn counters(&self) -> PacketDFastPathCounters {
         self.counters
     }
 }

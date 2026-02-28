@@ -5,7 +5,7 @@ use ast::{
     ModuleExport, ModuleImport, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase,
     UnaryOp, UpdateTarget, VariableDeclaration,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -137,6 +137,25 @@ pub enum Opcode {
     Halt,
 }
 
+pub type IdentifierSlot = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IdentifierOpcodeFamily {
+    Load,
+    Store,
+    ResolveReference,
+    Delete,
+    Typeof,
+    Call,
+    CallWithSpread,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentifierSlotMetadata {
+    pub slot: IdentifierSlot,
+    pub family: IdentifierOpcodeFamily,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompiledFunction {
     pub name: String,
@@ -235,6 +254,45 @@ pub fn compile_module(module: &Module) -> CompiledModule {
         chunk: compile_script(&module.body),
         imports: module.imports.clone(),
         exports: module.exports.clone(),
+    }
+}
+
+pub fn build_identifier_slot_metadata(code: &[Opcode]) -> Vec<Option<IdentifierSlotMetadata>> {
+    let mut slots = vec![None; code.len()];
+    let mut slots_by_key: BTreeMap<(IdentifierOpcodeFamily, String), IdentifierSlot> =
+        BTreeMap::new();
+    let mut next_slot: IdentifierSlot = 0;
+
+    for (index, opcode) in code.iter().enumerate() {
+        let Some((family, name)) = identifier_slot_key(opcode) else {
+            continue;
+        };
+        let key = (family, name.to_string());
+        let slot = *slots_by_key.entry(key).or_insert_with(|| {
+            let slot = next_slot;
+            next_slot = next_slot.wrapping_add(1);
+            slot
+        });
+        slots[index] = Some(IdentifierSlotMetadata { slot, family });
+    }
+
+    slots
+}
+
+fn identifier_slot_key(opcode: &Opcode) -> Option<(IdentifierOpcodeFamily, &str)> {
+    match opcode {
+        Opcode::LoadIdentifier(name) => Some((IdentifierOpcodeFamily::Load, name.as_str())),
+        Opcode::StoreVariable(name) => Some((IdentifierOpcodeFamily::Store, name.as_str())),
+        Opcode::ResolveIdentifierReference(name) => {
+            Some((IdentifierOpcodeFamily::ResolveReference, name.as_str()))
+        }
+        Opcode::DeleteIdentifier(name) => Some((IdentifierOpcodeFamily::Delete, name.as_str())),
+        Opcode::TypeofIdentifier(name) => Some((IdentifierOpcodeFamily::Typeof, name.as_str())),
+        Opcode::CallIdentifier { name, .. } => Some((IdentifierOpcodeFamily::Call, name.as_str())),
+        Opcode::CallIdentifierWithSpread { name, .. } => {
+            Some((IdentifierOpcodeFamily::CallWithSpread, name.as_str()))
+        }
+        _ => None,
     }
 }
 
@@ -2396,7 +2454,10 @@ impl Compiler {
 
 #[cfg(test)]
 mod tests {
-    use super::{Chunk, CompiledFunction, Opcode, compile_expression, compile_script};
+    use super::{
+        Chunk, CompiledFunction, IdentifierOpcodeFamily, Opcode, build_identifier_slot_metadata,
+        compile_expression, compile_script,
+    };
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
@@ -2429,6 +2490,49 @@ mod tests {
         };
 
         assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn identifier_slot_metadata_reuses_slot_per_name_and_family() {
+        let code = vec![
+            Opcode::LoadIdentifier("value".to_string()),
+            Opcode::LoadIdentifier("value".to_string()),
+            Opcode::LoadIdentifier("other".to_string()),
+        ];
+        let metadata = build_identifier_slot_metadata(&code);
+
+        let load_a = metadata[0].expect("slot metadata should exist");
+        let load_b = metadata[1].expect("slot metadata should exist");
+        let load_other = metadata[2].expect("slot metadata should exist");
+
+        assert_eq!(load_a.family, IdentifierOpcodeFamily::Load);
+        assert_eq!(load_b.family, IdentifierOpcodeFamily::Load);
+        assert_eq!(load_a.slot, load_b.slot);
+        assert_ne!(load_a.slot, load_other.slot);
+    }
+
+    #[test]
+    fn identifier_slot_metadata_separates_identifier_families() {
+        let code = vec![
+            Opcode::LoadIdentifier("x".to_string()),
+            Opcode::StoreVariable("x".to_string()),
+            Opcode::CallIdentifier {
+                name: "x".to_string(),
+                arg_count: 0,
+            },
+        ];
+        let metadata = build_identifier_slot_metadata(&code);
+
+        let load_slot = metadata[0].expect("load slot should exist");
+        let store_slot = metadata[1].expect("store slot should exist");
+        let call_slot = metadata[2].expect("call slot should exist");
+
+        assert_eq!(load_slot.family, IdentifierOpcodeFamily::Load);
+        assert_eq!(store_slot.family, IdentifierOpcodeFamily::Store);
+        assert_eq!(call_slot.family, IdentifierOpcodeFamily::Call);
+        assert_ne!(load_slot.slot, store_slot.slot);
+        assert_ne!(store_slot.slot, call_slot.slot);
+        assert_ne!(load_slot.slot, call_slot.slot);
     }
 
     #[test]
