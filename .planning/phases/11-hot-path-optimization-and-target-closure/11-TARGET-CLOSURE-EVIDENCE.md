@@ -119,4 +119,60 @@ Interpretation:
 
 Closure remains **open**. No green governance-bundle verdict is recorded for this run.
 
+## 8) Plan 11-07 authoritative governance + packet-d closure bundle (2026-02-28)
+
+### 8.1 Single authoritative machine-readable provenance artifact
+
+- Bundle path: `target/benchmarks/phase11-closure-bundle.json`
+- `timestamp_utc`: `2026-02-28T13:30:03Z`
+- Packet-D artifact path: `target/benchmarks/engine-comparison.local-dev.packet-d.json`
+- Packet-D artifact hash/sha256: `5c86d5ad74fa925e2978be29489adfd4d2fe9d486685fbce9b8b52b595f41667`
+
+### 8.2 Ordered command transcript from authoritative run
+
+1. `cargo run -p benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-d.json --allow-missing-comparators` (`rc=0`)
+2. `cargo fmt --check` (`rc=0`)
+3. `cargo clippy --all-targets -- -D warnings` (`rc=101`)
+4. `cargo test` (`rc=0`)
+5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-d.json` (`rc=0`)
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`)
+
+Exact command outputs captured from the run:
+
+- Clippy failure:
+
+  ```text
+  error: this function has too many arguments (8/7)
+     --> crates\benchmarks\src\main.rs:293:1
+  ```
+
+- Contract checker output:
+
+  ```text
+  benchmark contract check passed (target/benchmarks/engine-comparison.local-dev.packet-d.json)
+  ```
+
+- PERF-03 checker output:
+
+  ```text
+  perf target check failed
+  - aggregate.mean_ms_per_engine: require-qjs-lte-boa failed: candidate qjs-rs 1390.811014 > boa-engine 181.287246
+  ```
+
+### 8.3 Packet-d aggregate means (`local-dev` candidate)
+
+- `qjs-rs`: `1390.811014 ms`
+- `boa-engine`: `181.287246 ms`
+- `nodejs`: `2.211136 ms`
+- `qjs-rs / boa-engine`: `7.6728x`
+
+### 8.4 Final gate verdict (authoritative 11-07 bundle)
+
+- Governance Gate Bundle (`fmt` + `clippy` + `test`): **RED**
+  - `fmt=0`, `clippy=101`, `test=0`
+- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED**
+  - `qjs-rs 1390.811014 > boa-engine 181.287246`
+
+Phase 11 closure remains **open** because governance and PERF-03 are not jointly green in the same authoritative run artifact.
+
 
