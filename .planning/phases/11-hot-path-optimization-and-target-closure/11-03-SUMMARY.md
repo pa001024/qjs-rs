@@ -57,9 +57,10 @@ completed: 2026-02-28
 
 ## Task Commits
 
-1. **Task 1: Add guarded dense-array index fast path with safe fallback** - `2bef122` (perf)
+1. **Task 1: Add guarded dense-array index fast path with safe fallback** - `2bef122` (perf)  
+   Follow-up no-behavior-change clippy normalization: `df8241e` (perf)
 2. **Task 2: Prove packet-B semantic parity under optimization toggles** - `9449132` (test)
-3. **Task 3: Publish closure evidence bundle + tracking/docs updates** - _recorded in this plan-metadata/docs commit_
+3. **Task 3: Publish closure evidence bundle + tracking/docs updates** - `490f4b0` (docs)
 
 ## Files Created/Modified
 
