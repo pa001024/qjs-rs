@@ -1,0 +1,299 @@
+{
+  "schema_version": "bench.v1",
+  "generated_at_utc": "2026-02-28T00:00:00Z",
+  "run_profile": "local-dev",
+  "timing_mode": "eval-per-iteration",
+  "config": {
+    "iterations": 200,
+    "samples": 7,
+    "warmup_iterations": 3
+  },
+  "reproducibility": {
+    "required_engines": [
+      "qjs-rs",
+      "boa-engine",
+      "nodejs",
+      "quickjs-c"
+    ],
+    "required_case_ids": [
+      "arith-loop",
+      "fib-iterative",
+      "array-sum",
+      "json-roundtrip"
+    ],
+    "output_policy": {
+      "default_path": "target/benchmarks/engine-comparison.local-dev.json",
+      "effective_path": "target/benchmarks/engine-comparison.local-dev.json"
+    },
+    "comparator_strict_mode": false,
+    "engine_status": [
+      {
+        "engine": "qjs-rs",
+        "status": "available",
+        "command": "in-process",
+        "version": "qjs-rs 0.1.0"
+      },
+      {
+        "engine": "boa-engine",
+        "status": "available",
+        "command": "in-process",
+        "version": "boa-engine (in-process)"
+      },
+      {
+        "engine": "nodejs",
+        "status": "available",
+        "command": "node",
+        "path": "/usr/bin/node",
+        "workdir": "/workdir",
+        "version": "v24.0.0"
+      },
+      {
+        "engine": "quickjs-c",
+        "status": "missing",
+        "command": "qjs",
+        "reason": "binary not found in PATH"
+      }
+    ]
+  },
+  "environment": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpu_parallelism": 8,
+    "rustc": "rustc 1.93.1",
+    "node": "v24.0.0",
+    "quickjs_c": "unavailable"
+  },
+  "cases": [
+    {
+      "id": "arith-loop",
+      "title": "Arithmetic Loop",
+      "description": "integer arithmetic in a hot for-loop",
+      "engines": {
+        "qjs-rs": {
+          "sample_ms": [
+            18.2,
+            18.1,
+            18.4
+          ],
+          "mean_ms": 18.233,
+          "median_ms": 18.2,
+          "min_ms": 18.1,
+          "max_ms": 18.4,
+          "stddev_ms": 0.124,
+          "throughput_ops_per_sec": 10972.7,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 100.0,
+          "sample_guard_checksums": [
+            100.0,
+            100.0,
+            100.0
+          ],
+          "mean_guard_checksum": 100.0,
+          "guard_checksum_consistent": true
+        },
+        "boa-engine": {
+          "sample_ms": [
+            12.0,
+            12.2,
+            12.1
+          ],
+          "mean_ms": 12.1,
+          "median_ms": 12.1,
+          "min_ms": 12.0,
+          "max_ms": 12.2,
+          "stddev_ms": 0.082,
+          "throughput_ops_per_sec": 16528.9,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 100.0,
+          "sample_guard_checksums": [
+            100.0,
+            100.0,
+            100.0
+          ],
+          "mean_guard_checksum": 100.0,
+          "guard_checksum_consistent": true
+        },
+        "nodejs": {
+          "sample_ms": [
+            2.1,
+            2.2,
+            2.0
+          ],
+          "mean_ms": 2.1,
+          "median_ms": 2.1,
+          "min_ms": 2.0,
+          "max_ms": 2.2,
+          "stddev_ms": 0.082,
+          "throughput_ops_per_sec": 95238.1,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 100.0,
+          "sample_guard_checksums": [
+            100.0,
+            100.0,
+            100.0
+          ],
+          "mean_guard_checksum": 100.0,
+          "guard_checksum_consistent": true
+        }
+      }
+    },
+    {
+      "id": "fib-iterative",
+      "title": "Iterative Fibonacci",
+      "description": "function call + loop + assignments",
+      "engines": {
+        "qjs-rs": {
+          "sample_ms": [
+            9.8,
+            9.9,
+            10.0
+          ],
+          "mean_ms": 9.9,
+          "median_ms": 9.9,
+          "min_ms": 9.8,
+          "max_ms": 10.0,
+          "stddev_ms": 0.082,
+          "throughput_ops_per_sec": 20202.0,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 42.0,
+          "sample_guard_checksums": [
+            42.0,
+            42.0,
+            42.0
+          ],
+          "mean_guard_checksum": 42.0,
+          "guard_checksum_consistent": true
+        },
+        "boa-engine": {
+          "sample_ms": [
+            6.2,
+            6.4,
+            6.3
+          ],
+          "mean_ms": 6.3,
+          "median_ms": 6.3,
+          "min_ms": 6.2,
+          "max_ms": 6.4,
+          "stddev_ms": 0.082,
+          "throughput_ops_per_sec": 31746.0,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 42.0,
+          "sample_guard_checksums": [
+            42.0,
+            42.0,
+            42.0
+          ],
+          "mean_guard_checksum": 42.0,
+          "guard_checksum_consistent": true
+        },
+        "nodejs": {
+          "sample_ms": [
+            1.1,
+            1.2,
+            1.1
+          ],
+          "mean_ms": 1.133,
+          "median_ms": 1.1,
+          "min_ms": 1.1,
+          "max_ms": 1.2,
+          "stddev_ms": 0.047,
+          "throughput_ops_per_sec": 176522.5,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 42.0,
+          "sample_guard_checksums": [
+            42.0,
+            42.0,
+            42.0
+          ],
+          "mean_guard_checksum": 42.0,
+          "guard_checksum_consistent": true
+        }
+      }
+    },
+    {
+      "id": "array-sum",
+      "title": "Array Build and Sum",
+      "description": "array writes + reads + accumulation",
+      "engines": {
+        "qjs-rs": {
+          "sample_ms": [
+            31.0,
+            30.8,
+            31.2
+          ],
+          "mean_ms": 31.0,
+          "median_ms": 31.0,
+          "min_ms": 30.8,
+          "max_ms": 31.2,
+          "stddev_ms": 0.163,
+          "throughput_ops_per_sec": 6451.6,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 200.0,
+          "sample_guard_checksums": [
+            200.0,
+            200.0,
+            200.0
+          ],
+          "mean_guard_checksum": 200.0,
+          "guard_checksum_consistent": true
+        },
+        "boa-engine": {
+          "sample_ms": [
+            24.0,
+            23.8,
+            24.2
+          ],
+          "mean_ms": 24.0,
+          "median_ms": 24.0,
+          "min_ms": 23.8,
+          "max_ms": 24.2,
+          "stddev_ms": 0.163,
+          "throughput_ops_per_sec": 8333.3,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 200.0,
+          "sample_guard_checksums": [
+            200.0,
+            200.0,
+            200.0
+          ],
+          "mean_guard_checksum": 200.0,
+          "guard_checksum_consistent": true
+        },
+        "nodejs": {
+          "sample_ms": [
+            3.5,
+            3.6,
+            3.4
+          ],
+          "mean_ms": 3.5,
+          "median_ms": 3.5,
+          "min_ms": 3.4,
+          "max_ms": 3.6,
+          "stddev_ms": 0.082,
+          "throughput_ops_per_sec": 57142.9,
+          "guard_checksum_mode": "value-checksum-v1",
+          "warmup_guard_checksum": 200.0,
+          "sample_guard_checksums": [
+            200.0,
+            200.0,
+            200.0
+          ],
+          "mean_guard_checksum": 200.0,
+          "guard_checksum_consistent": true
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "mean_ms_per_engine": {
+      "qjs-rs": 19.711,
+      "boa-engine": 14.133,
+      "nodejs": 2.244
+    },
+    "relative_to_qjs_rs": {
+      "qjs-rs": 1.0,
+      "boa-engine": 1.394,
+      "nodejs": 8.784
+    }
+  }
+}
