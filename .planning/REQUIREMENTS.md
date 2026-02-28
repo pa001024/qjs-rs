@@ -13,9 +13,9 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration.
-- [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence.
-- [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI).
+- [x] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration.
+- [x] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence.
+- [x] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI).
 
 ### Correctness and Governance
 
@@ -43,9 +43,9 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Planned |
-| PERF-04 | Phase 11 | Planned |
-| PERF-05 | Phase 11 | Planned |
+| PERF-03 | Phase 11 | Completed |
+| PERF-04 | Phase 11 | Completed |
+| PERF-05 | Phase 11 | Completed |
 | TST-05 | Phase 12 | Planned |
 | TST-06 | Phase 12 | Planned |
 
@@ -54,7 +54,7 @@
 - Mapped to phases (exactly once): 7/7 (100%)
 - Unmapped: 0 ✓
 - Multi-mapped: 0 ✓
-- Checked off: 2/7
+- Checked off: 5/7
 
 ---
 *Requirements defined: 2026-02-27 for milestone v1.1*

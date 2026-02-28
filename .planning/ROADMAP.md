@@ -31,9 +31,9 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 Plans:
-- [ ] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact.
+- [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [ ] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence.
 - [ ] 11-03-PLAN.md — Land packet-B array/property optimizations and run final target-closure evidence bundle.
 **Success Criteria** (what must be TRUE):
@@ -64,4 +64,4 @@ Plans:
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 1/3 | 3/3 |
+| v1.1 | In Progress | 1/3 | 4/6 |
