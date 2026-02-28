@@ -82,6 +82,37 @@ python .github/scripts/check_perf_target.py \
 If the final `check_perf_target.py --require-qjs-lte-boa` command fails, Phase 11 PERF-03
 closure is **not** satisfied and the run must be recorded as a non-closure candidate.
 
+### Phase 11 packet-C closure candidate workflow
+
+`packet-c` artifacts automatically enable the packet-C runtime toggle for `qjs-rs` runs
+(`packet_c_enabled=true` in harness logs) while preserving the same contract/profile policy.
+
+```bash
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-c.json \
+  --allow-missing-comparators
+
+cargo run -p benchmarks --release -- \
+  --profile ci-linux \
+  --output target/benchmarks/engine-comparison.ci-linux.packet-c.json \
+  --allow-missing-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-c.json
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.ci-linux.packet-c.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json \
+  --require-qjs-lte-boa
+```
+
+If the final checker command fails, PERF-03 remains open and packet-C must be documented
+as evidence-only (no closure claim).
+
 ## CI Baseline Workflow (`ci-linux`)
 
 `ci-linux` defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`, strict comparators.
