@@ -87,3 +87,36 @@ Interpretation:
 - PERF-05 maintainability boundary: ✅ complete
 - PERF-03 closure (`qjs-rs <= boa-engine` on authoritative profile): ❌ not yet achieved in packet-B candidate
 
+## 7) Plan 11-05 governance + packet-c closure rerun (2026-02-28)
+
+### 7.1 Packet-c artifact refresh
+
+- Regenerated artifact: `target/benchmarks/engine-comparison.local-dev.packet-c.json`
+- Aggregate means (`local-dev`):
+  - `qjs-rs`: `1678.421964 ms`
+  - `boa-engine`: `189.600068 ms`
+  - `qjs-rs/boa-engine`: `8.8524x`
+
+### 7.2 Final command transcript (single sequence)
+
+1. `cargo run -p benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-c.json --allow-missing-comparators` ✅
+2. `cargo fmt --check` ❌
+3. `cargo clippy --all-targets -- -D warnings` ✅
+4. `cargo test` ✅
+5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-c.json` ✅
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json --require-qjs-lte-boa` ❌
+
+### 7.3 Gate verdict
+
+- Governance gate bundle (`fmt` + `clippy` + `test`): ❌ **RED** (`cargo fmt --check` failed)
+- PERF-03 authoritative closure gate: ❌ **FAILED**
+  - `candidate qjs-rs 1678.421964 > boa-engine 189.600068`
+
+### 7.4 Blocker summary
+
+1. Workspace formatting drift remains in VM files (outside this plan's ownership set), so the governance bundle is not fully green.
+2. Packet-c aggregate performance still fails the locked PERF-03 requirement (`qjs-rs <= boa-engine`).
+
+Closure remains **open**. No green governance-bundle verdict is recorded for this run.
+
+

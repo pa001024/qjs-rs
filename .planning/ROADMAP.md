@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [x] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (completed 2026-02-28; PERF-03 closure gate remains open after packet-c evidence)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (open gap as of 2026-02-28: packet-c perf target + governance bundle not jointly green)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`)
 
 ## Phase Details
@@ -31,12 +31,13 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 4/4 plans executed
+**Plans:** 5/5 plans executed
 Plans:
 - [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [x] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence. (completed 2026-02-28)
 - [x] 11-03-PLAN.md — Land packet-B array/property optimizations and run final target-closure evidence bundle. (completed 2026-02-28; see `11-TARGET-CLOSURE-EVIDENCE.md`)
 - [x] 11-04-PLAN.md — Land packet-C identifier/global lookup fast path, parity suite, and closure rerun evidence bundle. (completed 2026-02-28; see `11-PACKET-C-EVIDENCE.md`)
+- [x] 11-05-PLAN.md — Close governance/test debt and rerun authoritative closure bundle with packet-c artifact refresh. (completed 2026-02-28; closure remains open, see `11-TARGET-CLOSURE-EVIDENCE.md`)
 **Success Criteria** (what must be TRUE):
   1. Aggregate mean latency on the tracked suite is no worse than `boa-engine` under the same host and run configuration.
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
@@ -65,4 +66,4 @@ Plans:
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 2/3 | 7/7 |
+| v1.1 | In Progress | 2/3 | 8/8 |
