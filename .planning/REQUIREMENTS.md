@@ -13,7 +13,7 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration. _(Open gap: packet-c candidate still fails authoritative checker as of 2026-02-28.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration. _(Open gap: packet-d candidate still fails authoritative checker as of 2026-02-28.)_
 - [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Open closure state: packet evidence exists, but Phase 11 closure bundle is not fully green.)_
 - [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Open closure state: maintainability checks exist, but governance + PERF-03 bundle remains open.)_
 
@@ -43,7 +43,7 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Open (gap: packet-c perf target + governance bundle not jointly green) |
+| PERF-03 | Phase 11 | Open (gap: packet-d perf target + governance bundle not jointly green) |
 | PERF-04 | Phase 11 | Open (packet evidence landed; awaiting closed bundle) |
 | PERF-05 | Phase 11 | Open (maintainability evidence landed; awaiting closed bundle) |
 | TST-05 | Phase 12 | Planned |

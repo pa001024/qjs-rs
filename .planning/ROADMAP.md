@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (reopened gap queue as of 2026-02-28: `11-06` packet-d closure candidate + `11-07` final governance/traceability sync)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (final gap step as of 2026-02-28: `11-07` authoritative governance/traceability sync after completed packet-d candidate `11-06`)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -31,14 +31,14 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 5/7 plans completed (11-06 and 11-07 queued for gap closure)
+**Plans:** 6/7 plans completed (`11-07` remains queued for final gap closure)
 Plans:
 - [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [x] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence. (completed 2026-02-28)
 - [x] 11-03-PLAN.md — Land packet-B array/property optimizations and run final target-closure evidence bundle. (completed 2026-02-28; see `11-TARGET-CLOSURE-EVIDENCE.md`)
 - [x] 11-04-PLAN.md — Land packet-C identifier/global lookup fast path, parity suite, and closure rerun evidence bundle. (completed 2026-02-28; see `11-PACKET-C-EVIDENCE.md`)
 - [x] 11-05-PLAN.md — Close governance/test debt and rerun authoritative closure bundle with packet-c artifact refresh. (completed 2026-02-28; closure remains open, see `11-TARGET-CLOSURE-EVIDENCE.md`)
-- [ ] 11-06-PLAN.md — Build packet-D identifier-slot cache closure candidate and generate packet-d evidence for PERF-03 rerun. (queued gap-closure execution)
+- [x] 11-06-PLAN.md — Build packet-D identifier-slot cache closure candidate and generate packet-d evidence for PERF-03 rerun. (completed 2026-02-28; PERF-03 still open, see `11-PACKET-D-EVIDENCE.md`)
 - [ ] 11-07-PLAN.md — Execute final governance + PERF-03 authoritative bundle and synchronize traceability docs from single-run provenance. (queued gap-closure execution)
 **Success Criteria** (what must be TRUE):
   1. Aggregate mean latency on the tracked suite is no worse than `boa-engine` under the same host and run configuration.
@@ -68,4 +68,4 @@ Plans:
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 1/3 | 8/10 |
+| v1.1 | In Progress | 1/3 | 9/10 |
