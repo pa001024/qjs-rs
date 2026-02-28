@@ -14977,11 +14977,9 @@ impl Vm {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
-        if !guard.has_own_data_property {
-            if index != guard.current_length || !guard.extensible {
-                self.record_packet_b_dense_array_set_guard_miss();
-                return Ok(false);
-            }
+        if !guard.has_own_data_property && (index != guard.current_length || !guard.extensible) {
+            self.record_packet_b_dense_array_set_guard_miss();
+            return Ok(false);
         }
 
         let object = self
