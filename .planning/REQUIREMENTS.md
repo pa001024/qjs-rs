@@ -8,8 +8,8 @@
 
 ### Performance Baseline and Measurement
 
-- [ ] **PERF-01**: Project provides reproducible benchmark outputs comparing `qjs-rs`, `boa-engine`, `quickjs-c`, and `nodejs`, including machine-readable JSON and human-readable report artifacts.
-- [ ] **PERF-02**: Benchmark suite includes representative runtime hot paths (arithmetic loop, iterative function calls, array build/sum, JSON roundtrip) with configurable sample/iteration controls.
+- [x] **PERF-01**: Project provides reproducible benchmark outputs comparing `qjs-rs`, `boa-engine`, `quickjs-c`, and `nodejs`, including machine-readable JSON and human-readable report artifacts.
+- [x] **PERF-02**: Benchmark suite includes representative runtime hot paths (arithmetic loop, iterative function calls, array build/sum, JSON roundtrip) with configurable sample/iteration controls.
 
 ### Runtime Optimization
 
@@ -41,8 +41,8 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PERF-01 | Phase 10 | Planned |
-| PERF-02 | Phase 10 | Planned |
+| PERF-01 | Phase 10 | Completed |
+| PERF-02 | Phase 10 | Completed |
 | PERF-03 | Phase 11 | Planned |
 | PERF-04 | Phase 11 | Planned |
 | PERF-05 | Phase 11 | Planned |
@@ -54,8 +54,8 @@
 - Mapped to phases (exactly once): 7/7 (100%)
 - Unmapped: 0 ✓
 - Multi-mapped: 0 ✓
-- Checked off: 0/7
+- Checked off: 2/7
 
 ---
 *Requirements defined: 2026-02-27 for milestone v1.1*
-*Roadmap alignment updated: 2026-02-27*
+*Roadmap alignment updated: 2026-02-28*
