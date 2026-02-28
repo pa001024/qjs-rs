@@ -1,9 +1,9 @@
 ---
 phase: 11-hot-path-optimization-and-target-closure
 phase_number: "11"
-verified: 2026-02-28T18:05:00Z
+verified: 2026-02-28T10:05:07Z
 status: gaps_found
-score: 7/9 must-have truths verified (governance + PERF-03 closure bundle still red)
+score: "13/17 must-have truths verified"
 requirements_checked:
   - PERF-03
   - PERF-04
@@ -14,70 +14,75 @@ requirements_checked:
 
 ## Goal Verdict
 
-Phase 11 goal is **not fully achieved**.
+Phase 11 goal is **not achieved yet**.
 
-- Achieved: guarded packet-A/packet-B/packet-C optimization delivery, parity coverage, and contract-valid benchmark artifacts.
-- Not achieved: authoritative closure bundle remains open because (a) governance gates are not all green in one run, and (b) PERF-03 checker still fails for packet-c.
+Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on locked profile) is still red, so "competitive aggregate latency vs `boa-engine`" is not met.
 
-Therefore Phase 11 verification status remains `gaps_found`.
+## Inputs Audited
 
-## Scope
+- Plans/Summaries: `11-01..11-05` PLAN + SUMMARY
+- Evidence bundles:
+  - `11-PACKET-A-EVIDENCE.md`
+  - `11-PACKET-C-EVIDENCE.md`
+  - `11-TARGET-CLOSURE-EVIDENCE.md`
+- Traceability/governance sources:
+  - `.planning/ROADMAP.md`
+  - `.planning/REQUIREMENTS.md`
+  - `AGENTS.md`
+- Live codebase checks (this verification run):
+  - `cargo run -p benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-c.json --allow-missing-comparators` ✅
+  - `cargo fmt --check` ❌
+  - `cargo clippy --all-targets -- -D warnings` ✅
+  - `cargo test` ✅
+  - `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-c.json` ✅
+  - `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json --require-qjs-lte-boa` ❌ (`qjs-rs 1666.678364 > boa-engine 193.375425`)
 
-Validated plan/evidence set:
+## Must-Have Truth Audit (11-01..11-05)
 
-- `11-01-PLAN.md` through `11-05-PLAN.md`
-- `11-01-SUMMARY.md` through `11-05-SUMMARY.md` (where available for this execution cycle)
-- `11-PACKET-A-EVIDENCE.md`, `11-PACKET-C-EVIDENCE.md`, `11-TARGET-CLOSURE-EVIDENCE.md`
-- `.planning/ROADMAP.md`, `.planning/REQUIREMENTS.md`
+| Plan | Must-have truths | Result | Notes |
+|---|---:|---|---|
+| 11-01 | 3 | 3/3 ✅ | Closure policy + checker, perf metadata/hotspot attribution contract, attribution toggle/parity are present and test-covered. |
+| 11-02 | 3 | 3/3 ✅ | Packet-A guarded numeric/binding fast paths + fallback parity + contract-valid packet evidence are present. |
+| 11-03 | 3 | 1/3 ⚠️ | Packet-B implementation/parity evidence is present, but PERF-03 proof and all-green governance expectation are not met. |
+| 11-04 | 3 | 2/3 ⚠️ | Packet-C implementation/parity and before/after reporting are present; required closure pass (`--require-qjs-lte-boa`) is not met. |
+| 11-05 | 5 | 4/5 ⚠️ | Gap-closure sync + packet stability + failure-path doc synchronization are present; single-run governance bundle is still not green because `fmt` fails. |
 
-## Must-Have Audit Snapshot
+Net: **13/17 truths verified**.
 
-### Plan 11-01 foundation
+## Requirement Cross-Reference (Plan Frontmatter ↔ Traceability)
 
-**Status: PASS** — closure policy/checker and hotspot attribution contract are present and auditable.
+All five Phase 11 plans (`11-01..11-05`) declare the same requirement set in frontmatter:
+- `PERF-03`
+- `PERF-04`
+- `PERF-05`
 
-### Plan 11-02 packet-A
+Traceability status in `.planning/REQUIREMENTS.md` currently remains:
+- `PERF-03`: **Open**
+- `PERF-04`: **Open**
+- `PERF-05`: **Open**
 
-**Status: PASS** — numeric/binding fast paths remain guarded with parity coverage and measurable evidence.
+Verification conclusion per requirement:
 
-### Plan 11-03 packet-B
+| Requirement | Verification result | Evidence summary |
+|---|---|---|
+| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs > boa-engine`) on locked `local-dev` / `eval-per-iteration` closure policy. |
+| PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03 target closure policy. |
+| PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until closure bundle requirements are jointly satisfied. |
 
-**Status: PASS (implementation), GAP (closure)** — dense-array guarded fast path delivered with parity tests, but final closure gate remained open.
+## Governance/Boundary Checks
 
-### Plan 11-04 packet-C
-
-**Status: PASS (implementation), GAP (closure)** — identifier/global guarded fast path delivered with parity/invalidation tests, but aggregate closure still open.
-
-### Plan 11-05 gap-closure rerun
-
-**Status: GAPS FOUND**
-
-- ✅ Packet-B workspace bootstrap issue resolved (`UnknownIdentifier("Array")` test path now executes with baseline realm setup).
-- ✅ Benchmarks crate is clippy-clean under `--all-targets -D warnings`.
-- ❌ Governance bundle not green in one run (`cargo fmt --check` failed due existing VM formatting drift outside 11-05 ownership set).
-- ❌ PERF-03 closure checker still fails for packet-c candidate.
-
-## Command Evidence (authoritative 11-05 sequence)
-
-Executed in one sequence after regenerating packet-c artifact:
-
-- `cargo run -p benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-c.json --allow-missing-comparators` ✅
-- `cargo fmt --check` ❌
-- `cargo clippy --all-targets -- -D warnings` ✅
-- `cargo test` ✅
-- `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-c.json` ✅
-- `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json --require-qjs-lte-boa` ❌
-
-PERF-03 failure excerpt:
-
-- `candidate qjs-rs 1678.421964 > boa-engine 189.600068`
+- Pure-Rust runtime-core boundary: no C FFI indicators found in `crates/vm`, `crates/runtime`, `crates/bytecode`, `crates/builtins` scan.
+- Quality gates in this run:
+  - `fmt`: ❌
+  - `clippy`: ✅
+  - `test`: ✅
 
 ## Final Status
 
-- `status: gaps_found`
-- Remaining blockers:
-  1. Governance gate bundle is RED (`cargo fmt --check` failed).
-  2. PERF-03 authoritative aggregate checker remains RED for packet-c.
+- **status:** `gaps_found`
+- **Phase 11 closure:** **OPEN**
 
-Phase 11 stays in explicit open-gap state until both blockers pass in the same closure run.
+### Top remaining blockers
 
+1. **PERF-03 target not met**: authoritative closure checker still reports `qjs-rs` aggregate above `boa-engine`.
+2. **Governance bundle not jointly green**: `cargo fmt --check` remains red, so closure run cannot be promoted to closed-state narrative.
