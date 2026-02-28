@@ -1,17 +1,17 @@
 #![forbid(unsafe_code)]
 
-mod contract;
+pub(crate) mod contract;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use boa_engine::{Context as BoaContext, Source};
 use builtins::install_baseline;
 use bytecode::compile_script;
 use contract::{
-    AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult,
-    ComparatorConfig, ComparatorTarget, EngineAvailabilityStatus, EngineExecutionMetadata,
-    EngineKind, EnvironmentInfo, GUARD_CHECKSUM_MODE, ReproducibilityMetadata,
-    RequiredCaseDefinition, SCHEMA_VERSION, TimingMode, help_text, parse_cli_args,
-    required_case_catalog,
+    help_text, parse_cli_args, required_case_catalog, AggregateReport, BenchmarkReport,
+    CaseEngineResult, CaseReport, CliParseResult, ComparatorConfig, ComparatorTarget,
+    EngineAvailabilityStatus, EngineExecutionMetadata, EngineKind, EnvironmentInfo,
+    ReproducibilityMetadata, RequiredCaseDefinition, TimingMode, GUARD_CHECKSUM_MODE,
+    SCHEMA_VERSION,
 };
 use parser::parse_script;
 use runtime::JsValue;
@@ -109,7 +109,7 @@ fn extract_number(value: &JsValue) -> f64 {
     }
 }
 
-fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -> f64 {
+pub(crate) fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -> f64 {
     if let Some(number) = number {
         number
     } else if boolean.unwrap_or(false) {
@@ -119,7 +119,10 @@ fn guard_delta_from_number_or_bool(number: Option<f64>, boolean: Option<bool>) -
     }
 }
 
-fn timing_mode_for_engine(_engine: EngineKind, run_timing_mode: TimingMode) -> TimingMode {
+pub(crate) fn timing_mode_for_engine(
+    _engine: EngineKind,
+    run_timing_mode: TimingMode,
+) -> TimingMode {
     run_timing_mode
 }
 
@@ -289,7 +292,9 @@ fn run_engine_case(
         TimingMode::EvalPerIteration => match engine {
             EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(script, iterations),
             EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
-            EngineKind::NodeJs => run_nodejs_eval_per_iteration(script, iterations, &comparators.node),
+            EngineKind::NodeJs => {
+                run_nodejs_eval_per_iteration(script, iterations, &comparators.node)
+            }
             EngineKind::QuickJsC => {
                 run_quickjs_c_eval_per_iteration(script, iterations, &comparators.quickjs)
             }
@@ -363,7 +368,9 @@ fn summarize(
     }
 }
 
-fn preflight_engine_execution(comparators: &ComparatorConfig) -> Result<Vec<EngineExecutionMetadata>> {
+fn preflight_engine_execution(
+    comparators: &ComparatorConfig,
+) -> Result<Vec<EngineExecutionMetadata>> {
     let mut metadata = vec![
         EngineExecutionMetadata {
             engine: EngineKind::QjsRs.as_str().to_string(),
@@ -433,7 +440,10 @@ fn preflight_external_engine(
 ) -> EngineExecutionMetadata {
     let executable = comparator.executable();
     let resolved_path = resolve_executable_path(comparator);
-    let workdir = comparator.workdir.as_ref().map(|dir| dir.display().to_string());
+    let workdir = comparator
+        .workdir
+        .as_ref()
+        .map(|dir| dir.display().to_string());
     let mut last_reason: Option<String> = None;
 
     for version_arg in version_args {

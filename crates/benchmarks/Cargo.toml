@@ -1,0 +1,17 @@
+[package]
+name = "benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+boa_engine = "0.20"
+builtins.workspace = true
+bytecode.workspace = true
+parser.workspace = true
+runtime.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+vm.workspace = true

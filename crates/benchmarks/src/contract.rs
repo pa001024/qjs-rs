@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -198,6 +198,14 @@ pub fn parse_cli_args<I>(args: I) -> Result<CliParseResult>
 where
     I: IntoIterator<Item = String>,
 {
+    parse_cli_args_with_lookup(args, read_non_empty_env)
+}
+
+fn parse_cli_args_with_lookup<I, F>(args: I, env_lookup: F) -> Result<CliParseResult>
+where
+    I: IntoIterator<Item = String>,
+    F: Fn(&str) -> Option<String>,
+{
     let mut run_profile = RunProfile::LocalDev;
     let mut iterations_override: Option<usize> = None;
     let mut samples_override: Option<usize> = None;
@@ -265,10 +273,10 @@ where
                 ));
             }
             "--node-workdir" => {
-                node_workdir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow!("missing value after --node-workdir"))?,
-                ));
+                node_workdir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow!("missing value after --node-workdir")
+                    })?));
             }
             "--quickjs-command" => {
                 quickjs_command = Some(
@@ -277,16 +285,16 @@ where
                 );
             }
             "--quickjs-path" => {
-                quickjs_path = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow!("missing value after --quickjs-path"))?,
-                ));
+                quickjs_path =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow!("missing value after --quickjs-path")
+                    })?));
             }
             "--quickjs-workdir" => {
-                quickjs_workdir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow!("missing value after --quickjs-workdir"))?,
-                ));
+                quickjs_workdir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow!("missing value after --quickjs-workdir")
+                    })?));
             }
             "--strict-comparators" => {
                 strict_override = Some(true);
@@ -319,6 +327,7 @@ where
         ENV_NODE_PATH,
         ENV_NODE_WORKDIR,
         "node",
+        &env_lookup,
     );
     let quickjs = resolve_comparator_target(
         quickjs_command,
@@ -328,9 +337,10 @@ where
         ENV_QUICKJS_PATH,
         ENV_QUICKJS_WORKDIR,
         "qjs",
+        &env_lookup,
     );
     let strict_external = strict_override
-        .or_else(|| read_env_bool(ENV_STRICT_COMPARATORS))
+        .or_else(|| read_env_bool(ENV_STRICT_COMPARATORS, &env_lookup))
         .unwrap_or_else(|| run_profile.strict_comparators_default());
 
     Ok(CliParseResult::Run(CliArgs {
@@ -344,6 +354,18 @@ where
             strict_external,
         },
     }))
+}
+
+#[cfg(test)]
+pub fn parse_cli_args_with_env<I>(args: I, env_pairs: &[(&str, &str)]) -> Result<CliParseResult>
+where
+    I: IntoIterator<Item = String>,
+{
+    let env_map = env_pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect::<BTreeMap<_, _>>();
+    parse_cli_args_with_lookup(args, move |key| env_map.get(key).cloned())
 }
 
 pub fn help_text() -> &'static str {
@@ -478,14 +500,17 @@ fn read_non_empty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn read_env_bool(key: &str) -> Option<bool> {
-    read_non_empty_env(key).map(|value| {
+fn read_env_bool<F>(key: &str, env_lookup: &F) -> Option<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_lookup(key).map(|value| {
         let normalized = value.to_ascii_lowercase();
         matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
     })
 }
 
-fn resolve_comparator_target(
+fn resolve_comparator_target<F>(
     cli_command: Option<String>,
     cli_path: Option<PathBuf>,
     cli_workdir: Option<PathBuf>,
@@ -493,12 +518,16 @@ fn resolve_comparator_target(
     env_path_key: &str,
     env_workdir_key: &str,
     default_command: &str,
-) -> ComparatorTarget {
-    let path = cli_path.or_else(|| read_non_empty_env(env_path_key).map(PathBuf::from));
+    env_lookup: &F,
+) -> ComparatorTarget
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let path = cli_path.or_else(|| env_lookup(env_path_key).map(PathBuf::from));
     let command = cli_command
-        .or_else(|| read_non_empty_env(env_command_key))
+        .or_else(|| env_lookup(env_command_key))
         .unwrap_or_else(|| default_command.to_string());
-    let workdir = cli_workdir.or_else(|| read_non_empty_env(env_workdir_key).map(PathBuf::from));
+    let workdir = cli_workdir.or_else(|| env_lookup(env_workdir_key).map(PathBuf::from));
     ComparatorTarget {
         command,
         path,
