@@ -149,3 +149,72 @@ impl PacketBFastPathState {
         self.counters
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketCFastPathCounters {
+    pub identifier_guard_hits: u64,
+    pub identifier_guard_misses: u64,
+    pub global_guard_hits: u64,
+    pub global_guard_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketCFastPathState {
+    binding_cache: HashMap<String, BindingCacheEntry>,
+    counters: PacketCFastPathCounters,
+}
+
+impl PacketCFastPathState {
+    pub fn reset(&mut self) {
+        self.binding_cache.clear();
+        self.counters = PacketCFastPathCounters::default();
+    }
+
+    pub fn clear_binding_cache(&mut self) {
+        self.binding_cache.clear();
+    }
+
+    pub fn remove_binding_cache_entry(&mut self, name: &str) {
+        self.binding_cache.remove(name);
+    }
+
+    pub fn binding_cache_entry(&self, name: &str) -> Option<BindingCacheEntry> {
+        self.binding_cache.get(name).copied()
+    }
+
+    pub fn remember_binding_cache_entry(
+        &mut self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+    ) {
+        self.binding_cache.insert(
+            name.to_string(),
+            BindingCacheEntry {
+                scope_index,
+                binding_id,
+            },
+        );
+    }
+
+    pub fn record_identifier_guard_hit(&mut self) {
+        self.counters.identifier_guard_hits = self.counters.identifier_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_identifier_guard_miss(&mut self) {
+        self.counters.identifier_guard_misses =
+            self.counters.identifier_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_global_guard_hit(&mut self) {
+        self.counters.global_guard_hits = self.counters.global_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_global_guard_miss(&mut self) {
+        self.counters.global_guard_misses = self.counters.global_guard_misses.wrapping_add(1);
+    }
+
+    pub fn counters(&self) -> PacketCFastPathCounters {
+        self.counters
+    }
+}

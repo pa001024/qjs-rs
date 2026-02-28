@@ -4,6 +4,7 @@ pub mod perf;
 mod fast_path;
 pub use fast_path::PacketAFastPathCounters;
 pub use fast_path::PacketBFastPathCounters;
+pub use fast_path::PacketCFastPathCounters;
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -24,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::fast_path::{NumericBinaryOp, PacketAFastPathState, PacketBFastPathState};
+use crate::fast_path::{
+    NumericBinaryOp, PacketAFastPathState, PacketBFastPathState, PacketCFastPathState,
+};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -697,6 +700,9 @@ pub struct Vm {
     packet_b_fast_path_disabled: bool,
     packet_b_fast_path_metrics_enabled: bool,
     packet_b_fast_path: PacketBFastPathState,
+    packet_c_fast_path_disabled: bool,
+    packet_c_fast_path_metrics_enabled: bool,
+    packet_c_fast_path: PacketCFastPathState,
 }
 
 impl Vm {
@@ -783,6 +789,7 @@ impl Vm {
         self.gc_reclaimed_objects_total = 0;
         self.packet_a_fast_path.reset();
         self.packet_b_fast_path.reset();
+        self.packet_c_fast_path.reset();
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -991,6 +998,30 @@ impl Vm {
 
     pub fn packet_b_fast_path_counters(&self) -> PacketBFastPathCounters {
         self.packet_b_fast_path.counters()
+    }
+
+    pub fn set_packet_c_fast_path_enabled(&mut self, enabled: bool) {
+        self.packet_c_fast_path_disabled = !enabled;
+    }
+
+    pub fn packet_c_fast_path_enabled(&self) -> bool {
+        !self.packet_c_fast_path_disabled
+    }
+
+    pub fn set_packet_c_fast_path_metrics_enabled(&mut self, enabled: bool) {
+        self.packet_c_fast_path_metrics_enabled = enabled;
+    }
+
+    pub fn packet_c_fast_path_metrics_enabled(&self) -> bool {
+        self.packet_c_fast_path_metrics_enabled
+    }
+
+    pub fn reset_packet_c_fast_path_counters(&mut self) {
+        self.packet_c_fast_path.reset();
+    }
+
+    pub fn packet_c_fast_path_counters(&self) -> PacketCFastPathCounters {
+        self.packet_c_fast_path.counters()
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -2180,6 +2211,16 @@ impl Vm {
                         Ok(realm
                             .resolve_identifier(name)
                             .unwrap_or_else(|| self.global_this_value()))
+                    } else if let Some(global_object_id) =
+                        self.resolve_packet_c_global_own_data_property(name)
+                    {
+                        let value = self
+                            .objects
+                            .get(&global_object_id)
+                            .and_then(|object| object.properties.get(name))
+                            .cloned()
+                            .ok_or(VmError::UnknownIdentifier(name.clone()))?;
+                        Ok(value)
                     } else if let Some(global_object_id) = self.global_object_id {
                         let receiver = JsValue::Object(global_object_id);
                         if self.has_property_on_receiver(&receiver, name, realm)? {
@@ -3133,6 +3174,14 @@ impl Vm {
                         self.reflect_object_value()?
                     } else if let Some(value) = realm.resolve_identifier(name) {
                         value
+                    } else if let Some(global_object_id) =
+                        self.resolve_packet_c_global_own_data_property(name)
+                    {
+                        self.objects
+                            .get(&global_object_id)
+                            .and_then(|object| object.properties.get(name))
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined)
                     } else if let Some(global_object_id) = self.global_object_id {
                         let receiver = JsValue::Object(global_object_id);
                         if self.has_property_on_receiver(&receiver, name, realm)? {
@@ -14473,6 +14522,7 @@ impl Vm {
 
     fn invalidate_binding_fast_path_cache(&mut self) {
         self.packet_a_fast_path.clear_binding_cache();
+        self.packet_c_fast_path.clear_binding_cache();
     }
 
     fn record_packet_a_numeric_guard_hit(&mut self) {
@@ -14523,6 +14573,30 @@ impl Vm {
         }
     }
 
+    fn record_packet_c_identifier_guard_hit(&mut self) {
+        if self.packet_c_fast_path_metrics_enabled() {
+            self.packet_c_fast_path.record_identifier_guard_hit();
+        }
+    }
+
+    fn record_packet_c_identifier_guard_miss(&mut self) {
+        if self.packet_c_fast_path_metrics_enabled() {
+            self.packet_c_fast_path.record_identifier_guard_miss();
+        }
+    }
+
+    fn record_packet_c_global_guard_hit(&mut self) {
+        if self.packet_c_fast_path_metrics_enabled() {
+            self.packet_c_fast_path.record_global_guard_hit();
+        }
+    }
+
+    fn record_packet_c_global_guard_miss(&mut self) {
+        if self.packet_c_fast_path_metrics_enabled() {
+            self.packet_c_fast_path.record_global_guard_miss();
+        }
+    }
+
     fn cached_binding_entry_is_valid(
         &self,
         name: &str,
@@ -14548,13 +14622,47 @@ impl Vm {
     }
 
     fn resolve_binding_id_with_fast_path(&mut self, name: &str) -> Option<BindingId> {
-        if !self.packet_a_fast_path_enabled()
-            || !self.packet_a_fast_path_metrics_enabled()
-            || !self.with_objects.is_empty()
-        {
-            if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
+        let packet_a_metrics_enabled =
+            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
+        let packet_c_enabled = self.packet_c_fast_path_enabled();
+
+        if !self.with_objects.is_empty() {
+            if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
+            if packet_c_enabled {
+                self.record_packet_c_identifier_guard_miss();
+            }
+            return self.resolve_binding_id(name);
+        }
+
+        if packet_c_enabled {
+            if let Some(entry) = self.packet_c_fast_path.binding_cache_entry(name) {
+                if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                    self.record_packet_c_identifier_guard_hit();
+                    if packet_a_metrics_enabled {
+                        self.record_packet_a_binding_guard_hit();
+                    }
+                    return Some(entry.binding_id);
+                }
+                self.packet_c_fast_path.remove_binding_cache_entry(name);
+            }
+
+            self.record_packet_c_identifier_guard_miss();
+            if packet_a_metrics_enabled {
+                self.record_packet_a_binding_guard_miss();
+            }
+
+            if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+                self.packet_c_fast_path
+                    .remember_binding_cache_entry(name, scope_index, binding_id);
+                return Some(binding_id);
+            }
+            self.packet_c_fast_path.remove_binding_cache_entry(name);
+            return None;
+        }
+
+        if !packet_a_metrics_enabled {
             return self.resolve_binding_id(name);
         }
 
@@ -14564,10 +14672,8 @@ impl Vm {
                 return Some(entry.binding_id);
             }
             self.packet_a_fast_path.remove_binding_cache_entry(name);
-            self.record_packet_a_binding_guard_miss();
-        } else {
-            self.record_packet_a_binding_guard_miss();
         }
+        self.record_packet_a_binding_guard_miss();
 
         if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
             self.packet_a_fast_path
@@ -15524,6 +15630,34 @@ impl Vm {
         self.get_function_property(closure_id, property, realm)
     }
 
+    fn resolve_packet_c_global_own_data_property(&mut self, name: &str) -> Option<ObjectId> {
+        if !self.packet_c_fast_path_enabled() {
+            return None;
+        }
+        if !self.with_objects.is_empty() {
+            self.record_packet_c_global_guard_miss();
+            return None;
+        }
+        let Some(global_object_id) = self.global_object_id else {
+            self.record_packet_c_global_guard_miss();
+            return None;
+        };
+        let Some(global_object) = self.objects.get(&global_object_id) else {
+            self.record_packet_c_global_guard_miss();
+            return None;
+        };
+        if global_object.getters.contains_key(name) || global_object.setters.contains_key(name) {
+            self.record_packet_c_global_guard_miss();
+            return None;
+        }
+        if global_object.properties.contains_key(name) {
+            self.record_packet_c_global_guard_hit();
+            return Some(global_object_id);
+        }
+        self.record_packet_c_global_guard_miss();
+        None
+    }
+
     fn resolve_with_property_base_for_scope_depth(
         &mut self,
         name: &str,
@@ -15557,6 +15691,9 @@ impl Vm {
         }
         if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
             self.record_packet_a_binding_guard_miss();
+        }
+        if self.packet_c_fast_path_enabled() {
+            self.record_packet_c_identifier_guard_miss();
         }
         self.invalidate_binding_fast_path_cache();
 
@@ -15606,6 +15743,15 @@ impl Vm {
     ) -> Result<IdentifierReference, VmError> {
         if let Some(reference) = self.resolve_binding_or_with_reference(name, realm)? {
             return Ok(reference);
+        }
+        if let Some(global_object_id) = self.resolve_packet_c_global_own_data_property(name) {
+            self.packet_a_fast_path.remove_binding_cache_entry(name);
+            return Ok(IdentifierReference::Property {
+                base: JsValue::Object(global_object_id),
+                property: name.to_string(),
+                strict_on_missing: true,
+                with_base_object: false,
+            });
         }
         if let Some(global_object_id) = self.global_object_id {
             let base = JsValue::Object(global_object_id);
