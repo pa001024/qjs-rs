@@ -1450,7 +1450,7 @@ impl Vm {
                     .insert("globalThis".to_string(), module_global.clone());
             }
         }
-        let mut module_scope = BTreeMap::new();
+        let mut module_scope: Scope = BTreeMap::new();
         module_scope.insert(
             "globalThis".to_string(),
             self.create_binding(module_global, true),
@@ -2221,55 +2221,28 @@ impl Vm {
                         pc,
                         IdentifierOpcodeFamily::Load,
                     );
-                    let resolved = if let Some(reference) =
+                    let resolved = if self.with_objects.is_empty() {
+                        if let Some(binding_id) =
+                            self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                        {
+                            let binding = self
+                                .bindings
+                                .get(&binding_id)
+                                .ok_or(VmError::ScopeUnderflow)?;
+                            if matches!(binding.value, JsValue::Uninitialized) {
+                                Err(VmError::UnknownIdentifier(name.clone()))
+                            } else {
+                                Ok(binding.value.clone())
+                            }
+                        } else {
+                            self.resolve_unbound_identifier_value(name, realm)
+                        }
+                    } else if let Some(reference) =
                         self.resolve_binding_or_with_reference(name, realm, identifier_slot)?
                     {
                         self.load_identifier_reference_value(&reference, realm, strict)
-                    } else if name == "undefined" {
-                        Ok(JsValue::Undefined)
-                    } else if name == "NaN" {
-                        Ok(JsValue::Number(f64::NAN))
-                    } else if name == "Infinity" {
-                        Ok(JsValue::Number(f64::INFINITY))
-                    } else if name == "globalThis" {
-                        Ok(self.global_this_value())
-                    } else if name == "Math" {
-                        self.math_object_value()
-                    } else if name == "JSON" {
-                        self.json_object_value()
-                    } else if name == "Reflect" {
-                        self.reflect_object_value()
-                    } else if name == "super" {
-                        if let Some(base) = self.resolve_super_base_value() {
-                            Ok(base)
-                        } else {
-                            Err(VmError::UnknownIdentifier(name.clone()))
-                        }
-                    } else if name == "this" {
-                        Ok(realm
-                            .resolve_identifier(name)
-                            .unwrap_or_else(|| self.global_this_value()))
-                    } else if let Some(global_object_id) =
-                        self.resolve_global_own_data_property_for_identifier(name)
-                    {
-                        let value = self
-                            .objects
-                            .get(&global_object_id)
-                            .and_then(|object| object.properties.get(name))
-                            .cloned()
-                            .ok_or(VmError::UnknownIdentifier(name.clone()))?;
-                        Ok(value)
-                    } else if let Some(global_object_id) = self.global_object_id {
-                        let receiver = JsValue::Object(global_object_id);
-                        if self.has_property_on_receiver(&receiver, name, realm)? {
-                            self.get_property_from_receiver(receiver, name, realm)
-                        } else if name == "Object" && realm.resolve_identifier(name).is_none() {
-                            Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor))
-                        } else {
-                            Err(VmError::UnknownIdentifier(name.clone()))
-                        }
                     } else {
-                        Err(VmError::UnknownIdentifier(name.clone()))
+                        self.resolve_unbound_identifier_value(name, realm)
                     };
                     match resolved {
                         Ok(value) => self.stack.push(value),
@@ -2463,14 +2436,18 @@ impl Vm {
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
                             self.hotspot_attribution.record_array_indexed_property_get();
-                            if let JsValue::Object(object_id) = &receiver {
-                                let key = index.to_string();
-                                if let Some(value) =
-                                    self.try_packet_b_dense_array_index_get(*object_id, &key)?
+                            let key = index.to_string();
+                            if let JsValue::Object(object_id) = receiver {
+                                if let Some(value) = self
+                                    .try_packet_b_dense_array_index_get_with_index(
+                                        object_id, &key, index,
+                                    )?
                                 {
                                     return Ok(value);
                                 }
+                                return self.get_object_property(object_id, &key, realm);
                             }
+                            return self.get_property_from_receiver(receiver, &key, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() {
@@ -2781,14 +2758,16 @@ impl Vm {
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
                             self.hotspot_attribution.record_array_indexed_property_set();
-                            if let JsValue::Object(object_id) = &receiver {
-                                let key = index.to_string();
-                                if self
-                                    .try_packet_b_dense_array_index_set(*object_id, &key, &value)?
-                                {
+                            let key = index.to_string();
+                            if let JsValue::Object(object_id) = receiver {
+                                if self.try_packet_b_dense_array_index_set_with_index(
+                                    object_id, &key, index, &value,
+                                )? {
                                     return Ok(value);
                                 }
+                                return self.set_object_property(object_id, key, value, realm);
                             }
+                            return self.set_property_on_receiver(receiver, key, value, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() {
@@ -14462,7 +14441,7 @@ impl Vm {
         let mut captured_scopes = self.scopes.clone();
         let captured_with_objects = self.with_objects.clone();
         if self.function_is_named_function_expression(function) && function.name != "<anonymous>" {
-            let mut name_scope = BTreeMap::new();
+            let mut name_scope: Scope = BTreeMap::new();
             let function_name_binding = self.create_binding_with_behavior(
                 JsValue::Function(closure_id),
                 false,
@@ -14621,7 +14600,6 @@ impl Vm {
     fn invalidate_binding_fast_path_cache(&mut self) {
         self.packet_a_fast_path.clear_binding_cache();
         self.packet_c_fast_path.clear_binding_cache();
-        self.packet_d_fast_path.clear_slot_cache();
         self.packet_d_scope_generation = self.packet_d_scope_generation.wrapping_add(1);
     }
 
@@ -14778,14 +14756,29 @@ impl Vm {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
                 let guard_matches_generation =
                     entry.scope_generation == self.packet_d_scope_generation;
-                if guard_matches_generation
-                    && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
-                {
-                    self.record_packet_d_slot_guard_hit();
-                    if packet_a_metrics_enabled {
-                        self.record_packet_a_binding_guard_hit();
+                if guard_matches_generation {
+                    #[cfg(debug_assertions)]
+                    {
+                        if self.cached_binding_entry_is_valid(
+                            name,
+                            entry.scope_index,
+                            entry.binding_id,
+                        ) {
+                            self.record_packet_d_slot_guard_hit();
+                            if packet_a_metrics_enabled {
+                                self.record_packet_a_binding_guard_hit();
+                            }
+                            return Some(entry.binding_id);
+                        }
                     }
-                    return Some(entry.binding_id);
+                    #[cfg(not(debug_assertions))]
+                    {
+                        self.record_packet_d_slot_guard_hit();
+                        if packet_a_metrics_enabled {
+                            self.record_packet_a_binding_guard_hit();
+                        }
+                        return Some(entry.binding_id);
+                    }
                 }
                 self.packet_d_fast_path.remove_slot_cache_entry(slot);
             }
@@ -15198,12 +15191,21 @@ impl Vm {
         object_id: ObjectId,
         property: &str,
     ) -> Result<Option<JsValue>, VmError> {
-        if !self.packet_b_fast_path_enabled() {
-            return Ok(None);
-        }
         let Some(index) = Self::canonical_array_index(property) else {
             return Ok(None);
         };
+        self.try_packet_b_dense_array_index_get_with_index(object_id, property, index)
+    }
+
+    fn try_packet_b_dense_array_index_get_with_index(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+        index: usize,
+    ) -> Result<Option<JsValue>, VmError> {
+        if !self.packet_b_fast_path_enabled() {
+            return Ok(None);
+        }
         let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
@@ -15234,12 +15236,22 @@ impl Vm {
         property: &str,
         value: &JsValue,
     ) -> Result<bool, VmError> {
-        if !self.packet_b_fast_path_enabled() {
-            return Ok(false);
-        }
         let Some(index) = Self::canonical_array_index(property) else {
             return Ok(false);
         };
+        self.try_packet_b_dense_array_index_set_with_index(object_id, property, index, value)
+    }
+
+    fn try_packet_b_dense_array_index_set_with_index(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+        index: usize,
+        value: &JsValue,
+    ) -> Result<bool, VmError> {
+        if !self.packet_b_fast_path_enabled() {
+            return Ok(false);
+        }
         let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
@@ -15262,13 +15274,11 @@ impl Vm {
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        let property_key = property.to_string();
         object
             .properties
-            .insert(property.to_string(), value.clone());
-        object
-            .property_attributes
-            .entry(property.to_string())
-            .or_default();
+            .insert(property_key.clone(), value.clone());
+        object.property_attributes.entry(property_key).or_default();
         if index == guard.current_length {
             object.properties.insert(
                 "length".to_string(),
@@ -16035,49 +16045,66 @@ impl Vm {
                 self.get_property_from_receiver(base.clone(), property, realm)
             }
             IdentifierReference::Unresolvable { name } => {
-                if name == "super" {
-                    if let Some(base) = self.resolve_super_base_value() {
-                        return Ok(base);
-                    }
-                }
-                if name == "undefined" {
-                    return Ok(JsValue::Undefined);
-                }
-                if name == "NaN" {
-                    return Ok(JsValue::Number(f64::NAN));
-                }
-                if name == "Infinity" {
-                    return Ok(JsValue::Number(f64::INFINITY));
-                }
-                if name == "globalThis" {
-                    return Ok(self.global_this_value());
-                }
-                if name == "Math" {
-                    return self.math_object_value();
-                }
-                if name == "JSON" {
-                    return self.json_object_value();
-                }
-                if name == "Reflect" {
-                    return self.reflect_object_value();
-                }
-                if name == "this" {
-                    return Ok(realm
-                        .resolve_identifier(name)
-                        .unwrap_or_else(|| self.global_this_value()));
-                }
-                if let Some(global_object_id) = self.global_object_id {
-                    let receiver = JsValue::Object(global_object_id);
-                    if self.has_property_on_receiver(&receiver, name, realm)? {
-                        return self.get_property_from_receiver(receiver, name, realm);
-                    }
-                    if name == "Object" && realm.resolve_identifier(name).is_none() {
-                        return Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor));
-                    }
-                }
-                Err(VmError::UnknownIdentifier(name.clone()))
+                self.resolve_unbound_identifier_value(name, realm)
             }
         }
+    }
+
+    fn resolve_unbound_identifier_value(
+        &mut self,
+        name: &str,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if name == "super" {
+            if let Some(base) = self.resolve_super_base_value() {
+                return Ok(base);
+            }
+        }
+        if name == "undefined" {
+            return Ok(JsValue::Undefined);
+        }
+        if name == "NaN" {
+            return Ok(JsValue::Number(f64::NAN));
+        }
+        if name == "Infinity" {
+            return Ok(JsValue::Number(f64::INFINITY));
+        }
+        if name == "globalThis" {
+            return Ok(self.global_this_value());
+        }
+        if name == "Math" {
+            return self.math_object_value();
+        }
+        if name == "JSON" {
+            return self.json_object_value();
+        }
+        if name == "Reflect" {
+            return self.reflect_object_value();
+        }
+        if name == "this" {
+            return Ok(realm
+                .resolve_identifier(name)
+                .unwrap_or_else(|| self.global_this_value()));
+        }
+        if let Some(global_object_id) = self.resolve_global_own_data_property_for_identifier(name) {
+            let value = self
+                .objects
+                .get(&global_object_id)
+                .and_then(|object| object.properties.get(name))
+                .cloned()
+                .ok_or(VmError::UnknownIdentifier(name.to_string()))?;
+            return Ok(value);
+        }
+        if let Some(global_object_id) = self.global_object_id {
+            let receiver = JsValue::Object(global_object_id);
+            if self.has_property_on_receiver(&receiver, name, realm)? {
+                return self.get_property_from_receiver(receiver, name, realm);
+            }
+            if name == "Object" && realm.resolve_identifier(name).is_none() {
+                return Ok(JsValue::NativeFunction(NativeFunction::ObjectConstructor));
+            }
+        }
+        Err(VmError::UnknownIdentifier(name.to_string()))
     }
 
     fn store_identifier_reference_value(

@@ -1,7 +1,7 @@
 ---
 phase: 11-hot-path-optimization-and-target-closure
 phase_number: "11"
-verified: 2026-02-28T16:27:50Z
+verified: 2026-02-28T17:53:12Z
 status: gaps_found
 score: "16/22 must-have truths verified"
 requirements_checked:
@@ -32,7 +32,7 @@ Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on 
   - `.planning/STATE.md`
   - `AGENTS.md`
 - Authoritative machine-readable run artifact:
-  - `target/benchmarks/phase11-closure-bundle.json` (`timestamp_utc`: `2026-02-28T16:27:50Z`)
+  - `target/benchmarks/phase11-closure-bundle.json` (`timestamp_utc`: `2026-02-28T17:53:12Z`)
 
 ## Authoritative 11-07 Bundle Results (single provenance source)
 
@@ -48,13 +48,13 @@ Ordered command return codes from `target/benchmarks/phase11-closure-bundle.json
 Packet-D candidate hash provenance:
 
 - `path`: `target/benchmarks/engine-comparison.local-dev.packet-d.json`
-- `hash/sha256`: `02bcc45edebea604a98ac041cb0415f6aff71dde31fee49cb2f799b25c35ec16`
+- `hash/sha256`: `bde3e79d25d725cd07fc05f715cbb11e8c3df637a97c2acedcca1db08f7d01db`
 
 Aggregate means (candidate packet-d artifact):
 
-- `qjs-rs`: `1211.668632`
-- `boa-engine`: `154.937264`
-- `qjs-rs/boa-engine`: `7.8204x`
+- `qjs-rs`: `1370.511975`
+- `boa-engine`: `184.489346`
+- `qjs-rs/boa-engine`: `7.4286x`
 
 ## Must-Have Truth Audit (11-01..11-07)
 
@@ -86,7 +86,7 @@ Verification conclusion per requirement:
 
 | Requirement | Verification result | Evidence summary |
 |---|---|---|
-| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs 1211.668632 > boa-engine 154.937264`) in the latest run bundle. |
+| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs 1370.511975 > boa-engine 184.489346`) in the latest run bundle. |
 | PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03. |
 | PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until PERF-03 is satisfied in authoritative bundle checks. |
 
@@ -105,4 +105,4 @@ Verification conclusion per requirement:
 
 ### Top remaining blockers
 
-1. **PERF-03 target not met**: authoritative closure checker still reports `qjs-rs` aggregate above `boa-engine` (`1211.668632 > 154.937264`).
+1. **PERF-03 target not met**: authoritative closure checker still reports `qjs-rs` aggregate above `boa-engine` (`1370.511975 > 184.489346`).

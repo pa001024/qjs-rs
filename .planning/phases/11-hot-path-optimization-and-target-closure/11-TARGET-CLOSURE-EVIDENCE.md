@@ -215,4 +215,42 @@ perf target check failed
 
 Phase 11 closure remains **open** because PERF-03 is still red in the latest authoritative run artifact.
 
+## 10) Latest authoritative rerun (2026-02-28)
+
+### 10.1 Bundle provenance
+
+- Bundle path: `target/benchmarks/phase11-closure-bundle.json`
+- `timestamp_utc`: `2026-02-28T17:53:12Z`
+- Packet-D artifact hash/sha256: `bde3e79d25d725cd07fc05f715cbb11e8c3df637a97c2acedcca1db08f7d01db`
+
+### 10.2 Ordered command return codes
+
+1. `bench_generate`: `rc=0`
+2. `fmt`: `rc=0`
+3. `clippy`: `rc=0`
+4. `test`: `rc=0`
+5. `contract`: `rc=0`
+6. `perf_target`: `rc=1`
+
+### 10.3 PERF-03 checker output
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-boa failed: candidate qjs-rs 1370.511975 > boa-engine 184.489346
+```
+
+### 10.4 Candidate aggregates
+
+- `qjs-rs`: `1370.511975 ms`
+- `boa-engine`: `184.489346 ms`
+- `nodejs`: `1.997089 ms`
+- `qjs-rs / boa-engine`: `7.4286x`
+
+### 10.5 Verdict
+
+- Governance bundle: **PASS**
+- PERF-03 target: **FAIL**
+
+Phase 11 remains **open**.
+
 

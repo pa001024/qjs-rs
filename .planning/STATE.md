@@ -7,7 +7,7 @@ current_phase_name: hot-path optimization and target closure
 current_plan: None (Phase 11 plans completed; closure follow-up required)
 status: phase 11 plan queue complete; latest authoritative bundle shows governance green but PERF-03 still red, so closure remains open
 stopped_at: Post-11-07 authoritative bundle rerun completed (governance pass, perf-target fail)
-last_updated: "2026-02-28T16:27:50Z"
+last_updated: "2026-02-28T17:53:12Z"
 last_activity: 2026-02-28
 progress:
   total_phases: 3
@@ -66,5 +66,5 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 - Completed 11-07 authoritative closure sync: produced `target/benchmarks/phase11-closure-bundle.json`, appended evidence transcript, and synchronized roadmap/requirements/verification/state docs from that single artifact.
 - Recorded 11-07 blocker update: governance bundle still red because `cargo clippy --all-targets -- -D warnings` failed (`too_many_arguments` in `crates/benchmarks/src/main.rs:293`), and PERF-03 checker still fails (`qjs-rs 1390.811014 > boa-engine 181.287246`).
 - Follow-up closure work removed benchmarks clippy blocker and tightened packet-d benchmark wiring (`run_engine_case` context refactor, qjs-rs parse/compile hoist, packet-d keeps packet-c enabled, removed redundant benchmark baseline install path).
-- Latest authoritative rerun (`2026-02-28T16:27:50Z`) is governance-green (`fmt/clippy/test/contract` all `rc=0`) but PERF-03 still fails (`qjs-rs 1211.668632 > boa-engine 154.937264`), so Phase 11 remains open.
+- Latest authoritative rerun (`2026-02-28T17:53:12Z`) is governance-green (`fmt/clippy/test/contract` all `rc=0`) but PERF-03 still fails (`qjs-rs 1370.511975 > boa-engine 184.489346`), so Phase 11 remains open.
 

@@ -250,10 +250,6 @@ impl PacketDFastPathState {
         self.counters = PacketDFastPathCounters::default();
     }
 
-    pub fn clear_slot_cache(&mut self) {
-        self.slot_cache.clear();
-    }
-
     pub fn remove_slot_cache_entry(&mut self, slot: u32) {
         self.slot_cache.remove(&slot);
     }
