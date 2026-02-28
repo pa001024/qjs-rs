@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod perf;
+
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
     VariableDeclaration,
@@ -674,6 +676,7 @@ pub struct Vm {
     gc_boundary_collections: usize,
     gc_runtime_collections: usize,
     gc_reclaimed_objects_total: usize,
+    hotspot_attribution: perf::HotspotAttributionState,
 }
 
 impl Vm {
@@ -896,6 +899,28 @@ impl Vm {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
+    }
+
+    pub fn with_perf_from_env() -> Self {
+        let mut vm = Self::default();
+        vm.set_hotspot_attribution_enabled(perf::hotspot_attribution_enabled_from_env());
+        vm
+    }
+
+    pub fn set_hotspot_attribution_enabled(&mut self, enabled: bool) {
+        self.hotspot_attribution.set_enabled(enabled);
+    }
+
+    pub fn hotspot_attribution_enabled(&self) -> bool {
+        self.hotspot_attribution.enabled()
+    }
+
+    pub fn reset_hotspot_attribution(&mut self) {
+        self.hotspot_attribution.reset();
+    }
+
+    pub fn hotspot_attribution_snapshot(&self) -> Option<perf::HotspotAttribution> {
+        self.hotspot_attribution.snapshot()
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -2057,6 +2082,7 @@ impl Vm {
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
+                    self.hotspot_attribution.record_identifier_resolution();
                     let resolved = if let Some(reference) =
                         self.resolve_binding_or_with_reference(name, realm)?
                     {
@@ -2207,6 +2233,7 @@ impl Vm {
                     self.sync_annex_b_eval_var_function_binding(name, function_value_for_annex_b)?;
                 }
                 Opcode::StoreVariable(name) => {
+                    self.hotspot_attribution.record_identifier_resolution();
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     if let Some(binding_id) = self.resolve_binding_id(name) {
@@ -2271,6 +2298,9 @@ impl Vm {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let result = (|| {
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
+                        if Self::canonical_array_index(&key).is_some() {
+                            self.hotspot_attribution.record_array_indexed_property_get();
+                        }
                         self.get_property_from_receiver(receiver, &key, realm)
                     })();
                     match result {
@@ -2573,6 +2603,9 @@ impl Vm {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let result = (|| {
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
+                        if Self::canonical_array_index(&key).is_some() {
+                            self.hotspot_attribution.record_array_indexed_property_set();
+                        }
                         match receiver {
                             JsValue::Object(object_id) => {
                                 self.set_object_property(object_id, key, value, realm)
@@ -2701,6 +2734,7 @@ impl Vm {
                     continue;
                 }
                 Opcode::ResolveIdentifierReference(name) => {
+                    self.hotspot_attribution.record_identifier_resolution();
                     let reference = self.resolve_identifier_reference(name, realm, strict)?;
                     self.identifier_references.push(reference);
                 }
@@ -2779,15 +2813,19 @@ impl Vm {
                         return Err(VmError::ScopeUnderflow);
                     }
                 }
-                Opcode::Add => match self.evaluate_add(realm, strict) {
-                    Ok(result) => self.stack.push(result),
-                    Err(err) => {
-                        let target = self.route_runtime_error_to_handler(err, code.len())?;
-                        pc = target;
-                        continue;
+                Opcode::Add => {
+                    self.hotspot_attribution.record_numeric_op();
+                    match self.evaluate_add(realm, strict) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
                     }
-                },
+                }
                 Opcode::Sub => {
+                    self.hotspot_attribution.record_numeric_op();
                     match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs - rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
@@ -2798,6 +2836,7 @@ impl Vm {
                     }
                 }
                 Opcode::Mul => {
+                    self.hotspot_attribution.record_numeric_op();
                     match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs * rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
@@ -2808,6 +2847,7 @@ impl Vm {
                     }
                 }
                 Opcode::Div => {
+                    self.hotspot_attribution.record_numeric_op();
                     match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs / rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
@@ -2818,6 +2858,7 @@ impl Vm {
                     }
                 }
                 Opcode::Mod => {
+                    self.hotspot_attribution.record_numeric_op();
                     match self.eval_numeric_binary(realm, strict, |lhs, rhs| lhs % rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
