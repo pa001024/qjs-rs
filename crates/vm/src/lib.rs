@@ -3,6 +3,7 @@
 pub mod perf;
 mod fast_path;
 pub use fast_path::PacketAFastPathCounters;
+pub use fast_path::PacketBFastPathCounters;
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -23,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::fast_path::{NumericBinaryOp, PacketAFastPathState};
+use crate::fast_path::{NumericBinaryOp, PacketAFastPathState, PacketBFastPathState};
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -602,6 +603,15 @@ enum PromiseHook<'a> {
     DrainEnd(&'a PromiseJobDrainReport),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PacketBDenseArrayGuardState {
+    current_length: usize,
+    has_own_data_property: bool,
+    own_data_writable: Option<bool>,
+    extensible: bool,
+    prototype: Option<ObjectId>,
+}
+
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -684,6 +694,9 @@ pub struct Vm {
     packet_a_fast_path_disabled: bool,
     packet_a_fast_path_metrics_enabled: bool,
     packet_a_fast_path: PacketAFastPathState,
+    packet_b_fast_path_disabled: bool,
+    packet_b_fast_path_metrics_enabled: bool,
+    packet_b_fast_path: PacketBFastPathState,
 }
 
 impl Vm {
@@ -769,6 +782,7 @@ impl Vm {
         self.gc_runtime_collections = 0;
         self.gc_reclaimed_objects_total = 0;
         self.packet_a_fast_path.reset();
+        self.packet_b_fast_path.reset();
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -953,6 +967,30 @@ impl Vm {
 
     pub fn packet_a_fast_path_counters(&self) -> PacketAFastPathCounters {
         self.packet_a_fast_path.counters()
+    }
+
+    pub fn set_packet_b_fast_path_enabled(&mut self, enabled: bool) {
+        self.packet_b_fast_path_disabled = !enabled;
+    }
+
+    pub fn packet_b_fast_path_enabled(&self) -> bool {
+        !self.packet_b_fast_path_disabled
+    }
+
+    pub fn set_packet_b_fast_path_metrics_enabled(&mut self, enabled: bool) {
+        self.packet_b_fast_path_metrics_enabled = enabled;
+    }
+
+    pub fn packet_b_fast_path_metrics_enabled(&self) -> bool {
+        self.packet_b_fast_path_metrics_enabled
+    }
+
+    pub fn reset_packet_b_fast_path_counters(&mut self) {
+        self.packet_b_fast_path.reset();
+    }
+
+    pub fn packet_b_fast_path_counters(&self) -> PacketBFastPathCounters {
+        self.packet_b_fast_path.counters()
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -1358,10 +1396,8 @@ impl Vm {
             let binding_id = self.create_binding(value.clone(), true);
             module_scope.insert(name.to_string(), binding_id);
         }
-        let saved_scopes = std::mem::replace(
-            &mut self.scopes,
-            vec![Rc::new(RefCell::new(module_scope))],
-        );
+        let saved_scopes =
+            std::mem::replace(&mut self.scopes, vec![Rc::new(RefCell::new(module_scope))]);
         let saved_with_objects = std::mem::take(&mut self.with_objects);
         let saved_var_scope_stack = std::mem::take(&mut self.var_scope_stack);
         let saved_eval_contexts = std::mem::take(&mut self.eval_contexts);
@@ -2335,6 +2371,18 @@ impl Vm {
                     let key_value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let result = (|| {
+                        if let Some(index) = Self::canonical_array_index_from_property_value(&key_value)
+                        {
+                            self.hotspot_attribution.record_array_indexed_property_get();
+                            if let JsValue::Object(object_id) = &receiver {
+                                let key = index.to_string();
+                                if let Some(value) =
+                                    self.try_packet_b_dense_array_index_get(*object_id, &key)?
+                                {
+                                    return Ok(value);
+                                }
+                            }
+                        }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() {
                             self.hotspot_attribution.record_array_indexed_property_get();
@@ -2640,39 +2688,25 @@ impl Vm {
                     let key_value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let result = (|| {
+                        if let Some(index) = Self::canonical_array_index_from_property_value(&key_value)
+                        {
+                            self.hotspot_attribution.record_array_indexed_property_set();
+                            if let JsValue::Object(object_id) = &receiver {
+                                let key = index.to_string();
+                                if self.try_packet_b_dense_array_index_set(
+                                    *object_id,
+                                    &key,
+                                    &value,
+                                )? {
+                                    return Ok(value);
+                                }
+                            }
+                        }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() {
                             self.hotspot_attribution.record_array_indexed_property_set();
                         }
-                        match receiver {
-                            JsValue::Object(object_id) => {
-                                self.set_object_property(object_id, key, value, realm)
-                            }
-                            JsValue::Function(closure_id) => {
-                                if self.function_rejects_caller_arguments(closure_id)?
-                                    && matches!(key.as_str(), "caller" | "arguments")
-                                    && !self.closure_has_own_property(closure_id, &key)
-                                {
-                                    Err(VmError::TypeError("restricted function property access"))
-                                } else {
-                                    self.set_function_property(closure_id, key, value, realm)
-                                }
-                            }
-                            JsValue::NativeFunction(native) => self.set_property_on_receiver(
-                                JsValue::NativeFunction(native),
-                                key,
-                                value,
-                                realm,
-                            ),
-                            JsValue::HostFunction(host_id) => {
-                                if Self::is_restricted_function_property(&key) {
-                                    Err(VmError::TypeError("restricted function property access"))
-                                } else {
-                                    self.set_host_function_property(host_id, key, value, realm)
-                                }
-                            }
-                            _ => Err(VmError::TypeError("property write expects object")),
-                        }
+                        self.set_property_on_receiver(receiver, key, value, realm)
                     })();
                     match result {
                         Ok(result) => self.stack.push(result),
@@ -14465,6 +14499,30 @@ impl Vm {
         }
     }
 
+    fn record_packet_b_dense_array_get_guard_hit(&mut self) {
+        if self.packet_b_fast_path_metrics_enabled() {
+            self.packet_b_fast_path.record_dense_array_get_guard_hit();
+        }
+    }
+
+    fn record_packet_b_dense_array_get_guard_miss(&mut self) {
+        if self.packet_b_fast_path_metrics_enabled() {
+            self.packet_b_fast_path.record_dense_array_get_guard_miss();
+        }
+    }
+
+    fn record_packet_b_dense_array_set_guard_hit(&mut self) {
+        if self.packet_b_fast_path_metrics_enabled() {
+            self.packet_b_fast_path.record_dense_array_set_guard_hit();
+        }
+    }
+
+    fn record_packet_b_dense_array_set_guard_miss(&mut self) {
+        if self.packet_b_fast_path_metrics_enabled() {
+            self.packet_b_fast_path.record_dense_array_set_guard_miss();
+        }
+    }
+
     fn cached_binding_entry_is_valid(
         &self,
         name: &str,
@@ -14768,6 +14826,183 @@ impl Vm {
         Ok(false)
     }
 
+    fn packet_b_dense_array_guard_state(
+        &self,
+        object_id: ObjectId,
+        property: &str,
+        index: usize,
+    ) -> Result<Option<PacketBDenseArrayGuardState>, VmError> {
+        let Some(array_prototype_id) = self.array_prototype_id else {
+            return Ok(None);
+        };
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+        if !matches!(
+            object.properties.get(ARRAY_OBJECT_MARKER_KEY),
+            Some(JsValue::Bool(true))
+        ) {
+            return Ok(None);
+        }
+        if matches!(
+            object.properties.get(PROXY_OBJECT_MARKER_KEY),
+            Some(JsValue::Bool(true))
+        ) {
+            return Ok(None);
+        }
+        if object.prototype != Some(array_prototype_id) || object.prototype_value.is_some() {
+            return Ok(None);
+        }
+        let Some(length_attributes) = object.property_attributes.get("length") else {
+            return Ok(None);
+        };
+        if length_attributes.enumerable || length_attributes.configurable {
+            return Ok(None);
+        }
+        if object.getters.contains_key(property) || object.setters.contains_key(property) {
+            return Ok(None);
+        }
+
+        let current_length = object
+            .properties
+            .get("length")
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        if index > current_length {
+            return Ok(None);
+        }
+
+        let has_own_data_property = object.properties.contains_key(property);
+        if !has_own_data_property && index < current_length {
+            return Ok(None);
+        }
+
+        let own_data_writable = object.properties.get(property).map(|_| {
+            object
+                .property_attributes
+                .get(property)
+                .is_none_or(|attributes| attributes.writable)
+        });
+
+        Ok(Some(PacketBDenseArrayGuardState {
+            current_length,
+            has_own_data_property,
+            own_data_writable,
+            extensible: object.extensible,
+            prototype: object.prototype,
+        }))
+    }
+
+    fn packet_b_prototype_chain_has_indexed_property(
+        &self,
+        mut prototype: Option<ObjectId>,
+        property: &str,
+    ) -> Result<bool, VmError> {
+        while let Some(prototype_id) = prototype {
+            let object = self
+                .objects
+                .get(&prototype_id)
+                .ok_or_else(|| self.classify_unknown_object_error(prototype_id))?;
+            if object.properties.contains_key(property)
+                || object.getters.contains_key(property)
+                || object.setters.contains_key(property)
+                || object.prototype_value.is_some()
+            {
+                return Ok(true);
+            }
+            prototype = object.prototype;
+        }
+        Ok(false)
+    }
+
+    fn try_packet_b_dense_array_index_get(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+    ) -> Result<Option<JsValue>, VmError> {
+        if !self.packet_b_fast_path_enabled() {
+            return Ok(None);
+        }
+        let Some(index) = Self::canonical_array_index(property) else {
+            return Ok(None);
+        };
+        let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
+            self.record_packet_b_dense_array_get_guard_miss();
+            return Ok(None);
+        };
+        if index >= guard.current_length
+            || !guard.has_own_data_property
+            || self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?
+        {
+            self.record_packet_b_dense_array_get_guard_miss();
+            return Ok(None);
+        }
+        let Some(value) = self
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get(property))
+            .cloned()
+        else {
+            self.record_packet_b_dense_array_get_guard_miss();
+            return Ok(None);
+        };
+        self.record_packet_b_dense_array_get_guard_hit();
+        Ok(Some(value))
+    }
+
+    fn try_packet_b_dense_array_index_set(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+        value: &JsValue,
+    ) -> Result<bool, VmError> {
+        if !self.packet_b_fast_path_enabled() {
+            return Ok(false);
+        }
+        let Some(index) = Self::canonical_array_index(property) else {
+            return Ok(false);
+        };
+        let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
+            self.record_packet_b_dense_array_set_guard_miss();
+            return Ok(false);
+        };
+        if self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)? {
+            self.record_packet_b_dense_array_set_guard_miss();
+            return Ok(false);
+        }
+
+        if guard.has_own_data_property && guard.own_data_writable == Some(false) {
+            self.record_packet_b_dense_array_set_guard_miss();
+            return Ok(false);
+        }
+        if !guard.has_own_data_property {
+            if index != guard.current_length || !guard.extensible {
+                self.record_packet_b_dense_array_set_guard_miss();
+                return Ok(false);
+            }
+        }
+
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        object.properties.insert(property.to_string(), value.clone());
+        object
+            .property_attributes
+            .entry(property.to_string())
+            .or_default();
+        if index == guard.current_length {
+            object.properties.insert(
+                "length".to_string(),
+                JsValue::Number((guard.current_length + 1) as f64),
+            );
+        }
+        self.record_packet_b_dense_array_set_guard_hit();
+        Ok(true)
+    }
+
     fn get_property_from_receiver(
         &mut self,
         receiver: JsValue,
@@ -14775,7 +15010,12 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         match receiver {
-            JsValue::Object(object_id) => self.get_object_property(object_id, property, realm),
+            JsValue::Object(object_id) => {
+                if let Some(value) = self.try_packet_b_dense_array_index_get(object_id, property)? {
+                    return Ok(value);
+                }
+                self.get_object_property(object_id, property, realm)
+            }
             JsValue::Function(closure_id) => {
                 self.get_function_property(closure_id, property, realm)
             }
@@ -14827,6 +15067,9 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match receiver {
             JsValue::Object(object_id) => {
+                if self.try_packet_b_dense_array_index_set(object_id, &property, &value)? {
+                    return Ok(value);
+                }
                 self.set_object_property(object_id, property, value, realm)
             }
             JsValue::Function(closure_id) => {
@@ -19415,6 +19658,22 @@ impl Vm {
         Some(index as usize)
     }
 
+    fn canonical_array_index_from_property_value(value: &JsValue) -> Option<usize> {
+        match value {
+            JsValue::Number(number)
+                if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 =>
+            {
+                let index = *number as u64;
+                if index >= u32::MAX as u64 {
+                    return None;
+                }
+                Some(index as usize)
+            }
+            JsValue::String(property) => Self::canonical_array_index(property),
+            _ => None,
+        }
+    }
+
     fn coerce_valid_array_length_or_throw(
         &mut self,
         value: JsValue,
@@ -22535,8 +22794,8 @@ fn regexp_exec_capture_and_constructor_errors() {
 #[cfg(test)]
 mod tests {
     use super::{
-        GcStats, PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks,
-        TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION,
+        GcStats, PacketBFastPathCounters, PromiseJobDrainReport, PromiseJobDrainStopReason,
+        PromiseJobHostHooks, TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION,
         TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED, TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED,
         TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED, TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN,
         TYPE_ERROR_SHADOW_ROOT_MISMATCH, TYPE_ERROR_STALE_HANDLE, Vm, VmError,
@@ -26712,6 +26971,67 @@ slots[1][2].value + slots[2][0].value;
         let post_drain_stats = vm.collect_garbage(&realm);
         assert!(post_drain_stats.reclaimed_objects > pending_stats.reclaimed_objects);
         assert!(!vm.objects.contains_key(&captured_id));
+    }
+
+    #[test]
+    fn packet_b_array_dense_index_fast_path_guarding() {
+        let source = r#"
+let arr = [];
+for (let i = 0; i < 24; i = i + 1) {
+  arr[i] = i + 1;
+}
+let dense = 0;
+for (let i = 0; i < arr.length; i = i + 1) {
+  dense = dense + arr[i];
+}
+
+let accessorHits = 0;
+Object.defineProperty(arr, "3", {
+  get: function() {
+    accessorHits = accessorHits + 1;
+    return 77;
+  },
+  set: function(value) {
+    accessorHits = accessorHits + 10;
+  },
+  configurable: true
+});
+let accessorRead = arr[3];
+arr[3] = 5;
+
+let holeIsUndefined = arr[30] === undefined ? 1 : 0;
+Array.prototype[33] = 600;
+let inherited = arr[33];
+delete Array.prototype[33];
+
+arr[40] = 9;
+let sparseLength = arr.length;
+let sparseRead = arr[40];
+
+dense + accessorRead + inherited + sparseRead + sparseLength + holeIsUndefined + accessorHits;
+"#;
+        let script = parse_script(source).expect("script should parse");
+        let chunk = compile_script(&script);
+
+        let mut slow_vm = Vm::default();
+        slow_vm.set_packet_b_fast_path_enabled(false);
+        slow_vm.set_packet_b_fast_path_metrics_enabled(true);
+        let slow_value = slow_vm.execute(&chunk).expect("script should execute");
+        let slow_counters = slow_vm.packet_b_fast_path_counters();
+
+        let mut fast_vm = Vm::default();
+        fast_vm.set_packet_b_fast_path_enabled(true);
+        fast_vm.set_packet_b_fast_path_metrics_enabled(true);
+        let fast_value = fast_vm.execute(&chunk).expect("script should execute");
+        let fast_counters = fast_vm.packet_b_fast_path_counters();
+
+        assert_eq!(slow_value, JsValue::Number(1039.0));
+        assert_eq!(fast_value, slow_value);
+        assert_eq!(slow_counters, PacketBFastPathCounters::default());
+        assert!(fast_counters.dense_array_get_guard_hits > 0);
+        assert!(fast_counters.dense_array_set_guard_hits > 0);
+        assert!(fast_counters.dense_array_get_guard_misses > 0);
+        assert!(fast_counters.dense_array_set_guard_misses > 0);
     }
 
     #[test]

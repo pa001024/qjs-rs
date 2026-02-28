@@ -106,3 +106,46 @@ impl PacketAFastPathState {
         self.counters
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketBFastPathCounters {
+    pub dense_array_get_guard_hits: u64,
+    pub dense_array_get_guard_misses: u64,
+    pub dense_array_set_guard_hits: u64,
+    pub dense_array_set_guard_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketBFastPathState {
+    counters: PacketBFastPathCounters,
+}
+
+impl PacketBFastPathState {
+    pub fn reset(&mut self) {
+        self.counters = PacketBFastPathCounters::default();
+    }
+
+    pub fn record_dense_array_get_guard_hit(&mut self) {
+        self.counters.dense_array_get_guard_hits =
+            self.counters.dense_array_get_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_dense_array_get_guard_miss(&mut self) {
+        self.counters.dense_array_get_guard_misses =
+            self.counters.dense_array_get_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_dense_array_set_guard_hit(&mut self) {
+        self.counters.dense_array_set_guard_hits =
+            self.counters.dense_array_set_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_dense_array_set_guard_miss(&mut self) {
+        self.counters.dense_array_set_guard_misses =
+            self.counters.dense_array_set_guard_misses.wrapping_add(1);
+    }
+
+    pub fn counters(&self) -> PacketBFastPathCounters {
+        self.counters
+    }
+}
