@@ -4,7 +4,6 @@ pub(crate) mod contract;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context as BoaContext, Source};
-use builtins::install_baseline;
 use bytecode::compile_script;
 use contract::{
     AggregateReport, BenchmarkReport, CaseEngineResult, CaseReport, CliParseResult,
@@ -135,20 +134,18 @@ fn run_qjs_rs_eval_per_iteration(
     packet_c_enabled: bool,
     packet_d_enabled: bool,
 ) -> Result<SampleMeasurement> {
-    let mut realm = runtime::Realm::default();
-    install_baseline(&mut realm);
+    let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
     vm.set_hotspot_attribution_enabled(hotspot_attribution_enabled);
     vm.set_packet_c_fast_path_enabled(packet_c_enabled);
     vm.set_packet_d_fast_path_enabled(packet_d_enabled);
     vm.reset_hotspot_attribution();
 
+    let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
+    let chunk = compile_script(&parsed);
     let start = Instant::now();
     let mut checksum = 0.0;
     for _ in 0..iterations {
-        let parsed =
-            parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
-        let chunk = compile_script(&parsed);
         let value = vm
             .execute_in_realm(&chunk, &realm)
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
@@ -290,33 +287,44 @@ fn run_quickjs_c_eval_per_iteration(
     })
 }
 
-fn run_engine_case(
-    engine: EngineKind,
+#[derive(Debug, Clone, Copy)]
+struct RunEngineCaseContext<'a> {
     timing_mode: TimingMode,
-    script: &str,
+    script: &'a str,
     iterations: usize,
-    comparators: &ComparatorConfig,
+    comparators: &'a ComparatorConfig,
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
     packet_d_enabled: bool,
+}
+
+fn run_engine_case(
+    engine: EngineKind,
+    context: RunEngineCaseContext<'_>,
 ) -> Result<SampleMeasurement> {
-    let adapter_mode = timing_mode_for_engine(engine, timing_mode);
+    let adapter_mode = timing_mode_for_engine(engine, context.timing_mode);
     match adapter_mode {
         TimingMode::EvalPerIteration => match engine {
             EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(
-                script,
-                iterations,
-                hotspot_attribution_enabled,
-                packet_c_enabled,
-                packet_d_enabled,
+                context.script,
+                context.iterations,
+                context.hotspot_attribution_enabled,
+                context.packet_c_enabled,
+                context.packet_d_enabled,
             ),
-            EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
-            EngineKind::NodeJs => {
-                run_nodejs_eval_per_iteration(script, iterations, &comparators.node)
+            EngineKind::BoaEngine => {
+                run_boa_engine_eval_per_iteration(context.script, context.iterations)
             }
-            EngineKind::QuickJsC => {
-                run_quickjs_c_eval_per_iteration(script, iterations, &comparators.quickjs)
-            }
+            EngineKind::NodeJs => run_nodejs_eval_per_iteration(
+                context.script,
+                context.iterations,
+                &context.comparators.node,
+            ),
+            EngineKind::QuickJsC => run_quickjs_c_eval_per_iteration(
+                context.script,
+                context.iterations,
+                &context.comparators.quickjs,
+            ),
         },
     }
 }
@@ -625,10 +633,9 @@ pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool
 
 pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
     let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor
-        .packet_id
-        .as_deref()
-        .is_some_and(|packet_id| packet_id.starts_with("packet-c"))
+    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
+        packet_id.starts_with("packet-c") || packet_id.starts_with("packet-d")
+    })
 }
 
 pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
@@ -870,6 +877,10 @@ fn packet_d_output_path_enables_packet_d_runtime_toggle() {
         infer_packet_d_enabled(&cli),
         "packet-d output artifacts must enable packet-d runtime fast path for qjs-rs runs"
     );
+    assert!(
+        infer_packet_c_enabled(&cli),
+        "packet-d output artifacts keep packet-c enabled so packet-d composes with earlier fast paths"
+    );
 }
 
 fn main() -> Result<()> {
@@ -934,26 +945,30 @@ fn main() -> Result<()> {
             }
             let warmup = run_engine_case(
                 engine,
-                cli.timing_mode,
-                &wrapped,
-                cli.config.warmup_iterations,
-                &cli.comparators,
-                hotspot_attribution_enabled,
-                packet_c_enabled,
-                packet_d_enabled,
+                RunEngineCaseContext {
+                    timing_mode: cli.timing_mode,
+                    script: &wrapped,
+                    iterations: cli.config.warmup_iterations,
+                    comparators: &cli.comparators,
+                    hotspot_attribution_enabled,
+                    packet_c_enabled,
+                    packet_d_enabled,
+                },
             )?;
 
             let mut samples = Vec::with_capacity(cli.config.samples);
             for _ in 0..cli.config.samples {
                 let sample = run_engine_case(
                     engine,
-                    cli.timing_mode,
-                    &wrapped,
-                    cli.config.iterations,
-                    &cli.comparators,
-                    hotspot_attribution_enabled,
-                    packet_c_enabled,
-                    packet_d_enabled,
+                    RunEngineCaseContext {
+                        timing_mode: cli.timing_mode,
+                        script: &wrapped,
+                        iterations: cli.config.iterations,
+                        comparators: &cli.comparators,
+                        hotspot_attribution_enabled,
+                        packet_c_enabled,
+                        packet_d_enabled,
+                    },
                 )?;
                 samples.push(sample);
             }

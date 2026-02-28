@@ -13,7 +13,7 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration. _(Open gap: authoritative 11-07 bundle at `target/benchmarks/phase11-closure-bundle.json` still fails `--require-qjs-lte-boa` with `qjs-rs 1390.811014 > boa-engine 181.287246`.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration. _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T16:27:50Z`) still fails `--require-qjs-lte-boa` with `qjs-rs 1211.668632 > boa-engine 154.937264`.)_
 - [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Open closure state: packet evidence exists, but authoritative governance + PERF-03 bundle is still red.)_
 - [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Open closure state: maintainability evidence exists, but phase closure remains blocked until the authoritative governance + PERF-03 bundle is jointly green.)_
 
@@ -43,7 +43,7 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Open (gap: 11-07 authoritative bundle perf target failed: `qjs-rs 1390.811014 > boa-engine 181.287246`) |
+| PERF-03 | Phase 11 | Open (gap: latest authoritative bundle perf target failed: `qjs-rs 1211.668632 > boa-engine 154.937264`) |
 | PERF-04 | Phase 11 | Open (packet evidence landed; authoritative bundle still red due governance+perf gap) |
 | PERF-05 | Phase 11 | Open (maintainability evidence landed; authoritative governance+perf bundle still open) |
 | TST-05 | Phase 12 | Planned |

@@ -1,9 +1,9 @@
 ---
 phase: 11-hot-path-optimization-and-target-closure
 phase_number: "11"
-verified: 2026-02-28T13:30:03Z
+verified: 2026-02-28T16:27:50Z
 status: gaps_found
-score: "15/22 must-have truths verified"
+score: "16/22 must-have truths verified"
 requirements_checked:
   - PERF-03
   - PERF-04
@@ -16,11 +16,11 @@ requirements_checked:
 
 Phase 11 goal is **not achieved yet**.
 
-Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on locked profile) is still red in the single authoritative 11-07 run bundle, and governance is not jointly green in that same run.
+Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on locked profile) is still red in the latest authoritative run bundle, even though governance gates are now green.
 
 ## Inputs Audited
 
-- Plans/Summaries: `11-01..11-07` PLAN + SUMMARY set (11-07 in execution)
+- Plans/Summaries: `11-01..11-07` PLAN + SUMMARY set
 - Evidence bundles:
   - `11-PACKET-A-EVIDENCE.md`
   - `11-PACKET-C-EVIDENCE.md`
@@ -32,7 +32,7 @@ Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on 
   - `.planning/STATE.md`
   - `AGENTS.md`
 - Authoritative machine-readable run artifact:
-  - `target/benchmarks/phase11-closure-bundle.json` (`timestamp_utc`: `2026-02-28T13:30:03Z`)
+  - `target/benchmarks/phase11-closure-bundle.json` (`timestamp_utc`: `2026-02-28T16:27:50Z`)
 
 ## Authoritative 11-07 Bundle Results (single provenance source)
 
@@ -40,7 +40,7 @@ Ordered command return codes from `target/benchmarks/phase11-closure-bundle.json
 
 1. `bench_generate`: `rc=0`
 2. `fmt`: `rc=0`
-3. `clippy`: `rc=101`
+3. `clippy`: `rc=0`
 4. `test`: `rc=0`
 5. `contract`: `rc=0`
 6. `perf_target`: `rc=1`
@@ -48,13 +48,13 @@ Ordered command return codes from `target/benchmarks/phase11-closure-bundle.json
 Packet-D candidate hash provenance:
 
 - `path`: `target/benchmarks/engine-comparison.local-dev.packet-d.json`
-- `hash/sha256`: `5c86d5ad74fa925e2978be29489adfd4d2fe9d486685fbce9b8b52b595f41667`
+- `hash/sha256`: `02bcc45edebea604a98ac041cb0415f6aff71dde31fee49cb2f799b25c35ec16`
 
 Aggregate means (candidate packet-d artifact):
 
-- `qjs-rs`: `1390.811014`
-- `boa-engine`: `181.287246`
-- `qjs-rs/boa-engine`: `7.6728x`
+- `qjs-rs`: `1211.668632`
+- `boa-engine`: `154.937264`
+- `qjs-rs/boa-engine`: `7.8204x`
 
 ## Must-Have Truth Audit (11-01..11-07)
 
@@ -66,9 +66,9 @@ Aggregate means (candidate packet-d artifact):
 | 11-04 | 3 | 2/3 ⚠️ | Packet-C implementation/parity and before/after reporting are present; required closure pass (`--require-qjs-lte-boa`) is not met. |
 | 11-05 | 5 | 4/5 ⚠️ | Gap-closure sync + packet stability + failure-path doc synchronization are present; governance/perf closure remained open. |
 | 11-06 | 3 | 2/3 ⚠️ | Packet-D implementation and parity guard evidence are present; PERF-03 closure remained open. |
-| 11-07 | 2 | 0/2 ❌ | Authoritative bundle captured correctly, but governance and PERF-03 are not jointly green (`clippy` red, perf-target red). |
+| 11-07 | 2 | 1/2 ⚠️ | Authoritative bundle provenance and governance gates are green, but PERF-03 remains red so joint closure condition is still unmet. |
 
-Net: **15/22 truths verified**.
+Net: **16/22 truths verified**.
 
 ## Requirement Cross-Reference (Plan Frontmatter ↔ Traceability)
 
@@ -86,16 +86,16 @@ Verification conclusion per requirement:
 
 | Requirement | Verification result | Evidence summary |
 |---|---|---|
-| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs 1390.811014 > boa-engine 181.287246`) in the 11-07 run bundle. |
-| PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03 + governance conditions. |
-| PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until authoritative bundle is jointly green. |
+| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs 1211.668632 > boa-engine 154.937264`) in the latest run bundle. |
+| PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03. |
+| PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until PERF-03 is satisfied in authoritative bundle checks. |
 
 ## Governance/Boundary Checks
 
 - Pure-Rust runtime-core boundary: no C FFI indicators found in `crates/vm`, `crates/runtime`, `crates/bytecode`, `crates/builtins` scan.
-- Authoritative governance gate bundle (from 11-07 artifact):
+- Authoritative governance gate bundle (from latest closure artifact):
   - `fmt`: ✅
-  - `clippy`: ❌
+  - `clippy`: ✅
   - `test`: ✅
 
 ## Final Status
@@ -105,5 +105,4 @@ Verification conclusion per requirement:
 
 ### Top remaining blockers
 
-1. **Governance bundle not jointly green**: `cargo clippy --all-targets -- -D warnings` fails in authoritative bundle due `clippy::too_many_arguments` at `crates/benchmarks/src/main.rs:293`.
-2. **PERF-03 target not met**: authoritative closure checker reports `qjs-rs` aggregate above `boa-engine` (`1390.811014 > 181.287246`).
+1. **PERF-03 target not met**: authoritative closure checker still reports `qjs-rs` aggregate above `boa-engine` (`1211.668632 > 154.937264`).

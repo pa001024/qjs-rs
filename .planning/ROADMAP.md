@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all Phase 11 plans executed as of 2026-02-28; closure remains open per `phase11-closure-bundle.json` governance/perf failures)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all Phase 11 plans executed as of 2026-02-28; closure remains open per latest `phase11-closure-bundle.json` PERF-03 failure)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -31,7 +31,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 7/7 plans completed (closure still open: authoritative 11-07 bundle has `clippy`/PERF-03 red gates)
+**Plans:** 7/7 plans completed (closure still open: latest authoritative bundle has PERF-03 red gate)
 Plans:
 - [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [x] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence. (completed 2026-02-28)

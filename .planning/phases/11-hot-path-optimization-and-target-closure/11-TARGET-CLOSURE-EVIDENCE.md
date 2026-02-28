@@ -175,4 +175,44 @@ Exact command outputs captured from the run:
 
 Phase 11 closure remains **open** because governance and PERF-03 are not jointly green in the same authoritative run artifact.
 
+## 9) Post-clippy-fix authoritative rerun (2026-02-28)
+
+### 9.1 Single authoritative machine-readable provenance artifact
+
+- Bundle path: `target/benchmarks/phase11-closure-bundle.json`
+- `timestamp_utc`: `2026-02-28T16:27:50Z`
+- Packet-D artifact path: `target/benchmarks/engine-comparison.local-dev.packet-d.json`
+- Packet-D artifact hash/sha256: `02bcc45edebea604a98ac041cb0415f6aff71dde31fee49cb2f799b25c35ec16`
+
+### 9.2 Ordered command transcript from authoritative rerun
+
+1. `cargo run -p benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-d.json --allow-missing-comparators` (`rc=0`)
+2. `cargo fmt --check` (`rc=0`)
+3. `cargo clippy --all-targets -- -D warnings` (`rc=0`)
+4. `cargo test` (`rc=0`)
+5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-d.json` (`rc=0`)
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`)
+
+PERF-03 checker output:
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-boa failed: candidate qjs-rs 1211.668632 > boa-engine 154.937264
+```
+
+### 9.3 Packet-d aggregate means (`local-dev` candidate)
+
+- `qjs-rs`: `1211.668632 ms`
+- `boa-engine`: `154.937264 ms`
+- `nodejs`: `2.493782 ms`
+- `qjs-rs / boa-engine`: `7.8204x`
+
+### 9.4 Latest gate verdict
+
+- Governance bundle (`fmt` + `clippy` + `test`): **PASS** (`fmt=0`, `clippy=0`, `test=0`)
+- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED**
+  - `qjs-rs 1211.668632 > boa-engine 154.937264`
+
+Phase 11 closure remains **open** because PERF-03 is still red in the latest authoritative run artifact.
+
 
