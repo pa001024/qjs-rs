@@ -8,6 +8,9 @@ Phase 10 contract (`bench.v1`) requires this deterministic execution order for e
 
 Skipping step 2 is not allowed for PERF-01/PERF-02 evidence publication.
 
+For Phase 11 target closure rules (PERF-03/PERF-04/PERF-05), see
+[`docs/performance-closure-policy.md`](./performance-closure-policy.md).
+
 ## Deterministic Artifact Paths
 
 | Profile | JSON Artifact | Chart Artifact | Markdown Artifact |
@@ -32,6 +35,18 @@ python scripts/render_engine_benchmark_report.py \
   --input target/benchmarks/engine-comparison.local-dev.json \
   --chart target/benchmarks/engine-comparison.local-dev.svg \
   --report target/benchmarks/engine-comparison.local-dev.md
+```
+
+### Phase 11 authoritative baseline (`local-dev`, same-host rerun policy)
+
+```bash
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --allow-missing-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.phase11-baseline.json
 ```
 
 ## CI Baseline Workflow (`ci-linux`)
@@ -61,10 +76,12 @@ For quick CI gates that should avoid full benchmark runtime, run the checker aga
 python .github/scripts/check_engine_benchmark_contract.py --self-test
 python .github/scripts/check_engine_benchmark_contract.py \
   --input .github/scripts/benchmark_contract/fixtures/benchmark-report-valid.json
+python .github/scripts/check_perf_target.py --self-test
 ```
 
 ## Notes
 
 - The benchmark suite covers `arith-loop`, `fib-iterative`, `array-sum`, and `json-roundtrip`.
 - Contract checker failures are blocking and must be fixed before report generation is accepted.
+- Phase 11 perf-target claims are only valid when `.github/scripts/check_perf_target.py` passes under the authoritative `local-dev` + `eval-per-iteration` + same-host policy.
 - Rendered reports include schema/profile/timing/comparator metadata so audit reviewers can confirm reproducibility context directly from markdown.
