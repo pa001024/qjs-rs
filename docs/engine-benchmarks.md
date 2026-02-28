@@ -54,6 +54,34 @@ Phase 11 artifacts now embed:
 - `perf_target` metadata (closure policy, optimization tag/packet id, host fingerprint, comparator policy)
 - optional `qjs_rs_hotspot_attribution` counters for packet-level hotspot auditing
 
+### Phase 11 packet-B closure candidate workflow
+
+```bash
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-b.json \
+  --allow-missing-comparators
+
+cargo run -p benchmarks --release -- \
+  --profile ci-linux \
+  --output target/benchmarks/engine-comparison.ci-linux.packet-b.json \
+  --allow-missing-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-b.json
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.ci-linux.packet-b.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json \
+  --require-qjs-lte-boa
+```
+
+If the final `check_perf_target.py --require-qjs-lte-boa` command fails, Phase 11 PERF-03
+closure is **not** satisfied and the run must be recorded as a non-closure candidate.
+
 ## CI Baseline Workflow (`ci-linux`)
 
 `ci-linux` defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`, strict comparators.
