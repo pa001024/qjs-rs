@@ -31,6 +31,11 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
+**Plans:** 3 plans
+Plans:
+- [ ] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact.
+- [ ] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence.
+- [ ] 11-03-PLAN.md — Land packet-B array/property optimizations and run final target-closure evidence bundle.
 **Success Criteria** (what must be TRUE):
   1. Aggregate mean latency on the tracked suite is no worse than `boa-engine` under the same host and run configuration.
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
