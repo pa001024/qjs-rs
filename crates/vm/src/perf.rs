@@ -62,30 +62,23 @@ impl HotspotAttributionState {
         if !self.enabled {
             return;
         }
-        self.counters.identifier_resolution = self
-            .counters
-            .identifier_resolution
-            .saturating_add(1);
+        self.counters.identifier_resolution = self.counters.identifier_resolution.saturating_add(1);
     }
 
     pub fn record_array_indexed_property_get(&mut self) {
         if !self.enabled {
             return;
         }
-        self.counters.array_indexed_property_get = self
-            .counters
-            .array_indexed_property_get
-            .saturating_add(1);
+        self.counters.array_indexed_property_get =
+            self.counters.array_indexed_property_get.saturating_add(1);
     }
 
     pub fn record_array_indexed_property_set(&mut self) {
         if !self.enabled {
             return;
         }
-        self.counters.array_indexed_property_set = self
-            .counters
-            .array_indexed_property_set
-            .saturating_add(1);
+        self.counters.array_indexed_property_set =
+            self.counters.array_indexed_property_set.saturating_add(1);
     }
 }
 

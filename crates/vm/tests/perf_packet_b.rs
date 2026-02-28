@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-use bytecode::compile_script;
 use builtins::install_baseline;
+use bytecode::compile_script;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
 use vm::{PacketBFastPathCounters, Vm};

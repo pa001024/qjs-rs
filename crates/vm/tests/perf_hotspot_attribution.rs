@@ -3,7 +3,7 @@
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::JsValue;
-use vm::{perf::HotspotAttribution, Vm};
+use vm::{Vm, perf::HotspotAttribution};
 
 fn run_hotspot_sample(enable_attribution: bool) -> (JsValue, Option<HotspotAttribution>) {
     let script = parse_script(
