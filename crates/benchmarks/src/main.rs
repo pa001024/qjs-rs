@@ -619,7 +619,26 @@ fn host_fingerprint(environment: &EnvironmentInfo) -> String {
     )
 }
 
-fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool {
+pub(crate) fn build_perf_target_metadata(
+    output: &Path,
+    environment: &EnvironmentInfo,
+) -> PerfTargetMetadata {
+    let optimization_descriptor = contract::infer_optimization_descriptor(output);
+    PerfTargetMetadata {
+        policy_id: PERF_TARGET_POLICY_ID,
+        authoritative_run_profile: PERF_TARGET_AUTHORITY_PROFILE,
+        authoritative_timing_mode: PERF_TARGET_AUTHORITY_TIMING_MODE,
+        same_host_required: true,
+        host_fingerprint: host_fingerprint(environment),
+        optimization_mode: optimization_descriptor.mode,
+        optimization_tag: optimization_descriptor.tag,
+        packet_id: optimization_descriptor.packet_id,
+        required_comparators: REQUIRED_CLOSURE_COMPARATORS.to_vec(),
+        optional_comparators: OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
+    }
+}
+
+pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool {
     if let Some(override_value) = cli.hotspot_attribution_override {
         return override_value;
     }
@@ -822,26 +841,17 @@ fn main() -> Result<()> {
     let environment = collect_environment(&preflight_metadata);
     let optimization_descriptor = contract::infer_optimization_descriptor(&cli.output);
     let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
-    let perf_target = PerfTargetMetadata {
-        policy_id: PERF_TARGET_POLICY_ID,
-        authoritative_run_profile: PERF_TARGET_AUTHORITY_PROFILE,
-        authoritative_timing_mode: PERF_TARGET_AUTHORITY_TIMING_MODE,
-        same_host_required: true,
-        host_fingerprint: host_fingerprint(&environment),
-        optimization_mode: optimization_descriptor.mode,
-        optimization_tag: optimization_descriptor.tag.clone(),
-        packet_id: optimization_descriptor.packet_id.clone(),
-        required_comparators: REQUIRED_CLOSURE_COMPARATORS.to_vec(),
-        optional_comparators: OPTIONAL_CLOSURE_COMPARATORS.to_vec(),
-    };
+    let perf_target = build_perf_target_metadata(&cli.output, &environment);
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} optimization_tag={}: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
         hotspot_attribution_enabled,
+        optimization_descriptor.mode,
         perf_target.optimization_tag,
+        perf_target.packet_id.as_deref().unwrap_or("none"),
         cases.len(),
         EngineKind::all_required().len(),
         cli.config.samples,
