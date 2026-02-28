@@ -240,7 +240,7 @@ pub struct PacketDFastPathCounters {
 
 #[derive(Debug, Default)]
 pub struct PacketDFastPathState {
-    slot_cache: HashMap<u32, PacketDSlotCacheEntry>,
+    slot_cache: Vec<Option<PacketDSlotCacheEntry>>,
     counters: PacketDFastPathCounters,
 }
 
@@ -251,11 +251,14 @@ impl PacketDFastPathState {
     }
 
     pub fn remove_slot_cache_entry(&mut self, slot: u32) {
-        self.slot_cache.remove(&slot);
+        let index = slot as usize;
+        if let Some(entry) = self.slot_cache.get_mut(index) {
+            *entry = None;
+        }
     }
 
     pub fn slot_cache_entry(&self, slot: u32) -> Option<PacketDSlotCacheEntry> {
-        self.slot_cache.get(&slot).copied()
+        self.slot_cache.get(slot as usize).copied().flatten()
     }
 
     pub fn remember_slot_cache_entry(
@@ -265,14 +268,15 @@ impl PacketDFastPathState {
         binding_id: BindingId,
         scope_generation: u64,
     ) {
-        self.slot_cache.insert(
-            slot,
-            PacketDSlotCacheEntry {
-                scope_index,
-                binding_id,
-                scope_generation,
-            },
-        );
+        let index = slot as usize;
+        if index >= self.slot_cache.len() {
+            self.slot_cache.resize(index + 1, None);
+        }
+        self.slot_cache[index] = Some(PacketDSlotCacheEntry {
+            scope_index,
+            binding_id,
+            scope_generation,
+        });
     }
 
     pub fn record_slot_guard_hit(&mut self) {

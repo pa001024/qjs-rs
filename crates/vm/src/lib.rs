@@ -709,6 +709,9 @@ pub struct Vm {
     packet_d_fast_path_metrics_enabled: bool,
     packet_d_scope_generation: u64,
     packet_d_fast_path: PacketDFastPathState,
+    identifier_slot_metadata_cache:
+        BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
+    last_persistent_chunk_key: Option<(usize, usize)>,
 }
 
 impl Vm {
@@ -798,6 +801,8 @@ impl Vm {
         self.packet_c_fast_path.reset();
         self.packet_d_scope_generation = 0;
         self.packet_d_fast_path.reset();
+        self.identifier_slot_metadata_cache.clear();
+        self.last_persistent_chunk_key = None;
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
             self.object_prototype_id = Some(id);
@@ -943,6 +948,11 @@ impl Vm {
         chunk: &Chunk,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        let chunk_key = (chunk.code.as_ptr() as usize, chunk.code.len());
+        if self.last_persistent_chunk_key != Some(chunk_key) {
+            self.identifier_slot_metadata_cache.clear();
+            self.last_persistent_chunk_key = Some(chunk_key);
+        }
         if self.global_object_id.is_none() || self.scopes.is_empty() {
             let bootstrap = Chunk {
                 code: vec![Opcode::LoadUndefined, Opcode::Halt],
@@ -2223,6 +2233,20 @@ impl Vm {
         reclaimed
     }
 
+    fn identifier_slot_metadata_for_code(
+        &mut self,
+        code: &[Opcode],
+    ) -> Rc<Vec<Option<IdentifierSlotMetadata>>> {
+        let key = (code.as_ptr() as usize, code.len());
+        if let Some(metadata) = self.identifier_slot_metadata_cache.get(&key) {
+            return Rc::clone(metadata);
+        }
+        let metadata = Rc::new(build_identifier_slot_metadata(code));
+        self.identifier_slot_metadata_cache
+            .insert(key, Rc::clone(&metadata));
+        metadata
+    }
+
     fn execute_code(
         &mut self,
         code: &[Opcode],
@@ -2234,7 +2258,7 @@ impl Vm {
         let mut pc = 0usize;
         let check_interval = self.runtime_gc_check_interval.max(1);
         self.invalidate_binding_fast_path_cache();
-        let identifier_slot_metadata = build_identifier_slot_metadata(code);
+        let identifier_slot_metadata = self.identifier_slot_metadata_for_code(code);
         while pc < code.len() {
             if self.runtime_gc_enabled && self.auto_gc_enabled {
                 self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
