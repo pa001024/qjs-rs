@@ -22944,6 +22944,7 @@ mod tests {
         TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED, TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN,
         TYPE_ERROR_SHADOW_ROOT_MISMATCH, TYPE_ERROR_STALE_HANDLE, Vm, VmError,
     };
+    use builtins::install_baseline;
     use bytecode::{Chunk, CompiledFunction, Opcode, compile_script};
     use parser::parse_script;
     use regex::RegexBuilder;
@@ -27157,16 +27158,23 @@ dense + accessorRead + inherited + sparseRead + sparseLength + holeIsUndefined +
         let script = parse_script(source).expect("script should parse");
         let chunk = compile_script(&script);
 
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+
         let mut slow_vm = Vm::default();
         slow_vm.set_packet_b_fast_path_enabled(false);
         slow_vm.set_packet_b_fast_path_metrics_enabled(true);
-        let slow_value = slow_vm.execute(&chunk).expect("script should execute");
+        let slow_value = slow_vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
         let slow_counters = slow_vm.packet_b_fast_path_counters();
 
         let mut fast_vm = Vm::default();
         fast_vm.set_packet_b_fast_path_enabled(true);
         fast_vm.set_packet_b_fast_path_metrics_enabled(true);
-        let fast_value = fast_vm.execute(&chunk).expect("script should execute");
+        let fast_value = fast_vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
         let fast_counters = fast_vm.packet_b_fast_path_counters();
 
         assert_eq!(slow_value, JsValue::Number(1039.0));
