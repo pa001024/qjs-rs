@@ -133,12 +133,14 @@ fn run_qjs_rs_eval_per_iteration(
     iterations: usize,
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
+    packet_d_enabled: bool,
 ) -> Result<SampleMeasurement> {
     let mut realm = runtime::Realm::default();
     install_baseline(&mut realm);
     let mut vm = Vm::with_perf_from_env();
     vm.set_hotspot_attribution_enabled(hotspot_attribution_enabled);
     vm.set_packet_c_fast_path_enabled(packet_c_enabled);
+    vm.set_packet_d_fast_path_enabled(packet_d_enabled);
     vm.reset_hotspot_attribution();
 
     let start = Instant::now();
@@ -296,6 +298,7 @@ fn run_engine_case(
     comparators: &ComparatorConfig,
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
+    packet_d_enabled: bool,
 ) -> Result<SampleMeasurement> {
     let adapter_mode = timing_mode_for_engine(engine, timing_mode);
     match adapter_mode {
@@ -305,6 +308,7 @@ fn run_engine_case(
                 iterations,
                 hotspot_attribution_enabled,
                 packet_c_enabled,
+                packet_d_enabled,
             ),
             EngineKind::BoaEngine => run_boa_engine_eval_per_iteration(script, iterations),
             EngineKind::NodeJs => {
@@ -627,6 +631,14 @@ pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
         .is_some_and(|packet_id| packet_id.starts_with("packet-c"))
 }
 
+pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
+    let descriptor = contract::infer_optimization_descriptor(&cli.output);
+    descriptor
+        .packet_id
+        .as_deref()
+        .is_some_and(|packet_id| packet_id.starts_with("packet-d"))
+}
+
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
     HotspotAttributionCounters {
         numeric_ops: value.numeric_ops,
@@ -835,6 +847,31 @@ fn packet_c_output_path_enables_packet_c_runtime_toggle() {
     );
 }
 
+#[cfg(test)]
+#[test]
+fn packet_d_output_path_enables_packet_d_runtime_toggle() {
+    let cli = match contract::parse_cli_args_with_env(
+        vec![
+            "--profile".to_string(),
+            "local-dev".to_string(),
+            "--output".to_string(),
+            "target/benchmarks/engine-comparison.local-dev.packet-d.json".to_string(),
+            "--allow-missing-comparators".to_string(),
+        ],
+        &[],
+    )
+    .expect("cli args should parse")
+    {
+        contract::CliParseResult::Run(cli) => *cli,
+        contract::CliParseResult::Help => panic!("expected parsed run config"),
+    };
+
+    assert!(
+        infer_packet_d_enabled(&cli),
+        "packet-d output artifacts must enable packet-d runtime fast path for qjs-rs runs"
+    );
+}
+
 fn main() -> Result<()> {
     let cli = match parse_cli_args(env::args().skip(1))? {
         CliParseResult::Help => {
@@ -849,16 +886,18 @@ fn main() -> Result<()> {
     let environment = collect_environment(&preflight_metadata);
     let optimization_descriptor = contract::infer_optimization_descriptor(&cli.output);
     let packet_c_enabled = infer_packet_c_enabled(&cli);
+    let packet_d_enabled = infer_packet_d_enabled(&cli);
     let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
     let perf_target = build_perf_target_metadata(&cli.output, &environment);
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} packet_d_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
         hotspot_attribution_enabled,
         packet_c_enabled,
+        packet_d_enabled,
         optimization_descriptor.mode,
         perf_target.optimization_tag,
         perf_target.packet_id.as_deref().unwrap_or("none"),
@@ -901,6 +940,7 @@ fn main() -> Result<()> {
                 &cli.comparators,
                 hotspot_attribution_enabled,
                 packet_c_enabled,
+                packet_d_enabled,
             )?;
 
             let mut samples = Vec::with_capacity(cli.config.samples);
@@ -913,6 +953,7 @@ fn main() -> Result<()> {
                     &cli.comparators,
                     hotspot_attribution_enabled,
                     packet_c_enabled,
+                    packet_d_enabled,
                 )?;
                 samples.push(sample);
             }
