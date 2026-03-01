@@ -2485,58 +2485,64 @@ impl Vm {
                         };
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
-                    let result = (|| -> Result<(), VmError> {
-                        if let Some(binding_id) =
-                            self.resolve_binding_id_with_fast_path(name, identifier_slot)
-                        {
-                            let mut wrote_binding = false;
-                            {
-                                let binding = self
-                                    .binding_mut(binding_id)
-                                    .ok_or(VmError::ScopeUnderflow)?;
+                    let mut store_error = None;
+                    if let Some(binding_id) =
+                        self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                    {
+                        let mut wrote_binding = false;
+                        match self.binding_mut(binding_id) {
+                            Some(binding) => {
                                 if matches!(binding.value, JsValue::Uninitialized) {
-                                    return Err(VmError::UnknownIdentifier(name.clone()));
-                                }
-                                if !binding.mutable {
+                                    store_error = Some(VmError::UnknownIdentifier(name.clone()));
+                                } else if !binding.mutable {
                                     if !binding.sloppy_readonly_write_ignored || strict {
-                                        return Err(VmError::ImmutableBinding(name.clone()));
+                                        store_error = Some(VmError::ImmutableBinding(name.clone()));
                                     }
                                 } else {
                                     binding.value = value.clone();
                                     wrote_binding = true;
                                 }
                             }
-                            if wrote_binding {
-                                self.sync_global_property_from_binding(name, binding_id)?;
-                            }
-                        } else {
-                            self.packet_a_fast_path.remove_binding_cache_entry(name);
-                            self.packet_c_fast_path.remove_binding_cache_entry(name);
-                            self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-                            if strict {
-                                return Err(VmError::UnknownIdentifier(name.clone()));
-                            }
-                            if let Some(global_object_id) = self.global_object_id {
-                                let _ = self.set_object_property(
-                                    global_object_id,
-                                    name.clone(),
-                                    value.clone(),
-                                    realm,
-                                )?;
-                            } else {
-                                let global_scope = self
-                                    .scopes
-                                    .first()
-                                    .cloned()
-                                    .ok_or(VmError::ScopeUnderflow)?;
-                                let binding_id = self.create_binding(value.clone(), true);
-                                self.invalidate_binding_fast_path_cache_for_name(name);
-                                global_scope.borrow_mut().insert(name.clone(), binding_id);
+                            None => {
+                                store_error = Some(VmError::ScopeUnderflow);
                             }
                         }
-                        Ok(())
-                    })();
-                    if let Err(err) = result {
+                        if store_error.is_none()
+                            && wrote_binding
+                            && let Err(err) =
+                                self.sync_global_property_from_binding(name, binding_id)
+                        {
+                            store_error = Some(err);
+                        }
+                    } else {
+                        self.packet_a_fast_path.remove_binding_cache_entry(name);
+                        self.packet_c_fast_path.remove_binding_cache_entry(name);
+                        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                        if strict {
+                            store_error = Some(VmError::UnknownIdentifier(name.clone()));
+                        } else if let Some(global_object_id) = self.global_object_id {
+                            if let Err(err) = self.set_object_property(
+                                global_object_id,
+                                name.clone(),
+                                value.clone(),
+                                realm,
+                            ) {
+                                store_error = Some(err);
+                            }
+                        } else {
+                            match self.scopes.first().cloned() {
+                                Some(global_scope) => {
+                                    let binding_id = self.create_binding(value.clone(), true);
+                                    self.invalidate_binding_fast_path_cache_for_name(name);
+                                    global_scope.borrow_mut().insert(name.clone(), binding_id);
+                                }
+                                None => {
+                                    store_error = Some(VmError::ScopeUnderflow);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(err) = store_error {
                         let target = self.route_runtime_error_to_handler(err, code.len())?;
                         pc = target;
                         continue;
