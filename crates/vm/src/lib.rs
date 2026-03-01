@@ -14942,8 +14942,19 @@ impl Vm {
 
     #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
-        for (scope_index, scope_ref) in self.scopes.iter().enumerate().rev() {
-            if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
+        let scope_count = self.scopes.len();
+        if scope_count == 0 {
+            return None;
+        }
+
+        let mut scope_index = scope_count - 1;
+        if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
+            return Some((scope_index, binding_id));
+        }
+
+        while scope_index > 0 {
+            scope_index -= 1;
+            if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
                 return Some((scope_index, binding_id));
             }
         }
