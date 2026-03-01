@@ -52,11 +52,21 @@ impl HotspotAttributionState {
     }
 
     #[inline(always)]
+    pub fn record_numeric_op_unchecked(&mut self) {
+        self.counters.numeric_ops = self.counters.numeric_ops.wrapping_add(1);
+    }
+
+    #[inline(always)]
     pub fn record_numeric_op(&mut self) {
         if !self.enabled {
             return;
         }
-        self.counters.numeric_ops = self.counters.numeric_ops.wrapping_add(1);
+        self.record_numeric_op_unchecked();
+    }
+
+    #[inline(always)]
+    pub fn record_identifier_resolution_unchecked(&mut self) {
+        self.counters.identifier_resolution = self.counters.identifier_resolution.wrapping_add(1);
     }
 
     #[inline(always)]
@@ -64,7 +74,13 @@ impl HotspotAttributionState {
         if !self.enabled {
             return;
         }
-        self.counters.identifier_resolution = self.counters.identifier_resolution.wrapping_add(1);
+        self.record_identifier_resolution_unchecked();
+    }
+
+    #[inline(always)]
+    pub fn record_array_indexed_property_get_unchecked(&mut self) {
+        self.counters.array_indexed_property_get =
+            self.counters.array_indexed_property_get.wrapping_add(1);
     }
 
     #[inline(always)]
@@ -72,8 +88,13 @@ impl HotspotAttributionState {
         if !self.enabled {
             return;
         }
-        self.counters.array_indexed_property_get =
-            self.counters.array_indexed_property_get.wrapping_add(1);
+        self.record_array_indexed_property_get_unchecked();
+    }
+
+    #[inline(always)]
+    pub fn record_array_indexed_property_set_unchecked(&mut self) {
+        self.counters.array_indexed_property_set =
+            self.counters.array_indexed_property_set.wrapping_add(1);
     }
 
     #[inline(always)]
@@ -81,8 +102,7 @@ impl HotspotAttributionState {
         if !self.enabled {
             return;
         }
-        self.counters.array_indexed_property_set =
-            self.counters.array_indexed_property_set.wrapping_add(1);
+        self.record_array_indexed_property_set_unchecked();
     }
 }
 

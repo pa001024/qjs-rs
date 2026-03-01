@@ -19,10 +19,11 @@ use bytecode::{
 use fancy_regex::{Regex, RegexBuilder};
 use parser::{parse_expression, parse_module, parse_script_with_super};
 use runtime::{JsValue, ModuleLifecycleState, NativeFunction, Realm};
+use rustc_hash::FxHashMap as HashMap;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -144,11 +145,14 @@ struct Closure {
 
 #[derive(Debug, Clone, PartialEq)]
 struct JsObject {
-    properties: BTreeMap<String, JsValue>,
-    getters: BTreeMap<String, JsValue>,
-    setters: BTreeMap<String, JsValue>,
-    property_attributes: BTreeMap<String, PropertyAttributes>,
-    argument_mappings: BTreeMap<String, BindingId>,
+    properties: HashMap<String, JsValue>,
+    getters: HashMap<String, JsValue>,
+    setters: HashMap<String, JsValue>,
+    property_attributes: HashMap<String, PropertyAttributes>,
+    argument_mappings: HashMap<String, BindingId>,
+    array_length: Option<usize>,
+    is_array_object: bool,
+    is_proxy_object: bool,
     prototype: Option<ObjectId>,
     prototype_value: Option<JsValue>,
     prototype_overridden: bool,
@@ -158,11 +162,14 @@ struct JsObject {
 impl Default for JsObject {
     fn default() -> Self {
         Self {
-            properties: BTreeMap::new(),
-            getters: BTreeMap::new(),
-            setters: BTreeMap::new(),
-            property_attributes: BTreeMap::new(),
-            argument_mappings: BTreeMap::new(),
+            properties: HashMap::default(),
+            getters: HashMap::default(),
+            setters: HashMap::default(),
+            property_attributes: HashMap::default(),
+            argument_mappings: HashMap::default(),
+            array_length: None,
+            is_array_object: false,
+            is_proxy_object: false,
             prototype: None,
             prototype_value: None,
             prototype_overridden: false,
@@ -608,15 +615,6 @@ enum PromiseHook<'a> {
     DrainEnd(&'a PromiseJobDrainReport),
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PacketBDenseArrayGuardState {
-    current_length: usize,
-    has_own_data_property: bool,
-    own_data_writable: Option<bool>,
-    extensible: bool,
-    prototype: Option<ObjectId>,
-}
-
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -726,7 +724,7 @@ impl Vm {
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
         self.scopes.clear();
-        self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
+        self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
         self.bindings.clear();
         self.global_property_sync_bindings.clear();
         self.next_binding_id = 0;
@@ -1521,7 +1519,7 @@ impl Vm {
                     .insert("globalThis".to_string(), module_global.clone());
             }
         }
-        let mut module_scope: Scope = HashMap::new();
+        let mut module_scope: Scope = HashMap::default();
         module_scope.insert(
             "globalThis".to_string(),
             self.create_binding(module_global, true),
@@ -1564,7 +1562,11 @@ impl Vm {
             .objects
             .get(object_id)
             .ok_or(VmError::UnknownObject(*object_id))?;
-        Ok(object.properties.clone())
+        Ok(object
+            .properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
     }
 
     fn sanitize_module_value_for_exchange(value: JsValue) -> JsValue {
@@ -2283,6 +2285,7 @@ impl Vm {
     ) -> Result<ExecutionSignal, VmError> {
         let mut pc = 0usize;
         let check_interval = self.runtime_gc_check_interval.max(1);
+        let hotspot_enabled = self.hotspot_attribution_enabled();
         if reset_binding_fast_path_cache_at_entry {
             self.invalidate_binding_fast_path_cache();
         }
@@ -2314,7 +2317,10 @@ impl Vm {
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
-                    self.hotspot_attribution.record_identifier_resolution();
+                    if hotspot_enabled {
+                        self.hotspot_attribution
+                            .record_identifier_resolution_unchecked();
+                    }
                     let identifier_slot = Self::packet_d_slot_for_opcode(
                         &identifier_slot_metadata,
                         pc,
@@ -2451,7 +2457,10 @@ impl Vm {
                     self.sync_annex_b_eval_var_function_binding(name, function_value_for_annex_b)?;
                 }
                 Opcode::StoreVariable(name) => {
-                    self.hotspot_attribution.record_identifier_resolution();
+                    if hotspot_enabled {
+                        self.hotspot_attribution
+                            .record_identifier_resolution_unchecked();
+                    }
                     let identifier_slot = Self::packet_d_slot_for_opcode(
                         &identifier_slot_metadata,
                         pc,
@@ -2528,7 +2537,10 @@ impl Vm {
                         if let Some(index) =
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
-                            self.hotspot_attribution.record_array_indexed_property_get();
+                            if hotspot_enabled {
+                                self.hotspot_attribution
+                                    .record_array_indexed_property_get_unchecked();
+                            }
                             let mut key_buf = [0u8; 20];
                             let key = Self::array_index_decimal_key(index, &mut key_buf);
                             if let JsValue::Object(object_id) = receiver {
@@ -2544,8 +2556,9 @@ impl Vm {
                             return self.get_property_from_receiver(receiver, key, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
-                        if Self::canonical_array_index(&key).is_some() {
-                            self.hotspot_attribution.record_array_indexed_property_get();
+                        if Self::canonical_array_index(&key).is_some() && hotspot_enabled {
+                            self.hotspot_attribution
+                                .record_array_indexed_property_get_unchecked();
                         }
                         self.get_property_from_receiver(receiver, &key, realm)
                     })();
@@ -2678,11 +2691,15 @@ impl Vm {
                         JsValue::Object(id) => id,
                         _ => return Err(VmError::TypeError("property write expects object")),
                     };
+                    let length = match value {
+                        JsValue::Number(number) => number.max(0.0) as usize,
+                        _ => 0,
+                    };
                     let object = self
                         .objects
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
-                    object.properties.insert("length".to_string(), value);
+                    Self::set_object_array_length(object, length);
                     object.property_attributes.insert(
                         "length".to_string(),
                         PropertyAttributes {
@@ -2851,7 +2868,10 @@ impl Vm {
                         if let Some(index) =
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
-                            self.hotspot_attribution.record_array_indexed_property_set();
+                            if hotspot_enabled {
+                                self.hotspot_attribution
+                                    .record_array_indexed_property_set_unchecked();
+                            }
                             if let JsValue::Object(object_id) = receiver {
                                 if self.try_packet_b_dense_array_index_set_with_index(
                                     object_id, index, &value,
@@ -2865,8 +2885,9 @@ impl Vm {
                             return self.set_property_on_receiver(receiver, key, value, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
-                        if Self::canonical_array_index(&key).is_some() {
-                            self.hotspot_attribution.record_array_indexed_property_set();
+                        if Self::canonical_array_index(&key).is_some() && hotspot_enabled {
+                            self.hotspot_attribution
+                                .record_array_indexed_property_set_unchecked();
                         }
                         self.set_property_on_receiver(receiver, key, value, realm)
                     })();
@@ -2973,7 +2994,10 @@ impl Vm {
                     continue;
                 }
                 Opcode::ResolveIdentifierReference(name) => {
-                    self.hotspot_attribution.record_identifier_resolution();
+                    if hotspot_enabled {
+                        self.hotspot_attribution
+                            .record_identifier_resolution_unchecked();
+                    }
                     let identifier_slot = Self::packet_d_slot_for_opcode(
                         &identifier_slot_metadata,
                         pc,
@@ -3016,7 +3040,7 @@ impl Vm {
                     }
                 }
                 Opcode::EnterScope => {
-                    self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
+                    self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
                 }
                 Opcode::ExitScope => {
                     let Some(exited_scope) = self.scopes.pop() else {
@@ -3075,7 +3099,9 @@ impl Vm {
                     self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::Add => {
-                    self.hotspot_attribution.record_numeric_op();
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
                     match self.evaluate_add(realm, strict) {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
@@ -3086,7 +3112,9 @@ impl Vm {
                     }
                 }
                 Opcode::Sub => {
-                    self.hotspot_attribution.record_numeric_op();
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
                     match self.eval_numeric_binary(
                         realm,
                         strict,
@@ -3102,7 +3130,9 @@ impl Vm {
                     }
                 }
                 Opcode::Mul => {
-                    self.hotspot_attribution.record_numeric_op();
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
                     match self.eval_numeric_binary(
                         realm,
                         strict,
@@ -3118,7 +3148,9 @@ impl Vm {
                     }
                 }
                 Opcode::Div => {
-                    self.hotspot_attribution.record_numeric_op();
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
                     match self.eval_numeric_binary(
                         realm,
                         strict,
@@ -3134,7 +3166,9 @@ impl Vm {
                     }
                 }
                 Opcode::Mod => {
-                    self.hotspot_attribution.record_numeric_op();
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
                     match self.eval_numeric_binary(realm, strict, None, |lhs, rhs| lhs % rhs) {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
@@ -4269,7 +4303,7 @@ impl Vm {
         let rest_param_index = self.function_rest_param_index(&function);
         let is_async_function = self.function_is_async(&function);
 
-        let mut frame_scope: Scope = HashMap::new();
+        let mut frame_scope: Scope = HashMap::default();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
         for (index, param_name) in function.params.iter().enumerate() {
             let value = if rest_param_index == Some(index) {
@@ -4409,7 +4443,7 @@ impl Vm {
         self.with_objects = closure.captured_with_objects;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         if non_simple_params {
-            self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
+            self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
         }
         self.var_scope_stack = vec![self.scopes.len().saturating_sub(1)];
         self.stack = Vec::new();
@@ -4660,6 +4694,12 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        if marker == ARRAY_OBJECT_MARKER_KEY {
+            return Ok(object.is_array_object);
+        }
+        if marker == PROXY_OBJECT_MARKER_KEY {
+            return Ok(object.is_proxy_object);
+        }
         Ok(matches!(
             object.properties.get(marker),
             Some(JsValue::Bool(true))
@@ -9762,7 +9802,7 @@ impl Vm {
         match call_kind {
             EvalCallKind::Direct => {
                 if eval_strict {
-                    self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
+                    self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
                     self.var_scope_stack
                         .push(self.scopes.len().saturating_sub(1));
                 }
@@ -9774,7 +9814,7 @@ impl Vm {
                     .cloned()
                     .ok_or(VmError::ScopeUnderflow)?;
                 if eval_strict {
-                    self.scopes = vec![global_scope, Rc::new(RefCell::new(HashMap::new()))];
+                    self.scopes = vec![global_scope, Rc::new(RefCell::new(HashMap::default()))];
                     self.var_scope_stack = vec![1];
                 } else {
                     self.scopes = vec![global_scope];
@@ -10584,9 +10624,7 @@ impl Vm {
                 Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
                     let int_length = length.floor();
                     if int_length == *length && int_length <= u32::MAX as f64 {
-                        object
-                            .properties
-                            .insert("length".to_string(), JsValue::Number(int_length));
+                        Self::set_object_array_length(object, int_length as usize);
                         return Ok(JsValue::Object(object_id));
                     }
                     return Err(VmError::UncaughtException(self.create_error_exception(
@@ -10604,9 +10642,7 @@ impl Vm {
                 }
                 Some(value) => {
                     object.properties.insert("0".to_string(), value.clone());
-                    object
-                        .properties
-                        .insert("length".to_string(), JsValue::Number(1.0));
+                    Self::set_object_array_length(object, 1);
                     return Ok(JsValue::Object(object_id));
                 }
                 None => return Ok(JsValue::Object(object_id)),
@@ -10616,9 +10652,7 @@ impl Vm {
         for (index, value) in args.iter().enumerate() {
             object.properties.insert(index.to_string(), value.clone());
         }
-        object
-            .properties
-            .insert("length".to_string(), JsValue::Number(args.len() as f64));
+        Self::set_object_array_length(object, args.len());
         Ok(JsValue::Object(object_id))
     }
 
@@ -11006,6 +11040,7 @@ impl Vm {
                 .ok_or(VmError::UnknownObject(object_id))?;
             proxy.prototype = prototype;
             proxy.prototype_value = prototype_value;
+            proxy.is_proxy_object = true;
             proxy
                 .properties
                 .insert(PROXY_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -12888,16 +12923,16 @@ impl Vm {
             DefinePropertyTarget::Object(target_id) => {
                 if target_is_array {
                     if let Some(index) = Self::canonical_array_index(&property) {
-                        let current_length = target_object
-                            .properties
-                            .get("length")
-                            .map(|value| self.to_number(value))
-                            .unwrap_or(0.0)
-                            .max(0.0) as usize;
-                        if index >= current_length {
+                        let current_length = target_object.array_length.unwrap_or_else(|| {
                             target_object
                                 .properties
-                                .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+                                .get("length")
+                                .map(|value| self.to_number(value))
+                                .unwrap_or(0.0)
+                                .max(0.0) as usize
+                        });
+                        if index >= current_length {
+                            Self::set_object_array_length(&mut target_object, index + 1);
                         }
                     }
                 }
@@ -13424,9 +13459,7 @@ impl Vm {
                 .entry(index_key)
                 .or_default();
         }
-        array_object
-            .properties
-            .insert("length".to_string(), JsValue::Number(values.len() as f64));
+        Self::set_object_array_length(array_object, values.len());
         array_object.property_attributes.insert(
             "length".to_string(),
             PropertyAttributes {
@@ -14462,10 +14495,12 @@ impl Vm {
         id
     }
 
+    #[inline(always)]
     fn binding(&self, binding_id: BindingId) -> Option<&Binding> {
         self.bindings.get(binding_id)?.as_ref()
     }
 
+    #[inline(always)]
     fn binding_mut(&mut self, binding_id: BindingId) -> Option<&mut Binding> {
         self.bindings.get_mut(binding_id)?.as_mut()
     }
@@ -14498,6 +14533,8 @@ impl Vm {
         if let Some(object) = self.objects.get_mut(&object_id) {
             object.prototype = self.array_prototype_id;
             object.prototype_value = None;
+            object.array_length = Some(0);
+            object.is_array_object = true;
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -14510,9 +14547,7 @@ impl Vm {
                     configurable: true,
                 },
             );
-            object
-                .properties
-                .insert("length".to_string(), JsValue::Number(0.0));
+            Self::set_object_array_length(object, 0);
             object.property_attributes.insert(
                 "length".to_string(),
                 PropertyAttributes {
@@ -14551,7 +14586,7 @@ impl Vm {
         let mut captured_scopes = self.scopes.clone();
         let captured_with_objects = self.with_objects.clone();
         if self.function_is_named_function_expression(function) && function.name != "<anonymous>" {
-            let mut name_scope: Scope = HashMap::new();
+            let mut name_scope: Scope = HashMap::default();
             let function_name_binding = self.create_binding_with_behavior(
                 JsValue::Function(closure_id),
                 false,
@@ -14838,6 +14873,7 @@ impl Vm {
         true
     }
 
+    #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
         for (scope_index, scope_ref) in self.scopes.iter().enumerate().rev() {
             if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
@@ -14847,11 +14883,52 @@ impl Vm {
         None
     }
 
+    #[inline(always)]
     fn resolve_binding_id_with_fast_path(
         &mut self,
         name: &str,
         identifier_slot: Option<u32>,
     ) -> Option<BindingId> {
+        if self.with_objects.is_empty()
+            && self.packet_d_fast_path_enabled()
+            && !self.packet_d_fast_path_metrics_enabled()
+            && !self.packet_a_fast_path_metrics_enabled()
+            && let Some(slot) = identifier_slot
+        {
+            if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
+                if entry.scope_generation == self.packet_d_scope_generation {
+                    #[cfg(debug_assertions)]
+                    {
+                        if self.cached_binding_entry_is_valid(
+                            name,
+                            entry.scope_index,
+                            entry.binding_id,
+                        ) {
+                            return Some(entry.binding_id);
+                        }
+                        self.packet_d_fast_path.remove_slot_cache_entry(slot);
+                    }
+                    #[cfg(not(debug_assertions))]
+                    {
+                        return Some(entry.binding_id);
+                    }
+                } else {
+                    self.packet_d_fast_path.remove_slot_cache_entry(slot);
+                }
+            }
+            if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+                self.packet_d_fast_path.remember_slot_cache_entry(
+                    slot,
+                    scope_index,
+                    binding_id,
+                    self.packet_d_scope_generation,
+                );
+                return Some(binding_id);
+            }
+            self.packet_d_fast_path.remove_slot_cache_entry(slot);
+            return None;
+        }
+
         let packet_a_metrics_enabled =
             self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
         let packet_c_enabled = self.packet_c_fast_path_enabled();
@@ -15212,74 +15289,6 @@ impl Vm {
         Ok(false)
     }
 
-    fn packet_b_dense_array_guard_state(
-        &self,
-        object_id: ObjectId,
-        property: &str,
-        index: usize,
-    ) -> Result<Option<PacketBDenseArrayGuardState>, VmError> {
-        let Some(array_prototype_id) = self.array_prototype_id else {
-            return Ok(None);
-        };
-        let object = self
-            .objects
-            .get(&object_id)
-            .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
-        if !matches!(
-            object.properties.get(ARRAY_OBJECT_MARKER_KEY),
-            Some(JsValue::Bool(true))
-        ) {
-            return Ok(None);
-        }
-        if matches!(
-            object.properties.get(PROXY_OBJECT_MARKER_KEY),
-            Some(JsValue::Bool(true))
-        ) {
-            return Ok(None);
-        }
-        if object.prototype != Some(array_prototype_id) || object.prototype_value.is_some() {
-            return Ok(None);
-        }
-        let Some(length_attributes) = object.property_attributes.get("length") else {
-            return Ok(None);
-        };
-        if length_attributes.enumerable || length_attributes.configurable {
-            return Ok(None);
-        }
-        if object.getters.contains_key(property) || object.setters.contains_key(property) {
-            return Ok(None);
-        }
-
-        let current_length = object
-            .properties
-            .get("length")
-            .map(|value| self.length_value_to_usize(value))
-            .unwrap_or(0);
-        if index > current_length {
-            return Ok(None);
-        }
-
-        let has_own_data_property = object.properties.contains_key(property);
-        if !has_own_data_property && index < current_length {
-            return Ok(None);
-        }
-
-        let own_data_writable = object.properties.get(property).map(|_| {
-            object
-                .property_attributes
-                .get(property)
-                .is_none_or(|attributes| attributes.writable)
-        });
-
-        Ok(Some(PacketBDenseArrayGuardState {
-            current_length,
-            has_own_data_property,
-            own_data_writable,
-            extensible: object.extensible,
-            prototype: object.prototype,
-        }))
-    }
-
     fn packet_b_prototype_chain_has_indexed_property(
         &self,
         mut prototype: Option<ObjectId>,
@@ -15313,6 +15322,40 @@ impl Vm {
         self.try_packet_b_dense_array_index_get_with_index(object_id, index)
     }
 
+    fn try_packet_b_array_length_get(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<JsValue>, VmError> {
+        if !self.packet_b_fast_path_enabled() {
+            return Ok(None);
+        }
+        let Some(array_prototype_id) = self.array_prototype_id else {
+            return Ok(None);
+        };
+        let object = self
+            .objects
+            .get(&object_id)
+            .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+        if !object.is_array_object || object.is_proxy_object {
+            return Ok(None);
+        }
+        if object.prototype != Some(array_prototype_id)
+            || object.prototype_value.is_some()
+            || object.getters.contains_key("length")
+            || object.setters.contains_key("length")
+        {
+            return Ok(None);
+        }
+        let Some(length_attributes) = object.property_attributes.get("length") else {
+            return Ok(None);
+        };
+        if length_attributes.enumerable || length_attributes.configurable {
+            return Ok(None);
+        }
+        let length = object.array_length.unwrap_or(0);
+        Ok(Some(JsValue::Number(length as f64)))
+    }
+
     fn try_packet_b_dense_array_index_get_with_index(
         &mut self,
         object_id: ObjectId,
@@ -15323,23 +15366,53 @@ impl Vm {
         if !self.packet_b_fast_path_enabled() {
             return Ok(None);
         }
-        let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
-            self.record_packet_b_dense_array_get_guard_miss();
-            return Ok(None);
+        let (
+            prototype,
+            current_length,
+            own_value,
+            has_indexed_accessor,
+            is_array_object,
+            is_proxy_object,
+            valid_length_descriptor,
+            has_prototype_value_override,
+        ) = {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+            let valid_length_descriptor = object
+                .property_attributes
+                .get("length")
+                .is_some_and(|attributes| !attributes.enumerable && !attributes.configurable);
+            (
+                object.prototype,
+                object.array_length.unwrap_or(0),
+                object.properties.get(property).cloned(),
+                object.getters.contains_key(property) || object.setters.contains_key(property),
+                object.is_array_object,
+                object.is_proxy_object,
+                valid_length_descriptor,
+                object.prototype_value.is_some(),
+            )
         };
-        let prototype_chain_indexed = self.packet_b_prototype_chain_may_have_indexed_property
-            && self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?;
-        if index >= guard.current_length || !guard.has_own_data_property || prototype_chain_indexed
+        if !is_array_object
+            || is_proxy_object
+            || has_prototype_value_override
+            || !valid_length_descriptor
+            || has_indexed_accessor
+            || self.array_prototype_id != prototype
+            || index >= current_length
         {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         }
-        let Some(value) = self
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.properties.get(property))
-            .cloned()
-        else {
+        if self.packet_b_prototype_chain_may_have_indexed_property
+            && self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+        {
+            self.record_packet_b_dense_array_get_guard_miss();
+            return Ok(None);
+        }
+        let Some(value) = own_value else {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         };
@@ -15370,22 +15443,73 @@ impl Vm {
         if !self.packet_b_fast_path_enabled() {
             return Ok(false);
         }
-        let Some(guard) = self.packet_b_dense_array_guard_state(object_id, property, index)? else {
+        let (
+            prototype,
+            current_length,
+            has_own_data_property,
+            own_data_writable,
+            extensible,
+            has_indexed_accessor,
+            is_array_object,
+            is_proxy_object,
+            valid_length_descriptor,
+            has_prototype_value_override,
+        ) = {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+            let has_own_data_property = object.properties.contains_key(property);
+            let own_data_writable = if has_own_data_property {
+                Some(
+                    object
+                        .property_attributes
+                        .get(property)
+                        .is_none_or(|attributes| attributes.writable),
+                )
+            } else {
+                None
+            };
+            let valid_length_descriptor = object
+                .property_attributes
+                .get("length")
+                .is_some_and(|attributes| !attributes.enumerable && !attributes.configurable);
+            (
+                object.prototype,
+                object.array_length.unwrap_or(0),
+                has_own_data_property,
+                own_data_writable,
+                object.extensible,
+                object.getters.contains_key(property) || object.setters.contains_key(property),
+                object.is_array_object,
+                object.is_proxy_object,
+                valid_length_descriptor,
+                object.prototype_value.is_some(),
+            )
+        };
+        if !is_array_object
+            || is_proxy_object
+            || has_prototype_value_override
+            || !valid_length_descriptor
+            || has_indexed_accessor
+            || self.array_prototype_id != prototype
+            || index > current_length
+        {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
-        };
+        }
         if self.packet_b_prototype_chain_may_have_indexed_property
-            && self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?
+            && self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
         {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
 
-        if guard.has_own_data_property && guard.own_data_writable == Some(false) {
+        if has_own_data_property && own_data_writable == Some(false) {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
-        if !guard.has_own_data_property && (index != guard.current_length || !guard.extensible) {
+        if !has_own_data_property && (index != current_length || !extensible) {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
@@ -15398,9 +15522,8 @@ impl Vm {
         object
             .properties
             .insert(property_key.clone(), value.clone());
-        object.property_attributes.entry(property_key).or_default();
-        if index == guard.current_length {
-            Self::set_object_array_length(object, guard.current_length + 1);
+        if index == current_length {
+            Self::set_object_array_length(object, current_length + 1);
         }
         self.record_packet_b_dense_array_set_guard_hit();
         Ok(true)
@@ -15414,6 +15537,11 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match receiver {
             JsValue::Object(object_id) => {
+                if property == "length"
+                    && let Some(length) = self.try_packet_b_array_length_get(object_id)?
+                {
+                    return Ok(length);
+                }
                 if let Some(value) = self.try_packet_b_dense_array_index_get(object_id, property)? {
                     return Ok(value);
                 }
@@ -16869,6 +16997,8 @@ impl Vm {
             self.set_builtin_function_length(&reduce, 1.0);
             self.set_builtin_function_length(&reduce_right, 1.0);
             if let Some(object) = self.objects.get_mut(&id) {
+                object.array_length = Some(0);
+                object.is_array_object = true;
                 object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -16881,9 +17011,7 @@ impl Vm {
                         configurable: true,
                     },
                 );
-                object
-                    .properties
-                    .insert("length".to_string(), JsValue::Number(0.0));
+                Self::set_object_array_length(object, 0);
                 object.property_attributes.insert(
                     "length".to_string(),
                     PropertyAttributes {
@@ -19472,10 +19600,6 @@ impl Vm {
             None => return Err(self.classify_unknown_object_error(object_id)),
         };
         object.properties.insert(property.clone(), value.clone());
-        object
-            .property_attributes
-            .entry(property.clone())
-            .or_default();
         self.sync_global_binding_from_property_write(object_id, &property, &value)?;
         Ok(value)
     }
@@ -19488,7 +19612,6 @@ impl Vm {
     ) -> JsValue {
         let object = self.closure_objects.entry(closure_id).or_default();
         object.properties.insert(property.clone(), value.clone());
-        object.property_attributes.entry(property).or_default();
         value
     }
 
@@ -20293,10 +20416,7 @@ impl Vm {
                 }
                 return Ok(());
             }
-            object.properties.insert(
-                "length".to_string(),
-                JsValue::Number(requested_length as f64),
-            );
+            Self::set_object_array_length(object, requested_length);
             object
                 .property_attributes
                 .entry("length".to_string())
@@ -20340,9 +20460,7 @@ impl Vm {
                 .get(&key)
                 .is_some_and(|attributes| !attributes.configurable)
             {
-                object
-                    .properties
-                    .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+                Self::set_object_array_length(object, index + 1);
                 if throw_on_failure {
                     return Err(VmError::TypeError(
                         "cannot delete non-configurable array element",
@@ -20372,7 +20490,6 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         object.properties.insert(property.clone(), value);
-        object.property_attributes.entry(property).or_default();
         if next_length != current_length {
             Self::set_object_array_length(object, next_length);
         }
@@ -20437,7 +20554,6 @@ impl Vm {
             .ok_or(VmError::UnknownObject(object_id))?;
         let key = index.to_string();
         object.properties.insert(key.clone(), value);
-        object.property_attributes.entry(key).or_default();
         Self::set_object_array_length(object, index + 1);
         Ok(())
     }
@@ -20457,6 +20573,9 @@ impl Vm {
             .objects
             .get(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
+        if let Some(length) = object.array_length {
+            return Ok(length);
+        }
         let length = object
             .properties
             .get("length")
@@ -20476,6 +20595,7 @@ impl Vm {
 
     #[inline(always)]
     fn set_object_array_length(object: &mut JsObject, length: usize) {
+        object.array_length = Some(length);
         if let Some(current) = object.properties.get_mut("length") {
             *current = JsValue::Number(length as f64);
             return;
@@ -21935,6 +22055,7 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn evaluate_add(&mut self, realm: &Realm, caller_strict: bool) -> Result<JsValue, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -21981,6 +22102,7 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn coerce_number_runtime(
         &mut self,
         value: JsValue,
@@ -22018,6 +22140,7 @@ impl Vm {
         Ok(Self::to_int32_number(number))
     }
 
+    #[inline(always)]
     fn eval_numeric_binary(
         &mut self,
         realm: &Realm,

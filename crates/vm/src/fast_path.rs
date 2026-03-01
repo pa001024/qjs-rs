@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use runtime::JsValue;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 pub type BindingId = usize;
 
@@ -21,6 +21,7 @@ pub enum NumericRelationalOp {
     Ge,
 }
 
+#[inline(always)]
 pub fn fast_number_coercion_candidate(value: &JsValue) -> Option<f64> {
     match value {
         JsValue::Number(number) => Some(*number),
@@ -29,6 +30,7 @@ pub fn fast_number_coercion_candidate(value: &JsValue) -> Option<f64> {
     }
 }
 
+#[inline(always)]
 pub fn try_numeric_binary(
     value_left: &JsValue,
     value_right: &JsValue,
@@ -45,6 +47,7 @@ pub fn try_numeric_binary(
     Some(output)
 }
 
+#[inline(always)]
 pub fn try_numeric_relational(
     value_left: &JsValue,
     value_right: &JsValue,
