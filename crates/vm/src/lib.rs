@@ -14690,11 +14690,12 @@ impl Vm {
         pc: usize,
         family: IdentifierOpcodeFamily,
     ) -> Option<u32> {
-        metadata
-            .get(pc)
-            .and_then(|entry| *entry)
-            .filter(|entry| entry.family == family)
-            .map(|entry| entry.slot)
+        let entry = metadata.get(pc).and_then(|entry| *entry);
+        #[cfg(debug_assertions)]
+        if let Some(entry) = entry {
+            debug_assert_eq!(entry.family, family);
+        }
+        entry.map(|entry| entry.slot)
     }
 
     fn invalidate_binding_fast_path_cache(&mut self) {
