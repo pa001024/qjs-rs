@@ -22,7 +22,7 @@ use runtime::{JsValue, ModuleLifecycleState, NativeFunction, Realm};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -103,7 +103,7 @@ const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
 
 type BindingId = u64;
 type ObjectId = u64;
-type Scope = BTreeMap<String, BindingId>;
+type Scope = HashMap<String, BindingId>;
 type ScopeRef = Rc<RefCell<Scope>>;
 type PromiseHandlers = (Option<JsValue>, Option<JsValue>);
 type PropertyDescriptorTuple = (
@@ -723,7 +723,7 @@ impl Vm {
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
         self.stack.clear();
         self.scopes.clear();
-        self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+        self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
         self.bindings.clear();
         self.next_binding_id = 0;
         self.objects.clear();
@@ -1515,7 +1515,7 @@ impl Vm {
                     .insert("globalThis".to_string(), module_global.clone());
             }
         }
-        let mut module_scope: Scope = BTreeMap::new();
+        let mut module_scope: Scope = HashMap::new();
         module_scope.insert(
             "globalThis".to_string(),
             self.create_binding(module_global, true),
@@ -2995,7 +2995,7 @@ impl Vm {
                     }
                 }
                 Opcode::EnterScope => {
-                    self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+                    self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
                 }
                 Opcode::ExitScope => {
                     let Some(exited_scope) = self.scopes.pop() else {
@@ -4248,7 +4248,7 @@ impl Vm {
         let rest_param_index = self.function_rest_param_index(&function);
         let is_async_function = self.function_is_async(&function);
 
-        let mut frame_scope: Scope = BTreeMap::new();
+        let mut frame_scope: Scope = HashMap::new();
         let mut param_binding_ids = Vec::with_capacity(function.params.len());
         for (index, param_name) in function.params.iter().enumerate() {
             let value = if rest_param_index == Some(index) {
@@ -4388,7 +4388,7 @@ impl Vm {
         self.with_objects = closure.captured_with_objects;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         if non_simple_params {
-            self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+            self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
         }
         self.var_scope_stack = vec![self.scopes.len().saturating_sub(1)];
         self.stack = Vec::new();
@@ -9741,7 +9741,7 @@ impl Vm {
         match call_kind {
             EvalCallKind::Direct => {
                 if eval_strict {
-                    self.scopes.push(Rc::new(RefCell::new(BTreeMap::new())));
+                    self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
                     self.var_scope_stack
                         .push(self.scopes.len().saturating_sub(1));
                 }
@@ -9753,7 +9753,7 @@ impl Vm {
                     .cloned()
                     .ok_or(VmError::ScopeUnderflow)?;
                 if eval_strict {
-                    self.scopes = vec![global_scope, Rc::new(RefCell::new(BTreeMap::new()))];
+                    self.scopes = vec![global_scope, Rc::new(RefCell::new(HashMap::new()))];
                     self.var_scope_stack = vec![1];
                 } else {
                     self.scopes = vec![global_scope];
@@ -14529,7 +14529,7 @@ impl Vm {
         let mut captured_scopes = self.scopes.clone();
         let captured_with_objects = self.with_objects.clone();
         if self.function_is_named_function_expression(function) && function.name != "<anonymous>" {
-            let mut name_scope: Scope = BTreeMap::new();
+            let mut name_scope: Scope = HashMap::new();
             let function_name_binding = self.create_binding_with_behavior(
                 JsValue::Function(closure_id),
                 false,
