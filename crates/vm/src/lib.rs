@@ -15646,6 +15646,14 @@ impl Vm {
                 }),
             );
         }
+        if let Some(value) = self.get_object_own_property_with_receiver(
+            object_id,
+            property,
+            receiver.clone(),
+            realm,
+        )? {
+            return Ok(value);
+        }
         let is_array_prototype = self.array_prototype_id == Some(object_id);
         let is_array_like = self
             .is_array_length_tracking_object(object_id)
@@ -15736,15 +15744,6 @@ impl Vm {
             && !is_array_prototype
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
-        }
-        let mapped_binding = self
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.argument_mappings.get(property).copied());
-        if let Some(binding_id) = mapped_binding {
-            if let Some(binding) = self.binding(binding_id) {
-                return Ok(binding.value.clone());
-            }
         }
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
@@ -19126,6 +19125,14 @@ impl Vm {
                 }),
             );
         }
+        if let Some(value) = self.get_object_own_property_with_receiver(
+            object_id,
+            property,
+            JsValue::Object(object_id),
+            realm,
+        )? {
+            return Ok(value);
+        }
         let is_array_prototype = self.array_prototype_id == Some(object_id);
         let is_array_like = self
             .is_array_length_tracking_object(object_id)
@@ -19217,15 +19224,6 @@ impl Vm {
         {
             return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
         }
-        let mapped_binding = self
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.argument_mappings.get(property).copied());
-        if let Some(binding_id) = mapped_binding {
-            if let Some(binding) = self.binding(binding_id) {
-                return Ok(binding.value.clone());
-            }
-        }
         let receiver = JsValue::Object(object_id);
         let mut current_id = Some(object_id);
         while let Some(id) = current_id {
@@ -19275,6 +19273,43 @@ impl Vm {
             current_id = None;
         }
         Ok(JsValue::Undefined)
+    }
+
+    fn get_object_own_property_with_receiver(
+        &mut self,
+        object_id: ObjectId,
+        property: &str,
+        receiver: JsValue,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        let (mapped_binding, getter, setter_exists, value) = {
+            let object = self
+                .objects
+                .get(&object_id)
+                .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+            (
+                object.argument_mappings.get(property).copied(),
+                object.getters.get(property).cloned(),
+                object.setters.contains_key(property),
+                object.properties.get(property).cloned(),
+            )
+        };
+        if let Some(binding_id) = mapped_binding
+            && let Some(binding) = self.binding(binding_id)
+        {
+            return Ok(Some(binding.value.clone()));
+        }
+        if let Some(getter) = getter {
+            if matches!(getter, JsValue::Undefined) {
+                return Ok(Some(JsValue::Undefined));
+            }
+            let value = self.execute_callable(getter, Some(receiver), Vec::new(), realm, false)?;
+            return Ok(Some(value));
+        }
+        if setter_exists {
+            return Ok(Some(JsValue::Undefined));
+        }
+        Ok(value)
     }
 
     fn set_object_property(
@@ -24796,6 +24831,20 @@ mod tests {
             "var obj = {}; obj.push = Array.prototype.push; obj.pop = Array.prototype.pop; var a = obj.push(-1); var b = obj.push(-2); var c = obj.pop(); a === 1 && b === 2 && c === -2 && obj.length === 1 && obj[0] === -1 && Array.prototype.push.call(true) === 0 && Array.prototype.pop.call(true) === undefined;",
         )
         .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_instance_own_push_overrides_virtualized_array_push() {
+        let script = parse_script("var arr = []; arr.push = 123; arr.push === 123;")
+            .expect("script should parse");
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global(
