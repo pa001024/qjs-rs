@@ -19699,16 +19699,22 @@ impl Vm {
         value
     }
 
+    #[inline(always)]
     fn maybe_set_inferred_function_name(&mut self, value: &JsValue, binding_name: &str) {
         let JsValue::Function(closure_id) = value else {
             return;
         };
+        self.set_inferred_function_name_for_function(*closure_id, binding_name);
+    }
+
+    #[cold]
+    fn set_inferred_function_name_for_function(&mut self, closure_id: u64, binding_name: &str) {
         if binding_name.starts_with("$__class_ctor_") {
             return;
         }
         let existing_name = self
             .closure_objects
-            .get(closure_id)
+            .get(&closure_id)
             .and_then(|object| object.properties.get("name"));
         let should_keep_existing_name = match existing_name {
             Some(JsValue::String(name)) => {
@@ -19722,13 +19728,13 @@ impl Vm {
         }
         let inferred = self
             .closures
-            .get(closure_id)
+            .get(&closure_id)
             .and_then(|closure| closure.functions.get(closure.function_id))
             .map(|function| function.name.as_str())
             .filter(|name| !name.is_empty() && *name != "<anonymous>")
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| binding_name.to_string());
-        let object = self.closure_objects.entry(*closure_id).or_default();
+        let object = self.closure_objects.entry(closure_id).or_default();
         object
             .properties
             .insert("name".to_string(), JsValue::String(inferred));
