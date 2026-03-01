@@ -101,7 +101,7 @@ const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
 
-type BindingId = u64;
+type BindingId = usize;
 type ObjectId = u64;
 type Scope = HashMap<String, BindingId>;
 type ScopeRef = Rc<RefCell<Scope>>;
@@ -14451,18 +14451,15 @@ impl Vm {
     }
 
     fn binding(&self, binding_id: BindingId) -> Option<&Binding> {
-        let index: usize = binding_id.try_into().ok()?;
-        self.bindings.get(index)?.as_ref()
+        self.bindings.get(binding_id)?.as_ref()
     }
 
     fn binding_mut(&mut self, binding_id: BindingId) -> Option<&mut Binding> {
-        let index: usize = binding_id.try_into().ok()?;
-        self.bindings.get_mut(index)?.as_mut()
+        self.bindings.get_mut(binding_id)?.as_mut()
     }
 
     fn remove_binding_entry(&mut self, binding_id: BindingId) -> Option<Binding> {
-        let index: usize = binding_id.try_into().ok()?;
-        self.bindings.get_mut(index)?.take()
+        self.bindings.get_mut(binding_id)?.take()
     }
 
     fn create_object_value(&mut self) -> JsValue {

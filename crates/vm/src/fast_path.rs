@@ -3,7 +3,7 @@
 use runtime::JsValue;
 use std::collections::HashMap;
 
-pub type BindingId = u64;
+pub type BindingId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericBinaryOp {
