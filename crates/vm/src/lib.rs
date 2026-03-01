@@ -711,6 +711,7 @@ pub struct Vm {
     packet_d_fast_path: PacketDFastPathState,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
+    annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
     last_persistent_chunk_key: Option<(usize, usize)>,
 }
 
@@ -802,6 +803,7 @@ impl Vm {
         self.packet_d_scope_generation = 0;
         self.packet_d_fast_path.reset();
         self.identifier_slot_metadata_cache.clear();
+        self.annex_b_sync_counts_cache.clear();
         self.last_persistent_chunk_key = None;
         let object_prototype = self.create_object_value();
         if let JsValue::Object(id) = object_prototype {
@@ -2253,6 +2255,17 @@ impl Vm {
         self.identifier_slot_metadata_cache
             .insert(key, Rc::clone(&metadata));
         metadata
+    }
+
+    fn annex_b_sync_counts_for_code(&mut self, code: &[Opcode]) -> Rc<BTreeMap<String, usize>> {
+        let key = (code.as_ptr() as usize, code.len());
+        if let Some(counts) = self.annex_b_sync_counts_cache.get(&key) {
+            return Rc::clone(counts);
+        }
+        let counts = Rc::new(Self::annex_b_var_function_sync_counts_from_code(code));
+        self.annex_b_sync_counts_cache
+            .insert(key, Rc::clone(&counts));
+        counts
     }
 
     fn execute_code(
@@ -14590,7 +14603,7 @@ impl Vm {
         if strict {
             return Ok(false);
         }
-        let mut pending_syncs = Self::annex_b_var_function_sync_counts_from_code(code);
+        let mut pending_syncs = self.annex_b_sync_counts_for_code(code).as_ref().clone();
         for name in excluded_names {
             pending_syncs.remove(name);
         }
