@@ -13,6 +13,14 @@ pub enum NumericBinaryOp {
     Div,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericRelationalOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
 pub fn fast_number_coercion_candidate(value: &JsValue) -> Option<f64> {
     match value {
         JsValue::Number(number) => Some(*number),
@@ -33,6 +41,25 @@ pub fn try_numeric_binary(
         NumericBinaryOp::Sub => left - right,
         NumericBinaryOp::Mul => left * right,
         NumericBinaryOp::Div => left / right,
+    };
+    Some(output)
+}
+
+pub fn try_numeric_relational(
+    value_left: &JsValue,
+    value_right: &JsValue,
+    op: NumericRelationalOp,
+) -> Option<bool> {
+    let left = fast_number_coercion_candidate(value_left)?;
+    let right = fast_number_coercion_candidate(value_right)?;
+    if left.is_nan() || right.is_nan() {
+        return Some(false);
+    }
+    let output = match op {
+        NumericRelationalOp::Lt => left < right,
+        NumericRelationalOp::Le => left <= right,
+        NumericRelationalOp::Gt => left > right,
+        NumericRelationalOp::Ge => left >= right,
     };
     Some(output)
 }

@@ -27,8 +27,8 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::fast_path::{
-    NumericBinaryOp, PacketAFastPathState, PacketBFastPathState, PacketCFastPathState,
-    PacketDFastPathState,
+    NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
+    PacketCFastPathState, PacketDFastPathState,
 };
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
@@ -22067,6 +22067,23 @@ impl Vm {
     ) -> Result<bool, VmError> {
         let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+
+        if self.packet_a_fast_path_enabled() {
+            let fast_op = match op {
+                Opcode::Lt => Some(NumericRelationalOp::Lt),
+                Opcode::Le => Some(NumericRelationalOp::Le),
+                Opcode::Gt => Some(NumericRelationalOp::Gt),
+                Opcode::Ge => Some(NumericRelationalOp::Ge),
+                _ => None,
+            };
+            if let Some(fast_op) = fast_op {
+                if let Some(result) = fast_path::try_numeric_relational(&left, &right, fast_op) {
+                    self.record_packet_a_numeric_guard_hit();
+                    return Ok(result);
+                }
+                self.record_packet_a_numeric_guard_miss();
+            }
+        }
 
         match op {
             Opcode::Lt => Ok(self
