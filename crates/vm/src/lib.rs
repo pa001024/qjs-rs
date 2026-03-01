@@ -386,17 +386,17 @@ struct JsonStringifyContext {
 #[derive(Debug, Clone, PartialEq)]
 enum IdentifierReference {
     Binding {
-        name: String,
+        name: Rc<str>,
         binding_id: BindingId,
     },
     Property {
         base: JsValue,
-        property: String,
+        property: Rc<str>,
         strict_on_missing: bool,
         with_base_object: bool,
     },
     Unresolvable {
-        name: String,
+        name: Rc<str>,
     },
 }
 
@@ -672,6 +672,7 @@ pub struct Vm {
     uint8_array_prototype_id: Option<ObjectId>,
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
+    identifier_name_cache: HashMap<String, Rc<str>>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     template_cache: BTreeMap<u64, JsValue>,
@@ -2951,7 +2952,7 @@ impl Vm {
                                 self.delete_binding_reference(binding_id)
                             }
                             IdentifierReference::Property { base, property, .. } => {
-                                self.delete_property(base, property)?
+                                self.delete_property(base, property.to_string())?
                             }
                             IdentifierReference::Unresolvable { .. } => true,
                         }
@@ -16154,6 +16155,17 @@ impl Vm {
         Ok(None)
     }
 
+    #[inline(always)]
+    fn intern_identifier_name(&mut self, name: &str) -> Rc<str> {
+        if let Some(cached) = self.identifier_name_cache.get(name) {
+            return Rc::clone(cached);
+        }
+        let atom: Rc<str> = Rc::from(name);
+        self.identifier_name_cache
+            .insert(name.to_string(), Rc::clone(&atom));
+        atom
+    }
+
     fn resolve_binding_or_with_reference(
         &mut self,
         name: &str,
@@ -16163,10 +16175,8 @@ impl Vm {
         if self.with_objects.is_empty() {
             if let Some(binding_id) = self.resolve_binding_id_with_fast_path(name, identifier_slot)
             {
-                return Ok(Some(IdentifierReference::Binding {
-                    name: name.to_string(),
-                    binding_id,
-                }));
+                let name = self.intern_identifier_name(name);
+                return Ok(Some(IdentifierReference::Binding { name, binding_id }));
             }
             return Ok(None);
         }
@@ -16187,12 +16197,13 @@ impl Vm {
             if let Some(base) =
                 self.resolve_with_property_base_for_scope_depth(name, realm, scope_depth_marker)?
             {
+                let property = self.intern_identifier_name(name);
                 self.packet_a_fast_path.remove_binding_cache_entry(name);
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
                 return Ok(Some(IdentifierReference::Property {
                     base,
-                    property: name.to_string(),
+                    property,
                     strict_on_missing: true,
                     with_base_object: true,
                 }));
@@ -16203,19 +16214,18 @@ impl Vm {
                 .cloned()
                 .ok_or(VmError::ScopeUnderflow)?;
             if let Some(binding_id) = scope_ref.borrow().get(name).copied() {
-                return Ok(Some(IdentifierReference::Binding {
-                    name: name.to_string(),
-                    binding_id,
-                }));
+                let name = self.intern_identifier_name(name);
+                return Ok(Some(IdentifierReference::Binding { name, binding_id }));
             }
         }
         if let Some(base) = self.resolve_with_property_base_for_scope_depth(name, realm, 0)? {
+            let property = self.intern_identifier_name(name);
             self.packet_a_fast_path.remove_binding_cache_entry(name);
             self.packet_c_fast_path.remove_binding_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
             return Ok(Some(IdentifierReference::Property {
                 base,
-                property: name.to_string(),
+                property,
                 strict_on_missing: true,
                 with_base_object: true,
             }));
@@ -16236,12 +16246,13 @@ impl Vm {
             return Ok(reference);
         }
         if let Some(global_object_id) = self.resolve_global_own_data_property_for_identifier(name) {
+            let property = self.intern_identifier_name(name);
             self.packet_a_fast_path.remove_binding_cache_entry(name);
             self.packet_c_fast_path.remove_binding_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
             return Ok(IdentifierReference::Property {
                 base: JsValue::Object(global_object_id),
-                property: name.to_string(),
+                property,
                 strict_on_missing: true,
                 with_base_object: false,
             });
@@ -16249,12 +16260,13 @@ impl Vm {
         if let Some(global_object_id) = self.global_object_id {
             let base = JsValue::Object(global_object_id);
             if self.has_property_on_receiver(&base, name, realm)? {
+                let property = self.intern_identifier_name(name);
                 self.packet_a_fast_path.remove_binding_cache_entry(name);
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
                 return Ok(IdentifierReference::Property {
                     base,
-                    property: name.to_string(),
+                    property,
                     strict_on_missing: true,
                     with_base_object: false,
                 });
@@ -16263,9 +16275,8 @@ impl Vm {
         self.packet_a_fast_path.remove_binding_cache_entry(name);
         self.packet_c_fast_path.remove_binding_cache_entry(name);
         self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-        Ok(IdentifierReference::Unresolvable {
-            name: name.to_string(),
-        })
+        let name = self.intern_identifier_name(name);
+        Ok(IdentifierReference::Unresolvable { name })
     }
 
     fn load_identifier_reference_value(
@@ -16278,15 +16289,15 @@ impl Vm {
             IdentifierReference::Binding { name, binding_id } => {
                 let binding = self.binding(*binding_id).ok_or(VmError::ScopeUnderflow)?;
                 if matches!(binding.value, JsValue::Uninitialized) {
-                    return Err(VmError::UnknownIdentifier(name.clone()));
+                    return Err(VmError::UnknownIdentifier(name.to_string()));
                 }
                 Ok(binding.value.clone())
             }
             IdentifierReference::Property { base, property, .. } => {
-                self.get_property_from_receiver(base.clone(), property, realm)
+                self.get_property_from_receiver(base.clone(), property.as_ref(), realm)
             }
             IdentifierReference::Unresolvable { name } => {
-                self.resolve_unbound_identifier_value(name, realm)
+                self.resolve_unbound_identifier_value(name.as_ref(), realm)
             }
         }
     }
@@ -16360,25 +16371,25 @@ impl Vm {
                 let should_write = {
                     let binding = self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                     if matches!(binding.value, JsValue::Uninitialized) {
-                        return Err(VmError::UnknownIdentifier(name));
+                        return Err(VmError::UnknownIdentifier(name.to_string()));
                     }
                     if !binding.mutable {
                         if binding.sloppy_readonly_write_ignored && !strict {
                             false
                         } else {
-                            return Err(VmError::ImmutableBinding(name));
+                            return Err(VmError::ImmutableBinding(name.to_string()));
                         }
                     } else {
                         true
                     }
                 };
-                self.maybe_set_inferred_function_name(&value, &name);
+                self.maybe_set_inferred_function_name(&value, name.as_ref());
                 if should_write {
                     let binding = self
                         .binding_mut(binding_id)
                         .ok_or(VmError::ScopeUnderflow)?;
                     binding.value = value.clone();
-                    self.sync_global_property_from_binding(&name, binding_id)?;
+                    self.sync_global_property_from_binding(name.as_ref(), binding_id)?;
                 }
                 Ok(value)
             }
@@ -16388,19 +16399,24 @@ impl Vm {
                 strict_on_missing,
                 ..
             } => {
-                let still_exists = self.has_property_on_receiver(&base, &property, realm)?;
+                let still_exists =
+                    self.has_property_on_receiver(&base, property.as_ref(), realm)?;
                 if strict && strict_on_missing && !still_exists {
-                    return Err(VmError::UnknownIdentifier(property));
+                    return Err(VmError::UnknownIdentifier(property.to_string()));
                 }
-                self.set_property_on_receiver(base, property, value, realm)
+                self.set_property_on_receiver(base, property.to_string(), value, realm)
             }
             IdentifierReference::Unresolvable { name } => {
                 if strict {
-                    return Err(VmError::UnknownIdentifier(name));
+                    return Err(VmError::UnknownIdentifier(name.to_string()));
                 }
                 if let Some(global_object_id) = self.global_object_id {
-                    let _ =
-                        self.set_object_property(global_object_id, name, value.clone(), realm)?;
+                    let _ = self.set_object_property(
+                        global_object_id,
+                        name.to_string(),
+                        value.clone(),
+                        realm,
+                    )?;
                 } else {
                     let global_scope = self
                         .scopes
@@ -16408,7 +16424,9 @@ impl Vm {
                         .cloned()
                         .ok_or(VmError::ScopeUnderflow)?;
                     let binding_id = self.create_binding(value.clone(), true);
-                    global_scope.borrow_mut().insert(name, binding_id);
+                    global_scope
+                        .borrow_mut()
+                        .insert(name.to_string(), binding_id);
                 }
                 Ok(value)
             }
