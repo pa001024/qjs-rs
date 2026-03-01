@@ -673,7 +673,6 @@ pub struct Vm {
     with_objects: Vec<WithFrame>,
     identifier_references: Vec<IdentifierReference>,
     identifier_name_cache: HashMap<String, Rc<str>>,
-    binding_name_versions: HashMap<String, u64>,
     exception_handlers: Vec<ExceptionHandler>,
     pending_exception: Option<JsValue>,
     template_cache: BTreeMap<u64, JsValue>,
@@ -783,7 +782,6 @@ impl Vm {
         self.with_objects.clear();
         self.identifier_references.clear();
         self.identifier_name_cache.clear();
-        self.binding_name_versions.clear();
         self.exception_handlers.clear();
         self.pending_exception = None;
         self.template_cache.clear();
@@ -14759,19 +14757,10 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn binding_name_version(&self, name: &str) -> u64 {
-        self.binding_name_versions.get(name).copied().unwrap_or(0)
-    }
-
-    #[inline(always)]
     fn invalidate_binding_fast_path_cache_for_name(&mut self, name: &str) {
         self.packet_a_fast_path.remove_binding_cache_entry(name);
         self.packet_c_fast_path.remove_binding_cache_entry(name);
-        let version = self
-            .binding_name_versions
-            .entry(name.to_string())
-            .or_insert(0);
-        *version = version.wrapping_add(1);
+        self.packet_d_scope_generation = self.packet_d_scope_generation.wrapping_add(1);
     }
 
     fn invalidate_packet_d_slot_cache_entry(&mut self, slot: Option<u32>) {
@@ -14913,7 +14902,6 @@ impl Vm {
         name: &str,
         identifier_slot: Option<u32>,
     ) -> Option<BindingId> {
-        let name_version = self.binding_name_version(name);
         if self.with_objects.is_empty()
             && self.packet_d_fast_path_enabled()
             && !self.packet_d_fast_path_metrics_enabled()
@@ -14921,9 +14909,7 @@ impl Vm {
             && let Some(slot) = identifier_slot
         {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
-                if entry.scope_generation == self.packet_d_scope_generation
-                    && entry.name_version == name_version
-                {
+                if entry.scope_generation == self.packet_d_scope_generation {
                     #[cfg(debug_assertions)]
                     {
                         if self.cached_binding_entry_is_valid(
@@ -14949,7 +14935,6 @@ impl Vm {
                     scope_index,
                     binding_id,
                     self.packet_d_scope_generation,
-                    name_version,
                 );
                 return Some(binding_id);
             }
@@ -14977,9 +14962,8 @@ impl Vm {
 
         if packet_d_enabled && let Some(slot) = identifier_slot {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
-                let guard_matches_generation = entry.scope_generation
-                    == self.packet_d_scope_generation
-                    && entry.name_version == name_version;
+                let guard_matches_generation =
+                    entry.scope_generation == self.packet_d_scope_generation;
                 if guard_matches_generation {
                     #[cfg(debug_assertions)]
                     {
@@ -15016,7 +15000,6 @@ impl Vm {
                     scope_index,
                     binding_id,
                     self.packet_d_scope_generation,
-                    name_version,
                 );
                 return Some(binding_id);
             }

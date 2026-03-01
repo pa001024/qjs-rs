@@ -258,7 +258,6 @@ pub struct PacketDSlotCacheEntry {
     pub scope_index: usize,
     pub binding_id: BindingId,
     pub scope_generation: u64,
-    pub name_version: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -298,7 +297,6 @@ impl PacketDFastPathState {
         scope_index: usize,
         binding_id: BindingId,
         scope_generation: u64,
-        name_version: u64,
     ) {
         let index = slot as usize;
         if index >= self.slot_cache.len() {
@@ -308,7 +306,6 @@ impl PacketDFastPathState {
             scope_index,
             binding_id,
             scope_generation,
-            name_version,
         });
     }
 
