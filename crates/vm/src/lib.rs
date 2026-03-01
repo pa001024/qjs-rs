@@ -2291,8 +2291,12 @@ impl Vm {
         if reset_binding_fast_path_cache_at_entry {
             self.invalidate_binding_fast_path_cache();
         }
-        let identifier_slot_metadata = self.identifier_slot_metadata_for_code(code);
         let packet_d_slot_enabled = self.packet_d_fast_path_enabled();
+        let identifier_slot_metadata = if packet_d_slot_enabled {
+            Some(self.identifier_slot_metadata_for_code(code))
+        } else {
+            None
+        };
         while pc < code.len() {
             if self.runtime_gc_enabled && self.auto_gc_enabled {
                 self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
@@ -2324,15 +2328,16 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Load,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Load,
+                            )
+                        } else {
+                            None
+                        };
                     let resolved = if self.with_objects.is_empty() {
                         if let Some(binding_id) =
                             self.resolve_binding_id_with_fast_path(name, identifier_slot)
@@ -2468,15 +2473,16 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Store,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Store,
+                            )
+                        } else {
+                            None
+                        };
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     let result = (|| -> Result<(), VmError> {
@@ -2957,15 +2963,16 @@ impl Vm {
                     }
                 }
                 Opcode::DeleteIdentifier(name) => {
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Delete,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Delete,
+                            )
+                        } else {
+                            None
+                        };
                     let deleted = if let Some(reference) =
                         self.resolve_binding_or_with_reference(name, realm, identifier_slot)?
                     {
@@ -3021,15 +3028,16 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::ResolveReference,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::ResolveReference,
+                            )
+                        } else {
+                            None
+                        };
                     let reference =
                         self.resolve_identifier_reference(name, realm, strict, identifier_slot)?;
                     self.identifier_references.push(reference);
@@ -3357,15 +3365,16 @@ impl Vm {
                         .push(JsValue::String(self.typeof_value(&value).to_string()));
                 }
                 Opcode::TypeofIdentifier(name) => {
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Typeof,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Typeof,
+                            )
+                        } else {
+                            None
+                        };
                     let value = if let Some(binding_id) =
                         self.resolve_binding_id_with_fast_path(name, identifier_slot)
                     {
@@ -3620,15 +3629,16 @@ impl Vm {
                     }
                 }
                 Opcode::CallIdentifier { name, arg_count } => {
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Call,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Call,
+                            )
+                        } else {
+                            None
+                        };
                     match self.execute_identifier_call(
                         name,
                         *arg_count,
@@ -3645,15 +3655,16 @@ impl Vm {
                     }
                 }
                 Opcode::CallIdentifierWithSpread { name, spread_flags } => {
-                    let identifier_slot = if packet_d_slot_enabled {
-                        Self::packet_d_slot_for_opcode(
-                            &identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::CallWithSpread,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::CallWithSpread,
+                            )
+                        } else {
+                            None
+                        };
                     match self.execute_identifier_call_with_spread(
                         name,
                         spread_flags,
