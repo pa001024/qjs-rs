@@ -622,6 +622,7 @@ pub struct Vm {
     stack: Vec<JsValue>,
     scopes: Vec<ScopeRef>,
     bindings: Vec<Option<Binding>>,
+    global_property_sync_bindings: Vec<bool>,
     next_binding_id: BindingId,
     objects: BTreeMap<ObjectId, JsObject>,
     next_object_slot: u32,
@@ -702,6 +703,7 @@ pub struct Vm {
     packet_b_fast_path_disabled: bool,
     packet_b_fast_path_metrics_enabled: bool,
     packet_b_fast_path: PacketBFastPathState,
+    packet_b_prototype_chain_may_have_indexed_property: bool,
     packet_c_fast_path_disabled: bool,
     packet_c_fast_path_metrics_enabled: bool,
     packet_c_fast_path: PacketCFastPathState,
@@ -726,6 +728,7 @@ impl Vm {
         self.scopes.clear();
         self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
         self.bindings.clear();
+        self.global_property_sync_bindings.clear();
         self.next_binding_id = 0;
         self.objects.clear();
         self.next_object_slot = 0;
@@ -799,6 +802,7 @@ impl Vm {
         self.gc_reclaimed_objects_total = 0;
         self.packet_a_fast_path.reset();
         self.packet_b_fast_path.reset();
+        self.packet_b_prototype_chain_may_have_indexed_property = false;
         self.packet_c_fast_path.reset();
         self.packet_d_scope_generation = 0;
         self.packet_d_fast_path.reset();
@@ -2525,18 +2529,19 @@ impl Vm {
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
                             self.hotspot_attribution.record_array_indexed_property_get();
-                            let key = index.to_string();
+                            let mut key_buf = [0u8; 20];
+                            let key = Self::array_index_decimal_key(index, &mut key_buf);
                             if let JsValue::Object(object_id) = receiver {
                                 if let Some(value) = self
                                     .try_packet_b_dense_array_index_get_with_index(
-                                        object_id, &key, index,
+                                        object_id, index,
                                     )?
                                 {
                                     return Ok(value);
                                 }
-                                return self.get_object_property(object_id, &key, realm);
+                                return self.get_object_property(object_id, key, realm);
                             }
-                            return self.get_property_from_receiver(receiver, &key, realm);
+                            return self.get_property_from_receiver(receiver, key, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() {
@@ -2847,15 +2852,16 @@ impl Vm {
                             Self::canonical_array_index_from_property_value(&key_value)
                         {
                             self.hotspot_attribution.record_array_indexed_property_set();
-                            let key = index.to_string();
                             if let JsValue::Object(object_id) = receiver {
                                 if self.try_packet_b_dense_array_index_set_with_index(
-                                    object_id, &key, index, &value,
+                                    object_id, index, &value,
                                 )? {
                                     return Ok(value);
                                 }
+                                let key = index.to_string();
                                 return self.set_object_property(object_id, key, value, realm);
                             }
+                            let key = index.to_string();
                             return self.set_property_on_receiver(receiver, key, value, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
@@ -2980,10 +2986,12 @@ impl Vm {
                 Opcode::LoadReferenceValue => {
                     let reference = self
                         .identifier_references
-                        .last()
-                        .cloned()
+                        .pop()
                         .ok_or(VmError::StackUnderflow)?;
-                    match self.load_identifier_reference_value(&reference, realm, strict) {
+                    let load_result =
+                        self.load_identifier_reference_value(&reference, realm, strict);
+                    self.identifier_references.push(reference);
+                    match load_result {
                         Ok(value) => self.stack.push(value),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -12621,6 +12629,9 @@ impl Vm {
                 ));
             }
         };
+        if let DefinePropertyTarget::Object(target_id) = &target {
+            self.mark_packet_b_prototype_chain_maybe_indexed(*target_id, &property);
+        }
         let mut target_object = match target {
             DefinePropertyTarget::Object(target_id) => self
                 .objects
@@ -14447,6 +14458,7 @@ impl Vm {
             deletable,
             sloppy_readonly_write_ignored,
         }));
+        self.global_property_sync_bindings.push(false);
         id
     }
 
@@ -14688,6 +14700,8 @@ impl Vm {
         family: IdentifierOpcodeFamily,
     ) -> Option<u32> {
         let entry = metadata.get(pc).and_then(|entry| *entry);
+        #[cfg(not(debug_assertions))]
+        let _ = family;
         #[cfg(debug_assertions)]
         if let Some(entry) = entry {
             debug_assert_eq!(entry.family, family);
@@ -14719,12 +14733,14 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn record_packet_a_binding_guard_hit(&mut self) {
         if self.packet_a_fast_path_metrics_enabled() {
             self.packet_a_fast_path.record_binding_guard_hit();
         }
     }
 
+    #[inline(always)]
     fn record_packet_a_binding_guard_miss(&mut self) {
         if self.packet_a_fast_path_metrics_enabled() {
             self.packet_a_fast_path.record_binding_guard_miss();
@@ -14755,12 +14771,14 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn record_packet_c_identifier_guard_hit(&mut self) {
         if self.packet_c_fast_path_metrics_enabled() {
             self.packet_c_fast_path.record_identifier_guard_hit();
         }
     }
 
+    #[inline(always)]
     fn record_packet_c_identifier_guard_miss(&mut self) {
         if self.packet_c_fast_path_metrics_enabled() {
             self.packet_c_fast_path.record_identifier_guard_miss();
@@ -14779,12 +14797,14 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
     fn record_packet_d_slot_guard_hit(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_hit();
         }
     }
 
+    #[inline(always)]
     fn record_packet_d_slot_guard_miss(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_miss();
@@ -15233,9 +15253,8 @@ impl Vm {
         let current_length = object
             .properties
             .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
+            .map(|value| self.length_value_to_usize(value))
+            .unwrap_or(0);
         if index > current_length {
             return Ok(None);
         }
@@ -15291,15 +15310,16 @@ impl Vm {
         let Some(index) = Self::canonical_array_index(property) else {
             return Ok(None);
         };
-        self.try_packet_b_dense_array_index_get_with_index(object_id, property, index)
+        self.try_packet_b_dense_array_index_get_with_index(object_id, index)
     }
 
     fn try_packet_b_dense_array_index_get_with_index(
         &mut self,
         object_id: ObjectId,
-        property: &str,
         index: usize,
     ) -> Result<Option<JsValue>, VmError> {
+        let mut key_buf = [0u8; 20];
+        let property = Self::array_index_decimal_key(index, &mut key_buf);
         if !self.packet_b_fast_path_enabled() {
             return Ok(None);
         }
@@ -15307,9 +15327,9 @@ impl Vm {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         };
-        if index >= guard.current_length
-            || !guard.has_own_data_property
-            || self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?
+        let prototype_chain_indexed = self.packet_b_prototype_chain_may_have_indexed_property
+            && self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?;
+        if index >= guard.current_length || !guard.has_own_data_property || prototype_chain_indexed
         {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
@@ -15336,16 +15356,17 @@ impl Vm {
         let Some(index) = Self::canonical_array_index(property) else {
             return Ok(false);
         };
-        self.try_packet_b_dense_array_index_set_with_index(object_id, property, index, value)
+        self.try_packet_b_dense_array_index_set_with_index(object_id, index, value)
     }
 
     fn try_packet_b_dense_array_index_set_with_index(
         &mut self,
         object_id: ObjectId,
-        property: &str,
         index: usize,
         value: &JsValue,
     ) -> Result<bool, VmError> {
+        let mut key_buf = [0u8; 20];
+        let property = Self::array_index_decimal_key(index, &mut key_buf);
         if !self.packet_b_fast_path_enabled() {
             return Ok(false);
         }
@@ -15353,7 +15374,9 @@ impl Vm {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         };
-        if self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)? {
+        if self.packet_b_prototype_chain_may_have_indexed_property
+            && self.packet_b_prototype_chain_has_indexed_property(guard.prototype, property)?
+        {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
@@ -15377,10 +15400,7 @@ impl Vm {
             .insert(property_key.clone(), value.clone());
         object.property_attributes.entry(property_key).or_default();
         if index == guard.current_length {
-            object.properties.insert(
-                "length".to_string(),
-                JsValue::Number((guard.current_length + 1) as f64),
-            );
+            Self::set_object_array_length(object, guard.current_length + 1);
         }
         self.record_packet_b_dense_array_set_guard_hit();
         Ok(true)
@@ -16354,6 +16374,9 @@ impl Vm {
         let Some(binding_id) = binding_id else {
             return Ok(());
         };
+        if let Some(mark) = self.global_property_sync_bindings.get_mut(binding_id) {
+            *mark = true;
+        }
         let value = self
             .binding(binding_id)
             .map(|binding| binding.value.clone())
@@ -16391,16 +16414,17 @@ impl Vm {
         name: &str,
         binding_id: BindingId,
     ) -> Result<(), VmError> {
+        if !self
+            .global_property_sync_bindings
+            .get(binding_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         let Some(global_object_id) = self.global_object_id else {
             return Ok(());
         };
-        let is_global_binding = self
-            .scopes
-            .first()
-            .is_some_and(|scope| scope.borrow().get(name) == Some(&binding_id));
-        if !is_global_binding {
-            return Ok(());
-        }
         let value = self
             .binding(binding_id)
             .map(|binding| binding.value.clone())
@@ -19317,6 +19341,7 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        self.mark_packet_b_prototype_chain_maybe_indexed(object_id, &property);
         let (mapped_binding_id, own_setter, own_getter_exists, own_data_writable, own_prototype) = {
             let object = self
                 .objects
@@ -20194,6 +20219,21 @@ impl Vm {
         Some(index as usize)
     }
 
+    fn array_index_decimal_key(index: usize, buf: &mut [u8; 20]) -> &str {
+        let mut cursor = buf.len();
+        let mut remaining = index;
+        loop {
+            cursor = cursor.saturating_sub(1);
+            buf[cursor] = b'0' + (remaining % 10) as u8;
+            remaining /= 10;
+            if remaining == 0 {
+                break;
+            }
+        }
+        // digits were generated from decimal ASCII bytes
+        std::str::from_utf8(&buf[cursor..]).expect("array index decimal conversion must be utf-8")
+    }
+
     fn canonical_array_index_from_property_value(value: &JsValue) -> Option<usize> {
         match value {
             JsValue::Number(number)
@@ -20334,9 +20374,7 @@ impl Vm {
         object.properties.insert(property.clone(), value);
         object.property_attributes.entry(property).or_default();
         if next_length != current_length {
-            object
-                .properties
-                .insert("length".to_string(), JsValue::Number(next_length as f64));
+            Self::set_object_array_length(object, next_length);
         }
         Ok(())
     }
@@ -20351,9 +20389,8 @@ impl Vm {
             .objects
             .get(&object_id)
             .and_then(|object| object.properties.get("length"))
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
+            .map(|value| self.length_value_to_usize(value))
+            .unwrap_or(0);
         if index >= length {
             return Ok(());
         }
@@ -20401,9 +20438,7 @@ impl Vm {
         let key = index.to_string();
         object.properties.insert(key.clone(), value);
         object.property_attributes.entry(key).or_default();
-        object
-            .properties
-            .insert("length".to_string(), JsValue::Number((index + 1) as f64));
+        Self::set_object_array_length(object, index + 1);
         Ok(())
     }
 
@@ -20413,9 +20448,7 @@ impl Vm {
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        object
-            .properties
-            .insert("length".to_string(), JsValue::Number((index + by) as f64));
+        Self::set_object_array_length(object, index + by);
         Ok(())
     }
 
@@ -20427,10 +20460,44 @@ impl Vm {
         let length = object
             .properties
             .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0);
-        Ok(length as usize)
+            .map(|value| self.length_value_to_usize(value))
+            .unwrap_or(0);
+        Ok(length)
+    }
+
+    #[inline(always)]
+    fn length_value_to_usize(&self, value: &JsValue) -> usize {
+        let length = match value {
+            JsValue::Number(number) => *number,
+            other => self.to_number(other),
+        };
+        length.max(0.0) as usize
+    }
+
+    #[inline(always)]
+    fn set_object_array_length(object: &mut JsObject, length: usize) {
+        if let Some(current) = object.properties.get_mut("length") {
+            *current = JsValue::Number(length as f64);
+            return;
+        }
+        object
+            .properties
+            .insert("length".to_string(), JsValue::Number(length as f64));
+    }
+
+    #[inline(always)]
+    fn mark_packet_b_prototype_chain_maybe_indexed(&mut self, object_id: ObjectId, property: &str) {
+        if self.packet_b_prototype_chain_may_have_indexed_property {
+            return;
+        }
+        if !matches!(self.array_prototype_id, Some(id) if id == object_id)
+            && !matches!(self.object_prototype_id, Some(id) if id == object_id)
+        {
+            return;
+        }
+        if Self::canonical_array_index(property).is_some() {
+            self.packet_b_prototype_chain_may_have_indexed_property = true;
+        }
     }
 
     fn to_length_from_number(number: f64) -> i64 {

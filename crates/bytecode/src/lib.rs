@@ -811,7 +811,12 @@ impl Compiler {
 
                 let for_lexical_bindings =
                     Self::for_initializer_lexical_bindings(initializer.as_ref());
-                let needs_per_iteration_scope = !for_lexical_bindings.is_empty();
+                let needs_per_iteration_scope = !for_lexical_bindings.is_empty()
+                    && Self::for_loop_requires_per_iteration_scope(
+                        condition.as_ref(),
+                        update.as_ref(),
+                        body.as_ref(),
+                    );
                 let mut carry_temps = Vec::new();
                 if needs_per_iteration_scope {
                     for (name, mutable) in &for_lexical_bindings {
@@ -1647,6 +1652,238 @@ impl Compiler {
                 })
                 .collect(),
             ForInitializer::Expression(_) => Vec::new(),
+        }
+    }
+
+    fn for_loop_requires_per_iteration_scope(
+        condition: Option<&Expr>,
+        update: Option<&Expr>,
+        body: &Stmt,
+    ) -> bool {
+        condition.is_some_and(Self::expr_contains_function_or_direct_eval)
+            || update.is_some_and(Self::expr_contains_function_or_direct_eval)
+            || Self::stmt_contains_function_or_direct_eval(body)
+    }
+
+    fn stmt_contains_function_or_direct_eval(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Empty
+            | Stmt::Break
+            | Stmt::BreakLabel(_)
+            | Stmt::Continue
+            | Stmt::ContinueLabel(_) => false,
+            Stmt::VariableDeclaration(VariableDeclaration { initializer, .. }) => initializer
+                .as_ref()
+                .is_some_and(Self::expr_contains_function_or_direct_eval),
+            Stmt::VariableDeclarations(declarations) => declarations.iter().any(|declaration| {
+                declaration
+                    .initializer
+                    .as_ref()
+                    .is_some_and(Self::expr_contains_function_or_direct_eval)
+            }),
+            Stmt::FunctionDeclaration(_) => true,
+            Stmt::Return(value) => value
+                .as_ref()
+                .is_some_and(Self::expr_contains_function_or_direct_eval),
+            Stmt::Expression(expr) | Stmt::Throw(expr) => {
+                Self::expr_contains_function_or_direct_eval(expr)
+            }
+            Stmt::Block(statements) => statements
+                .iter()
+                .any(Self::stmt_contains_function_or_direct_eval),
+            Stmt::If {
+                condition,
+                consequent,
+                alternate,
+            } => {
+                Self::expr_contains_function_or_direct_eval(condition)
+                    || Self::stmt_contains_function_or_direct_eval(consequent)
+                    || alternate
+                        .as_ref()
+                        .is_some_and(|stmt| Self::stmt_contains_function_or_direct_eval(stmt))
+            }
+            Stmt::While { condition, body } => {
+                Self::expr_contains_function_or_direct_eval(condition)
+                    || Self::stmt_contains_function_or_direct_eval(body)
+            }
+            Stmt::With { object, body } => {
+                let _ = object;
+                let _ = body;
+                true
+            }
+            Stmt::DoWhile { body, condition } => {
+                Self::stmt_contains_function_or_direct_eval(body)
+                    || Self::expr_contains_function_or_direct_eval(condition)
+            }
+            Stmt::For {
+                initializer,
+                condition,
+                update,
+                body,
+            } => {
+                initializer
+                    .as_ref()
+                    .is_some_and(Self::for_initializer_contains_function_or_direct_eval)
+                    || condition
+                        .as_ref()
+                        .is_some_and(Self::expr_contains_function_or_direct_eval)
+                    || update
+                        .as_ref()
+                        .is_some_and(Self::expr_contains_function_or_direct_eval)
+                    || Self::stmt_contains_function_or_direct_eval(body)
+            }
+            Stmt::Switch {
+                discriminant,
+                cases,
+            } => {
+                Self::expr_contains_function_or_direct_eval(discriminant)
+                    || cases.iter().any(|case| {
+                        case.test
+                            .as_ref()
+                            .is_some_and(Self::expr_contains_function_or_direct_eval)
+                            || case
+                                .consequent
+                                .iter()
+                                .any(Self::stmt_contains_function_or_direct_eval)
+                    })
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                try_block
+                    .iter()
+                    .any(Self::stmt_contains_function_or_direct_eval)
+                    || catch_block.as_ref().is_some_and(|statements| {
+                        statements
+                            .iter()
+                            .any(Self::stmt_contains_function_or_direct_eval)
+                    })
+                    || finally_block.as_ref().is_some_and(|statements| {
+                        statements
+                            .iter()
+                            .any(Self::stmt_contains_function_or_direct_eval)
+                    })
+            }
+            Stmt::Labeled { body, .. } => Self::stmt_contains_function_or_direct_eval(body),
+        }
+    }
+
+    fn for_initializer_contains_function_or_direct_eval(initializer: &ForInitializer) -> bool {
+        match initializer {
+            ForInitializer::VariableDeclaration(VariableDeclaration { initializer, .. }) => {
+                initializer
+                    .as_ref()
+                    .is_some_and(Self::expr_contains_function_or_direct_eval)
+            }
+            ForInitializer::VariableDeclarations(declarations) => {
+                declarations.iter().any(|declaration| {
+                    declaration
+                        .initializer
+                        .as_ref()
+                        .is_some_and(Self::expr_contains_function_or_direct_eval)
+                })
+            }
+            ForInitializer::Expression(expr) => Self::expr_contains_function_or_direct_eval(expr),
+        }
+    }
+
+    fn expr_contains_function_or_direct_eval(expr: &Expr) -> bool {
+        match expr {
+            Expr::Number(_)
+            | Expr::Bool(_)
+            | Expr::Null
+            | Expr::String(_)
+            | Expr::RegexLiteral { .. }
+            | Expr::This
+            | Expr::Identifier(_)
+            | Expr::Elision => false,
+            Expr::Function { .. } => true,
+            Expr::ObjectLiteral(properties) => properties.iter().any(|property| {
+                let key_contains = match &property.key {
+                    ObjectPropertyKey::Computed(expr)
+                    | ObjectPropertyKey::AccessorGetComputed(expr)
+                    | ObjectPropertyKey::AccessorSetComputed(expr) => {
+                        Self::expr_contains_function_or_direct_eval(expr)
+                    }
+                    ObjectPropertyKey::Static(_)
+                    | ObjectPropertyKey::ProtoSetter
+                    | ObjectPropertyKey::AccessorGet(_)
+                    | ObjectPropertyKey::AccessorSet(_) => false,
+                };
+                key_contains || Self::expr_contains_function_or_direct_eval(&property.value)
+            }),
+            Expr::ArrayLiteral(items) | Expr::Sequence(items) => items
+                .iter()
+                .any(Self::expr_contains_function_or_direct_eval),
+            Expr::Unary { expr, .. } | Expr::SpreadArgument(expr) => {
+                Self::expr_contains_function_or_direct_eval(expr)
+            }
+            Expr::Conditional {
+                condition,
+                consequent,
+                alternate,
+            } => {
+                Self::expr_contains_function_or_direct_eval(condition)
+                    || Self::expr_contains_function_or_direct_eval(consequent)
+                    || Self::expr_contains_function_or_direct_eval(alternate)
+            }
+            Expr::Member { object, .. } => Self::expr_contains_function_or_direct_eval(object),
+            Expr::MemberComputed { object, property } => {
+                Self::expr_contains_function_or_direct_eval(object)
+                    || Self::expr_contains_function_or_direct_eval(property)
+            }
+            Expr::Call { callee, arguments } => {
+                if matches!(
+                    callee.as_ref(),
+                    Expr::Identifier(Identifier(name)) if name == "eval"
+                ) {
+                    return true;
+                }
+                Self::expr_contains_function_or_direct_eval(callee)
+                    || arguments
+                        .iter()
+                        .any(Self::expr_contains_function_or_direct_eval)
+            }
+            Expr::New { callee, arguments } => {
+                Self::expr_contains_function_or_direct_eval(callee)
+                    || arguments
+                        .iter()
+                        .any(Self::expr_contains_function_or_direct_eval)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_contains_function_or_direct_eval(left)
+                    || Self::expr_contains_function_or_direct_eval(right)
+            }
+            Expr::Assign { value, .. } => Self::expr_contains_function_or_direct_eval(value),
+            Expr::AssignMember { object, value, .. } => {
+                Self::expr_contains_function_or_direct_eval(object)
+                    || Self::expr_contains_function_or_direct_eval(value)
+            }
+            Expr::AssignMemberComputed {
+                object,
+                property,
+                value,
+            } => {
+                Self::expr_contains_function_or_direct_eval(object)
+                    || Self::expr_contains_function_or_direct_eval(property)
+                    || Self::expr_contains_function_or_direct_eval(value)
+            }
+            Expr::Update { target, .. } => match target {
+                UpdateTarget::Identifier(_) => false,
+                UpdateTarget::Member { object, .. } => {
+                    Self::expr_contains_function_or_direct_eval(object)
+                }
+                UpdateTarget::MemberComputed { object, property } => {
+                    Self::expr_contains_function_or_direct_eval(object)
+                        || Self::expr_contains_function_or_direct_eval(property)
+                }
+            },
+            Expr::AnnexBCallAssignmentTarget { target } => {
+                Self::expr_contains_function_or_direct_eval(target)
+            }
         }
     }
 
@@ -3384,54 +3621,21 @@ mod tests {
                     name: "$__loop_completion_0".to_string(),
                     mutable: true,
                 },
-                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
-                Opcode::LoadIdentifier("i".to_string()),
-                Opcode::StoreReferenceValue,
-                Opcode::Pop,
-                Opcode::LoadUndefined,
-                Opcode::DefineVariable {
-                    name: "$__loop_completion_1".to_string(),
-                    mutable: true,
-                },
-                Opcode::EnterScope,
-                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
-                Opcode::DefineVariable {
-                    name: "i".to_string(),
-                    mutable: true,
-                },
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(41),
+                Opcode::JumpIfFalse(19),
                 Opcode::LoadIdentifier("i".to_string()),
-                Opcode::StoreVariable("$__loop_completion_1".to_string()),
+                Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
-                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
-                Opcode::LoadIdentifier("i".to_string()),
-                Opcode::StoreReferenceValue,
-                Opcode::Pop,
-                Opcode::ExitScope,
-                Opcode::EnterScope,
-                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
-                Opcode::DefineVariable {
-                    name: "i".to_string(),
-                    mutable: true,
-                },
                 Opcode::ResolveIdentifierReference("i".to_string()),
                 Opcode::LoadReferenceValue,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
                 Opcode::StoreReferenceValue,
                 Opcode::Pop,
-                Opcode::ResolveIdentifierReference("$__loop_completion_0".to_string()),
-                Opcode::LoadIdentifier("i".to_string()),
-                Opcode::StoreReferenceValue,
-                Opcode::Pop,
-                Opcode::ExitScope,
-                Opcode::Jump(11),
-                Opcode::ExitScope,
-                Opcode::Jump(43),
-                Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
+                Opcode::Jump(5),
+                Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::ExitScope,
                 Opcode::Halt,
             ],

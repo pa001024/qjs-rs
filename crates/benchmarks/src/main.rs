@@ -136,10 +136,9 @@ fn run_qjs_rs_eval_per_iteration(
 ) -> Result<SampleMeasurement> {
     let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
-    vm.set_hotspot_attribution_enabled(hotspot_attribution_enabled);
+    vm.set_hotspot_attribution_enabled(false);
     vm.set_packet_c_fast_path_enabled(packet_c_enabled);
     vm.set_packet_d_fast_path_enabled(packet_d_enabled);
-    vm.reset_hotspot_attribution();
 
     let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
     let chunk = compile_script(&parsed);
@@ -151,11 +150,21 @@ fn run_qjs_rs_eval_per_iteration(
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
         checksum += extract_number(&value);
     }
+    let hotspot_attribution = if hotspot_attribution_enabled {
+        vm.set_hotspot_attribution_enabled(true);
+        vm.reset_hotspot_attribution();
+        let _ = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
+        vm.hotspot_attribution_snapshot()
+    } else {
+        None
+    };
     std::hint::black_box(checksum);
     Ok(SampleMeasurement {
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
         guard_checksum: checksum,
-        hotspot_attribution: vm.hotspot_attribution_snapshot(),
+        hotspot_attribution,
     })
 }
 

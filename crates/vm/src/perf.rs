@@ -51,34 +51,38 @@ impl HotspotAttributionState {
         self.enabled.then_some(self.counters)
     }
 
+    #[inline(always)]
     pub fn record_numeric_op(&mut self) {
         if !self.enabled {
             return;
         }
-        self.counters.numeric_ops = self.counters.numeric_ops.saturating_add(1);
+        self.counters.numeric_ops = self.counters.numeric_ops.wrapping_add(1);
     }
 
+    #[inline(always)]
     pub fn record_identifier_resolution(&mut self) {
         if !self.enabled {
             return;
         }
-        self.counters.identifier_resolution = self.counters.identifier_resolution.saturating_add(1);
+        self.counters.identifier_resolution = self.counters.identifier_resolution.wrapping_add(1);
     }
 
+    #[inline(always)]
     pub fn record_array_indexed_property_get(&mut self) {
         if !self.enabled {
             return;
         }
         self.counters.array_indexed_property_get =
-            self.counters.array_indexed_property_get.saturating_add(1);
+            self.counters.array_indexed_property_get.wrapping_add(1);
     }
 
+    #[inline(always)]
     pub fn record_array_indexed_property_set(&mut self) {
         if !self.enabled {
             return;
         }
         self.counters.array_indexed_property_set =
-            self.counters.array_indexed_property_set.saturating_add(1);
+            self.counters.array_indexed_property_set.wrapping_add(1);
     }
 }
 
