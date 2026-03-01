@@ -182,6 +182,7 @@ struct Compiler {
     functions: Vec<CompiledFunction>,
     scope_depth: usize,
     handler_depth: usize,
+    with_nesting: usize,
     loops: Vec<LoopContext>,
     break_contexts: Vec<BreakContext>,
     label_contexts: Vec<LabelContext>,
@@ -1457,7 +1458,9 @@ impl Compiler {
             action: FinallyAction::ExitWith,
         });
 
+        self.with_nesting = self.with_nesting.saturating_add(1);
         let body_value = self.compile_stmt(body, code, keep_value);
+        self.with_nesting = self.with_nesting.saturating_sub(1);
 
         self.finally_contexts.pop();
         code.push(Opcode::PopExceptionHandler);
@@ -1497,8 +1500,10 @@ impl Compiler {
         let saved_finally_contexts = std::mem::take(&mut self.finally_contexts);
         let saved_loop_completion_targets = std::mem::take(&mut self.loop_completion_targets);
         let saved_function_nesting = self.function_nesting;
+        let saved_with_nesting = self.with_nesting;
         self.scope_depth = 0;
         self.handler_depth = 0;
+        self.with_nesting = 0;
         self.function_nesting = self.function_nesting.saturating_add(1);
 
         let mut code = Vec::new();
@@ -1525,6 +1530,7 @@ impl Compiler {
         self.finally_contexts = saved_finally_contexts;
         self.loop_completion_targets = saved_loop_completion_targets;
         self.function_nesting = saved_function_nesting;
+        self.with_nesting = saved_with_nesting;
         function_id
     }
 
@@ -2205,15 +2211,26 @@ impl Compiler {
                 target: Identifier(name),
                 value,
             } => {
-                code.push(Opcode::ResolveIdentifierReference(name.clone()));
-                if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
-                    code.push(Opcode::LoadReferenceValue);
-                    self.compile_expr(right, code);
-                    code.push(Self::binary_opcode(op));
+                if self.with_nesting == 0 {
+                    if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
+                        code.push(Opcode::LoadIdentifier(name.clone()));
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                    } else {
+                        self.compile_expr(value, code);
+                    }
+                    code.push(Opcode::StoreVariable(name.clone()));
                 } else {
-                    self.compile_expr(value, code);
+                    code.push(Opcode::ResolveIdentifierReference(name.clone()));
+                    if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
+                        code.push(Opcode::LoadReferenceValue);
+                        self.compile_expr(right, code);
+                        code.push(Self::binary_opcode(op));
+                    } else {
+                        self.compile_expr(value, code);
+                    }
+                    code.push(Opcode::StoreReferenceValue);
                 }
-                code.push(Opcode::StoreReferenceValue);
             }
             Expr::AssignMember {
                 object,
@@ -2484,15 +2501,23 @@ impl Compiler {
     ) {
         match target {
             UpdateTarget::Identifier(Identifier(name)) => {
-                code.push(Opcode::ResolveIdentifierReference(name.clone()));
-                code.push(Opcode::LoadReferenceValue);
+                if self.with_nesting == 0 {
+                    code.push(Opcode::LoadIdentifier(name.clone()));
+                } else {
+                    code.push(Opcode::ResolveIdentifierReference(name.clone()));
+                    code.push(Opcode::LoadReferenceValue);
+                }
                 code.push(Opcode::ToNumber);
                 if !prefix {
                     code.push(Opcode::Dup);
                 }
                 code.push(Opcode::LoadNumber(1.0));
                 code.push(if increment { Opcode::Add } else { Opcode::Sub });
-                code.push(Opcode::StoreReferenceValue);
+                if self.with_nesting == 0 {
+                    code.push(Opcode::StoreVariable(name.clone()));
+                } else {
+                    code.push(Opcode::StoreReferenceValue);
+                }
                 if !prefix {
                     code.push(Opcode::Pop);
                 }
@@ -2785,9 +2810,8 @@ mod tests {
         let chunk = compile_expression(&expr);
         let expected = Chunk {
             code: vec![
-                Opcode::ResolveIdentifierReference("x".to_string()),
                 Opcode::LoadNumber(2.0),
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
                 Opcode::LoadNumber(1.0),
                 Opcode::Halt,
@@ -3092,12 +3116,11 @@ mod tests {
         let chunk = compile_expression(&expr);
         let expected = Chunk {
             code: vec![
-                Opcode::ResolveIdentifierReference("x".to_string()),
-                Opcode::LoadReferenceValue,
+                Opcode::LoadIdentifier("x".to_string()),
                 Opcode::ToNumber,
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],
@@ -3171,11 +3194,10 @@ mod tests {
                     name: "x".to_string(),
                     mutable: true,
                 },
-                Opcode::ResolveIdentifierReference("x".to_string()),
-                Opcode::LoadReferenceValue,
+                Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Add,
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
@@ -3443,15 +3465,13 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(13),
-                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::JumpIfFalse(12),
                 Opcode::LoadNumber(1.0),
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
-                Opcode::Jump(17),
-                Opcode::ResolveIdentifierReference("x".to_string()),
+                Opcode::Jump(15),
                 Opcode::LoadNumber(2.0),
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
@@ -3506,12 +3526,11 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(3.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(15),
-                Opcode::ResolveIdentifierReference("x".to_string()),
-                Opcode::LoadReferenceValue,
+                Opcode::JumpIfFalse(14),
+                Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("x".to_string()),
                 Opcode::Pop,
                 Opcode::Jump(4),
                 Opcode::LoadIdentifier("x".to_string()),
@@ -3624,15 +3643,14 @@ mod tests {
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(19),
+                Opcode::JumpIfFalse(18),
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
-                Opcode::ResolveIdentifierReference("i".to_string()),
-                Opcode::LoadReferenceValue,
+                Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(1.0),
                 Opcode::Add,
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("i".to_string()),
                 Opcode::Pop,
                 Opcode::Jump(5),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
@@ -3732,16 +3750,14 @@ mod tests {
                 Opcode::StrictEq,
                 Opcode::JumpIfFalse(10),
                 Opcode::Jump(11),
-                Opcode::Jump(17),
-                Opcode::ResolveIdentifierReference("y".to_string()),
+                Opcode::Jump(16),
                 Opcode::LoadNumber(1.0),
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("y".to_string()),
                 Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
-                Opcode::Jump(22),
-                Opcode::ResolveIdentifierReference("y".to_string()),
+                Opcode::Jump(20),
                 Opcode::LoadNumber(2.0),
-                Opcode::StoreReferenceValue,
+                Opcode::StoreVariable("y".to_string()),
                 Opcode::StoreVariable("$__loop_completion_1".to_string()),
                 Opcode::Pop,
                 Opcode::LoadIdentifier("$__loop_completion_1".to_string()),
