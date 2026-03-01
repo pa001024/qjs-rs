@@ -929,7 +929,7 @@ impl Vm {
                     return Err(err);
                 }
             };
-        let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
+        let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict, true);
         if pushed_annex_b_context {
             self.annex_b_eval_var_function_contexts.pop();
         }
@@ -949,6 +949,7 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         let chunk_key = (chunk.code.as_ptr() as usize, chunk.code.len());
+        let chunk_changed = self.last_persistent_chunk_key != Some(chunk_key);
         if self.last_persistent_chunk_key != Some(chunk_key) {
             self.identifier_slot_metadata_cache.clear();
             self.last_persistent_chunk_key = Some(chunk_key);
@@ -981,7 +982,14 @@ impl Vm {
                     return Err(err);
                 }
             };
-        let signal = self.execute_code(&chunk.code, &chunk.functions, realm, false, strict);
+        let signal = self.execute_code(
+            &chunk.code,
+            &chunk.functions,
+            realm,
+            false,
+            strict,
+            chunk_changed,
+        );
         if pushed_annex_b_context {
             self.annex_b_eval_var_function_contexts.pop();
         }
@@ -2254,10 +2262,13 @@ impl Vm {
         realm: &Realm,
         allow_return: bool,
         strict: bool,
+        reset_binding_fast_path_cache_at_entry: bool,
     ) -> Result<ExecutionSignal, VmError> {
         let mut pc = 0usize;
         let check_interval = self.runtime_gc_check_interval.max(1);
-        self.invalidate_binding_fast_path_cache();
+        if reset_binding_fast_path_cache_at_entry {
+            self.invalidate_binding_fast_path_cache();
+        }
         let identifier_slot_metadata = self.identifier_slot_metadata_for_code(code);
         while pc < code.len() {
             if self.runtime_gc_enabled && self.auto_gc_enabled {
@@ -4417,6 +4428,7 @@ impl Vm {
             realm,
             true,
             closure.strict,
+            true,
         );
         if pushed_annex_b_context {
             self.annex_b_eval_var_function_contexts.pop();
@@ -14219,11 +14231,12 @@ impl Vm {
         self.exception_handlers = Vec::new();
         self.pending_exception = None;
         let strict = force_strict || self.code_is_strict(&chunk.code);
-        let result = match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict) {
-            Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
-            Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
-            Err(err) => Err(err),
-        };
+        let result =
+            match self.execute_code(&chunk.code, &chunk.functions, realm, false, strict, true) {
+                Ok(ExecutionSignal::Halt) => Ok(self.stack.pop().unwrap_or(JsValue::Undefined)),
+                Ok(ExecutionSignal::Return) => Err(VmError::TopLevelReturn),
+                Err(err) => Err(err),
+            };
         self.exception_handlers = saved_handlers;
         self.pending_exception = saved_pending_exception;
         self.identifier_references = saved_identifier_references;
@@ -27542,6 +27555,28 @@ counter;
         let second = vm
             .execute_in_realm_persistent(&chunk, &realm)
             .expect("second run should execute");
+
+        assert_eq!(first, JsValue::Number(1.0));
+        assert_eq!(second, JsValue::Number(2.0));
+    }
+
+    #[test]
+    fn execute_in_realm_persistent_handles_chunk_switch_without_slot_confusion() {
+        let script_x = parse_script("var x = 1; x;").expect("script should parse");
+        let chunk_x = compile_script(&script_x);
+        let script_y = parse_script("var y = 2; y;").expect("script should parse");
+        let chunk_y = compile_script(&script_y);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+
+        let mut vm = Vm::default();
+        let first = vm
+            .execute_in_realm_persistent(&chunk_x, &realm)
+            .expect("first chunk should execute");
+        let second = vm
+            .execute_in_realm_persistent(&chunk_y, &realm)
+            .expect("second chunk should execute");
 
         assert_eq!(first, JsValue::Number(1.0));
         assert_eq!(second, JsValue::Number(2.0));
