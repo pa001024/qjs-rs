@@ -41,8 +41,9 @@ Plans:
 - [x] 11-06-PLAN.md — Build packet-D identifier-slot cache closure candidate and generate packet-d evidence for PERF-03 rerun. (completed 2026-02-28; PERF-03 still open, see `11-PACKET-D-EVIDENCE.md`)
 - [x] 11-07-PLAN.md — Execute final governance + PERF-03 authoritative bundle and synchronize traceability docs from single-run provenance. (completed 2026-02-28; bundle remained red so phase closure stays open)
 - [x] 11-08-PLAN.md — Align PERF-03 checker/policy/traceability artifacts to active quickjs-ratio target (`qjs-rs <= 1.25x quickjs-c`). (completed 2026-03-02; closure still open pending authoritative quickjs-ratio evidence run)
-- [ ] 11-09-PLAN.md — Execute next guarded hotspot optimization loop and publish authoritative quickjs-ratio PERF-03 verdict evidence.
-**Success Criteria** (what must be TRUE):
+- [x] 11-09-PLAN.md — Execute next guarded hotspot optimization loop and publish authoritative quickjs-ratio PERF-03 verdict evidence. (completed 2026-03-02; closure still open)
+- [ ] 11-10-PLAN.md — Fix governance (cargo fmt) and execute another optimization attempt with packet-f candidate.
+- [ ] 11-11-PLAN.md — Final optimization push for Phase 11 closure with packet-final candidate.
   1. Aggregate mean latency on the tracked suite is at most `1.25x quickjs-c` under the same host and run configuration (equivalent to >=80% of `quickjs-c` performance).
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
   3. Each optimization includes guard/fallback behavior and does not alter externally observable semantics.
@@ -70,4 +71,4 @@ Plans:
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 1/3 | 11/12 |
+VK|| v1.1 | In Progress | 1/3 | 11/13 |
