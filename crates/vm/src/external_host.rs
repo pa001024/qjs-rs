@@ -24,6 +24,24 @@ impl fmt::Debug for ExternalHostCallbacks {
 }
 
 impl Vm {
+    fn refresh_host_constructor_backlink(&mut self, host_id: u64, prototype: &JsValue) {
+        if let JsValue::Object(prototype_id) = prototype
+            && let Some(prototype_object) = self.objects.get_mut(prototype_id)
+        {
+            prototype_object
+                .properties
+                .insert("constructor".to_string(), JsValue::HostFunction(host_id));
+            prototype_object.property_attributes.insert(
+                "constructor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
+    }
+
     pub fn call_function_value(
         &mut self,
         callee: JsValue,
@@ -143,25 +161,14 @@ impl Vm {
             .and_then(|object| object.properties.get("prototype"))
             .cloned()
         {
-            return Ok(existing);
+            if Self::is_object_like_value(&existing) {
+                self.refresh_host_constructor_backlink(host_id, &existing);
+                return Ok(existing);
+            }
         }
 
         let prototype = self.create_object_value();
-        if let JsValue::Object(prototype_id) = prototype {
-            if let Some(prototype_object) = self.objects.get_mut(&prototype_id) {
-                prototype_object
-                    .properties
-                    .insert("constructor".to_string(), JsValue::HostFunction(host_id));
-                prototype_object.property_attributes.insert(
-                    "constructor".to_string(),
-                    PropertyAttributes {
-                        writable: true,
-                        enumerable: false,
-                        configurable: true,
-                    },
-                );
-            }
-        }
+        self.refresh_host_constructor_backlink(host_id, &prototype);
 
         let object = self.host_function_objects.entry(host_id).or_default();
         object
