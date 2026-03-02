@@ -21,15 +21,11 @@ Phase 11 closure uses exactly one profile/mode pair:
 
 ## Comparator Availability Policy
 
-For closure checks:
+Baseline/candidate artifacts must preserve metadata comparators (`qjs-rs`, `boa-engine` required; `quickjs-c`, `nodejs` optional) and explicit unavailable reasons.
 
-- **Required comparators (checker metadata):** `qjs-rs`, `boa-engine` (must be `available`)
-- **Optional comparators (checker metadata):** `quickjs-c`, `nodejs` (may be `missing`/`unsupported`)
+For the active PERF-03 closure command (`--require-qjs-lte-quickjs-ratio 1.25`), `quickjs-c` becomes mandatory: both artifacts must report `quickjs-c` comparator status as `available`, and both artifacts must include aggregate `quickjs-c` means.
 
-For the v1.1 milestone target update, `quickjs-c` aggregate data is additionally required for closure decisions (see Acceptance Threshold).
-
-Optional comparators may be unavailable only if benchmark metadata includes explicit status + reason.
-Claims with silent comparator absence are rejected.
+Legacy `--require-qjs-lte-boa` checks remain compatibility-only and are not an active closure criterion.
 
 ## Required Artifact Metadata
 
@@ -51,37 +47,36 @@ Artifacts may also include `qjs_rs_hotspot_attribution` snapshots for packet-lev
 cargo run -p benchmarks --release -- \
   --profile local-dev \
   --output target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
   --input target/benchmarks/engine-comparison.local-dev.phase11-baseline.json
 ```
 
-### 2) Candidate comparison gate
+### 2) Candidate creation + contract validation
+
+```bash
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
+  --allow-missing-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-d.json
+```
+
+### 3) PERF-03 ratio gate (authoritative closure check)
 
 ```bash
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --require-qjs-lte-quickjs-ratio 1.25
 ```
 
-```bash
-python - <<'PY'
-import json
-from pathlib import Path
-
-candidate = json.loads(Path("target/benchmarks/engine-comparison.local-dev.packet-b.json").read_text(encoding="utf-8"))
-means = candidate["aggregate"]["mean_ms_per_engine"]
-qjs_rs = float(means["qjs-rs"])
-quickjs = float(means["quickjs-c"])
-ratio = qjs_rs / quickjs
-if ratio > 1.25:
-    raise SystemExit(f"perf target check failed: qjs-rs/quickjs-c={ratio:.6f} > 1.250000")
-print(f"perf target check passed: qjs-rs/quickjs-c={ratio:.6f} <= 1.250000")
-PY
-```
-
-### 3) Checker self-test (required before policy changes)
+### 4) Checker self-test (required before policy changes)
 
 ```bash
 python .github/scripts/check_perf_target.py --self-test

@@ -45,6 +45,7 @@ python scripts/render_engine_benchmark_report.py \
 cargo run -p benchmarks --release -- \
   --profile local-dev \
   --output target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
@@ -56,44 +57,39 @@ Phase 11 artifacts now embed:
 - `perf_target` metadata (closure policy, optimization tag/packet id, host fingerprint, comparator policy)
 - optional `qjs_rs_hotspot_attribution` counters for packet-level hotspot auditing
 
-### Phase 11 packet-B closure candidate workflow
+### Phase 11 canonical closure candidate workflow (packet-D example)
 
 ```bash
 cargo run -p benchmarks --release -- \
   --profile local-dev \
-  --output target/benchmarks/engine-comparison.local-dev.packet-b.json \
+  --output target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 cargo run -p benchmarks --release -- \
   --profile ci-linux \
-  --output target/benchmarks/engine-comparison.ci-linux.packet-b.json \
+  --output target/benchmarks/engine-comparison.ci-linux.packet-d.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
-  --input target/benchmarks/engine-comparison.local-dev.packet-b.json
+  --input target/benchmarks/engine-comparison.local-dev.packet-d.json
 
 python .github/scripts/check_engine_benchmark_contract.py \
-  --input target/benchmarks/engine-comparison.ci-linux.packet-b.json
+  --input target/benchmarks/engine-comparison.ci-linux.packet-d.json
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json
-
-python - <<'PY'
-import json
-from pathlib import Path
-
-candidate = json.loads(Path("target/benchmarks/engine-comparison.local-dev.packet-b.json").read_text(encoding="utf-8"))
-means = candidate["aggregate"]["mean_ms_per_engine"]
-ratio = float(means["qjs-rs"]) / float(means["quickjs-c"])
-if ratio > 1.25:
-    raise SystemExit(f"perf target check failed: qjs-rs/quickjs-c={ratio:.6f} > 1.250000")
-print(f"perf target check passed: qjs-rs/quickjs-c={ratio:.6f} <= 1.250000")
-PY
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --require-qjs-lte-quickjs-ratio 1.25
 ```
 
 If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), Phase 11 PERF-03 closure is
 **not** satisfied and the run must be recorded as a non-closure candidate.
+
+PERF-04 still requires packet/hotspot evidence publication even when PERF-03 remains open.
+
+Legacy `--require-qjs-lte-boa` checker runs are audit-only and are not active closure criteria.
 
 ### Phase 11 packet-C closure candidate workflow
 
@@ -104,11 +100,13 @@ If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), Phase 11 PERF-03 clo
 cargo run -p benchmarks --release -- \
   --profile local-dev \
   --output target/benchmarks/engine-comparison.local-dev.packet-c.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 cargo run -p benchmarks --release -- \
   --profile ci-linux \
   --output target/benchmarks/engine-comparison.ci-linux.packet-c.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
@@ -119,7 +117,8 @@ python .github/scripts/check_engine_benchmark_contract.py \
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json \
+  --require-qjs-lte-quickjs-ratio 1.25
 ```
 
 If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-C
@@ -135,11 +134,13 @@ contract/profile policy.
 cargo run -p benchmarks --release -- \
   --profile local-dev \
   --output target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 cargo run -p benchmarks --release -- \
   --profile ci-linux \
   --output target/benchmarks/engine-comparison.ci-linux.packet-d.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
   --allow-missing-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
@@ -150,7 +151,8 @@ python .github/scripts/check_engine_benchmark_contract.py \
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json \
+  --require-qjs-lte-quickjs-ratio 1.25
 ```
 
 If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-D
