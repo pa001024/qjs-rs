@@ -257,3 +257,81 @@ perf target check failed
 Phase 11 remains **open**. Active closure still requires an authoritative `--require-qjs-lte-quickjs-ratio 1.25` pass.
 
 
+## 11) Plan 11-09 packet-e authoritative quickjs-ratio attempt (2026-03-02)
+
+### 11.1 VM packet-path optimization scope
+
+- Implemented one guarded low-risk identifier-call dispatch optimization in packet-D path:
+  - direct call-site binding resolution fast path for `CallIdentifier` / `CallIdentifierWithSpread` when slot metadata is available and `with` is absent.
+  - fallback remains canonical `resolve_identifier_reference` path on guard miss.
+- Added packet-D telemetry counters for direct call dispatch:
+  - `identifier_call_direct_hits`
+  - `identifier_call_direct_misses`
+- Added parity coverage for direct call dispatch/fallback behavior:
+  - `perf_packet_d_identifier_call_direct_dispatch_guarding`.
+
+### 11.2 Governance/parity verification commands (Task 1)
+
+1. `cargo fmt --check` ❌
+   - failed with pre-existing and local formatting drift reports (including non-11-09 ownership paths such as `crates/bytecode/src/lib.rs`).
+2. `cargo clippy -p vm -p benchmarks -- -D warnings` ✅
+3. `cargo test -p vm perf_packet_d -- --nocapture` ✅
+   - result: `5 passed; 0 failed`.
+4. `cargo test -p vm perf_hotspot_attribution -- --nocapture` ✅
+   - result: `1 passed; 0 failed` for selected test filter.
+
+### 11.3 Authoritative baseline/candidate artifacts and contract checks (Task 2)
+
+- Regenerated strict-comparator baseline (required for quickjs-ratio checker mode):
+  - `target/benchmarks/engine-comparison.local-dev.phase11-baseline.json`
+  - `generated_at_utc`: `2026-03-02T07:30:27.870Z`
+- Generated packet-e candidate:
+  - `target/benchmarks/engine-comparison.local-dev.packet-e.json`
+  - `generated_at_utc`: `2026-03-02T07:32:15.800Z`
+  - `sha256`: `e2c83552ed5f89129b700885c8ec67476d26214fb96ec0fad94223723d465a9c`
+
+Contract validation commands:
+
+- `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.phase11-baseline.json` ✅
+- `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-e.json` ✅
+
+### 11.4 PERF-03 quickjs-ratio checker verdict
+
+Checker command:
+
+```bash
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-e.json \
+  --require-qjs-lte-quickjs-ratio 1.25
+```
+
+Result: ❌ **FAILED**
+
+Exact checker output:
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-quickjs-ratio failed: candidate qjs-rs/quickjs-c 6.136312 > 1.250000 (qjs-rs=98.181000, quickjs-c=16.000000)
+```
+
+Aggregate means snapshot:
+
+- Baseline: `qjs-rs=101.873618`, `quickjs-c=16.428571`
+- Candidate packet-e: `qjs-rs=98.181000`, `quickjs-c=16.000000`
+- Candidate ratio (`qjs-rs/quickjs-c`): `6.136312x`
+
+Packet hotspot attribution snapshot (`qjs_rs_hotspot_attribution.total`, packet-e):
+
+- `numeric_ops`: `157087`
+- `identifier_resolution`: `349965`
+- `array_indexed_property_get`: `14007`
+- `array_indexed_property_set`: `14000`
+
+### 11.5 Current closure status after 11-09
+
+- PERF-04 packet evidence: ✅ retained and extended (new guarded call-dispatch optimization + parity test)
+- PERF-05 maintainability boundary: ✅ retained (guarded fallback semantics, no runtime-core C FFI)
+- PERF-03 active closure (`qjs-rs <= 1.25x quickjs-c`): ❌ still open (`6.136312x`)
+
+
