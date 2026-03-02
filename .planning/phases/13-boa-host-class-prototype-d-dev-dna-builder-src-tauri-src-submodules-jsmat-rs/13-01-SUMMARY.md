@@ -54,7 +54,7 @@ Each task was committed atomically:
 
 1. **Task 1: Add host constructor/prototype conformance coverage** - `5b03c62` (test)
 2. **Task 2: Harden host constructor/prototype runtime behavior** - `70fe519` (fix)
-3. **Task 3: Regression sweep and summary publication** - `<pending>` (docs)
+3. **Task 3: Regression sweep and summary publication** - `36e150b` (docs)
 
 ## Files Created/Modified
 - `.planning/phases/13-boa-host-class-prototype-d-dev-dna-builder-src-tauri-src-submodules-jsmat-rs/13-01-SUMMARY.md` - Plan execution record and verification evidence index.
