@@ -18,3 +18,11 @@
   - `target/verification-traceability.md`
 
 ---
+
+## v1.1 milestone (In Progress)
+
+**Theme:** Performance Acceleration
+
+**Updated target:** Continue hot-path optimization and reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent: `qjs-rs <= 1.25x quickjs-c`) while keeping semantic/governance gates green.
+
+**Current state:** Phase 11 remains open; governance is green in latest authoritative bundle, but performance closure has not yet met the updated target threshold.

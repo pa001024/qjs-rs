@@ -131,6 +131,101 @@ pub enum JsValue {
     Undefined,
 }
 
+impl From<bool> for JsValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<f64> for JsValue {
+    fn from(value: f64) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<f32> for JsValue {
+    fn from(value: f32) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<i32> for JsValue {
+    fn from(value: i32) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<i64> for JsValue {
+    fn from(value: i64) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<u32> for JsValue {
+    fn from(value: u32) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<u64> for JsValue {
+    fn from(value: u64) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<usize> for JsValue {
+    fn from(value: usize) -> Self {
+        Self::Number(value as f64)
+    }
+}
+
+impl From<String> for JsValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for JsValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl<T> From<Option<T>> for JsValue
+where
+    T: Into<JsValue>,
+{
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => value.into(),
+            None => Self::Null,
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! js_value {
+    (null) => {
+        $crate::JsValue::Null
+    };
+    (undefined) => {
+        $crate::JsValue::Undefined
+    };
+    (uninitialized) => {
+        $crate::JsValue::Uninitialized
+    };
+    (true) => {
+        $crate::JsValue::Bool(true)
+    };
+    (false) => {
+        $crate::JsValue::Bool(false)
+    };
+    ($value:expr) => {{
+        let value: $crate::JsValue = ::core::convert::Into::into($value);
+        value
+    }};
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleLifecycleState {
     Unlinked,
@@ -183,5 +278,18 @@ mod tests {
             Some(JsValue::Number(42.0))
         );
         assert_eq!(realm.resolve_identifier("missing"), None);
+    }
+
+    #[test]
+    fn js_value_macro_converts_common_literals() {
+        assert_eq!(crate::js_value!(true), JsValue::Bool(true));
+        assert_eq!(crate::js_value!(false), JsValue::Bool(false));
+        assert_eq!(crate::js_value!(null), JsValue::Null);
+        assert_eq!(crate::js_value!(undefined), JsValue::Undefined);
+        assert_eq!(crate::js_value!(41), JsValue::Number(41.0));
+        assert_eq!(
+            crate::js_value!("hello"),
+            JsValue::String("hello".to_string())
+        );
     }
 }

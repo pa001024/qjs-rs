@@ -2,9 +2,7 @@
 
 use runtime::JsValue;
 use test_harness::{ModuleEntryExecution, run_module_entry_with_vm};
-use vm::{
-    PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks, VmError,
-};
+use vm::{PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks, VmError};
 
 #[derive(Default)]
 struct RecordingHooks {
@@ -128,7 +126,10 @@ fn module_host_hook_visibility() {
     let err = execution
         .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect_err("nested enqueue callback failure should be typed");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed")
+    );
 
     let mut execution = evaluate_module_with_async_chains();
     let mut hooks = RecordingHooks {
@@ -151,5 +152,8 @@ fn module_host_hook_visibility() {
     let err = execution
         .drain_promise_jobs_with_host_hooks(1, false, &mut hooks)
         .expect_err("drain-end callback failure should be typed");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed")
+    );
 }

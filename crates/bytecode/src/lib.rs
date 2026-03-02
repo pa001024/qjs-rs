@@ -38,6 +38,7 @@ pub enum Opcode {
         function_id: usize,
     },
     StoreVariable(String),
+    IncrementVariable(String),
     GetProperty(String),
     GetPropertyByValue,
     GetSuperProperty(String),
@@ -284,6 +285,7 @@ fn identifier_slot_key(opcode: &Opcode) -> Option<(IdentifierOpcodeFamily, &str)
     match opcode {
         Opcode::LoadIdentifier(name) => Some((IdentifierOpcodeFamily::Load, name.as_str())),
         Opcode::StoreVariable(name) => Some((IdentifierOpcodeFamily::Store, name.as_str())),
+        Opcode::IncrementVariable(name) => Some((IdentifierOpcodeFamily::Store, name.as_str())),
         Opcode::ResolveIdentifierReference(name) => {
             Some((IdentifierOpcodeFamily::ResolveReference, name.as_str()))
         }
@@ -2211,16 +2213,9 @@ impl Compiler {
                 target: Identifier(name),
                 value,
             } => {
-                if self.with_nesting == 0 {
-                    if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
-                        code.push(Opcode::LoadIdentifier(name.clone()));
-                        self.compile_expr(right, code);
-                        code.push(Self::binary_opcode(op));
-                    } else {
-                        self.compile_expr(value, code);
-                    }
-                    code.push(Opcode::StoreVariable(name.clone()));
-                } else {
+                let preserve_reference =
+                    self.with_nesting > 0 || Self::expr_contains_function_or_direct_eval(value);
+                if preserve_reference {
                     code.push(Opcode::ResolveIdentifierReference(name.clone()));
                     if let Some((op, right)) = Self::match_identifier_compound_value(name, value) {
                         code.push(Opcode::LoadReferenceValue);
@@ -2230,6 +2225,17 @@ impl Compiler {
                         self.compile_expr(value, code);
                     }
                     code.push(Opcode::StoreReferenceValue);
+                } else if Self::match_identifier_increment_value(name, value) {
+                    code.push(Opcode::IncrementVariable(name.clone()));
+                } else if let Some((op, right)) = Self::match_identifier_compound_value(name, value)
+                {
+                    code.push(Opcode::LoadIdentifier(name.clone()));
+                    self.compile_expr(right, code);
+                    code.push(Self::binary_opcode(op));
+                    code.push(Opcode::StoreVariable(name.clone()));
+                } else {
+                    self.compile_expr(value, code);
+                    code.push(Opcode::StoreVariable(name.clone()));
                 }
             }
             Expr::AssignMember {
@@ -2638,6 +2644,21 @@ impl Compiler {
         }
     }
 
+    fn match_identifier_increment_value(name: &str, value: &Expr) -> bool {
+        let Expr::Binary { op, left, right } = value else {
+            return false;
+        };
+        if *op != BinaryOp::Add {
+            return false;
+        }
+        match (&**left, &**right) {
+            (Expr::Identifier(Identifier(lhs_name)), Expr::Number(number)) => {
+                lhs_name == name && *number == 1.0
+            }
+            _ => false,
+        }
+    }
+
     fn match_member_compound_value<'a>(
         object: &Expr,
         property: &str,
@@ -2717,8 +2738,8 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::{
-        Chunk, CompiledFunction, IdentifierOpcodeFamily, Opcode, build_identifier_slot_metadata,
-        compile_expression, compile_script,
+        build_identifier_slot_metadata, compile_expression, compile_script, Chunk,
+        CompiledFunction, IdentifierOpcodeFamily, Opcode,
     };
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,
@@ -3526,11 +3547,8 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::LoadNumber(3.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(14),
-                Opcode::LoadIdentifier("x".to_string()),
-                Opcode::LoadNumber(1.0),
-                Opcode::Add,
-                Opcode::StoreVariable("x".to_string()),
+                Opcode::JumpIfFalse(11),
+                Opcode::IncrementVariable("x".to_string()),
                 Opcode::Pop,
                 Opcode::Jump(4),
                 Opcode::LoadIdentifier("x".to_string()),
@@ -3643,14 +3661,11 @@ mod tests {
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::LoadNumber(2.0),
                 Opcode::Lt,
-                Opcode::JumpIfFalse(18),
+                Opcode::JumpIfFalse(15),
                 Opcode::LoadIdentifier("i".to_string()),
                 Opcode::StoreVariable("$__loop_completion_0".to_string()),
                 Opcode::Pop,
-                Opcode::LoadIdentifier("i".to_string()),
-                Opcode::LoadNumber(1.0),
-                Opcode::Add,
-                Opcode::StoreVariable("i".to_string()),
+                Opcode::IncrementVariable("i".to_string()),
                 Opcode::Pop,
                 Opcode::Jump(5),
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),

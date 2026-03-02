@@ -22,7 +22,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use vm::{Vm, perf::HotspotAttribution};
 
 #[derive(Debug, Clone)]
@@ -255,28 +255,44 @@ fn run_quickjs_c_eval_per_iteration(
 ) -> Result<SampleMeasurement> {
     let script_json = serde_json::to_string(script)?;
     let quickjs_code = format!(
-        "const code = {script_json};\
-         const iterations = {iterations};\
-         let guard = 0;\
-         const start = Date.now();\
-         for (let i = 0; i < iterations; i++) {{\
-           const value = eval(code);\
-           if (typeof value === 'number') guard += value;\
-           else if (value === true) guard += 1;\
-         }}\
-         const end = Date.now();\
-         console.log(JSON.stringify({{ elapsed_ms: end - start, guard }}));"
+        "const code = {script_json};\n\
+         const iterations = {iterations};\n\
+         let guard = 0;\n\
+         const start = Date.now() >>> 0;\n\
+         for (let i = 0; i < iterations; i++) {{\n\
+           const value = eval(code);\n\
+           if (typeof value === 'number') guard += value;\n\
+           else if (value === true) guard += 1;\n\
+         }}\n\
+         const end = Date.now() >>> 0;\n\
+         const elapsed_ms = (end - start) >>> 0;\n\
+         console.log(JSON.stringify({{ elapsed_ms, guard }}));"
     );
+
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let quickjs_script_path = env::temp_dir().join(format!(
+        "qjs-rs-benchmark-{}-{timestamp_ms}.js",
+        std::process::id()
+    ));
+    fs::write(&quickjs_script_path, quickjs_code.as_bytes()).with_context(|| {
+        format!(
+            "failed to write temporary quickjs benchmark script: {}",
+            quickjs_script_path.display()
+        )
+    })?;
 
     let mut command = Command::new(comparator.executable());
     if let Some(workdir) = &comparator.workdir {
         command.current_dir(workdir);
     }
     let output = command
-        .arg("-e")
-        .arg(quickjs_code)
+        .arg(quickjs_script_path.as_os_str())
         .output()
         .context("failed to execute quickjs-c benchmark")?;
+    let _ = fs::remove_file(&quickjs_script_path);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -644,7 +660,7 @@ pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
     let descriptor = contract::infer_optimization_descriptor(&cli.output);
     descriptor.packet_id.as_deref().is_some_and(|packet_id| {
         packet_id.starts_with("packet-c") || packet_id.starts_with("packet-d")
-    })
+    }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
 
 pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
@@ -653,6 +669,7 @@ pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
         .packet_id
         .as_deref()
         .is_some_and(|packet_id| packet_id.starts_with("packet-d"))
+        || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
 
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {

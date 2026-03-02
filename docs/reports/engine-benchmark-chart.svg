@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" font-family="Inter,Segoe UI,Arial,sans-serif">
+<rect width="1200" height="620" fill="#ffffff"/>
+<text x="70" y="28" font-size="20" font-weight="700" fill="#111827">JS Engine Benchmark (mean ms, lower is better)</text>
+<line x1="70" y1="500.00" x2="1170" y2="500.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="504.00" text-anchor="end" font-size="11" fill="#6b7280">0.0ms</text>
+<line x1="70" y1="410.00" x2="1170" y2="410.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="414.00" text-anchor="end" font-size="11" fill="#6b7280">304.2ms</text>
+<line x1="70" y1="320.00" x2="1170" y2="320.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="324.00" text-anchor="end" font-size="11" fill="#6b7280">608.3ms</text>
+<line x1="70" y1="230.00" x2="1170" y2="230.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="234.00" text-anchor="end" font-size="11" fill="#6b7280">912.5ms</text>
+<line x1="70" y1="140.00" x2="1170" y2="140.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="144.00" text-anchor="end" font-size="11" fill="#6b7280">1216.6ms</text>
+<line x1="70" y1="50.00" x2="1170" y2="50.00" stroke="#e5e7eb" stroke-width="1"/>
+<text x="62" y="54.00" text-anchor="end" font-size="11" fill="#6b7280">1520.8ms</text>
+<rect x="90.00" y="190.46" width="45.00" height="309.54" fill="#2563eb" rx="3"/>
+<rect x="140.00" y="469.44" width="45.00" height="30.56" fill="#16a34a" rx="3"/>
+<rect x="190.00" y="495.80" width="45.00" height="4.20" fill="#d97706" rx="3"/>
+<rect x="240.00" y="499.58" width="45.00" height="0.42" fill="#dc2626" rx="3"/>
+<text x="207.50" y="524" text-anchor="middle" font-size="11" fill="#111827">arith-loop</text>
+<rect x="365.00" y="478.13" width="45.00" height="21.87" fill="#2563eb" rx="3"/>
+<rect x="415.00" y="496.12" width="45.00" height="3.88" fill="#16a34a" rx="3"/>
+<rect x="465.00" y="499.17" width="45.00" height="0.83" fill="#d97706" rx="3"/>
+<rect x="515.00" y="499.85" width="45.00" height="0.15" fill="#dc2626" rx="3"/>
+<text x="482.50" y="524" text-anchor="middle" font-size="11" fill="#111827">fib-iterative</text>
+<rect x="640.00" y="50.00" width="45.00" height="450.00" fill="#2563eb" rx="3"/>
+<rect x="690.00" y="430.23" width="45.00" height="69.77" fill="#16a34a" rx="3"/>
+<rect x="740.00" y="494.79" width="45.00" height="5.21" fill="#d97706" rx="3"/>
+<rect x="790.00" y="498.84" width="45.00" height="1.16" fill="#dc2626" rx="3"/>
+<text x="757.50" y="524" text-anchor="middle" font-size="11" fill="#111827">array-sum</text>
+<rect x="915.00" y="497.86" width="45.00" height="2.14" fill="#2563eb" rx="3"/>
+<rect x="965.00" y="496.58" width="45.00" height="3.42" fill="#16a34a" rx="3"/>
+<rect x="1015.00" y="499.29" width="45.00" height="0.71" fill="#d97706" rx="3"/>
+<rect x="1065.00" y="499.89" width="45.00" height="0.11" fill="#dc2626" rx="3"/>
+<text x="1032.50" y="524" text-anchor="middle" font-size="11" fill="#111827">json-roundtrip</text>
+<line x1="70" y1="500" x2="1170" y2="500" stroke="#111827" stroke-width="1.2"/>
+<line x1="70" y1="50" x2="70" y2="500" stroke="#111827" stroke-width="1.2"/>
+<rect x="900" y="12" width="12" height="12" fill="#2563eb" rx="2"/>
+<text x="917" y="22" font-size="12" fill="#374151">qjs-rs</text>
+<rect x="995" y="12" width="12" height="12" fill="#16a34a" rx="2"/>
+<text x="1012" y="22" font-size="12" fill="#374151">boa-engine</text>
+<rect x="1090" y="12" width="12" height="12" fill="#d97706" rx="2"/>
+<text x="1107" y="22" font-size="12" fill="#374151">quickjs-c</text>
+<rect x="1185" y="12" width="12" height="12" fill="#dc2626" rx="2"/>
+<text x="1202" y="22" font-size="12" fill="#374151">nodejs</text>
+</svg>

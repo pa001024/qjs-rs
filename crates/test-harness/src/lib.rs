@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod host_callbacks;
 pub mod test262;
 
 use builtins::install_baseline;
@@ -7,8 +8,11 @@ use bytecode::{compile_expression, compile_script};
 use parser::{parse_expression, parse_script};
 use runtime::{JsValue, Realm};
 use std::collections::BTreeMap;
-use vm::{
-    ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobHostHooks, Vm, VmError,
+use vm::{ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobHostHooks, Vm, VmError};
+
+pub use host_callbacks::{
+    HostCallbackExecution, HostCallbackRegistration, execute_script_with_host_callbacks,
+    run_script_with_host_callbacks,
 };
 
 pub fn run_expression(source: &str) -> Result<JsValue, String> {

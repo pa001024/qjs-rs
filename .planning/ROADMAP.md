@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach aggregate `qjs-rs <= boa-engine` while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all Phase 11 plans executed as of 2026-02-28; closure remains open per latest `phase11-closure-bundle.json` PERF-03 failure)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all Phase 11 plans executed as of 2026-02-28; closure remains open per latest `phase11-closure-bundle.json` PERF-03 failure)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -28,7 +28,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
   4. Sample/iteration controls are configurable and documented for both local and CI runs.
 
 ### Phase 11: Hot-Path Optimization and Target Closure
-**Goal**: Achieve competitive aggregate latency versus `boa-engine` through evidence-backed VM/runtime/bytecode optimizations.
+**Goal**: Achieve >=80% of `quickjs-c` performance on the tracked suite through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
 **Plans:** 7/7 plans completed (closure still open: latest authoritative bundle has PERF-03 red gate)
@@ -41,7 +41,7 @@ Plans:
 - [x] 11-06-PLAN.md — Build packet-D identifier-slot cache closure candidate and generate packet-d evidence for PERF-03 rerun. (completed 2026-02-28; PERF-03 still open, see `11-PACKET-D-EVIDENCE.md`)
 - [x] 11-07-PLAN.md — Execute final governance + PERF-03 authoritative bundle and synchronize traceability docs from single-run provenance. (completed 2026-02-28; bundle remained red so phase closure stays open)
 **Success Criteria** (what must be TRUE):
-  1. Aggregate mean latency on the tracked suite is no worse than `boa-engine` under the same host and run configuration.
+  1. Aggregate mean latency on the tracked suite is at most `1.25x quickjs-c` under the same host and run configuration (equivalent to >=80% of `quickjs-c` performance).
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
   3. Each optimization includes guard/fallback behavior and does not alter externally observable semantics.
   4. Runtime-core remains pure Rust (no C FFI introduced) and optimization changes stay within maintainable layer boundaries.

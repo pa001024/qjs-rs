@@ -13,7 +13,7 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **no worse than** `boa-engine` on the same host and run configuration. _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T17:53:12Z`) still fails `--require-qjs-lte-boa` with `qjs-rs 1370.511975 > boa-engine 184.489346`.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T17:53:12Z`) remains below this threshold.)_
 - [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Open closure state: packet evidence exists, but authoritative governance + PERF-03 bundle is still red.)_
 - [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Open closure state: maintainability evidence exists, but phase closure remains blocked until the authoritative governance + PERF-03 bundle is jointly green.)_
 
@@ -27,14 +27,14 @@
 - **LAN-01**: Expand full `Proxy` invariant coverage beyond minimal currently executable paths.
 - **LAN-02**: Expand `Symbol` and `BigInt` edge behavior to larger conformance subsets.
 - **LAN-03**: Broaden typed-array coverage beyond baseline `Uint8Array`-centric paths.
-- **PERF-06**: Pursue QuickJS(C)-gap closure phases after surpassing boa-engine baseline.
+- **PERF-06**: Pursue additional QuickJS(C)-gap closure phases after crossing the >=80% milestone threshold.
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
 | Runtime core C FFI dependency | Violates project boundary (pure Rust runtime core) |
-| Large feature-surface expansion in same milestone | v1.1 focus is performance closure against boa-engine |
+| Large feature-surface expansion in same milestone | v1.1 focus is performance closure to >=80% of quickjs-c |
 | Unbounded benchmark scenarios without reproducibility contract | Prioritize deterministic and actionable benchmark signals |
 
 ## Traceability
@@ -43,7 +43,7 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Open (gap: latest authoritative bundle perf target failed: `qjs-rs 1370.511975 > boa-engine 184.489346`) |
+| PERF-03 | Phase 11 | Open (gap: latest authoritative bundle perf target still below >=80% quickjs-c threshold) |
 | PERF-04 | Phase 11 | Open (packet evidence landed; authoritative bundle still red due governance+perf gap) |
 | PERF-05 | Phase 11 | Open (maintainability evidence landed; authoritative governance+perf bundle still open) |
 | TST-05 | Phase 12 | Planned |

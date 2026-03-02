@@ -5,8 +5,8 @@ use bytecode::compile_script;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
 use std::collections::BTreeMap;
-use vm::{PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks, Vm, VmError};
 use vm::{ModuleHost, ModuleHostError};
+use vm::{PromiseJobDrainReport, PromiseJobDrainStopReason, PromiseJobHostHooks, Vm, VmError};
 
 #[derive(Default)]
 struct RecordingHooks {
@@ -292,7 +292,10 @@ fn module_path_promise_queue_matrix() {
     let err = vm
         .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
         .expect_err("enqueue callback failure should be typed in module path");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed")
+    );
 
     let mut vm = evaluate_module_with_nested_promises();
     let mut hooks = RecordingHooks {
@@ -315,5 +318,8 @@ fn module_path_promise_queue_matrix() {
     let err = vm
         .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
         .expect_err("drain-end callback failure should be typed in module path");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed")
+    );
 }

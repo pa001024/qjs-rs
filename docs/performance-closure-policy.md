@@ -23,8 +23,10 @@ Phase 11 closure uses exactly one profile/mode pair:
 
 For closure checks:
 
-- **Required comparators:** `qjs-rs`, `boa-engine` (must be `available`)
-- **Optional comparators:** `quickjs-c`, `nodejs` (may be `missing`/`unsupported`)
+- **Required comparators (checker metadata):** `qjs-rs`, `boa-engine` (must be `available`)
+- **Optional comparators (checker metadata):** `quickjs-c`, `nodejs` (may be `missing`/`unsupported`)
+
+For the v1.1 milestone target update, `quickjs-c` aggregate data is additionally required for closure decisions (see Acceptance Threshold).
 
 Optional comparators may be unavailable only if benchmark metadata includes explicit status + reason.
 Claims with silent comparator absence are rejected.
@@ -60,8 +62,23 @@ python .github/scripts/check_engine_benchmark_contract.py \
 ```bash
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json \
-  --require-qjs-lte-boa
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json
+```
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+candidate = json.loads(Path("target/benchmarks/engine-comparison.local-dev.packet-b.json").read_text(encoding="utf-8"))
+means = candidate["aggregate"]["mean_ms_per_engine"]
+qjs_rs = float(means["qjs-rs"])
+quickjs = float(means["quickjs-c"])
+ratio = qjs_rs / quickjs
+if ratio > 1.25:
+    raise SystemExit(f"perf target check failed: qjs-rs/quickjs-c={ratio:.6f} > 1.250000")
+print(f"perf target check passed: qjs-rs/quickjs-c={ratio:.6f} <= 1.250000")
+PY
 ```
 
 ### 3) Checker self-test (required before policy changes)
@@ -75,6 +92,6 @@ python .github/scripts/check_perf_target.py --self-test
 PERF-03 closure is satisfied only when:
 
 1. baseline/candidate satisfy the policy metadata checks above, and
-2. `--require-qjs-lte-boa` passes (candidate aggregate `qjs-rs <= boa-engine`) under the authoritative profile/mode.
+2. Candidate aggregate latency satisfies `qjs-rs <= 1.25x quickjs-c` (equivalent to >=80% of quickjs-c performance) under the authoritative profile/mode.
 
 No alternate profile, timing mode, or cross-host run is accepted for Phase 11 closure claims.

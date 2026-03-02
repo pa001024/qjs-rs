@@ -18,7 +18,7 @@ Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without intr
 
 ## Current Milestone: v1.1 Performance Acceleration
 
-**Goal:** Optimize runtime hot paths so the qjs-rs benchmark aggregate latency is at least on par with (or better than) `boa-engine` while preserving semantic correctness.
+**Goal:** Continue runtime hot-path optimization so `qjs-rs` reaches **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving semantic correctness.
 
 **Target features:**
 - Add reproducible cross-engine performance baselines (`qjs-rs`, `boa-engine`, `quickjs-c`, `nodejs`) as first-class milestone evidence.
@@ -27,9 +27,9 @@ Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without intr
 
 ## Next Milestone Goals
 
-- Reach `qjs-rs <= boa-engine` aggregate mean latency on the local benchmark suite.
+- Reach `qjs-rs >= 80%` of `quickjs-c` performance on the tracked benchmark suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`).
 - Keep existing semantic and governance gates green while introducing performance changes.
-- Build an optimization playbook that can be iterated toward QuickJS(C)-class performance.
+- Build an optimization playbook that can push beyond the 80% QuickJS threshold after initial closure.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without intr
 ### Active
 
 - [ ] Define and approve milestone v1.1 performance requirements
-- [ ] Execute v1.1 roadmap to beat boa-engine on the tracked benchmark suite without semantic regressions
+- [ ] Execute v1.1 roadmap to reach >=80% of QuickJS(C) performance on the tracked benchmark suite without semantic regressions
 - [ ] Add stable performance baselines and threshold gates for CI/regression tracking
 
 ### Out of Scope

@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod external_host;
 mod fast_path;
+mod opaque_bindings;
 pub mod perf;
+mod runtime_limits;
 pub use fast_path::PacketAFastPathCounters;
 pub use fast_path::PacketBFastPathCounters;
 pub use fast_path::PacketCFastPathCounters;
@@ -24,13 +27,16 @@ use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::external_host::ExternalHostCallbacks;
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
     PacketCFastPathState, PacketDFastPathState,
 };
+use crate::opaque_bindings::OpaqueBindings;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -98,6 +104,7 @@ const TYPE_ERROR_MODULE_LOAD_FAILED: &str = "ModuleLifecycle:LoadFailed";
 const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
 const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
 const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
+const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
@@ -146,6 +153,7 @@ struct Closure {
 #[derive(Debug, Clone, PartialEq)]
 struct JsObject {
     properties: HashMap<String, JsValue>,
+    dense_elements: Option<Vec<Option<JsValue>>>,
     getters: HashMap<String, JsValue>,
     setters: HashMap<String, JsValue>,
     property_attributes: HashMap<String, PropertyAttributes>,
@@ -163,6 +171,7 @@ impl Default for JsObject {
     fn default() -> Self {
         Self {
             properties: HashMap::default(),
+            dense_elements: None,
             getters: HashMap::default(),
             setters: HashMap::default(),
             property_attributes: HashMap::default(),
@@ -229,6 +238,10 @@ enum HostFunction {
         target: JsValue,
         this_arg: JsValue,
         bound_args: Vec<JsValue>,
+    },
+    ExternalCallback {
+        callback_id: u64,
+        constructable: bool,
     },
     GeneratorFactory {
         producer: JsValue,
@@ -416,6 +429,10 @@ enum HandleErrorKind {
 pub enum VmError {
     EmptyStack,
     StackUnderflow,
+    StackLimitExceeded {
+        max_stack_size: usize,
+        current_stack_size: usize,
+    },
     ScopeUnderflow,
     UnknownIdentifier(String),
     ImmutableBinding(String),
@@ -434,6 +451,11 @@ pub enum VmError {
     UncaughtException(JsValue),
     RuntimeIntegrity(&'static str),
     TypeError(&'static str),
+    MemoryLimitExceeded {
+        limit_bytes: usize,
+        estimated_bytes: usize,
+    },
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +637,34 @@ enum PromiseHook<'a> {
     DrainEnd(&'a PromiseJobDrainReport),
 }
 
+type VmInterruptHandler = dyn FnMut() -> bool;
+
+struct InterruptState {
+    handler: Option<Box<VmInterruptHandler>>,
+    poll_interval: usize,
+    tick: usize,
+}
+
+impl Default for InterruptState {
+    fn default() -> Self {
+        Self {
+            handler: None,
+            poll_interval: 1024,
+            tick: 0,
+        }
+    }
+}
+
+impl fmt::Debug for InterruptState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InterruptState")
+            .field("has_handler", &self.handler.is_some())
+            .field("poll_interval", &self.poll_interval)
+            .field("tick", &self.tick)
+            .finish()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Vm {
     stack: Vec<JsValue>,
@@ -630,6 +680,7 @@ pub struct Vm {
     next_closure_id: u64,
     host_functions: BTreeMap<u64, HostFunction>,
     host_function_objects: BTreeMap<u64, JsObject>,
+    external_host_callbacks: ExternalHostCallbacks,
     native_function_objects: BTreeMap<NativeFunction, JsObject>,
     native_function_deleted: BTreeSet<(NativeFunction, String)>,
     next_host_function_id: u64,
@@ -695,6 +746,12 @@ pub struct Vm {
     gc_boundary_collections: usize,
     gc_runtime_collections: usize,
     gc_reclaimed_objects_total: usize,
+    memory_limit_bytes: Option<usize>,
+    memory_check_interval: usize,
+    memory_check_tick: usize,
+    max_stack_size: Option<usize>,
+    interrupt_state: InterruptState,
+    opaque_bindings: OpaqueBindings,
     hotspot_attribution: perf::HotspotAttributionState,
     packet_a_fast_path_disabled: bool,
     packet_a_fast_path_metrics_enabled: bool,
@@ -737,6 +794,7 @@ impl Vm {
         self.next_closure_id = 0;
         self.host_functions.clear();
         self.host_function_objects.clear();
+        self.external_host_callbacks = ExternalHostCallbacks::default();
         self.native_function_objects.clear();
         self.native_function_deleted.clear();
         self.next_host_function_id = 0;
@@ -800,6 +858,9 @@ impl Vm {
         self.gc_boundary_collections = 0;
         self.gc_runtime_collections = 0;
         self.gc_reclaimed_objects_total = 0;
+        self.memory_check_tick = 0;
+        self.interrupt_state.tick = 0;
+        self.opaque_bindings.entries.clear();
         self.packet_a_fast_path.reset();
         self.packet_b_fast_path.reset();
         self.packet_b_prototype_chain_may_have_indexed_property = false;
@@ -2071,6 +2132,10 @@ impl Vm {
 
     fn enqueue_object_values(&mut self, object: JsObject) {
         self.gc_mark_stack.extend(object.properties.into_values());
+        if let Some(dense_elements) = object.dense_elements {
+            self.gc_mark_stack
+                .extend(dense_elements.into_iter().flatten());
+        }
         self.gc_mark_stack.extend(object.getters.into_values());
         self.gc_mark_stack.extend(object.setters.into_values());
         if let Some(prototype_value) = object.prototype_value {
@@ -2109,7 +2174,8 @@ impl Vm {
             HostFunction::ProxyRevoke { proxy } => {
                 self.gc_mark_stack.push(proxy);
             }
-            HostFunction::StringReplaceThis
+            HostFunction::ExternalCallback { .. }
+            | HostFunction::StringReplaceThis
             | HostFunction::StringMatchThis
             | HostFunction::StringSearchThis
             | HostFunction::StringIndexOfThis
@@ -2247,6 +2313,7 @@ impl Vm {
         for id in unreached {
             self.objects.remove(&id);
             self.free_object_slots.push(Self::object_id_slot(id));
+            self.clear_opaque_data_for_object(id);
         }
         reclaimed
     }
@@ -2297,7 +2364,18 @@ impl Vm {
         } else {
             None
         };
+        let packet_d_slot_direct_mode = packet_d_slot_enabled
+            && !self.packet_d_fast_path_metrics_enabled()
+            && !self.packet_a_fast_path_metrics_enabled();
+        let numeric_opcode_direct_mode = !self.packet_a_fast_path_metrics_enabled();
+        let mut with_objects_empty = self.with_objects.is_empty();
         while pc < code.len() {
+            if self.interrupt_state.handler.is_some()
+                || self.max_stack_size.is_some()
+                || self.memory_limit_bytes.is_some()
+            {
+                self.enforce_runtime_limits()?;
+            }
             if self.runtime_gc_enabled && self.auto_gc_enabled {
                 self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
                 if self.runtime_gc_tick % check_interval == 0 {
@@ -2328,20 +2406,26 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot =
-                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
-                            Self::packet_d_slot_for_opcode(
-                                identifier_slot_metadata,
-                                pc,
-                                IdentifierOpcodeFamily::Load,
-                            )
+                    let identifier_slot = if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                        Self::packet_d_slot_for_opcode(
+                            identifier_slot_metadata,
+                            pc,
+                            IdentifierOpcodeFamily::Load,
+                        )
+                    } else {
+                        None
+                    };
+                    let resolved = if with_objects_empty {
+                        let binding_id = if packet_d_slot_direct_mode {
+                            if let Some(slot) = identifier_slot {
+                                self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                            } else {
+                                self.resolve_binding_id_with_fast_path(name, None)
+                            }
                         } else {
-                            None
-                        };
-                    let resolved = if self.with_objects.is_empty() {
-                        if let Some(binding_id) =
                             self.resolve_binding_id_with_fast_path(name, identifier_slot)
-                        {
+                        };
+                        if let Some(binding_id) = binding_id {
                             let binding =
                                 self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                             if matches!(binding.value, JsValue::Uninitialized) {
@@ -2473,22 +2557,28 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot =
-                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
-                            Self::packet_d_slot_for_opcode(
-                                identifier_slot_metadata,
-                                pc,
-                                IdentifierOpcodeFamily::Store,
-                            )
-                        } else {
-                            None
-                        };
+                    let identifier_slot = if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                        Self::packet_d_slot_for_opcode(
+                            identifier_slot_metadata,
+                            pc,
+                            IdentifierOpcodeFamily::Store,
+                        )
+                    } else {
+                        None
+                    };
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     let mut store_error = None;
-                    if let Some(binding_id) =
+                    let binding_id = if with_objects_empty && packet_d_slot_direct_mode {
+                        if let Some(slot) = identifier_slot {
+                            self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                        } else {
+                            self.resolve_binding_id_with_fast_path(name, None)
+                        }
+                    } else {
                         self.resolve_binding_id_with_fast_path(name, identifier_slot)
-                    {
+                    };
+                    if let Some(binding_id) = binding_id {
                         let mut wrote_binding = false;
                         match self.binding_mut(binding_id) {
                             Some(binding) => {
@@ -2548,6 +2638,123 @@ impl Vm {
                         continue;
                     }
                     self.stack.push(value);
+                }
+                Opcode::IncrementVariable(name) => {
+                    if hotspot_enabled {
+                        self.hotspot_attribution
+                            .record_identifier_resolution_unchecked();
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Store,
+                            )
+                        } else {
+                            None
+                        };
+
+                    let mut result: Result<JsValue, VmError> = Err(VmError::ScopeUnderflow);
+                    let binding_id = if with_objects_empty && packet_d_slot_direct_mode {
+                        if let Some(slot) = identifier_slot {
+                            self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                        } else {
+                            self.resolve_binding_id_with_fast_path(name, None)
+                        }
+                    } else {
+                        self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                    };
+
+                    if let Some(binding_id) = binding_id {
+                        let mut next_value: Option<JsValue> = None;
+                        let mut write_binding = false;
+                        match self.binding_mut(binding_id) {
+                            Some(binding) => {
+                                if matches!(binding.value, JsValue::Uninitialized) {
+                                    result = Err(VmError::UnknownIdentifier(name.clone()));
+                                } else if !binding.mutable {
+                                    if !binding.sloppy_readonly_write_ignored || strict {
+                                        result = Err(VmError::ImmutableBinding(name.clone()));
+                                    } else {
+                                        result = Ok(binding.value.clone());
+                                    }
+                                } else {
+                                    next_value = Some(binding.value.clone());
+                                    write_binding = true;
+                                }
+                            }
+                            None => {
+                                result = Err(VmError::ScopeUnderflow);
+                            }
+                        }
+
+                        if write_binding {
+                            if let Some(current_value) = next_value {
+                                match self.evaluate_add_from_operands(
+                                    current_value,
+                                    JsValue::Number(1.0),
+                                    realm,
+                                    strict,
+                                ) {
+                                    Ok(updated) => {
+                                        if let Some(binding) = self.binding_mut(binding_id) {
+                                            binding.value = updated.clone();
+                                            if let Err(err) =
+                                                self.sync_global_property_from_binding(name, binding_id)
+                                            {
+                                                result = Err(err);
+                                            } else {
+                                                result = Ok(updated);
+                                            }
+                                        } else {
+                                            result = Err(VmError::ScopeUnderflow);
+                                        }
+                                    }
+                                    Err(err) => result = Err(err),
+                                }
+                            }
+                        }
+                    } else if strict {
+                        result = Err(VmError::UnknownIdentifier(name.clone()));
+                    } else {
+                        match self.resolve_unbound_identifier_value(name, realm) {
+                            Ok(current_value) => match self.evaluate_add_from_operands(
+                                current_value,
+                                JsValue::Number(1.0),
+                                realm,
+                                strict,
+                            ) {
+                                Ok(updated) => {
+                                    if let Some(global_object_id) = self.global_object_id {
+                                        match self.set_object_property(
+                                            global_object_id,
+                                            name.clone(),
+                                            updated.clone(),
+                                            realm,
+                                        ) {
+                                            Ok(_) => result = Ok(updated),
+                                            Err(err) => result = Err(err),
+                                        }
+                                    } else {
+                                        result = Err(VmError::UnknownIdentifier(name.clone()));
+                                    }
+                                }
+                                Err(err) => result = Err(err),
+                            },
+                            Err(err) => result = Err(err),
+                        }
+                    }
+
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
                 }
                 Opcode::GetProperty(name) => {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -2910,7 +3117,13 @@ impl Vm {
                                     return Ok(value);
                                 }
                                 let key = index.to_string();
-                                return self.set_object_property(object_id, key, value, realm);
+                                return self.set_object_property_with_known_array_index(
+                                    object_id,
+                                    key,
+                                    Some(index),
+                                    value,
+                                    realm,
+                                );
                             }
                             let key = index.to_string();
                             return self.set_property_on_receiver(receiver, key, value, realm);
@@ -3128,6 +3341,7 @@ impl Vm {
                                 object,
                                 scope_depth: self.scopes.len(),
                             });
+                            with_objects_empty = false;
                             self.invalidate_binding_fast_path_cache();
                         }
                         Err(err) => {
@@ -3141,13 +3355,25 @@ impl Vm {
                     if self.with_objects.pop().is_none() {
                         return Err(VmError::ScopeUnderflow);
                     }
+                    with_objects_empty = self.with_objects.is_empty();
                     self.invalidate_binding_fast_path_cache();
                 }
                 Opcode::Add => {
                     if hotspot_enabled {
                         self.hotspot_attribution.record_numeric_op_unchecked();
                     }
-                    match self.evaluate_add(realm, strict) {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(JsValue::Number(lhs + rhs))
+                        } else {
+                            self.evaluate_add_from_operands(left, right, realm, strict)
+                        }
+                    } else {
+                        self.evaluate_add_from_operands(left, right, realm, strict)
+                    };
+                    match result {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3160,12 +3386,32 @@ impl Vm {
                     if hotspot_enabled {
                         self.hotspot_attribution.record_numeric_op_unchecked();
                     }
-                    match self.eval_numeric_binary(
-                        realm,
-                        strict,
-                        Some(NumericBinaryOp::Sub),
-                        |lhs, rhs| lhs - rhs,
-                    ) {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(*lhs - *rhs)
+                        } else {
+                            self.eval_numeric_binary_from_operands(
+                                left,
+                                right,
+                                realm,
+                                strict,
+                                Some(NumericBinaryOp::Sub),
+                                |lhs, rhs| lhs - rhs,
+                            )
+                        }
+                    } else {
+                        self.eval_numeric_binary_from_operands(
+                            left,
+                            right,
+                            realm,
+                            strict,
+                            Some(NumericBinaryOp::Sub),
+                            |lhs, rhs| lhs - rhs,
+                        )
+                    };
+                    match result {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3178,12 +3424,32 @@ impl Vm {
                     if hotspot_enabled {
                         self.hotspot_attribution.record_numeric_op_unchecked();
                     }
-                    match self.eval_numeric_binary(
-                        realm,
-                        strict,
-                        Some(NumericBinaryOp::Mul),
-                        |lhs, rhs| lhs * rhs,
-                    ) {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(*lhs * *rhs)
+                        } else {
+                            self.eval_numeric_binary_from_operands(
+                                left,
+                                right,
+                                realm,
+                                strict,
+                                Some(NumericBinaryOp::Mul),
+                                |lhs, rhs| lhs * rhs,
+                            )
+                        }
+                    } else {
+                        self.eval_numeric_binary_from_operands(
+                            left,
+                            right,
+                            realm,
+                            strict,
+                            Some(NumericBinaryOp::Mul),
+                            |lhs, rhs| lhs * rhs,
+                        )
+                    };
+                    match result {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3196,12 +3462,32 @@ impl Vm {
                     if hotspot_enabled {
                         self.hotspot_attribution.record_numeric_op_unchecked();
                     }
-                    match self.eval_numeric_binary(
-                        realm,
-                        strict,
-                        Some(NumericBinaryOp::Div),
-                        |lhs, rhs| lhs / rhs,
-                    ) {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(*lhs / *rhs)
+                        } else {
+                            self.eval_numeric_binary_from_operands(
+                                left,
+                                right,
+                                realm,
+                                strict,
+                                Some(NumericBinaryOp::Div),
+                                |lhs, rhs| lhs / rhs,
+                            )
+                        }
+                    } else {
+                        self.eval_numeric_binary_from_operands(
+                            left,
+                            right,
+                            realm,
+                            strict,
+                            Some(NumericBinaryOp::Div),
+                            |lhs, rhs| lhs / rhs,
+                        )
+                    };
+                    match result {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3214,7 +3500,32 @@ impl Vm {
                     if hotspot_enabled {
                         self.hotspot_attribution.record_numeric_op_unchecked();
                     }
-                    match self.eval_numeric_binary(realm, strict, None, |lhs, rhs| lhs % rhs) {
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(*lhs % *rhs)
+                        } else {
+                            self.eval_numeric_binary_from_operands(
+                                left,
+                                right,
+                                realm,
+                                strict,
+                                None,
+                                |lhs, rhs| lhs % rhs,
+                            )
+                        }
+                    } else {
+                        self.eval_numeric_binary_from_operands(
+                            left,
+                            right,
+                            realm,
+                            strict,
+                            None,
+                            |lhs, rhs| lhs % rhs,
+                        )
+                    };
+                    match result {
                         Ok(result) => self.stack.push(JsValue::Number(result)),
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3792,6 +4103,12 @@ impl Vm {
             pc += 1;
         }
 
+        if self.interrupt_state.handler.is_some()
+            || self.max_stack_size.is_some()
+            || self.memory_limit_bytes.is_some()
+        {
+            self.enforce_runtime_limits()?;
+        }
         Ok(ExecutionSignal::Halt)
     }
 
@@ -3994,14 +4311,50 @@ impl Vm {
                 self.execute_native_call(native, args, realm, caller_strict, true)
             }
             JsValue::HostFunction(host_id) => {
-                if let Some(HostFunction::BoundCall {
-                    target,
-                    this_arg: _,
-                    mut bound_args,
-                }) = self.host_functions.get(&host_id).cloned()
-                {
-                    bound_args.extend(args);
-                    return self.execute_construct_value(target, bound_args, realm, caller_strict);
+                if let Some(host) = self.host_functions.get(&host_id).cloned() {
+                    if let HostFunction::BoundCall {
+                        target,
+                        this_arg: _,
+                        mut bound_args,
+                    } = host
+                    {
+                        bound_args.extend(args);
+                        return self.execute_construct_value(
+                            target,
+                            bound_args,
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                    if let HostFunction::ExternalCallback {
+                        callback_id,
+                        constructable: true,
+                    } = host
+                    {
+                        let constructed = self.create_object_value();
+                        let prototype =
+                            self.get_or_create_host_function_prototype_property(host_id)?;
+                        if let Ok((prototype, prototype_value)) =
+                            self.parse_prototype_value(prototype)
+                        {
+                            self.apply_prototype_components_to_value(
+                                &constructed,
+                                prototype,
+                                prototype_value,
+                            );
+                        }
+                        let result = self.execute_external_host_callback(
+                            callback_id,
+                            Some(constructed.clone()),
+                            args,
+                            realm,
+                            caller_strict,
+                        )?;
+                        if Self::is_object_like_value(&result) {
+                            return Ok(result);
+                        }
+                        return Ok(constructed);
+                    }
                 }
                 Err(VmError::NotCallable)
             }
@@ -4121,17 +4474,30 @@ impl Vm {
                 }
             }
             JsValue::HostFunction(host_id) => {
-                let Some(HostFunction::BoundCall {
+                let result = if let Some(HostFunction::BoundCall {
                     target,
                     this_arg: _,
                     mut bound_args,
                 }) = self.host_functions.get(&host_id).cloned()
-                else {
+                {
+                    bound_args.extend(args);
+                    self.execute_construct_value(target, bound_args, realm, caller_strict)?
+                } else if matches!(
+                    self.host_functions.get(&host_id),
+                    Some(HostFunction::ExternalCallback {
+                        constructable: true,
+                        ..
+                    })
+                ) {
+                    self.execute_construct_value(
+                        JsValue::HostFunction(host_id),
+                        args,
+                        realm,
+                        caller_strict,
+                    )?
+                } else {
                     return Err(VmError::NotCallable);
                 };
-                bound_args.extend(args);
-                let result =
-                    self.execute_construct_value(target, bound_args, realm, caller_strict)?;
                 if Self::is_object_like_value(&result) {
                     if let Some((prototype, prototype_value)) = super_prototype_hint {
                         self.apply_prototype_components_to_value(
@@ -6207,6 +6573,17 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        if args.len() == 1
+            && let Some(JsValue::Object(object_id)) = this_arg.as_ref()
+            && let Some(length) = self
+                .objects
+                .get(object_id)
+                .and_then(|object| object.array_length)
+            && self.try_packet_b_dense_array_index_set_with_index(*object_id, length, &args[0])?
+        {
+            return Ok(JsValue::Number((length + 1) as f64));
+        }
+
         let target = self.object_prototype_this_object(
             this_arg,
             "Array.prototype.push called on null or undefined",
@@ -6214,15 +6591,40 @@ impl Vm {
         let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
         let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
         let length = Self::to_length_from_number(length_number);
-        let arg_count =
-            i64::try_from(args.len()).map_err(|_| VmError::TypeError("invalid array length"))?;
-        let new_length = length
-            .checked_add(arg_count)
-            .filter(|next| *next <= MAX_SAFE_INTEGER_F64 as i64)
-            .ok_or(VmError::TypeError("invalid array length"))?;
+        let new_length = if args.len() == 1 {
+            let next = length + 1;
+            if next > MAX_SAFE_INTEGER_F64 as i64 {
+                return Err(VmError::TypeError("invalid array length"));
+            }
+            next
+        } else {
+            let arg_count =
+                i64::try_from(args.len()).map_err(|_| VmError::TypeError("invalid array length"))?;
+            length
+                .checked_add(arg_count)
+                .filter(|next| *next <= MAX_SAFE_INTEGER_F64 as i64)
+                .ok_or(VmError::TypeError("invalid array length"))?
+        };
 
-        let mut index = length;
-        for arg in args {
+        let mut generic_start = 0usize;
+        if let JsValue::Object(object_id) = target.clone() {
+            if let Ok(mut fast_index) = usize::try_from(length) {
+                for (offset, arg) in args.iter().enumerate() {
+                    if self.try_packet_b_dense_array_index_set_with_index(object_id, fast_index, arg)? {
+                        fast_index += 1;
+                        generic_start = offset + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if generic_start == args.len() {
+                    return Ok(JsValue::Number(new_length as f64));
+                }
+            }
+        }
+
+        let mut index = length + i64::try_from(generic_start).unwrap_or(0);
+        for arg in args.iter().skip(generic_start) {
             let key = index.to_string();
             self.ensure_assign_target_writable(&target, &key)?;
             let _ = self.set_property_on_receiver(target.clone(), key, arg.clone(), realm)?;
@@ -6975,6 +7377,8 @@ impl Vm {
                 bound_args.extend(args);
                 self.execute_callable(target, Some(this_arg), bound_args, realm, caller_strict)
             }
+            HostFunction::ExternalCallback { callback_id, .. } => self
+                .execute_external_host_callback(callback_id, this_arg, args, realm, caller_strict),
             HostFunction::GeneratorFactory { producer } => {
                 let produced_values = self.execute_callable(
                     producer,
@@ -12095,6 +12499,13 @@ impl Vm {
         all_keys.extend(object.properties.keys().cloned());
         all_keys.extend(object.getters.keys().cloned());
         all_keys.extend(object.setters.keys().cloned());
+        if let Some(dense_elements) = object.dense_elements.as_ref() {
+            for (index, entry) in dense_elements.iter().enumerate() {
+                if entry.is_some() {
+                    all_keys.insert(index.to_string());
+                }
+            }
+        }
 
         let mut index_keys: Vec<(usize, String)> = Vec::new();
         let mut string_keys = Vec::new();
@@ -12132,6 +12543,13 @@ impl Vm {
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
                 if !(object.properties.contains_key(property)
+                    || Self::canonical_array_index(property).is_some_and(|index| {
+                        object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                            .is_some_and(|entry| entry.is_some())
+                    })
                     || object.getters.contains_key(property)
                     || object.setters.contains_key(property))
                 {
@@ -13605,13 +14023,23 @@ impl Vm {
         target_id: ObjectId,
         property: &str,
     ) -> Result<JsValue, VmError> {
+        let canonical_index = Self::canonical_array_index(property);
         let (data_value, getter_value, setter_value, attributes, is_arguments_like) = {
             let object = self
                 .objects
                 .get(&target_id)
                 .ok_or(VmError::UnknownObject(target_id))?;
             (
-                object.properties.get(property).cloned(),
+                object.properties.get(property).cloned().or_else(|| {
+                    canonical_index
+                        .and_then(|index| {
+                            object
+                                .dense_elements
+                                .as_ref()
+                                .and_then(|dense_elements| dense_elements.get(index))
+                        })
+                        .and_then(|entry| entry.clone())
+                }),
                 object.getters.get(property).cloned(),
                 object.setters.get(property).cloned(),
                 object.property_attributes.get(property).copied(),
@@ -13939,7 +14367,17 @@ impl Vm {
             return Ok(JsValue::Undefined);
         }
 
-        if !Self::host_function_has_default_property(property) {
+        if property == "prototype" && self.host_function_is_constructable(host_id) {
+            let prototype = self.get_or_create_host_function_prototype_property(host_id)?;
+            return Ok(self.create_descriptor_object(vec![
+                ("value", prototype),
+                ("writable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(false)),
+                ("configurable", JsValue::Bool(false)),
+            ]));
+        }
+
+        if !self.host_function_has_own_property_runtime(host_id, property) {
             return Ok(JsValue::Undefined);
         }
 
@@ -14595,6 +15033,7 @@ impl Vm {
             object.prototype_value = None;
             object.array_length = Some(0);
             object.is_array_object = true;
+            object.dense_elements = Some(Vec::new());
             object.properties.insert(
                 "constructor".to_string(),
                 JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -14789,6 +15228,7 @@ impl Vm {
         Ok(None)
     }
 
+    #[inline(always)]
     fn packet_d_slot_for_opcode(
         metadata: &[Option<IdentifierSlotMetadata>],
         pc: usize,
@@ -14962,13 +15402,47 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn resolve_binding_id_with_fast_path(
+    fn resolve_binding_id_with_packet_d_known_slot(
+        &mut self,
+        name: &str,
+        slot: u32,
+    ) -> Option<BindingId> {
+        if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
+            if entry.scope_generation == self.packet_d_scope_generation {
+                #[cfg(debug_assertions)]
+                {
+                    if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                        return Some(entry.binding_id);
+                    }
+                    self.packet_d_fast_path.remove_slot_cache_entry(slot);
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    return Some(entry.binding_id);
+                }
+            } else {
+                self.packet_d_fast_path.remove_slot_cache_entry(slot);
+            }
+        }
+        if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+            self.packet_d_fast_path.remember_slot_cache_entry(
+                slot,
+                scope_index,
+                binding_id,
+                self.packet_d_scope_generation,
+            );
+            return Some(binding_id);
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn resolve_binding_id_with_fast_path_no_with(
         &mut self,
         name: &str,
         identifier_slot: Option<u32>,
     ) -> Option<BindingId> {
-        if self.with_objects.is_empty()
-            && self.packet_d_fast_path_enabled()
+        if self.packet_d_fast_path_enabled()
             && !self.packet_d_fast_path_metrics_enabled()
             && !self.packet_a_fast_path_metrics_enabled()
             && let Some(slot) = identifier_slot
@@ -14977,11 +15451,7 @@ impl Vm {
                 if entry.scope_generation == self.packet_d_scope_generation {
                     #[cfg(debug_assertions)]
                     {
-                        if self.cached_binding_entry_is_valid(
-                            name,
-                            entry.scope_index,
-                            entry.binding_id,
-                        ) {
+                        if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
                             return Some(entry.binding_id);
                         }
                         self.packet_d_fast_path.remove_slot_cache_entry(slot);
@@ -15003,7 +15473,6 @@ impl Vm {
                 );
                 return Some(binding_id);
             }
-            self.packet_d_fast_path.remove_slot_cache_entry(slot);
             return None;
         }
 
@@ -15011,19 +15480,6 @@ impl Vm {
             self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
         let packet_c_enabled = self.packet_c_fast_path_enabled();
         let packet_d_enabled = self.packet_d_fast_path_enabled();
-
-        if !self.with_objects.is_empty() {
-            if packet_a_metrics_enabled {
-                self.record_packet_a_binding_guard_miss();
-            }
-            if packet_c_enabled {
-                self.record_packet_c_identifier_guard_miss();
-            }
-            if packet_d_enabled && identifier_slot.is_some() {
-                self.record_packet_d_slot_guard_miss();
-            }
-            return self.resolve_binding_id(name);
-        }
 
         if packet_d_enabled && let Some(slot) = identifier_slot {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
@@ -15118,6 +15574,35 @@ impl Vm {
         }
         self.packet_a_fast_path.remove_binding_cache_entry(name);
         None
+    }
+
+    #[inline(always)]
+    fn resolve_binding_id_with_fast_path(
+        &mut self,
+        name: &str,
+        identifier_slot: Option<u32>,
+    ) -> Option<BindingId> {
+        if self.with_objects.is_empty() {
+            return self.resolve_binding_id_with_fast_path_no_with(name, identifier_slot);
+        }
+
+        let packet_a_metrics_enabled =
+            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
+        let packet_c_enabled = self.packet_c_fast_path_enabled();
+        let packet_d_enabled = self.packet_d_fast_path_enabled();
+
+        {
+            if packet_a_metrics_enabled {
+                self.record_packet_a_binding_guard_miss();
+            }
+            if packet_c_enabled {
+                self.record_packet_c_identifier_guard_miss();
+            }
+            if packet_d_enabled && identifier_slot.is_some() {
+                self.record_packet_d_slot_guard_miss();
+            }
+            return self.resolve_binding_id(name);
+        }
     }
 
     fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
@@ -15281,7 +15766,7 @@ impl Vm {
                 if property == "isPrototypeOf" {
                     return Ok(true);
                 }
-                if Self::host_function_has_default_property(property) {
+                if self.host_function_has_own_property_runtime(*host_id, property) {
                     return Ok(true);
                 }
                 let mut current = self.get_prototype_of_value(&JsValue::HostFunction(*host_id))?;
@@ -15434,19 +15919,19 @@ impl Vm {
         Ok(Some(JsValue::Number(length as f64)))
     }
 
+    #[inline(always)]
     fn try_packet_b_dense_array_index_get_with_index(
         &mut self,
         object_id: ObjectId,
         index: usize,
     ) -> Result<Option<JsValue>, VmError> {
-        let mut key_buf = [0u8; 20];
-        let property = Self::array_index_decimal_key(index, &mut key_buf);
         if !self.packet_b_fast_path_enabled() {
             return Ok(None);
         }
         let (
             prototype,
             current_length,
+            dense_length,
             own_value,
             has_indexed_accessor,
             is_array_object,
@@ -15458,6 +15943,13 @@ impl Vm {
                 .objects
                 .get(&object_id)
                 .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
+            let has_indexed_accessor = if object.getters.is_empty() && object.setters.is_empty() {
+                false
+            } else {
+                let mut key_buf = [0u8; 20];
+                let property = Self::array_index_decimal_key(index, &mut key_buf);
+                object.getters.contains_key(property) || object.setters.contains_key(property)
+            };
             let valid_length_descriptor = object
                 .property_attributes
                 .get("length")
@@ -15465,8 +15957,17 @@ impl Vm {
             (
                 object.prototype,
                 object.array_length.unwrap_or(0),
-                object.properties.get(property).cloned(),
-                object.getters.contains_key(property) || object.setters.contains_key(property),
+                object
+                    .dense_elements
+                    .as_ref()
+                    .map(|elements| elements.len())
+                    .unwrap_or(0),
+                object
+                    .dense_elements
+                    .as_ref()
+                    .and_then(|elements| elements.get(index))
+                    .and_then(|entry| entry.clone()),
+                has_indexed_accessor,
                 object.is_array_object,
                 object.is_proxy_object,
                 valid_length_descriptor,
@@ -15480,12 +15981,17 @@ impl Vm {
             || has_indexed_accessor
             || self.array_prototype_id != prototype
             || index >= current_length
+            || dense_length != current_length
         {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         }
         if self.packet_b_prototype_chain_may_have_indexed_property
-            && self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+            && {
+                let mut key_buf = [0u8; 20];
+                let property = Self::array_index_decimal_key(index, &mut key_buf);
+                self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+            }
         {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
@@ -15510,14 +16016,13 @@ impl Vm {
         self.try_packet_b_dense_array_index_set_with_index(object_id, index, value)
     }
 
+    #[inline(always)]
     fn try_packet_b_dense_array_index_set_with_index(
         &mut self,
         object_id: ObjectId,
         index: usize,
         value: &JsValue,
     ) -> Result<bool, VmError> {
-        let mut key_buf = [0u8; 20];
-        let property = Self::array_index_decimal_key(index, &mut key_buf);
         if !self.packet_b_fast_path_enabled() {
             return Ok(false);
         }
@@ -15526,6 +16031,7 @@ impl Vm {
             current_length,
             has_own_data_property,
             own_data_writable,
+            dense_length,
             extensible,
             has_indexed_accessor,
             is_array_object,
@@ -15537,14 +16043,24 @@ impl Vm {
                 .objects
                 .get(&object_id)
                 .ok_or_else(|| self.classify_unknown_object_error(object_id))?;
-            let has_own_data_property = object.properties.contains_key(property);
+            let has_own_data_property = object
+                .dense_elements
+                .as_ref()
+                .and_then(|elements| elements.get(index))
+                .is_some_and(|entry| entry.is_some());
             let own_data_writable = if has_own_data_property {
-                Some(
-                    object
-                        .property_attributes
-                        .get(property)
-                        .is_none_or(|attributes| attributes.writable),
-                )
+                if object.property_attributes.len() <= 2 {
+                    Some(true)
+                } else {
+                    let mut key_buf = [0u8; 20];
+                    let property = Self::array_index_decimal_key(index, &mut key_buf);
+                    Some(
+                        object
+                            .property_attributes
+                            .get(property)
+                            .is_none_or(|attributes| attributes.writable),
+                    )
+                }
             } else {
                 None
             };
@@ -15557,8 +16073,19 @@ impl Vm {
                 object.array_length.unwrap_or(0),
                 has_own_data_property,
                 own_data_writable,
+                object
+                    .dense_elements
+                    .as_ref()
+                    .map(|elements| elements.len())
+                    .unwrap_or(0),
                 object.extensible,
-                object.getters.contains_key(property) || object.setters.contains_key(property),
+                if object.getters.is_empty() && object.setters.is_empty() {
+                    false
+                } else {
+                    let mut key_buf = [0u8; 20];
+                    let property = Self::array_index_decimal_key(index, &mut key_buf);
+                    object.getters.contains_key(property) || object.setters.contains_key(property)
+                },
                 object.is_array_object,
                 object.is_proxy_object,
                 valid_length_descriptor,
@@ -15572,12 +16099,17 @@ impl Vm {
             || has_indexed_accessor
             || self.array_prototype_id != prototype
             || index > current_length
+            || dense_length != current_length
         {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
         if self.packet_b_prototype_chain_may_have_indexed_property
-            && self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+            && {
+                let mut key_buf = [0u8; 20];
+                let property = Self::array_index_decimal_key(index, &mut key_buf);
+                self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+            }
         {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
@@ -15596,10 +16128,12 @@ impl Vm {
             .objects
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
-        let property_key = property.to_string();
-        object
-            .properties
-            .insert(property_key.clone(), value.clone());
+        if let Some(dense_elements) = object.dense_elements.as_mut() {
+            if index >= dense_elements.len() {
+                dense_elements.resize(index + 1, None);
+            }
+            dense_elements[index] = Some(value.clone());
+        }
         if index == current_length {
             Self::set_object_array_length(object, current_length + 1);
         }
@@ -17094,6 +17628,7 @@ impl Vm {
             if let Some(object) = self.objects.get_mut(&id) {
                 object.array_length = Some(0);
                 object.is_array_object = true;
+                object.dense_elements = Some(Vec::new());
                 object.properties.insert(
                     "constructor".to_string(),
                     JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -19527,6 +20062,7 @@ impl Vm {
         receiver: JsValue,
         realm: &Realm,
     ) -> Result<Option<JsValue>, VmError> {
+        let canonical_index = Self::canonical_array_index(property);
         let (mapped_binding, getter, setter_exists, value) = {
             let object = self
                 .objects
@@ -19536,7 +20072,16 @@ impl Vm {
                 object.argument_mappings.get(property).copied(),
                 object.getters.get(property).cloned(),
                 object.setters.contains_key(property),
-                object.properties.get(property).cloned(),
+                object.properties.get(property).cloned().or_else(|| {
+                    canonical_index
+                        .and_then(|index| {
+                            object
+                                .dense_elements
+                                .as_ref()
+                                .and_then(|dense_elements| dense_elements.get(index))
+                        })
+                        .and_then(|entry| entry.clone())
+                }),
             )
         };
         if let Some(binding_id) = mapped_binding
@@ -19561,6 +20106,17 @@ impl Vm {
         &mut self,
         object_id: ObjectId,
         property: String,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.set_object_property_with_known_array_index(object_id, property, None, value, realm)
+    }
+
+    fn set_object_property_with_known_array_index(
+        &mut self,
+        object_id: ObjectId,
+        property: String,
+        known_array_index: Option<usize>,
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
@@ -19685,7 +20241,7 @@ impl Vm {
                 self.set_array_length_property(object_id, requested_length, false)?;
                 return Ok(value);
             }
-            if let Some(index) = Self::canonical_array_index(&property) {
+            if let Some(index) = known_array_index.or_else(|| Self::canonical_array_index(&property)) {
                 self.set_array_index_property(object_id, index, property, value.clone())?;
                 return Ok(value);
             }
@@ -20131,6 +20687,13 @@ impl Vm {
                     .get(object_id)
                     .ok_or(VmError::UnknownObject(*object_id))?;
                 Ok(object.properties.contains_key(property)
+                    || Self::canonical_array_index(property).is_some_and(|index| {
+                        object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                            .is_some_and(|entry| entry.is_some())
+                    })
                     || object.getters.contains_key(property)
                     || object.setters.contains_key(property))
             }
@@ -20159,10 +20722,28 @@ impl Vm {
                         || object.getters.contains_key(property)
                         || object.setters.contains_key(property));
                 }
-                Ok(Self::host_function_has_default_property(property))
+                Ok(self.host_function_has_own_property_runtime(*host_id, property))
             }
             _ => Ok(false),
         }
+    }
+
+    fn host_function_has_own_property_runtime(&self, host_id: u64, property: &str) -> bool {
+        if self
+            .host_function_objects
+            .get(&host_id)
+            .is_some_and(|object| {
+                object.properties.contains_key(property)
+                    || object.getters.contains_key(property)
+                    || object.setters.contains_key(property)
+            })
+        {
+            return true;
+        }
+        if property == "prototype" {
+            return self.host_function_is_constructable(host_id);
+        }
+        Self::host_function_has_default_property(property)
     }
 
     fn host_function_has_default_property(property: &str) -> bool {
@@ -20654,7 +21235,7 @@ impl Vm {
             .get_mut(&object_id)
             .ok_or(VmError::UnknownObject(object_id))?;
         let key = index.to_string();
-        object.properties.insert(key.clone(), value);
+        object.properties.insert(key, value);
         Self::set_object_array_length(object, index + 1);
         Ok(())
     }
@@ -20697,6 +21278,11 @@ impl Vm {
     #[inline(always)]
     fn set_object_array_length(object: &mut JsObject, length: usize) {
         object.array_length = Some(length);
+        if let Some(dense_elements) = object.dense_elements.as_mut() {
+            if dense_elements.len() > length {
+                dense_elements.truncate(length);
+            }
+        }
         if let Some(current) = object.properties.get_mut("length") {
             *current = JsValue::Number(length as f64);
             return;
@@ -21388,6 +21974,12 @@ impl Vm {
             Some(object) => object,
             None => return Err(self.classify_unknown_object_error(object_id)),
         };
+        if let Some(index) = Self::canonical_array_index(property)
+            && let Some(dense_elements) = object.dense_elements.as_mut()
+            && index < dense_elements.len()
+        {
+            dense_elements[index] = None;
+        }
         object.properties.remove(property);
         object.getters.remove(property);
         object.setters.remove(property);
@@ -21544,6 +22136,13 @@ impl Vm {
                 target: JsValue::HostFunction(host_id),
                 method: FunctionMethod::Bind,
             })),
+            "prototype" => {
+                if self.host_function_is_constructable(host_id) {
+                    self.get_or_create_host_function_prototype_property(host_id)
+                } else {
+                    Ok(JsValue::Undefined)
+                }
+            }
             "length" => Ok(JsValue::Number(0.0)),
             "toString" => Ok(
                 self.create_host_function_value(HostFunction::FunctionToString {
@@ -22157,9 +22756,13 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn evaluate_add(&mut self, realm: &Realm, caller_strict: bool) -> Result<JsValue, VmError> {
-        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+    fn evaluate_add_from_operands(
+        &mut self,
+        left: JsValue,
+        right: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         if self.packet_a_fast_path_enabled() {
             if let Some(number) = fast_path::try_numeric_binary(&left, &right, NumericBinaryOp::Add)
             {
@@ -22242,15 +22845,15 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn eval_numeric_binary(
+    fn eval_numeric_binary_from_operands(
         &mut self,
+        left: JsValue,
+        right: JsValue,
         realm: &Realm,
         caller_strict: bool,
         fast_path_op: Option<NumericBinaryOp>,
         op: impl FnOnce(f64, f64) -> f64,
     ) -> Result<f64, VmError> {
-        let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
-        let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
         if self.packet_a_fast_path_enabled()
             && let Some(fast_path_op) = fast_path_op
         {
@@ -23641,7 +24244,7 @@ fn regexp_exec_capture_and_constructor_errors() {
 mod tests {
     use super::{
         GcStats, PacketBFastPathCounters, PromiseJobDrainReport, PromiseJobDrainStopReason,
-        PromiseJobHostHooks, TYPE_ERROR_INVALID_HANDLE,
+        PromiseJobHostHooks, TYPE_ERROR_INVALID_HANDLE, TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE,
         TYPE_ERROR_PROMISE_JOB_CALLBACK_INTERACTION, TYPE_ERROR_PROMISE_JOB_ON_DRAIN_END_FAILED,
         TYPE_ERROR_PROMISE_JOB_ON_DRAIN_START_FAILED, TYPE_ERROR_PROMISE_JOB_ON_ENQUEUE_FAILED,
         TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN, TYPE_ERROR_SHADOW_ROOT_MISMATCH,
@@ -23652,6 +24255,8 @@ mod tests {
     use parser::parse_script;
     use regex::RegexBuilder;
     use runtime::{JsValue, NativeFunction, Realm};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
         Chunk {
@@ -27979,5 +28584,174 @@ counter;
     fn unpin_unknown_handle_returns_none() {
         let mut vm = Vm::default();
         assert!(vm.unpin_host_value(999).is_none());
+    }
+
+    #[test]
+    fn stack_limit_reports_error_when_exceeded() {
+        let script = parse_script("1;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let realm = Realm::default();
+        let mut vm = Vm::default();
+        vm.set_max_stack_size(Some(0));
+
+        let err = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect_err("stack-limited execution should fail");
+        assert_eq!(
+            err,
+            VmError::StackLimitExceeded {
+                max_stack_size: 0,
+                current_stack_size: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn memory_limit_reports_error_when_estimate_exceeds_limit() {
+        let script = parse_script("1;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let realm = Realm::default();
+        let mut vm = Vm::default();
+        vm.set_memory_check_interval(1);
+        vm.set_memory_limit_bytes(Some(1));
+
+        let err = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect_err("memory-limited execution should fail");
+        assert!(matches!(
+            err,
+            VmError::MemoryLimitExceeded {
+                limit_bytes: 1,
+                estimated_bytes: _
+            }
+        ));
+    }
+
+    #[test]
+    fn interrupt_handler_can_abort_execution() {
+        let script = parse_script("var x = 1; x + 1;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let realm = Realm::default();
+        let mut vm = Vm::default();
+        vm.set_interrupt_poll_interval(1);
+        vm.set_interrupt_handler(|| true);
+
+        let err = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect_err("interrupt handler should abort execution");
+        assert_eq!(err, VmError::Interrupted);
+    }
+
+    #[test]
+    fn opaque_data_binding_roundtrip() {
+        let script = parse_script("({});").expect("script should parse");
+        let chunk = compile_script(&script);
+        let realm = Realm::default();
+        let mut vm = Vm::default();
+        let object = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+
+        vm.bind_opaque_data(&object, String::from("payload"))
+            .expect("opaque bind should succeed");
+        assert_eq!(
+            vm.opaque_data::<String>(&object)
+                .expect("opaque value should exist"),
+            "payload"
+        );
+        let payload = vm
+            .take_opaque_data::<String>(&object)
+            .expect("opaque value should be removed");
+        assert_eq!(payload, "payload");
+        assert!(vm.opaque_data::<String>(&object).is_none());
+    }
+
+    #[test]
+    fn opaque_data_binding_rejects_primitives() {
+        let mut vm = Vm::default();
+        let err = vm
+            .bind_opaque_data(&JsValue::Number(1.0), "x".to_string())
+            .expect_err("primitive opaque bind must fail");
+        assert_eq!(err, VmError::TypeError(TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE));
+    }
+
+    #[test]
+    fn global_host_callback_function_executes() {
+        let script = parse_script("rustAdd(1, 2);").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        vm.define_global_host_callback(
+            &realm,
+            "rustAdd",
+            2.0,
+            false,
+            |_vm, _this_arg, args, _realm, _strict| {
+                let lhs = args.first().map_or(0.0, |value| match value {
+                    JsValue::Number(value) => *value,
+                    _ => 0.0,
+                });
+                let rhs = args.get(1).map_or(0.0, |value| match value {
+                    JsValue::Number(value) => *value,
+                    _ => 0.0,
+                });
+                Ok(JsValue::Number(lhs + rhs))
+            },
+        )
+        .expect("register rustAdd callback");
+
+        let result = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(result, JsValue::Number(3.0));
+    }
+
+    #[test]
+    fn opaque_big_object_binding_releases_after_block_scope_and_gc() {
+        struct RustBigObj {
+            payload: Vec<u8>,
+            drop_counter: Arc<AtomicUsize>,
+        }
+
+        impl Drop for RustBigObj {
+            fn drop(&mut self) {
+                let _ = self.payload.len();
+                self.drop_counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let script = parse_script("{ const a = new RustBigObj(); }").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let drop_counter = Arc::new(AtomicUsize::new(0));
+        let drop_counter_for_callback = Arc::clone(&drop_counter);
+        vm.define_global_host_callback(
+            &realm,
+            "RustBigObj",
+            0.0,
+            true,
+            move |vm, this_arg, _args, _realm, _strict| {
+                let this_obj = this_arg.unwrap_or_else(|| vm.create_object_value());
+                vm.bind_opaque_data(
+                    &this_obj,
+                    RustBigObj {
+                        payload: vec![0u8; 1024 * 1024],
+                        drop_counter: Arc::clone(&drop_counter_for_callback),
+                    },
+                )?;
+                Ok(this_obj)
+            },
+        )
+        .expect("register RustBigObj constructor");
+        let result = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(result, JsValue::Undefined);
+
+        let _ = vm.collect_garbage(&realm);
+        assert_eq!(drop_counter.load(Ordering::SeqCst), 1);
     }
 }

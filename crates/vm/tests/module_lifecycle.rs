@@ -363,7 +363,10 @@ fn module_host_hook_drain_through_module_jobs() {
     let err = vm
         .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
         .expect_err("nested enqueue callback failure should be typed");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnEnqueueFailed")
+    );
 
     let mut vm = evaluate_module_with_nested_promise_chain();
     let mut hooks = RecordingHooks {
@@ -373,7 +376,10 @@ fn module_host_hook_drain_through_module_jobs() {
     let err = vm
         .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
         .expect_err("drain-end callback failure should be typed");
-    assert_eq!(err, VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed"));
+    assert_eq!(
+        err,
+        VmError::TypeError("PromiseJobQueue:HostOnDrainEndFailed")
+    );
 }
 
 #[test]

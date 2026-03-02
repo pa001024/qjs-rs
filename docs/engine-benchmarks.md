@@ -22,6 +22,8 @@ For Phase 11 target closure rules (PERF-03/PERF-04/PERF-05), see
 
 `local-dev` defaults: `iterations=200`, `samples=7`, `warmup_iterations=3`, lenient comparators.
 
+For `qjs-rs` runs, local-dev now enables packet-D fast-path composition by default so baseline iteration loops track the latest stable optimization stack.
+
 ```bash
 cargo run -p benchmarks --release -- \
   --profile local-dev \
@@ -75,12 +77,23 @@ python .github/scripts/check_engine_benchmark_contract.py \
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json \
-  --require-qjs-lte-boa
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+candidate = json.loads(Path("target/benchmarks/engine-comparison.local-dev.packet-b.json").read_text(encoding="utf-8"))
+means = candidate["aggregate"]["mean_ms_per_engine"]
+ratio = float(means["qjs-rs"]) / float(means["quickjs-c"])
+if ratio > 1.25:
+    raise SystemExit(f"perf target check failed: qjs-rs/quickjs-c={ratio:.6f} > 1.250000")
+print(f"perf target check passed: qjs-rs/quickjs-c={ratio:.6f} <= 1.250000")
+PY
 ```
 
-If the final `check_perf_target.py --require-qjs-lte-boa` command fails, Phase 11 PERF-03
-closure is **not** satisfied and the run must be recorded as a non-closure candidate.
+If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), Phase 11 PERF-03 closure is
+**not** satisfied and the run must be recorded as a non-closure candidate.
 
 ### Phase 11 packet-C closure candidate workflow
 
@@ -106,12 +119,11 @@ python .github/scripts/check_engine_benchmark_contract.py \
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json \
-  --require-qjs-lte-boa
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json
 ```
 
-If the final checker command fails, PERF-03 remains open and packet-C must be documented
-as evidence-only (no closure claim).
+If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-C
+must be documented as evidence-only (no closure claim).
 
 ### Phase 11 packet-D closure candidate workflow
 
@@ -138,12 +150,11 @@ python .github/scripts/check_engine_benchmark_contract.py \
 
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
-  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json \
-  --require-qjs-lte-boa
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json
 ```
 
-If the final checker command fails, PERF-03 remains open and packet-D must be documented
-as evidence-only (no closure claim).
+If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-D
+must be documented as evidence-only (no closure claim).
 
 ## CI Baseline Workflow (`ci-linux`)
 
@@ -179,5 +190,5 @@ python .github/scripts/check_perf_target.py --self-test
 
 - The benchmark suite covers `arith-loop`, `fib-iterative`, `array-sum`, and `json-roundtrip`.
 - Contract checker failures are blocking and must be fixed before report generation is accepted.
-- Phase 11 perf-target claims are only valid when `.github/scripts/check_perf_target.py` passes under the authoritative `local-dev` + `eval-per-iteration` + same-host policy.
+- Phase 11 perf-target claims are only valid when policy checks pass under the authoritative `local-dev` + `eval-per-iteration` + same-host policy and the aggregate ratio `qjs-rs/quickjs-c <= 1.25`.
 - Rendered reports include schema/profile/timing/comparator metadata so audit reviewers can confirm reproducibility context directly from markdown.
