@@ -1,7 +1,7 @@
 ---
 phase: 11-hot-path-optimization-and-target-closure
 phase_number: "11"
-verified: 2026-03-02T21:00:07.571Z
+verified: 2026-03-02T21:09:00.786472Z
 status: gaps_found
 score: "latest authoritative 11-12 packet-g evidence remains below PERF-03 target (6.236987x > 1.25x) with governance gates green"
 requirements_checked:
@@ -20,7 +20,7 @@ Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= 1.25x quickjs-c
 
 ## Inputs Audited
 
-- Plans/Summaries: `11-01..11-12` PLAN + SUMMARY set (`11-12-SUMMARY.md` pending this execution finalization)
+- Plans/Summaries: `11-01..11-12` PLAN + SUMMARY set
 - Evidence bundles:
   - `11-PACKET-A-EVIDENCE.md`
   - `11-PACKET-C-EVIDENCE.md`
@@ -58,6 +58,11 @@ Aggregate means (11-12 packet-g candidate):
 - `qjs-rs`: `79.521582`
 - `quickjs-c`: `12.750000`
 - `qjs-rs/quickjs-c`: `6.236987x`
+
+Revalidation checks executed on `2026-03-02T21:09:00.786472Z` against the same baseline/candidate artifacts:
+
+1. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-g.json`: ✅
+2. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-g.json --require-qjs-lte-quickjs-ratio 1.25`: ❌ (`qjs-rs/quickjs-c 6.236987 > 1.25`)
 
 ## Must-Have Truth Audit (11-01..11-12)
 
@@ -116,4 +121,3 @@ Verification conclusion per requirement:
 ### Top remaining blockers
 
 1. **PERF-03 target not met**: latest authoritative packet-g ratio is `6.236987x`, above `1.25x` closure threshold.
-
