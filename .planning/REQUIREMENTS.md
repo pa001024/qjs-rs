@@ -22,6 +22,13 @@
 - [ ] **TST-05**: Existing semantic/governance quality gates (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, test262-lite governance checks) remain green after optimization work.
 - [ ] **TST-06**: Performance regression guardrails are documented and executable in CI/nightly workflows with deterministic artifact output paths.
 
+### Host Class/Prototype Alignment (Phase 13)
+
+- [x] **HOST-13-NEW**: Host callback constructors enforce `new`-only semantics and reject invalid construction paths.
+- [x] **HOST-13-PROTO-FALLBACK**: Host constructor `prototype` resolution falls back deterministically when `constructor.prototype` is missing or non-object.
+- [x] **HOST-13-CONSTRUCTOR-LINK**: `prototype.constructor` backlink remains correct after lazy creation and fallback paths.
+- [x] **HOST-13-SETPROTO-SAFETY**: `Object.setPrototypeOf` host-target behavior preserves cycle/extensibility/SameValue invariants.
+
 ## Future Requirements (post-v1.1)
 
 - **LAN-01**: Expand full `Proxy` invariant coverage beyond minimal currently executable paths.
@@ -48,6 +55,10 @@
 | PERF-05 | Phase 11 | Open (maintainability evidence and governance are green; phase closure still blocked by PERF-03) |
 | TST-05 | Phase 12 | Planned |
 | TST-06 | Phase 12 | Planned |
+| HOST-13-NEW | Phase 13 | Completed |
+| HOST-13-PROTO-FALLBACK | Phase 13 | Completed |
+| HOST-13-CONSTRUCTOR-LINK | Phase 13 | Completed |
+| HOST-13-SETPROTO-SAFETY | Phase 13 | Completed |
 
 **Coverage:**
 - v1.1 requirements: 7 total

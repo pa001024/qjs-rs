@@ -76,10 +76,11 @@ VK|| v1.1 | In Progress | 1/3 | 11/13 |
 
 ### Phase 13: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Lock host callback constructor/prototype invariants to Boa-aligned behavior and validate compatibility against `jsmat.rs` host usage shape.
+**Requirements**: HOST-13-NEW, HOST-13-PROTO-FALLBACK, HOST-13-CONSTRUCTOR-LINK, HOST-13-SETPROTO-SAFETY
 **Depends on:** Phase 12
-**Plans:** 0 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 13 to break down)
+- [x] 13-01-PLAN.md — Implement host constructor/prototype conformance tests and fallback linkage hardening. (completed 2026-03-03)
+- [x] 13-02-PLAN.md — Verify host invariants and synchronize roadmap/requirements traceability with `jsmat.rs` compatibility evidence. (completed 2026-03-03)
