@@ -109,23 +109,19 @@ total;
     );
 
     assert_eq!(
-        snapshot_a.packet_g_name_guard_hits,
-        0,
+        snapshot_a.packet_g_name_guard_hits, 0,
         "packet-G counters must stay visible and deterministic before packet-G path is enabled"
     );
     assert_eq!(
-        snapshot_a.packet_g_name_guard_misses,
-        0,
+        snapshot_a.packet_g_name_guard_misses, 0,
         "packet-G counters must stay visible and deterministic before packet-G path is enabled"
     );
     assert_eq!(
-        snapshot_a.packet_g_name_guard_revalidate_hits,
-        0,
+        snapshot_a.packet_g_name_guard_revalidate_hits, 0,
         "packet-G counters must stay visible and deterministic before packet-G path is enabled"
     );
     assert_eq!(
-        snapshot_a.packet_g_name_guard_revalidate_misses,
-        0,
+        snapshot_a.packet_g_name_guard_revalidate_misses, 0,
         "packet-G counters must stay visible and deterministic before packet-G path is enabled"
     );
 

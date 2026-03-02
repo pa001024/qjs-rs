@@ -450,8 +450,7 @@ total;
         "packet-g miss counters must flow into hotspot attribution"
     );
     assert!(
-        hotspot.packet_g_name_guard_revalidate_hits
-            + hotspot.packet_g_name_guard_revalidate_misses
+        hotspot.packet_g_name_guard_revalidate_hits + hotspot.packet_g_name_guard_revalidate_misses
             > 0,
         "packet-g revalidate counters must flow into hotspot attribution"
     );

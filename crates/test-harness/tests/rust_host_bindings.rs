@@ -1,8 +1,8 @@
 use runtime::JsValue;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use test_harness::{
-    execute_script_with_host_callbacks, run_script_with_host_callbacks, HostCallbackRegistration,
+    HostCallbackRegistration, execute_script_with_host_callbacks, run_script_with_host_callbacks,
 };
 use vm::VmError;
 

@@ -133,12 +133,16 @@ fn run_qjs_rs_eval_per_iteration(
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
     packet_d_enabled: bool,
+    packet_g_enabled: bool,
 ) -> Result<SampleMeasurement> {
     let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
     vm.set_hotspot_attribution_enabled(false);
     vm.set_packet_c_fast_path_enabled(packet_c_enabled);
     vm.set_packet_d_fast_path_enabled(packet_d_enabled);
+    vm.set_packet_d_fast_path_metrics_enabled(false);
+    vm.set_packet_g_fast_path_enabled(packet_g_enabled);
+    vm.set_packet_g_fast_path_metrics_enabled(false);
 
     let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
     let chunk = compile_script(&parsed);
@@ -151,11 +155,15 @@ fn run_qjs_rs_eval_per_iteration(
         checksum += extract_number(&value);
     }
     let hotspot_attribution = if hotspot_attribution_enabled {
+        vm.set_packet_d_fast_path_metrics_enabled(packet_d_enabled);
+        vm.set_packet_g_fast_path_metrics_enabled(packet_g_enabled);
         vm.set_hotspot_attribution_enabled(true);
         vm.reset_hotspot_attribution();
         let _ = vm
             .execute_in_realm_persistent(&chunk, &realm)
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
+        vm.set_packet_d_fast_path_metrics_enabled(false);
+        vm.set_packet_g_fast_path_metrics_enabled(false);
         vm.hotspot_attribution_snapshot()
     } else {
         None
@@ -321,6 +329,7 @@ struct RunEngineCaseContext<'a> {
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
     packet_d_enabled: bool,
+    packet_g_enabled: bool,
 }
 
 fn run_engine_case(
@@ -336,6 +345,7 @@ fn run_engine_case(
                 context.hotspot_attribution_enabled,
                 context.packet_c_enabled,
                 context.packet_d_enabled,
+                context.packet_g_enabled,
             ),
             EngineKind::BoaEngine => {
                 run_boa_engine_eval_per_iteration(context.script, context.iterations)
@@ -663,6 +673,7 @@ pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
             || packet_id.starts_with("packet-d")
             || packet_id.starts_with("packet-e")
             || packet_id.starts_with("packet-f")
+            || packet_id.starts_with("packet-g")
             || packet_id.starts_with("packet-final")
     }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
@@ -673,14 +684,32 @@ pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
         packet_id.starts_with("packet-d")
             || packet_id.starts_with("packet-e")
             || packet_id.starts_with("packet-f")
+            || packet_id.starts_with("packet-g")
             || packet_id.starts_with("packet-final")
     }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
+}
+
+pub(crate) fn infer_packet_g_enabled(cli: &contract::CliArgs) -> bool {
+    let descriptor = contract::infer_optimization_descriptor(&cli.output);
+    descriptor
+        .packet_id
+        .as_deref()
+        .is_some_and(|packet_id| packet_id.starts_with("packet-g"))
 }
 
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
     HotspotAttributionCounters {
         numeric_ops: value.numeric_ops,
         identifier_resolution: value.identifier_resolution,
+        identifier_resolution_fallback_scans: value.identifier_resolution_fallback_scans,
+        packet_d_slot_guard_hits: value.packet_d_slot_guard_hits,
+        packet_d_slot_guard_misses: value.packet_d_slot_guard_misses,
+        packet_d_slot_guard_revalidate_hits: value.packet_d_slot_guard_revalidate_hits,
+        packet_d_slot_guard_revalidate_misses: value.packet_d_slot_guard_revalidate_misses,
+        packet_g_name_guard_hits: value.packet_g_name_guard_hits,
+        packet_g_name_guard_misses: value.packet_g_name_guard_misses,
+        packet_g_name_guard_revalidate_hits: value.packet_g_name_guard_revalidate_hits,
+        packet_g_name_guard_revalidate_misses: value.packet_g_name_guard_revalidate_misses,
         array_indexed_property_get: value.array_indexed_property_get,
         array_indexed_property_set: value.array_indexed_property_set,
     }
@@ -694,6 +723,33 @@ fn merge_hotspot_counters(
     target.identifier_resolution = target
         .identifier_resolution
         .saturating_add(source.identifier_resolution);
+    target.identifier_resolution_fallback_scans = target
+        .identifier_resolution_fallback_scans
+        .saturating_add(source.identifier_resolution_fallback_scans);
+    target.packet_d_slot_guard_hits = target
+        .packet_d_slot_guard_hits
+        .saturating_add(source.packet_d_slot_guard_hits);
+    target.packet_d_slot_guard_misses = target
+        .packet_d_slot_guard_misses
+        .saturating_add(source.packet_d_slot_guard_misses);
+    target.packet_d_slot_guard_revalidate_hits = target
+        .packet_d_slot_guard_revalidate_hits
+        .saturating_add(source.packet_d_slot_guard_revalidate_hits);
+    target.packet_d_slot_guard_revalidate_misses = target
+        .packet_d_slot_guard_revalidate_misses
+        .saturating_add(source.packet_d_slot_guard_revalidate_misses);
+    target.packet_g_name_guard_hits = target
+        .packet_g_name_guard_hits
+        .saturating_add(source.packet_g_name_guard_hits);
+    target.packet_g_name_guard_misses = target
+        .packet_g_name_guard_misses
+        .saturating_add(source.packet_g_name_guard_misses);
+    target.packet_g_name_guard_revalidate_hits = target
+        .packet_g_name_guard_revalidate_hits
+        .saturating_add(source.packet_g_name_guard_revalidate_hits);
+    target.packet_g_name_guard_revalidate_misses = target
+        .packet_g_name_guard_revalidate_misses
+        .saturating_add(source.packet_g_name_guard_revalidate_misses);
     target.array_indexed_property_get = target
         .array_indexed_property_get
         .saturating_add(source.array_indexed_property_get);
@@ -974,6 +1030,39 @@ fn packet_f_output_path_enables_packet_d_runtime_toggle() {
 
 #[cfg(test)]
 #[test]
+fn packet_g_output_path_enables_packet_g_runtime_toggle() {
+    let cli = match contract::parse_cli_args_with_env(
+        vec![
+            "--profile".to_string(),
+            "local-dev".to_string(),
+            "--output".to_string(),
+            "target/benchmarks/engine-comparison.local-dev.packet-g.json".to_string(),
+            "--strict-comparators".to_string(),
+        ],
+        &[],
+    )
+    .expect("cli args should parse")
+    {
+        contract::CliParseResult::Run(cli) => *cli,
+        contract::CliParseResult::Help => panic!("expected parsed run config"),
+    };
+
+    assert!(
+        infer_packet_g_enabled(&cli),
+        "packet-g output artifacts must enable packet-g runtime fast path"
+    );
+    assert!(
+        infer_packet_d_enabled(&cli),
+        "packet-g output artifacts must keep packet-d runtime fast path enabled"
+    );
+    assert!(
+        infer_packet_c_enabled(&cli),
+        "packet-g output artifacts must keep packet-c runtime fast path enabled"
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn packet_final_output_path_enables_packet_d_runtime_toggle() {
     let cli = match contract::parse_cli_args_with_env(
         vec![
@@ -1016,17 +1105,19 @@ fn main() -> Result<()> {
     let optimization_descriptor = contract::infer_optimization_descriptor(&cli.output);
     let packet_c_enabled = infer_packet_c_enabled(&cli);
     let packet_d_enabled = infer_packet_d_enabled(&cli);
+    let packet_g_enabled = infer_packet_g_enabled(&cli);
     let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
     let perf_target = build_perf_target_metadata(&cli.output, &environment);
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} packet_d_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} packet_d_enabled={} packet_g_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
         hotspot_attribution_enabled,
         packet_c_enabled,
         packet_d_enabled,
+        packet_g_enabled,
         optimization_descriptor.mode,
         perf_target.optimization_tag,
         perf_target.packet_id.as_deref().unwrap_or("none"),
@@ -1071,6 +1162,7 @@ fn main() -> Result<()> {
                     hotspot_attribution_enabled,
                     packet_c_enabled,
                     packet_d_enabled,
+                    packet_g_enabled,
                 },
             )?;
 
@@ -1086,6 +1178,7 @@ fn main() -> Result<()> {
                         hotspot_attribution_enabled,
                         packet_c_enabled,
                         packet_d_enabled,
+                        packet_g_enabled,
                     },
                 )?;
                 samples.push(sample);
@@ -1121,6 +1214,15 @@ fn main() -> Result<()> {
         let mut total = HotspotAttributionCounters {
             numeric_ops: 0,
             identifier_resolution: 0,
+            identifier_resolution_fallback_scans: 0,
+            packet_d_slot_guard_hits: 0,
+            packet_d_slot_guard_misses: 0,
+            packet_d_slot_guard_revalidate_hits: 0,
+            packet_d_slot_guard_revalidate_misses: 0,
+            packet_g_name_guard_hits: 0,
+            packet_g_name_guard_misses: 0,
+            packet_g_name_guard_revalidate_hits: 0,
+            packet_g_name_guard_revalidate_misses: 0,
             array_indexed_property_get: 0,
             array_indexed_property_set: 0,
         };

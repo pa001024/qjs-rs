@@ -138,6 +138,15 @@ pub struct PerfTargetMetadata {
 pub struct HotspotAttributionCounters {
     pub numeric_ops: u64,
     pub identifier_resolution: u64,
+    pub identifier_resolution_fallback_scans: u64,
+    pub packet_d_slot_guard_hits: u64,
+    pub packet_d_slot_guard_misses: u64,
+    pub packet_d_slot_guard_revalidate_hits: u64,
+    pub packet_d_slot_guard_revalidate_misses: u64,
+    pub packet_g_name_guard_hits: u64,
+    pub packet_g_name_guard_misses: u64,
+    pub packet_g_name_guard_revalidate_hits: u64,
+    pub packet_g_name_guard_revalidate_misses: u64,
     pub array_indexed_property_get: u64,
     pub array_indexed_property_set: u64,
 }

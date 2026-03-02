@@ -2738,8 +2738,8 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_identifier_slot_metadata, compile_expression, compile_script, Chunk,
-        CompiledFunction, IdentifierOpcodeFamily, Opcode,
+        Chunk, CompiledFunction, IdentifierOpcodeFamily, Opcode, build_identifier_slot_metadata,
+        compile_expression, compile_script,
     };
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier,

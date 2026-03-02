@@ -158,10 +158,11 @@ python .github/scripts/check_perf_target.py \
 If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-D
 must be documented as evidence-only (no closure claim).
 
-### Phase 11 packet-E/F/final closure candidate workflow
+### Phase 11 packet-E/F/G/final closure candidate workflow
 
-`packet-e`, `packet-f`, and `packet-final` artifacts keep packet-C and packet-D runtime
-toggles enabled so identifier packet experiments compose with existing guarded fast paths.
+`packet-e`, `packet-f`, `packet-g`, and `packet-final` artifacts keep packet-C and packet-D runtime
+toggles enabled. `packet-g` additionally enables the packet-G name-guard runtime toggle so
+identifier packet experiments compose with existing guarded fast paths.
 
 ```bash
 cargo run -p benchmarks --release -- \
@@ -190,6 +191,20 @@ python .github/scripts/check_engine_benchmark_contract.py \
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
   --candidate target/benchmarks/engine-comparison.local-dev.packet-f.json \
+  --require-qjs-lte-quickjs-ratio 1.25
+
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-g.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
+  --strict-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-g.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-g.json \
   --require-qjs-lte-quickjs-ratio 1.25
 
 cargo run -p benchmarks --release -- \
