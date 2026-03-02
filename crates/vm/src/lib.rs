@@ -15385,6 +15385,10 @@ impl Vm {
     fn record_packet_d_slot_guard_hit(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_hit();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_d_slot_guard_hit_unchecked();
+            }
         }
     }
 
@@ -15392,6 +15396,10 @@ impl Vm {
     fn record_packet_d_slot_guard_miss(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_miss();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_d_slot_guard_miss_unchecked();
+            }
         }
     }
 
@@ -15399,6 +15407,10 @@ impl Vm {
     fn record_packet_d_slot_guard_revalidate_hit(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_revalidate_hit();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_d_slot_guard_revalidate_hit_unchecked();
+            }
         }
     }
 
@@ -15406,6 +15418,18 @@ impl Vm {
     fn record_packet_d_slot_guard_revalidate_miss(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_slot_guard_revalidate_miss();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_d_slot_guard_revalidate_miss_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn record_identifier_resolution_fallback_scan(&mut self) {
+        if self.hotspot_attribution_enabled() {
+            self.hotspot_attribution
+                .record_identifier_resolution_fallback_scan_unchecked();
         }
     }
 
@@ -15572,6 +15596,7 @@ impl Vm {
                 return Some(binding_id);
             }
         }
+        self.record_identifier_resolution_fallback_scan();
         if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
             self.packet_d_fast_path.remember_slot_cache_entry(
                 slot,
@@ -15669,6 +15694,7 @@ impl Vm {
             if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
+            self.record_identifier_resolution_fallback_scan();
             if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
                 self.packet_d_fast_path.remember_slot_cache_entry(
                     slot,
@@ -15699,6 +15725,7 @@ impl Vm {
                 self.record_packet_a_binding_guard_miss();
             }
 
+            self.record_identifier_resolution_fallback_scan();
             if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
                 self.packet_c_fast_path
                     .remember_binding_cache_entry(name, scope_index, binding_id);
@@ -15720,6 +15747,7 @@ impl Vm {
             }
             self.record_packet_a_binding_guard_miss();
 
+            self.record_identifier_resolution_fallback_scan();
             if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
                 self.packet_a_fast_path
                     .remember_binding_cache_entry(name, scope_index, binding_id);
@@ -16949,6 +16977,7 @@ impl Vm {
             self.record_packet_d_slot_guard_miss();
         }
         self.invalidate_binding_fast_path_cache();
+        self.record_identifier_resolution_fallback_scan();
 
         let scope_count = self.scopes.len();
         for scope_index in (0..scope_count).rev() {
