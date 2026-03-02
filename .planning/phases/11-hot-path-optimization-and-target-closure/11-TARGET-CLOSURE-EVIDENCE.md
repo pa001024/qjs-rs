@@ -3,6 +3,8 @@
 _Date:_ 2026-02-28  
 _Plan:_ 11-03 (`11-hot-path-optimization-and-target-closure`)
 
+_Traceability note (11-08): this file preserves historical boa-gate transcripts for audit history. Active PERF-03 closure is `qjs-rs <= 1.25x quickjs-c` under `--require-qjs-lte-quickjs-ratio 1.25`._
+
 ## 1) Artifacts generated
 
 - Baseline (locked reference): `target/benchmarks/engine-comparison.local-dev.phase11-baseline.json`
@@ -49,7 +51,7 @@ Checker command:
 python .github/scripts/check_perf_target.py \
   --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
   --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json \
-  --require-qjs-lte-boa
+  --require-qjs-lte-boa  # legacy historical gate
 ```
 
 Result: ❌ **FAILED**
@@ -59,7 +61,8 @@ Result: ❌ **FAILED**
 Interpretation:
 
 - Packet-B improved Phase 11 hotspot families versus baseline and versus packet-A in local-dev measurements.
-- Final locked PERF-03 closure criterion (`qjs-rs <= boa-engine`) is still unmet for this candidate.
+- Historical legacy closure criterion (`qjs-rs <= boa-engine`) was unmet for this candidate.
+- Active closure criterion is `qjs-rs <= 1.25x quickjs-c`; this packet section does not contain an authoritative quickjs-ratio pass.
 
 ## 4) PERF-05 maintainability boundary checklist
 
@@ -76,7 +79,7 @@ Interpretation:
 - `cargo run -p benchmarks --release -- --profile ci-linux --output target/benchmarks/engine-comparison.ci-linux.packet-b.json --allow-missing-comparators` ✅
 - `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-b.json` ✅
 - `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.ci-linux.packet-b.json` ✅
-- `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json --require-qjs-lte-boa` ❌ (see Section 3)
+- `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-b.json --require-qjs-lte-boa` ❌ (legacy historical gate; see Section 3)
 - `cargo fmt --check` ❌ (workspace formatting drift outside packet-B scope)
 - `cargo clippy --all-targets -- -D warnings` ❌ (pre-existing benchmark target lint debt outside packet-B scope)
 - `cargo test` ❌ (Windows host memory/pagefile exhaustion during full workspace test build)
@@ -85,7 +88,7 @@ Interpretation:
 
 - PERF-04 packet evidence: ✅ complete (two optimization packets with measurable deltas)
 - PERF-05 maintainability boundary: ✅ complete
-- PERF-03 closure (`qjs-rs <= boa-engine` on authoritative profile): ❌ not yet achieved in packet-B candidate
+- PERF-03 active closure (`qjs-rs <= 1.25x quickjs-c` on authoritative profile): ❌ not yet achieved (no authoritative quickjs-ratio green verdict recorded here)
 
 ## 7) Plan 11-05 governance + packet-c closure rerun (2026-02-28)
 
@@ -104,7 +107,7 @@ Interpretation:
 3. `cargo clippy --all-targets -- -D warnings` ✅
 4. `cargo test` ✅
 5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-c.json` ✅
-6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json --require-qjs-lte-boa` ❌
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-c.json --require-qjs-lte-boa` ❌ (legacy historical gate)
 
 ### 7.3 Gate verdict
 
@@ -115,7 +118,7 @@ Interpretation:
 ### 7.4 Blocker summary
 
 1. Workspace formatting drift remains in VM files (outside this plan's ownership set), so the governance bundle is not fully green.
-2. Packet-c aggregate performance still fails the locked PERF-03 requirement (`qjs-rs <= boa-engine`).
+2. Packet-c aggregate performance still fails the historical legacy PERF-03 gate (`qjs-rs <= boa-engine`); active quickjs-ratio closure remains open.
 
 Closure remains **open**. No green governance-bundle verdict is recorded for this run.
 
@@ -135,7 +138,7 @@ Closure remains **open**. No green governance-bundle verdict is recorded for thi
 3. `cargo clippy --all-targets -- -D warnings` (`rc=101`)
 4. `cargo test` (`rc=0`)
 5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-d.json` (`rc=0`)
-6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`)
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`, legacy historical gate)
 
 Exact command outputs captured from the run:
 
@@ -170,7 +173,7 @@ Exact command outputs captured from the run:
 
 - Governance Gate Bundle (`fmt` + `clippy` + `test`): **RED**
   - `fmt=0`, `clippy=101`, `test=0`
-- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED**
+- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED** (legacy historical gate)
   - `qjs-rs 1390.811014 > boa-engine 181.287246`
 
 Phase 11 closure remains **open** because governance and PERF-03 are not jointly green in the same authoritative run artifact.
@@ -191,7 +194,7 @@ Phase 11 closure remains **open** because governance and PERF-03 are not jointly
 3. `cargo clippy --all-targets -- -D warnings` (`rc=0`)
 4. `cargo test` (`rc=0`)
 5. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-d.json` (`rc=0`)
-6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`)
+6. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-d.json --require-qjs-lte-boa` (`rc=1`, legacy historical gate)
 
 PERF-03 checker output:
 
@@ -210,7 +213,7 @@ perf target check failed
 ### 9.4 Latest gate verdict
 
 - Governance bundle (`fmt` + `clippy` + `test`): **PASS** (`fmt=0`, `clippy=0`, `test=0`)
-- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED**
+- PERF-03 authoritative checker (`--require-qjs-lte-boa`): **FAILED** (legacy historical gate)
   - `qjs-rs 1211.668632 > boa-engine 154.937264`
 
 Phase 11 closure remains **open** because PERF-03 is still red in the latest authoritative run artifact.
@@ -251,6 +254,6 @@ perf target check failed
 - Governance bundle: **PASS**
 - PERF-03 target: **FAIL**
 
-Phase 11 remains **open**.
+Phase 11 remains **open**. Active closure still requires an authoritative `--require-qjs-lte-quickjs-ratio 1.25` pass.
 
 

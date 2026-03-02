@@ -13,7 +13,7 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T17:53:12Z`) remains below this threshold.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T17:53:12Z`) remains below this threshold; active closure checker mode is `--require-qjs-lte-quickjs-ratio 1.25`, and legacy boa-based checks are audit-only.)_
 - [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Open closure state: packet evidence exists, but authoritative governance + PERF-03 bundle is still red.)_
 - [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Open closure state: maintainability evidence exists, but phase closure remains blocked until the authoritative governance + PERF-03 bundle is jointly green.)_
 

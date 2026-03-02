@@ -56,17 +56,18 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 - Completed 11-02 packet-A optimization closure: guarded numeric fast paths, binding cache invalidation harness, packet-a artifact generation, and successful perf-target checks vs `phase11-baseline` (`arith-loop` and `fib-iterative` improvement gates passed).
 - Recorded packet-A decision: binding fast-path counters remain metrics-gated to preserve benchmark-path performance while retaining deterministic parity/invalidation test observability.
 - Completed 11-03 packet-B optimization closure work: guarded dense-array index fast path, packet-B parity suite, packet-b local-dev/ci-linux artifacts, and `11-TARGET-CLOSURE-EVIDENCE.md` publication.
-- Recorded 11-03 blocker: `check_perf_target.py --require-qjs-lte-boa` still fails for packet-b (`qjs-rs` aggregate mean above `boa-engine`) despite packet-level improvements.
+- Recorded 11-03 blocker (legacy historical gate): `check_perf_target.py --require-qjs-lte-boa` failed for packet-b (`qjs-rs` aggregate mean above `boa-engine`) despite packet-level improvements.
 - Completed 11-04 packet-C closure attempt: guarded identifier/global lookup fast path, packet-C parity suite, packet-c local-dev/ci-linux artifacts, and `11-PACKET-C-EVIDENCE.md` publication.
-- Recorded 11-04 blocker update: authoritative closure gate still fails (`qjs-rs 1666.496393 > boa-engine 189.938318`) and packet-c regresses versus packet-b aggregate performance.
+- Recorded 11-04 blocker update (legacy historical gate): authoritative closure gate failed (`qjs-rs 1666.496393 > boa-engine 189.938318`) and packet-c regressed versus packet-b aggregate performance.
 - Completed 11-05 governance/closure rerun: fixed packet-B test bootstrap, removed benchmarks clippy blockers, regenerated packet-c artifact, and reran full governance + closure command bundle.
-- Recorded 11-05 blocker update: `cargo fmt --check` still fails due existing VM formatting drift outside 11-05 ownership; PERF-03 checker still fails (`qjs-rs 1678.421964 > boa-engine 189.600068`).
+- Recorded 11-05 blocker update (legacy historical gate): `cargo fmt --check` failed due existing VM formatting drift outside 11-05 ownership; PERF-03 checker failed (`qjs-rs 1678.421964 > boa-engine 189.600068`).
 - Executed 11-06 packet-d closure candidate: landed identifier-slot bytecode/VM fast path, added packet-d parity coverage, generated packet-d local-dev/ci-linux artifacts, and published `11-PACKET-D-EVIDENCE.md`.
-- Recorded 11-06 blocker update: PERF-03 authoritative checker still fails on packet-d (`qjs-rs 1383.310014 > boa-engine 176.068693`), so Phase 11 remains open and 11-07 final sync is required.
+- Recorded 11-06 blocker update (legacy historical gate): PERF-03 checker failed on packet-d (`qjs-rs 1383.310014 > boa-engine 176.068693`), so Phase 11 remained open and 11-07 final sync was required.
 - Completed 11-07 authoritative closure sync: produced `target/benchmarks/phase11-closure-bundle.json`, appended evidence transcript, and synchronized roadmap/requirements/verification/state docs from that single artifact.
-- Recorded 11-07 blocker update: governance bundle still red because `cargo clippy --all-targets -- -D warnings` failed (`too_many_arguments` in `crates/benchmarks/src/main.rs:293`), and PERF-03 checker still fails (`qjs-rs 1390.811014 > boa-engine 181.287246`).
+- Recorded 11-07 blocker update (legacy historical gate): governance bundle was red because `cargo clippy --all-targets -- -D warnings` failed (`too_many_arguments` in `crates/benchmarks/src/main.rs:293`), and PERF-03 checker failed (`qjs-rs 1390.811014 > boa-engine 181.287246`).
 - Follow-up closure work removed benchmarks clippy blocker and tightened packet-d benchmark wiring (`run_engine_case` context refactor, qjs-rs parse/compile hoist, packet-d keeps packet-c enabled, removed redundant benchmark baseline install path).
-- Latest authoritative rerun (`2026-02-28T17:53:12Z`) is governance-green (`fmt/clippy/test/contract` all `rc=0`) but PERF-03 still fails (`qjs-rs 1370.511975 > boa-engine 184.489346`), so Phase 11 remains open.
+- Latest authoritative rerun (`2026-02-28T17:53:12Z`) is governance-green (`fmt/clippy/test/contract` all `rc=0`) but the legacy PERF-03 gate still failed (`qjs-rs 1370.511975 > boa-engine 184.489346`), so Phase 11 remained open.
+- Active gate status is unchanged: no authoritative `--require-qjs-lte-quickjs-ratio 1.25` pass has been recorded yet.
 
 ## Target Definition Notes
 

@@ -16,7 +16,7 @@ requirements_checked:
 
 Phase 11 goal is **not achieved yet**.
 
-Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= boa-engine` on locked profile) is still red in the latest authoritative run bundle, even though governance gates are now green.
+Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= 1.25x quickjs-c` on locked profile) is still red in the latest authoritative run bundle, even though governance gates are now green.
 
 ## Inputs Audited
 
@@ -53,8 +53,9 @@ Packet-D candidate hash provenance:
 Aggregate means (candidate packet-d artifact):
 
 - `qjs-rs`: `1370.511975`
-- `boa-engine`: `184.489346`
-- `qjs-rs/boa-engine`: `7.4286x`
+- Historical legacy comparator snapshot from the latest archived bundle:
+  - `boa-engine`: `184.489346`
+  - `qjs-rs/boa-engine`: `7.4286x`
 
 ## Must-Have Truth Audit (11-01..11-07)
 
@@ -63,7 +64,7 @@ Aggregate means (candidate packet-d artifact):
 | 11-01 | 3 | 3/3 ✅ | Closure policy + checker, perf metadata/hotspot attribution contract, attribution toggle/parity are present and test-covered. |
 | 11-02 | 3 | 3/3 ✅ | Packet-A guarded numeric/binding fast paths + fallback parity + contract-valid packet evidence are present. |
 | 11-03 | 3 | 1/3 ⚠️ | Packet-B implementation/parity evidence is present, but PERF-03 proof and all-green governance expectation are not met. |
-| 11-04 | 3 | 2/3 ⚠️ | Packet-C implementation/parity and before/after reporting are present; required closure pass (`--require-qjs-lte-boa`) is not met. |
+| 11-04 | 3 | 2/3 ⚠️ | Packet-C implementation/parity and before/after reporting are present; historical legacy closure pass (`--require-qjs-lte-boa`) was not met. |
 | 11-05 | 5 | 4/5 ⚠️ | Gap-closure sync + packet stability + failure-path doc synchronization are present; governance/perf closure remained open. |
 | 11-06 | 3 | 2/3 ⚠️ | Packet-D implementation and parity guard evidence are present; PERF-03 closure remained open. |
 | 11-07 | 2 | 1/2 ⚠️ | Authoritative bundle provenance and governance gates are green, but PERF-03 remains red so joint closure condition is still unmet. |
@@ -86,7 +87,7 @@ Verification conclusion per requirement:
 
 | Requirement | Verification result | Evidence summary |
 |---|---|---|
-| PERF-03 | ❌ Unsatisfied | Authoritative checker still fails (`qjs-rs 1370.511975 > boa-engine 184.489346`) in the latest run bundle. |
+| PERF-03 | ❌ Unsatisfied | Active closure criterion is now `qjs-rs <= 1.25x quickjs-c`; no authoritative quickjs-ratio green verdict is recorded yet, so closure remains open. |
 | PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03. |
 | PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until PERF-03 is satisfied in authoritative bundle checks. |
 
@@ -105,4 +106,4 @@ Verification conclusion per requirement:
 
 ### Top remaining blockers
 
-1. **PERF-03 target not met**: authoritative closure checker still reports `qjs-rs` aggregate above `boa-engine` (`1370.511975 > 184.489346`).
+1. **PERF-03 target not met**: active `qjs-rs <= 1.25x quickjs-c` closure evidence has not produced a green authoritative verdict.
