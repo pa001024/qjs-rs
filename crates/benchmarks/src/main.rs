@@ -659,7 +659,9 @@ pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool
 pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
     let descriptor = contract::infer_optimization_descriptor(&cli.output);
     descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-c") || packet_id.starts_with("packet-d")
+        packet_id.starts_with("packet-c")
+            || packet_id.starts_with("packet-d")
+            || packet_id.starts_with("packet-e")
     }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
 
@@ -668,7 +670,7 @@ pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
     descriptor
         .packet_id
         .as_deref()
-        .is_some_and(|packet_id| packet_id.starts_with("packet-d"))
+        .is_some_and(|packet_id| packet_id.starts_with("packet-d") || packet_id.starts_with("packet-e"))
         || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
 
@@ -906,6 +908,35 @@ fn packet_d_output_path_enables_packet_d_runtime_toggle() {
     assert!(
         infer_packet_c_enabled(&cli),
         "packet-d output artifacts keep packet-c enabled so packet-d composes with earlier fast paths"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn packet_e_output_path_enables_packet_d_runtime_toggle() {
+    let cli = match contract::parse_cli_args_with_env(
+        vec![
+            "--profile".to_string(),
+            "ci-linux".to_string(),
+            "--output".to_string(),
+            "target/benchmarks/engine-comparison.ci-linux.packet-e.json".to_string(),
+            "--strict-comparators".to_string(),
+        ],
+        &[],
+    )
+    .expect("cli args should parse")
+    {
+        contract::CliParseResult::Run(cli) => *cli,
+        contract::CliParseResult::Help => panic!("expected parsed run config"),
+    };
+
+    assert!(
+        infer_packet_d_enabled(&cli),
+        "packet-e output artifacts must keep packet-d runtime fast path enabled"
+    );
+    assert!(
+        infer_packet_c_enabled(&cli),
+        "packet-e output artifacts must keep packet-c runtime fast path enabled"
     );
 }
 

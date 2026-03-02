@@ -158,6 +158,27 @@ python .github/scripts/check_perf_target.py \
 If the final ratio check fails (`qjs-rs/quickjs-c > 1.25`), PERF-03 remains open and packet-D
 must be documented as evidence-only (no closure claim).
 
+### Phase 11 packet-E closure candidate workflow
+
+`packet-e` artifacts keep packet-C and packet-D runtime toggles enabled so identifier packet
+experiments compose with existing guarded fast paths.
+
+```bash
+cargo run -p benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-e.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
+  --strict-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-e.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-e.json \
+  --require-qjs-lte-quickjs-ratio 1.25
+```
+
 ## CI Baseline Workflow (`ci-linux`)
 
 `ci-linux` defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`, strict comparators.
