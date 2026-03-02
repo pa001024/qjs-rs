@@ -77,7 +77,9 @@ def _parse_case_limits(raw_items: list[str]) -> dict[str, float]:
         case_id, ratio_text = item.split("=", 1)
         case_id = case_id.strip()
         if not case_id:
-            raise PerfTargetError(f"invalid --max-case-regression entry '{item}' (empty case id)")
+            raise PerfTargetError(
+                f"invalid --max-case-regression entry '{item}' (empty case id)"
+            )
         try:
             ratio = float(ratio_text)
         except ValueError as exc:  # pragma: no cover - defensive parse branch
@@ -92,7 +94,9 @@ def _parse_case_limits(raw_items: list[str]) -> dict[str, float]:
     return limits
 
 
-def _collect_engine_status(report: dict[str, Any], errors: list[str], prefix: str) -> dict[str, dict[str, Any]]:
+def _collect_engine_status(
+    report: dict[str, Any], errors: list[str], prefix: str
+) -> dict[str, dict[str, Any]]:
     reproducibility = _require_object(
         report.get("reproducibility"), f"{prefix}.reproducibility", errors
     )
@@ -127,24 +131,36 @@ def _collect_engine_status(report: dict[str, Any], errors: list[str], prefix: st
     return status_by_engine
 
 
-def _collect_case_qjs_means(report: dict[str, Any], errors: list[str], prefix: str) -> dict[str, float]:
+def _collect_case_qjs_means(
+    report: dict[str, Any], errors: list[str], prefix: str
+) -> dict[str, float]:
     cases = _require_array(report.get("cases"), f"{prefix}.cases", errors)
     means: dict[str, float] = {}
     for idx, case_value in enumerate(cases):
         case = _require_object(case_value, f"{prefix}.cases[{idx}]", errors)
         case_id = _require_string(case.get("id"), f"{prefix}.cases[{idx}].id", errors)
-        engines = _require_object(case.get("engines"), f"{prefix}.cases[{idx}].engines", errors)
-        qjs = _require_object(engines.get("qjs-rs"), f"{prefix}.cases[{idx}].engines.qjs-rs", errors)
-        mean_ms = _require_number(qjs.get("mean_ms"), f"{prefix}.cases[{idx}].engines.qjs-rs.mean_ms", errors)
+        engines = _require_object(
+            case.get("engines"), f"{prefix}.cases[{idx}].engines", errors
+        )
+        qjs = _require_object(
+            engines.get("qjs-rs"), f"{prefix}.cases[{idx}].engines.qjs-rs", errors
+        )
+        mean_ms = _require_number(
+            qjs.get("mean_ms"), f"{prefix}.cases[{idx}].engines.qjs-rs.mean_ms", errors
+        )
         if case_id:
             means[case_id] = mean_ms
     return means
 
 
-def _require_aggregate_mean(report: dict[str, Any], engine: str, errors: list[str], prefix: str) -> float:
+def _require_aggregate_mean(
+    report: dict[str, Any], engine: str, errors: list[str], prefix: str
+) -> float:
     aggregate = _require_object(report.get("aggregate"), f"{prefix}.aggregate", errors)
     mean_map = _require_object(
-        aggregate.get("mean_ms_per_engine"), f"{prefix}.aggregate.mean_ms_per_engine", errors
+        aggregate.get("mean_ms_per_engine"),
+        f"{prefix}.aggregate.mean_ms_per_engine",
+        errors,
     )
     return _require_number(
         mean_map.get(engine),
@@ -153,9 +169,15 @@ def _require_aggregate_mean(report: dict[str, Any], engine: str, errors: list[st
     )
 
 
-def _validate_perf_target_metadata(report: dict[str, Any], errors: list[str], prefix: str) -> dict[str, Any]:
-    metadata = _require_object(report.get("perf_target"), f"{prefix}.perf_target", errors)
-    policy_id = _require_string(metadata.get("policy_id"), f"{prefix}.perf_target.policy_id", errors)
+def _validate_perf_target_metadata(
+    report: dict[str, Any], errors: list[str], prefix: str
+) -> dict[str, Any]:
+    metadata = _require_object(
+        report.get("perf_target"), f"{prefix}.perf_target", errors
+    )
+    policy_id = _require_string(
+        metadata.get("policy_id"), f"{prefix}.perf_target.policy_id", errors
+    )
     profile = _require_string(
         metadata.get("authoritative_run_profile"),
         f"{prefix}.perf_target.authoritative_run_profile",
@@ -205,12 +227,18 @@ def _validate_perf_target_metadata(report: dict[str, Any], errors: list[str], pr
         for value in optional_comparators
     ]
 
-    schema_version = _require_string(report.get("schema_version"), f"{prefix}.schema_version", errors)
+    schema_version = _require_string(
+        report.get("schema_version"), f"{prefix}.schema_version", errors
+    )
     if schema_version and schema_version != SCHEMA_VERSION:
         _append_error(errors, f"{prefix}.schema_version", f"must be '{SCHEMA_VERSION}'")
 
-    run_profile = _require_string(report.get("run_profile"), f"{prefix}.run_profile", errors)
-    timing_mode = _require_string(report.get("timing_mode"), f"{prefix}.timing_mode", errors)
+    run_profile = _require_string(
+        report.get("run_profile"), f"{prefix}.run_profile", errors
+    )
+    timing_mode = _require_string(
+        report.get("timing_mode"), f"{prefix}.timing_mode", errors
+    )
 
     if run_profile and run_profile != AUTHORITATIVE_PROFILE:
         _append_error(
@@ -310,6 +338,7 @@ def validate_reports(
     candidate: dict[str, Any],
     *,
     require_qjs_lte_boa: bool,
+    require_qjs_lte_quickjs_ratio: float | None,
     expect_case_improvement: list[str],
     max_case_regression: dict[str, float],
 ) -> ValidationResult:
@@ -321,8 +350,12 @@ def validate_reports(
     baseline_status = _collect_engine_status(baseline, errors, "baseline")
     candidate_status = _collect_engine_status(candidate, errors, "candidate")
 
-    required = baseline_metadata.get("required_comparators", DEFAULT_REQUIRED_COMPARATORS)
-    optional = baseline_metadata.get("optional_comparators", DEFAULT_OPTIONAL_COMPARATORS)
+    required = baseline_metadata.get(
+        "required_comparators", DEFAULT_REQUIRED_COMPARATORS
+    )
+    optional = baseline_metadata.get(
+        "optional_comparators", DEFAULT_OPTIONAL_COMPARATORS
+    )
     if not isinstance(required, list):
         required = DEFAULT_REQUIRED_COMPARATORS
     if not isinstance(optional, list):
@@ -357,7 +390,8 @@ def validate_reports(
     baseline_host = baseline_metadata.get("host_fingerprint")
     candidate_host = candidate_metadata.get("host_fingerprint")
     same_host_required = bool(
-        baseline_metadata.get("same_host_required") or candidate_metadata.get("same_host_required")
+        baseline_metadata.get("same_host_required")
+        or candidate_metadata.get("same_host_required")
     )
     if same_host_required and baseline_host != candidate_host:
         _append_error(
@@ -367,8 +401,56 @@ def validate_reports(
         )
 
     baseline_qjs_agg = _require_aggregate_mean(baseline, "qjs-rs", errors, "baseline")
-    candidate_qjs_agg = _require_aggregate_mean(candidate, "qjs-rs", errors, "candidate")
-    candidate_boa_agg = _require_aggregate_mean(candidate, "boa-engine", errors, "candidate")
+    candidate_qjs_agg = _require_aggregate_mean(
+        candidate, "qjs-rs", errors, "candidate"
+    )
+    candidate_boa_agg = _require_aggregate_mean(
+        candidate, "boa-engine", errors, "candidate"
+    )
+
+    baseline_quickjs_agg: float | None = None
+    candidate_quickjs_agg: float | None = None
+    if require_qjs_lte_quickjs_ratio is not None:
+        baseline_quickjs_entry = baseline_status.get("quickjs-c")
+        candidate_quickjs_entry = candidate_status.get("quickjs-c")
+        if baseline_quickjs_entry is None:
+            _append_error(
+                errors,
+                "baseline.reproducibility.engine_status",
+                "require-qjs-lte-quickjs-ratio requires quickjs-c metadata entry",
+            )
+        elif baseline_quickjs_entry.get("status") != "available":
+            _append_error(
+                errors,
+                "baseline.reproducibility.engine_status[quickjs-c]",
+                "require-qjs-lte-quickjs-ratio requires quickjs-c comparator status 'available'",
+            )
+
+        if candidate_quickjs_entry is None:
+            _append_error(
+                errors,
+                "candidate.reproducibility.engine_status",
+                "require-qjs-lte-quickjs-ratio requires quickjs-c metadata entry",
+            )
+        elif candidate_quickjs_entry.get("status") != "available":
+            _append_error(
+                errors,
+                "candidate.reproducibility.engine_status[quickjs-c]",
+                "require-qjs-lte-quickjs-ratio requires quickjs-c comparator status 'available'",
+            )
+
+        baseline_quickjs_agg = _require_aggregate_mean(
+            baseline,
+            "quickjs-c",
+            errors,
+            "baseline",
+        )
+        candidate_quickjs_agg = _require_aggregate_mean(
+            candidate,
+            "quickjs-c",
+            errors,
+            "candidate",
+        )
 
     baseline_case_means = _collect_case_qjs_means(baseline, errors, "baseline")
     candidate_case_means = _collect_case_qjs_means(candidate, errors, "candidate")
@@ -438,6 +520,45 @@ def validate_reports(
             ),
         )
 
+    if (
+        require_qjs_lte_quickjs_ratio is not None
+        and baseline_quickjs_agg is not None
+        and baseline_quickjs_agg <= 0
+    ):
+        _append_error(
+            errors,
+            "baseline.aggregate.mean_ms_per_engine.quickjs-c",
+            "require-qjs-lte-quickjs-ratio requires quickjs-c aggregate mean_ms > 0",
+        )
+    if (
+        require_qjs_lte_quickjs_ratio is not None
+        and candidate_quickjs_agg is not None
+        and candidate_quickjs_agg <= 0
+    ):
+        _append_error(
+            errors,
+            "candidate.aggregate.mean_ms_per_engine.quickjs-c",
+            "require-qjs-lte-quickjs-ratio requires quickjs-c aggregate mean_ms > 0",
+        )
+
+    if (
+        require_qjs_lte_quickjs_ratio is not None
+        and candidate_quickjs_agg is not None
+        and candidate_quickjs_agg > 0
+    ):
+        observed_ratio = candidate_qjs_agg / candidate_quickjs_agg
+        if observed_ratio > require_qjs_lte_quickjs_ratio:
+            _append_error(
+                errors,
+                "aggregate.mean_ms_per_engine",
+                (
+                    "require-qjs-lte-quickjs-ratio failed: "
+                    f"candidate qjs-rs/quickjs-c {observed_ratio:.6f} > "
+                    f"{require_qjs_lte_quickjs_ratio:.6f} "
+                    f"(qjs-rs={candidate_qjs_agg:.6f}, quickjs-c={candidate_quickjs_agg:.6f})"
+                ),
+            )
+
     # Always include this sanity condition: baseline must include qjs-rs aggregate.
     if baseline_qjs_agg <= 0:
         _append_error(
@@ -464,6 +585,7 @@ def run_check(
     baseline_path: Path,
     candidate_path: Path,
     require_qjs_lte_boa: bool,
+    require_qjs_lte_quickjs_ratio: float | None,
     expect_case_improvement: list[str],
     max_case_regression: dict[str, float],
 ) -> ValidationResult:
@@ -473,14 +595,19 @@ def run_check(
         baseline,
         candidate,
         require_qjs_lte_boa=require_qjs_lte_boa,
+        require_qjs_lte_quickjs_ratio=require_qjs_lte_quickjs_ratio,
         expect_case_improvement=expect_case_improvement,
         max_case_regression=max_case_regression,
     )
 
 
-def _expect_failure(result: ValidationResult, expected_fragment: str, scenario: str) -> None:
+def _expect_failure(
+    result: ValidationResult, expected_fragment: str, scenario: str
+) -> None:
     if result.status != "failed":
-        raise PerfTargetError(f"self-test '{scenario}' expected failure but checker passed")
+        raise PerfTargetError(
+            f"self-test '{scenario}' expected failure but checker passed"
+        )
     if not any(expected_fragment in error for error in result.errors):
         raise PerfTargetError(
             f"self-test '{scenario}' failed for an unexpected reason: {result.errors}"
@@ -495,6 +622,7 @@ def _fixture_report(
     packet_id: str | None,
     qjs_agg: float,
     boa_agg: float,
+    quickjs_agg: float | None = None,
     case_means: dict[str, float],
     quickjs_status: str = "missing",
     quickjs_reason: str = "quickjs-c not installed",
@@ -521,7 +649,9 @@ def _fixture_report(
         "engine": "quickjs-c",
         "status": quickjs_status,
         "command": "qjs",
-        "reason": quickjs_reason if quickjs_status in {"missing", "unsupported"} else None,
+        "reason": quickjs_reason
+        if quickjs_status in {"missing", "unsupported"}
+        else None,
     }
     node_entry = {
         "engine": "nodejs",
@@ -544,6 +674,13 @@ def _fixture_report(
         quickjs_entry,
     ]
 
+    aggregate_means: dict[str, float] = {
+        "qjs-rs": qjs_agg,
+        "boa-engine": boa_agg,
+    }
+    if quickjs_agg is not None:
+        aggregate_means["quickjs-c"] = quickjs_agg
+
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": "2026-02-28T00:00:00Z",
@@ -565,12 +702,7 @@ def _fixture_report(
             "engine_status": engine_status,
         },
         "cases": cases,
-        "aggregate": {
-            "mean_ms_per_engine": {
-                "qjs-rs": qjs_agg,
-                "boa-engine": boa_agg,
-            }
-        },
+        "aggregate": {"mean_ms_per_engine": aggregate_means},
     }
 
 
@@ -618,6 +750,7 @@ def run_self_test(repo_root: Path) -> None:
         baseline_path=baseline_path,
         candidate_path=candidate_path,
         require_qjs_lte_boa=True,
+        require_qjs_lte_quickjs_ratio=None,
         expect_case_improvement=["arith-loop", "fib-iterative"],
         max_case_regression={"json-roundtrip": 1.10},
     )
@@ -631,11 +764,14 @@ def run_self_test(repo_root: Path) -> None:
     different_host["perf_target"] = dict(candidate_fixture["perf_target"])
     different_host["perf_target"]["host_fingerprint"] = "host-b"
     different_host_path = temp_root / "candidate-different-host.json"
-    different_host_path.write_text(json.dumps(different_host, indent=2), encoding="utf-8")
+    different_host_path.write_text(
+        json.dumps(different_host, indent=2), encoding="utf-8"
+    )
     different_host_result = run_check(
         baseline_path=baseline_path,
         candidate_path=different_host_path,
         require_qjs_lte_boa=False,
+        require_qjs_lte_quickjs_ratio=None,
         expect_case_improvement=[],
         max_case_regression={},
     )
@@ -656,6 +792,7 @@ def run_self_test(repo_root: Path) -> None:
         baseline_path=baseline_path,
         candidate_path=slower_path,
         require_qjs_lte_boa=True,
+        require_qjs_lte_quickjs_ratio=None,
         expect_case_improvement=[],
         max_case_regression={},
     )
@@ -678,11 +815,14 @@ def run_self_test(repo_root: Path) -> None:
         quickjs_reason="",
     )
     missing_reason_path = temp_root / "candidate-missing-reason.json"
-    missing_reason_path.write_text(json.dumps(missing_reason, indent=2), encoding="utf-8")
+    missing_reason_path.write_text(
+        json.dumps(missing_reason, indent=2), encoding="utf-8"
+    )
     missing_reason_result = run_check(
         baseline_path=baseline_path,
         candidate_path=missing_reason_path,
         require_qjs_lte_boa=False,
+        require_qjs_lte_quickjs_ratio=None,
         expect_case_improvement=[],
         max_case_regression={},
     )
@@ -690,6 +830,125 @@ def run_self_test(repo_root: Path) -> None:
         missing_reason_result,
         "reason: must be a non-empty string",
         "missing-comparator-reason",
+    )
+
+    ratio_baseline = _fixture_report(
+        host_fingerprint="host-a",
+        optimization_mode="baseline",
+        optimization_tag="phase11-baseline",
+        packet_id=None,
+        qjs_agg=120.0,
+        boa_agg=110.0,
+        quickjs_agg=100.0,
+        case_means={
+            "arith-loop": 200.0,
+            "fib-iterative": 100.0,
+            "array-sum": 300.0,
+            "json-roundtrip": 20.0,
+        },
+        quickjs_status="available",
+    )
+    ratio_candidate = _fixture_report(
+        host_fingerprint="host-a",
+        optimization_mode="packet",
+        optimization_tag="packet-d",
+        packet_id="packet-d",
+        qjs_agg=100.0,
+        boa_agg=95.0,
+        quickjs_agg=90.0,
+        case_means={
+            "arith-loop": 180.0,
+            "fib-iterative": 90.0,
+            "array-sum": 280.0,
+            "json-roundtrip": 19.0,
+        },
+        quickjs_status="available",
+    )
+    ratio_baseline_path = temp_root / "baseline-ratio.json"
+    ratio_candidate_path = temp_root / "candidate-ratio.json"
+    ratio_baseline_path.write_text(
+        json.dumps(ratio_baseline, indent=2), encoding="utf-8"
+    )
+    ratio_candidate_path.write_text(
+        json.dumps(ratio_candidate, indent=2), encoding="utf-8"
+    )
+
+    ratio_positive = run_check(
+        baseline_path=ratio_baseline_path,
+        candidate_path=ratio_candidate_path,
+        require_qjs_lte_boa=False,
+        require_qjs_lte_quickjs_ratio=1.25,
+        expect_case_improvement=[],
+        max_case_regression={},
+    )
+    if ratio_positive.status != "passed":
+        raise PerfTargetError(
+            f"self-test 'ratio-positive' expected pass but failed: {ratio_positive.errors}"
+        )
+
+    ratio_slow = dict(ratio_candidate)
+    ratio_slow["aggregate"] = {
+        "mean_ms_per_engine": {"qjs-rs": 130.0, "boa-engine": 95.0, "quickjs-c": 90.0}
+    }
+    ratio_slow_path = temp_root / "candidate-ratio-slow.json"
+    ratio_slow_path.write_text(json.dumps(ratio_slow, indent=2), encoding="utf-8")
+    ratio_slow_result = run_check(
+        baseline_path=ratio_baseline_path,
+        candidate_path=ratio_slow_path,
+        require_qjs_lte_boa=False,
+        require_qjs_lte_quickjs_ratio=1.25,
+        expect_case_improvement=[],
+        max_case_regression={},
+    )
+    _expect_failure(
+        ratio_slow_result,
+        "require-qjs-lte-quickjs-ratio failed",
+        "quickjs-ratio-threshold",
+    )
+
+    ratio_missing_quickjs = _fixture_report(
+        host_fingerprint="host-a",
+        optimization_mode="packet",
+        optimization_tag="packet-d",
+        packet_id="packet-d",
+        qjs_agg=100.0,
+        boa_agg=95.0,
+        quickjs_agg=None,
+        case_means={"arith-loop": 180.0},
+        quickjs_status="missing",
+        quickjs_reason="quickjs-c not installed",
+    )
+    ratio_missing_quickjs_path = temp_root / "candidate-ratio-missing-quickjs.json"
+    ratio_missing_quickjs_path.write_text(
+        json.dumps(ratio_missing_quickjs, indent=2),
+        encoding="utf-8",
+    )
+    ratio_missing_quickjs_result = run_check(
+        baseline_path=ratio_baseline_path,
+        candidate_path=ratio_missing_quickjs_path,
+        require_qjs_lte_boa=False,
+        require_qjs_lte_quickjs_ratio=1.25,
+        expect_case_improvement=[],
+        max_case_regression={},
+    )
+    _expect_failure(
+        ratio_missing_quickjs_result,
+        "require-qjs-lte-quickjs-ratio requires quickjs-c comparator status 'available'",
+        "quickjs-ratio-requires-quickjs",
+    )
+
+    mixed_flags_result = run_check(
+        baseline_path=ratio_baseline_path,
+        candidate_path=ratio_candidate_path,
+        require_qjs_lte_boa=True,
+        require_qjs_lte_quickjs_ratio=1.25,
+        expect_case_improvement=[],
+        max_case_regression={},
+    )
+    _expect_failure(
+        mixed_flags_result,
+        "require-qjs-lte-boa failed",
+        "mixed-flags-boa-check-retained",
     )
 
 
@@ -703,7 +962,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--baseline",
         type=Path,
-        default=Path("target/benchmarks/engine-comparison.local-dev.phase11-baseline.json"),
+        default=Path(
+            "target/benchmarks/engine-comparison.local-dev.phase11-baseline.json"
+        ),
         help="Path to baseline benchmark artifact JSON",
     )
     parser.add_argument(
@@ -716,6 +977,15 @@ def parse_args() -> argparse.Namespace:
         "--require-qjs-lte-boa",
         action="store_true",
         help="Fail if candidate aggregate qjs-rs mean_ms is greater than boa-engine",
+    )
+    parser.add_argument(
+        "--require-qjs-lte-quickjs-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Fail if candidate aggregate qjs-rs/quickjs-c exceeds RATIO; "
+            "requires quickjs-c availability and aggregate means in both artifacts"
+        ),
     )
     parser.add_argument(
         "--expect-case-improvement",
@@ -750,11 +1020,17 @@ def main() -> int:
         return 0
 
     try:
+        if (
+            args.require_qjs_lte_quickjs_ratio is not None
+            and args.require_qjs_lte_quickjs_ratio <= 0
+        ):
+            raise PerfTargetError("--require-qjs-lte-quickjs-ratio must be > 0")
         max_case_regression = _parse_case_limits(args.max_case_regression)
         result = run_check(
             baseline_path=args.baseline,
             candidate_path=args.candidate,
             require_qjs_lte_boa=args.require_qjs_lte_boa,
+            require_qjs_lte_quickjs_ratio=args.require_qjs_lte_quickjs_ratio,
             expect_case_improvement=args.expect_case_improvement,
             max_case_regression=max_case_regression,
         )
