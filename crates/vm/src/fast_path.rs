@@ -381,10 +381,6 @@ impl PacketGFastPathState {
         self.counters = PacketGFastPathCounters::default();
     }
 
-    pub fn clear_name_cache(&mut self) {
-        self.name_cache.clear();
-    }
-
     pub fn remove_name_cache_entry(&mut self, name: &str) {
         self.name_cache.remove(name);
     }

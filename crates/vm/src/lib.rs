@@ -1194,6 +1194,30 @@ impl Vm {
         self.packet_d_fast_path.counters()
     }
 
+    pub fn set_packet_g_fast_path_enabled(&mut self, enabled: bool) {
+        self.packet_g_fast_path_enabled = enabled;
+    }
+
+    pub fn packet_g_fast_path_enabled(&self) -> bool {
+        self.packet_g_fast_path_enabled
+    }
+
+    pub fn set_packet_g_fast_path_metrics_enabled(&mut self, enabled: bool) {
+        self.packet_g_fast_path_metrics_enabled = enabled;
+    }
+
+    pub fn packet_g_fast_path_metrics_enabled(&self) -> bool {
+        self.packet_g_fast_path_metrics_enabled
+    }
+
+    pub fn reset_packet_g_fast_path_counters(&mut self) {
+        self.packet_g_fast_path.reset();
+    }
+
+    pub fn packet_g_fast_path_counters(&self) -> PacketGFastPathCounters {
+        self.packet_g_fast_path.counters()
+    }
+
     pub fn enable_auto_gc(&mut self, enabled: bool) {
         self.auto_gc_enabled = enabled;
     }
@@ -2615,6 +2639,7 @@ impl Vm {
                     } else {
                         self.packet_a_fast_path.remove_binding_cache_entry(name);
                         self.packet_c_fast_path.remove_binding_cache_entry(name);
+                        self.packet_g_fast_path.remove_name_cache_entry(name);
                         self.invalidate_packet_d_slot_cache_entry(identifier_slot);
                         if strict {
                             store_error = Some(VmError::UnknownIdentifier(name.clone()));
@@ -15296,6 +15321,7 @@ impl Vm {
     fn invalidate_binding_fast_path_cache_for_name(&mut self, name: &str) {
         self.packet_a_fast_path.remove_binding_cache_entry(name);
         self.packet_c_fast_path.remove_binding_cache_entry(name);
+        self.packet_g_fast_path.remove_name_cache_entry(name);
         self.packet_d_scope_generation = self.packet_d_scope_generation.wrapping_add(1);
     }
 
@@ -15460,6 +15486,50 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn record_packet_g_name_guard_hit(&mut self) {
+        if self.packet_g_fast_path_metrics_enabled() {
+            self.packet_g_fast_path.record_name_guard_hit();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_g_name_guard_hit_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_g_name_guard_miss(&mut self) {
+        if self.packet_g_fast_path_metrics_enabled() {
+            self.packet_g_fast_path.record_name_guard_miss();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_g_name_guard_miss_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_g_name_guard_revalidate_hit(&mut self) {
+        if self.packet_g_fast_path_metrics_enabled() {
+            self.packet_g_fast_path.record_name_guard_revalidate_hit();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_g_name_guard_revalidate_hit_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_g_name_guard_revalidate_miss(&mut self) {
+        if self.packet_g_fast_path_metrics_enabled() {
+            self.packet_g_fast_path.record_name_guard_revalidate_miss();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_g_name_guard_revalidate_miss_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
     fn try_resolve_identifier_call_direct_binding(
         &mut self,
         name: &str,
@@ -15534,6 +15604,71 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn try_revalidate_packet_g_name_cache_entry(
+        &mut self,
+        name: &str,
+        entry: PacketGNameCacheEntry,
+    ) -> Option<(usize, BindingId)> {
+        if entry.scope_index + 1 == self.scopes.len()
+            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        {
+            self.packet_g_fast_path.remember_name_cache_entry(
+                name,
+                entry.scope_index,
+                entry.binding_id,
+                self.packet_d_scope_generation,
+            );
+            self.record_packet_g_name_guard_revalidate_hit();
+            return Some((entry.scope_index, entry.binding_id));
+        }
+        self.record_packet_g_name_guard_revalidate_miss();
+        self.packet_g_fast_path.remove_name_cache_entry(name);
+        None
+    }
+
+    #[inline(always)]
+    fn resolve_binding_entry_with_packet_g_name_cache(
+        &mut self,
+        name: &str,
+    ) -> Option<(usize, BindingId)> {
+        if let Some(entry) = self.packet_g_fast_path.name_cache_entry(name) {
+            if entry.scope_generation == self.packet_d_scope_generation {
+                #[cfg(debug_assertions)]
+                {
+                    if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+                    {
+                        self.record_packet_g_name_guard_hit();
+                        return Some((entry.scope_index, entry.binding_id));
+                    }
+                    self.packet_g_fast_path.remove_name_cache_entry(name);
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    self.record_packet_g_name_guard_hit();
+                    return Some((entry.scope_index, entry.binding_id));
+                }
+            } else if let Some(result) = self.try_revalidate_packet_g_name_cache_entry(name, entry)
+            {
+                return Some(result);
+            }
+        }
+
+        self.record_packet_g_name_guard_miss();
+        self.record_identifier_resolution_fallback_scan();
+        if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+            self.packet_g_fast_path.remember_name_cache_entry(
+                name,
+                scope_index,
+                binding_id,
+                self.packet_d_scope_generation,
+            );
+            return Some((scope_index, binding_id));
+        }
+        self.packet_g_fast_path.remove_name_cache_entry(name);
+        None
+    }
+
+    #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
         let scope_count = self.scopes.len();
         match scope_count {
@@ -15596,8 +15731,13 @@ impl Vm {
                 return Some(binding_id);
             }
         }
-        self.record_identifier_resolution_fallback_scan();
-        if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+        let fallback = if self.packet_g_fast_path_enabled() {
+            self.resolve_binding_entry_with_packet_g_name_cache(name)
+        } else {
+            self.record_identifier_resolution_fallback_scan();
+            self.resolve_binding_id_slow(name)
+        };
+        if let Some((scope_index, binding_id)) = fallback {
             self.packet_d_fast_path.remember_slot_cache_entry(
                 slot,
                 scope_index,
@@ -15643,7 +15783,13 @@ impl Vm {
                     return Some(binding_id);
                 }
             }
-            if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+            let fallback = if self.packet_g_fast_path_enabled() {
+                self.resolve_binding_entry_with_packet_g_name_cache(name)
+            } else {
+                self.record_identifier_resolution_fallback_scan();
+                self.resolve_binding_id_slow(name)
+            };
+            if let Some((scope_index, binding_id)) = fallback {
                 self.packet_d_fast_path.remember_slot_cache_entry(
                     slot,
                     scope_index,
@@ -15659,6 +15805,7 @@ impl Vm {
             self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
         let packet_c_enabled = self.packet_c_fast_path_enabled();
         let packet_d_enabled = self.packet_d_fast_path_enabled();
+        let packet_g_enabled = self.packet_g_fast_path_enabled();
 
         if packet_d_enabled && let Some(slot) = identifier_slot {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
@@ -15694,8 +15841,13 @@ impl Vm {
             if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
-            self.record_identifier_resolution_fallback_scan();
-            if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+            let fallback = if packet_g_enabled {
+                self.resolve_binding_entry_with_packet_g_name_cache(name)
+            } else {
+                self.record_identifier_resolution_fallback_scan();
+                self.resolve_binding_id_slow(name)
+            };
+            if let Some((scope_index, binding_id)) = fallback {
                 self.packet_d_fast_path.remember_slot_cache_entry(
                     slot,
                     scope_index,
@@ -15705,6 +15857,20 @@ impl Vm {
                 return Some(binding_id);
             }
             self.packet_d_fast_path.remove_slot_cache_entry(slot);
+            return None;
+        }
+
+        if packet_g_enabled {
+            if let Some((_, binding_id)) = self.resolve_binding_entry_with_packet_g_name_cache(name)
+            {
+                if packet_a_metrics_enabled {
+                    self.record_packet_a_binding_guard_hit();
+                }
+                return Some(binding_id);
+            }
+            if packet_a_metrics_enabled {
+                self.record_packet_a_binding_guard_miss();
+            }
             return None;
         }
 
@@ -15772,6 +15938,7 @@ impl Vm {
             self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
         let packet_c_enabled = self.packet_c_fast_path_enabled();
         let packet_d_enabled = self.packet_d_fast_path_enabled();
+        let packet_g_enabled = self.packet_g_fast_path_enabled();
 
         if packet_a_metrics_enabled {
             self.record_packet_a_binding_guard_miss();
@@ -15781,6 +15948,9 @@ impl Vm {
         }
         if packet_d_enabled && identifier_slot.is_some() {
             self.record_packet_d_slot_guard_miss();
+        }
+        if packet_g_enabled {
+            self.record_packet_g_name_guard_miss();
         }
         self.resolve_binding_id(name)
     }
@@ -16976,6 +17146,9 @@ impl Vm {
         if self.packet_d_fast_path_enabled() && identifier_slot.is_some() {
             self.record_packet_d_slot_guard_miss();
         }
+        if self.packet_g_fast_path_enabled() {
+            self.record_packet_g_name_guard_miss();
+        }
         self.invalidate_binding_fast_path_cache();
         self.record_identifier_resolution_fallback_scan();
 
@@ -16988,6 +17161,7 @@ impl Vm {
                 let property = self.intern_identifier_name(name);
                 self.packet_a_fast_path.remove_binding_cache_entry(name);
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
+                self.packet_g_fast_path.remove_name_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
                 return Ok(Some(IdentifierReference::Property {
                     base,
@@ -17010,6 +17184,7 @@ impl Vm {
             let property = self.intern_identifier_name(name);
             self.packet_a_fast_path.remove_binding_cache_entry(name);
             self.packet_c_fast_path.remove_binding_cache_entry(name);
+            self.packet_g_fast_path.remove_name_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
             return Ok(Some(IdentifierReference::Property {
                 base,
@@ -17037,6 +17212,7 @@ impl Vm {
             let property = self.intern_identifier_name(name);
             self.packet_a_fast_path.remove_binding_cache_entry(name);
             self.packet_c_fast_path.remove_binding_cache_entry(name);
+            self.packet_g_fast_path.remove_name_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
             return Ok(IdentifierReference::Property {
                 base: JsValue::Object(global_object_id),
@@ -17051,6 +17227,7 @@ impl Vm {
                 let property = self.intern_identifier_name(name);
                 self.packet_a_fast_path.remove_binding_cache_entry(name);
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
+                self.packet_g_fast_path.remove_name_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
                 return Ok(IdentifierReference::Property {
                     base,
@@ -17062,6 +17239,7 @@ impl Vm {
         }
         self.packet_a_fast_path.remove_binding_cache_entry(name);
         self.packet_c_fast_path.remove_binding_cache_entry(name);
+        self.packet_g_fast_path.remove_name_cache_entry(name);
         self.invalidate_packet_d_slot_cache_entry(identifier_slot);
         let name = self.intern_identifier_name(name);
         Ok(IdentifierReference::Unresolvable { name })
