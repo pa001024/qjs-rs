@@ -59,3 +59,40 @@ fn native_error_constructor_prototype_chain() {
     let mut vm = Vm::default();
     assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
 }
+
+#[test]
+fn host_callback_set_prototype_of_reports_type_errors_for_invalid_mutations() {
+    let script = parse_script(
+        "var base = {}; \
+         Object.setPrototypeOf(HostCtor, base); \
+         var cycle = false; \
+         try { Object.setPrototypeOf(base, HostCtor); } catch (err) { cycle = err instanceof TypeError; } \
+         Object.preventExtensions(HostCtor); \
+         var blocked = false; \
+         try { Object.setPrototypeOf(HostCtor, {}); } catch (err) { blocked = err instanceof TypeError; } \
+         cycle && blocked;",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+
+    let mut realm = Realm::default();
+    realm.define_global(
+        "Object",
+        JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+    );
+    realm.define_global(
+        "TypeError",
+        JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+    );
+
+    let mut vm = Vm::default();
+    let host_ctor = vm.register_host_callback_function(
+        "HostCtor",
+        0.0,
+        true,
+        |_vm, this_arg, _args, _realm, _strict| Ok(this_arg.unwrap_or(JsValue::Undefined)),
+    );
+    realm.define_global("HostCtor", host_ctor);
+
+    assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+}

@@ -1,8 +1,8 @@
 use runtime::JsValue;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use test_harness::{
-    HostCallbackRegistration, execute_script_with_host_callbacks, run_script_with_host_callbacks,
+    execute_script_with_host_callbacks, run_script_with_host_callbacks, HostCallbackRegistration,
 };
 use vm::VmError;
 
@@ -70,4 +70,85 @@ fn host_constructor_binding_reclaims_opaque_big_object_after_scope() {
     assert_eq!(drop_counter.load(Ordering::SeqCst), 0);
     let _ = execution.vm.collect_garbage(&execution.realm);
     assert_eq!(drop_counter.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn host_constructable_callback_requires_new_and_receives_constructor_this() {
+    let result = run_script_with_host_callbacks(
+        "var instance = new RustCtor(); typeof instance === 'object' && instance !== null;",
+        vec![HostCallbackRegistration::constructor(
+            "RustCtor",
+            0.0,
+            |_vm, this_arg, _args, _realm, _strict| {
+                let this_obj =
+                    this_arg.ok_or(VmError::TypeError("HostCallback:MissingConstructorThis"))?;
+                Ok(this_obj)
+            },
+        )],
+    );
+
+    assert_eq!(result, Ok(JsValue::Bool(true)));
+}
+
+#[test]
+fn host_non_constructable_callback_rejects_new() {
+    let result = run_script_with_host_callbacks(
+        "var threw = false; try { new RustFn(); } catch (err) { threw = err instanceof TypeError; } threw;",
+        vec![HostCallbackRegistration::function(
+            "RustFn",
+            0.0,
+            |_vm, _this_arg, _args, _realm, _strict| Ok(JsValue::Undefined),
+        )],
+    );
+
+    assert_eq!(result, Ok(JsValue::Bool(true)));
+}
+
+#[test]
+fn host_constructor_prototype_fallback_restores_backlink_after_non_object_override() {
+    let result = run_script_with_host_callbacks(
+        "var first = new HostCtor(); \
+         var firstOk = Object.getPrototypeOf(first).constructor === HostCtor; \
+         HostCtor.prototype = 1; \
+         var second = new HostCtor(); \
+         var secondProto = Object.getPrototypeOf(second); \
+         firstOk && secondProto !== Object.prototype && secondProto.constructor === HostCtor;",
+        vec![HostCallbackRegistration::constructor(
+            "HostCtor",
+            0.0,
+            |_vm, this_arg, _args, _realm, _strict| {
+                let this_obj =
+                    this_arg.ok_or(VmError::TypeError("HostCallback:MissingConstructorThis"))?;
+                Ok(this_obj)
+            },
+        )],
+    );
+
+    assert_eq!(result, Ok(JsValue::Bool(true)));
+}
+
+#[test]
+fn object_set_prototype_of_host_target_enforces_cycle_extensibility_and_same_value_noop() {
+    let result = run_script_with_host_callbacks(
+        "var base = {}; \
+         Object.setPrototypeOf(HostCtor, base); \
+         var cycle = false; \
+         try { Object.setPrototypeOf(base, HostCtor); } catch (err) { cycle = err instanceof TypeError; } \
+         Object.preventExtensions(HostCtor); \
+         var blocked = false; \
+         try { Object.setPrototypeOf(HostCtor, {}); } catch (err) { blocked = err instanceof TypeError; } \
+         var sameValue = Object.setPrototypeOf(HostCtor, base) === HostCtor; \
+         cycle && blocked && sameValue;",
+        vec![HostCallbackRegistration::constructor(
+            "HostCtor",
+            0.0,
+            |_vm, this_arg, _args, _realm, _strict| {
+                let this_obj =
+                    this_arg.ok_or(VmError::TypeError("HostCallback:MissingConstructorThis"))?;
+                Ok(this_obj)
+            },
+        )],
+    );
+
+    assert_eq!(result, Ok(JsValue::Bool(true)));
 }
