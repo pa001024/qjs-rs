@@ -266,6 +266,8 @@ pub struct PacketDFastPathCounters {
     pub slot_guard_misses: u64,
     pub global_guard_hits: u64,
     pub global_guard_misses: u64,
+    pub identifier_call_direct_hits: u64,
+    pub identifier_call_direct_misses: u64,
 }
 
 #[derive(Debug, Default)]
@@ -323,6 +325,16 @@ impl PacketDFastPathState {
 
     pub fn record_global_guard_miss(&mut self) {
         self.counters.global_guard_misses = self.counters.global_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_identifier_call_direct_hit(&mut self) {
+        self.counters.identifier_call_direct_hits =
+            self.counters.identifier_call_direct_hits.wrapping_add(1);
+    }
+
+    pub fn record_identifier_call_direct_miss(&mut self) {
+        self.counters.identifier_call_direct_misses =
+            self.counters.identifier_call_direct_misses.wrapping_add(1);
     }
 
     pub fn counters(&self) -> PacketDFastPathCounters {

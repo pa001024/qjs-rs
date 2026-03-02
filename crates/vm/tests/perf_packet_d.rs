@@ -4,7 +4,7 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
-use vm::{PacketDFastPathCounters, Vm, perf::HotspotAttribution};
+use vm::{perf::HotspotAttribution, PacketDFastPathCounters, Vm};
 
 fn run_script(
     source: &str,
@@ -138,6 +138,40 @@ sum;
     assert!(
         counters.slot_guard_misses > 0,
         "with lookups must bypass packet-D slot cache"
+    );
+}
+
+#[test]
+fn perf_packet_d_identifier_call_direct_dispatch_guarding() {
+    let source = r#"
+function step(value) {
+  return value + 1;
+}
+globalThis.packetDGlobalStep = function(value) {
+  return value + 10;
+};
+let total = 0;
+for (let i = 0; i < 6; i = i + 1) {
+  total = step(total);
+}
+total = packetDGlobalStep(total);
+delete globalThis.packetDGlobalStep;
+total;
+"#;
+
+    let (value, counters, hotspot) = assert_packet_d_parity(source);
+    assert_eq!(value, JsValue::Number(16.0));
+    assert!(
+        counters.identifier_call_direct_hits > 0,
+        "stable lexical call identifiers should hit packet-D direct call dispatch"
+    );
+    assert!(
+        counters.identifier_call_direct_misses > 0,
+        "global-property call identifiers must miss packet-D direct call dispatch and fallback"
+    );
+    assert!(
+        hotspot.identifier_resolution > 0,
+        "call identifier workloads should still emit identifier-resolution attribution"
     );
 }
 

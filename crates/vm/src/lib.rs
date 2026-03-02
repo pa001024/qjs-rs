@@ -4144,6 +4144,20 @@ impl Vm {
         identifier_slot: Option<u32>,
     ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
+        if let Some(callee) = self.try_resolve_identifier_call_direct_binding(name, identifier_slot)? {
+            if name == "super" {
+                return self.execute_super_constructor_call(callee, args, realm, caller_strict);
+            }
+            if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
+                return self.execute_eval_argument(
+                    args.first(),
+                    realm,
+                    caller_strict,
+                    EvalCallKind::Direct,
+                );
+            }
+            return self.execute_callable(callee, None, args, realm, caller_strict);
+        }
         let reference =
             self.resolve_identifier_reference(name, realm, caller_strict, identifier_slot)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
@@ -4179,6 +4193,20 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
+        if let Some(callee) = self.try_resolve_identifier_call_direct_binding(name, identifier_slot)? {
+            if name == "super" {
+                return self.execute_super_constructor_call(callee, args, realm, caller_strict);
+            }
+            if name == "eval" && matches!(callee, JsValue::NativeFunction(NativeFunction::Eval)) {
+                return self.execute_eval_argument(
+                    args.first(),
+                    realm,
+                    caller_strict,
+                    EvalCallKind::Direct,
+                );
+            }
+            return self.execute_callable(callee, None, args, realm, caller_strict);
+        }
         let reference =
             self.resolve_identifier_reference(name, realm, caller_strict, identifier_slot)?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
@@ -15365,6 +15393,55 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
+    fn record_packet_d_identifier_call_direct_hit(&mut self) {
+        if self.packet_d_fast_path_metrics_enabled() {
+            self.packet_d_fast_path.record_identifier_call_direct_hit();
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_d_identifier_call_direct_miss(&mut self) {
+        if self.packet_d_fast_path_metrics_enabled() {
+            self.packet_d_fast_path.record_identifier_call_direct_miss();
+        }
+    }
+
+    #[inline(always)]
+    fn try_resolve_identifier_call_direct_binding(
+        &mut self,
+        name: &str,
+        identifier_slot: Option<u32>,
+    ) -> Result<Option<JsValue>, VmError> {
+        if self.with_objects.is_empty()
+            && self.packet_d_fast_path_enabled()
+            && let Some(slot) = identifier_slot
+        {
+            let binding_id = if !self.packet_d_fast_path_metrics_enabled()
+                && !self.packet_a_fast_path_metrics_enabled()
+            {
+                self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+            } else {
+                self.resolve_binding_id_with_fast_path(name, Some(slot))
+            };
+
+            if let Some(binding_id) = binding_id {
+                let binding = self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
+                if matches!(binding.value, JsValue::Uninitialized) {
+                    self.record_packet_d_identifier_call_direct_miss();
+                    return Err(VmError::UnknownIdentifier(name.to_string()));
+                }
+                let value = binding.value.clone();
+                self.record_packet_d_identifier_call_direct_hit();
+                return Ok(Some(value));
+            }
+
+            self.record_packet_d_identifier_call_direct_miss();
+        }
+
+        Ok(None)
+    }
+
     fn cached_binding_entry_is_valid(
         &self,
         name: &str,
@@ -15555,25 +15632,25 @@ impl Vm {
         }
 
         if !packet_a_metrics_enabled {
-            return self.resolve_binding_id(name);
-        }
+            self.resolve_binding_id(name)
+        } else {
+            if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
+                if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                    self.record_packet_a_binding_guard_hit();
+                    return Some(entry.binding_id);
+                }
+                self.packet_a_fast_path.remove_binding_cache_entry(name);
+            }
+            self.record_packet_a_binding_guard_miss();
 
-        if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
-            if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
-                self.record_packet_a_binding_guard_hit();
-                return Some(entry.binding_id);
+            if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
+                self.packet_a_fast_path
+                    .remember_binding_cache_entry(name, scope_index, binding_id);
+                return Some(binding_id);
             }
             self.packet_a_fast_path.remove_binding_cache_entry(name);
+            None
         }
-        self.record_packet_a_binding_guard_miss();
-
-        if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
-            self.packet_a_fast_path
-                .remember_binding_cache_entry(name, scope_index, binding_id);
-            return Some(binding_id);
-        }
-        self.packet_a_fast_path.remove_binding_cache_entry(name);
-        None
     }
 
     #[inline(always)]
@@ -15591,18 +15668,16 @@ impl Vm {
         let packet_c_enabled = self.packet_c_fast_path_enabled();
         let packet_d_enabled = self.packet_d_fast_path_enabled();
 
-        {
-            if packet_a_metrics_enabled {
-                self.record_packet_a_binding_guard_miss();
-            }
-            if packet_c_enabled {
-                self.record_packet_c_identifier_guard_miss();
-            }
-            if packet_d_enabled && identifier_slot.is_some() {
-                self.record_packet_d_slot_guard_miss();
-            }
-            return self.resolve_binding_id(name);
+        if packet_a_metrics_enabled {
+            self.record_packet_a_binding_guard_miss();
         }
+        if packet_c_enabled {
+            self.record_packet_c_identifier_guard_miss();
+        }
+        if packet_d_enabled && identifier_slot.is_some() {
+            self.record_packet_d_slot_guard_miss();
+        }
+        self.resolve_binding_id(name)
     }
 
     fn resolve_binding_id(&self, name: &str) -> Option<BindingId> {
