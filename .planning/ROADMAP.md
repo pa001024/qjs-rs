@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all 11 plans executed; latest packet-final evidence keeps PERF-03 open, so phase closure remains pending)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (plans 11-01..11-11 executed; 11-12 planned for next closure attempt, PERF-03 still open)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -31,7 +31,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve >=80% of `quickjs-c` performance on the tracked suite through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 11/11 plans complete
+**Plans:** 11/12 plans complete
 Plans:
 - [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [x] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence. (completed 2026-02-28)
@@ -44,6 +44,7 @@ Plans:
 - [x] 11-09-PLAN.md — Execute next guarded hotspot optimization loop and publish authoritative quickjs-ratio PERF-03 verdict evidence. (completed 2026-03-02; closure still open)
 - [x] 11-10-PLAN.md — Fix governance (cargo fmt) and execute another optimization attempt with packet-f candidate. (completed 2026-03-03; governance green, PERF-03 still open)
 - [x] 11-11-PLAN.md — Final optimization push for Phase 11 closure with packet-final candidate. (completed 2026-03-03; governance green, PERF-03 still open)
+- [ ] 11-12-PLAN.md — Execute packet-g identifier-resolution fallback-reduction optimization loop and publish authoritative quickjs-ratio closure verdict.
   1. Aggregate mean latency on the tracked suite is at most `1.25x quickjs-c` under the same host and run configuration (equivalent to >=80% of `quickjs-c` performance).
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
   3. Each optimization includes guard/fallback behavior and does not alter externally observable semantics.
