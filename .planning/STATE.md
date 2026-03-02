@@ -75,3 +75,9 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 - As of this update, active milestone performance closure is defined as `qjs-rs <= 1.25x quickjs-c` (>=80% quickjs-c performance) on the tracked suite.
 - Historical execution notes above retain prior checker wording and values from archived bundles for audit traceability.
 
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 13 added: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
+
