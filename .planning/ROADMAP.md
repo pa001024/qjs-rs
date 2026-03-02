@@ -12,8 +12,8 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [x] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all 11 plans executed; latest packet-final evidence keeps PERF-03 open, so phase closure remains pending) (completed 2026-03-02)
-- [x] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes) (completed 2026-03-02)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (all 11 plans executed; latest packet-final evidence keeps PERF-03 open, so phase closure remains pending)
+- [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
 
