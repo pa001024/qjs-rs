@@ -13,9 +13,9 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative bundle at `target/benchmarks/phase11-closure-bundle.json` (`2026-02-28T17:53:12Z`) remains below this threshold; active closure checker mode is `--require-qjs-lte-quickjs-ratio 1.25`, and legacy boa-based checks are audit-only.)_
-- [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Open closure state: packet evidence exists, but authoritative governance + PERF-03 bundle is still red.)_
-- [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Open closure state: maintainability evidence exists, but phase closure remains blocked until the authoritative governance + PERF-03 bundle is jointly green.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative packet-final artifact `target/benchmarks/engine-comparison.local-dev.packet-final.json` (`2026-03-02T16:52:08.444Z`) is still above threshold (`qjs-rs/quickjs-c = 5.755257x`); active closure checker mode is `--require-qjs-lte-quickjs-ratio 1.25`.)_
+- [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Implemented with packets A/B/C/D/E/F/final and supporting parity/hotspot evidence, but milestone closure remains open until PERF-03 passes.)_
+- [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Boundary evidence remains positive and governance checks are green; requirement stays open only because PERF-03 closure is still unmet.)_
 
 ### Correctness and Governance
 
@@ -43,9 +43,9 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Open (gap: latest authoritative bundle perf target still below >=80% quickjs-c threshold) |
-| PERF-04 | Phase 11 | Open (packet evidence landed; authoritative bundle still red due governance+perf gap) |
-| PERF-05 | Phase 11 | Open (maintainability evidence landed; authoritative governance+perf bundle still open) |
+| PERF-03 | Phase 11 | Open (gap: latest authoritative packet-final quickjs-ratio remains above 1.25x) |
+| PERF-04 | Phase 11 | Open (packet evidence landed through packet-final; phase closure still blocked by PERF-03) |
+| PERF-05 | Phase 11 | Open (maintainability evidence and governance are green; phase closure still blocked by PERF-03) |
 | TST-05 | Phase 12 | Planned |
 | TST-06 | Phase 12 | Planned |
 

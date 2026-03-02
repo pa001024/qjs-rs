@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: performance acceleration
 current_phase: 11
 current_phase_name: hot-path optimization and target closure
-current_plan: None (Phase 11 plans completed; closure follow-up required)
-status: phase 11 plan queue complete; latest authoritative bundle shows governance green but PERF-03 still below the >=80% quickjs-c target, so closure remains open
-stopped_at: Post-11-07 authoritative bundle rerun completed (governance pass, perf-target fail)
-last_updated: "2026-02-28T17:53:12Z"
-last_activity: 2026-02-28
+current_plan: None (11-11 executed; follow-up closure planning required)
+status: phase 11 plan queue complete; latest authoritative packet-final evidence is governance-green but PERF-03 remains above the 1.25x quickjs-c closure target
+stopped_at: Post-11-11 authoritative packet-final rerun completed (governance pass, perf-target fail)
+last_updated: "2026-03-02T16:52:08.444Z"
+last_activity: 2026-03-03
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 10
-  completed_plans: 10
+  total_plans: 13
+  completed_plans: 13
   percent: 100
 ---
 
@@ -24,20 +24,20 @@ progress:
 See: .planning/PROJECT.md (milestone v1.1 active)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.  
-**Current focus:** Keep Phase 11 in explicit open-gap state after latest authoritative bundle (`phase11-closure-bundle.json`) confirmed governance pass but PERF-03 remains below the >=80% quickjs-c threshold; Phase 12 remains blocked.
+**Current focus:** Keep Phase 11 in explicit open-gap state after packet-f and packet-final authoritative reruns confirmed governance pass but PERF-03 remains below the >=80% quickjs-c threshold; Phase 12 remains blocked.
 
 ## Current Position
 
 **Current Milestone:** v1.1 Performance Acceleration  
 **Current Phase:** 11 — Hot-Path Optimization and Target Closure  
-**Current Plan:** None (11-07 executed; follow-up closure planning required)  
-**Status:** All Phase 11 plans executed; authoritative bundle now has green governance gates but PERF-03 is still below >=80% quickjs-c; Phase 12 blocked  
+**Current Plan:** None (11-11 executed; follow-up closure planning required)  
+**Status:** All Phase 11 plans executed; latest packet-final evidence keeps PERF-03 above `1.25x quickjs-c` despite green governance gates; Phase 12 blocked  
 **Progress:** [██████████] 100%
 
 ## Active Roadmap (v1.1)
 
 - [x] Phase 10: Baseline Contract and Benchmark Normalization (PERF-01, PERF-02) — completed 2026-02-28
-- [ ] Phase 11: Hot-Path Optimization and Target Closure (PERF-03, PERF-04, PERF-05) — 11-07 executed, closure remains open from latest authoritative bundle (`fmt=0`, `clippy=0`, `test=0`, `perf_target=1`; target definition: >=80% quickjs-c)
+- [ ] Phase 11: Hot-Path Optimization and Target Closure (PERF-03, PERF-04, PERF-05) — 11-01..11-11 executed, but latest packet-final gate remains red (`qjs-rs/quickjs-c=5.755257x > 1.25x`)
 - [ ] Phase 12: Performance Governance and Non-Regression Gates (TST-05, TST-06) — blocked until Phase 11 queue closes
 
 ## Requirement Coverage Snapshot
@@ -66,7 +66,8 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 - Completed 11-07 authoritative closure sync: produced `target/benchmarks/phase11-closure-bundle.json`, appended evidence transcript, and synchronized roadmap/requirements/verification/state docs from that single artifact.
 - Recorded 11-07 blocker update (legacy historical gate): governance bundle was red because `cargo clippy --all-targets -- -D warnings` failed (`too_many_arguments` in `crates/benchmarks/src/main.rs:293`), and PERF-03 checker failed (`qjs-rs 1390.811014 > boa-engine 181.287246`).
 - Follow-up closure work removed benchmarks clippy blocker and tightened packet-d benchmark wiring (`run_engine_case` context refactor, qjs-rs parse/compile hoist, packet-d keeps packet-c enabled, removed redundant benchmark baseline install path).
-- Latest authoritative rerun (`2026-02-28T17:53:12Z`) is governance-green (`fmt/clippy/test/contract` all `rc=0`) but the legacy PERF-03 gate still failed (`qjs-rs 1370.511975 > boa-engine 184.489346`), so Phase 11 remained open.
+- Plan 11-10 completed: governance gates green, packet-f artifact generated (`qjs-rs/quickjs-c=6.085281x`), PERF-03 remained open.
+- Plan 11-11 completed: final packet-final artifact generated (`qjs-rs/quickjs-c=5.755257x`), PERF-03 remained open.
 - Active gate status is unchanged: no authoritative `--require-qjs-lte-quickjs-ratio 1.25` pass has been recorded yet.
 
 ## Target Definition Notes

@@ -1,9 +1,9 @@
 ---
 phase: 11-hot-path-optimization-and-target-closure
 phase_number: "11"
-verified: 2026-03-02T07:32:15.800Z
+verified: 2026-03-02T16:52:08.444Z
 status: gaps_found
-score: "evidence synchronized through 11-09; PERF-03 quickjs-ratio gate still red"
+score: "latest authoritative 11-11 packet-final evidence remains below PERF-03 target (5.755257x > 1.25x) with governance gates green"
 requirements_checked:
   - PERF-03
   - PERF-04
@@ -16,11 +16,11 @@ requirements_checked:
 
 Phase 11 goal is **not achieved yet**.
 
-Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= 1.25x quickjs-c` on locked profile) is still red in the latest authoritative packet-e run (`qjs-rs/quickjs-c = 6.136312x`).
+Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= 1.25x quickjs-c` on locked profile) is still red in the latest authoritative packet-final run (`qjs-rs/quickjs-c = 5.755257x`).
 
 ## Inputs Audited
 
-- Plans/Summaries: `11-01..11-09` PLAN + SUMMARY set
+- Plans/Summaries: `11-01..11-11` PLAN + SUMMARY set
 - Evidence bundles:
   - `11-PACKET-A-EVIDENCE.md`
   - `11-PACKET-C-EVIDENCE.md`
@@ -33,34 +33,36 @@ Reason: the hard closure target (`PERF-03`: aggregate `qjs-rs <= 1.25x quickjs-c
   - `AGENTS.md`
 - Authoritative machine-readable run artifacts:
   - `target/benchmarks/engine-comparison.local-dev.phase11-baseline.json` (`generated_at_utc`: `2026-03-02T07:30:27.870Z`)
-  - `target/benchmarks/engine-comparison.local-dev.packet-e.json` (`generated_at_utc`: `2026-03-02T07:32:15.800Z`)
+  - `target/benchmarks/engine-comparison.local-dev.packet-f.json` (`generated_at_utc`: `2026-03-02T16:51:43.510Z`)
+  - `target/benchmarks/engine-comparison.local-dev.packet-final.json` (`generated_at_utc`: `2026-03-02T16:52:08.444Z`)
 
-## Authoritative 11-09 Candidate Results (single provenance source)
+## Authoritative 11-10/11-11 Candidate Results (single provenance source)
 
-Ordered command outcomes for the authoritative 11-09 run set:
+Ordered command outcomes for the authoritative 11-10 and 11-11 run set:
 
-1. `cargo fmt --check`: ❌
+1. `cargo fmt --check`: ✅
 2. `cargo clippy -p vm -p benchmarks -- -D warnings`: ✅
 3. `cargo test -p vm perf_packet_d -- --nocapture`: ✅
 4. `cargo test -p vm perf_hotspot_attribution -- --nocapture`: ✅
-5. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators`: ✅
-6. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-e.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators`: ✅
-7. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.phase11-baseline.json`: ✅
-8. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-e.json`: ✅
-9. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-e.json --require-qjs-lte-quickjs-ratio 1.25`: ❌
+5. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-f.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators`: ✅
+6. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-f.json`: ✅
+7. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-f.json --require-qjs-lte-quickjs-ratio 1.25`: ❌ (`qjs-rs/quickjs-c 6.085281 > 1.25`)
+8. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-final.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators`: ✅
+9. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-final.json`: ✅
+10. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-final.json --require-qjs-lte-quickjs-ratio 1.25`: ❌ (`qjs-rs/quickjs-c 5.755257 > 1.25`)
 
-Packet-e candidate hash provenance:
+Packet-final candidate hash provenance:
 
-- `path`: `target/benchmarks/engine-comparison.local-dev.packet-e.json`
-- `hash/sha256`: `e2c83552ed5f89129b700885c8ec67476d26214fb96ec0fad94223723d465a9c`
+- `path`: `target/benchmarks/engine-comparison.local-dev.packet-final.json`
+- `hash/sha256`: `b351b97e14c70018f3b0f2837fec738e15f4d2dd6543e049f36472bb2a87d60c`
 
-Aggregate means (11-09 packet-e candidate):
+Aggregate means (11-11 packet-final candidate):
 
-- `qjs-rs`: `98.181000`
-- `quickjs-c`: `16.000000`
-- `qjs-rs/quickjs-c`: `6.136312x`
+- `qjs-rs`: `76.668243`
+- `quickjs-c`: `13.321429`
+- `qjs-rs/quickjs-c`: `5.755257x`
 
-## Must-Have Truth Audit (11-01..11-09)
+## Must-Have Truth Audit (11-01..11-11)
 
 | Plan | Must-have truths | Result | Notes |
 |---|---:|---|---|
@@ -73,12 +75,14 @@ Aggregate means (11-09 packet-e candidate):
 | 11-07 | 2 | 1/2 ⚠️ | Authoritative bundle provenance and governance gates are green, but PERF-03 remained red so joint closure condition was unmet. |
 | 11-08 | 3 | 3/3 ✅ | PERF-03 checker/policy/traceability alignment to active quickjs-ratio gate is complete and self-tested. |
 | 11-09 | 3 | 2/3 ⚠️ | Guarded identifier-call dispatch optimization + parity/hotspot evidence landed; authoritative quickjs-ratio checker is still red. |
+| 11-10 | 3 | 2/3 ⚠️ | Governance was restored to green and packet-f candidate evidence is contract-valid; PERF-03 quickjs-ratio checker remains red (`6.085281x`). |
+| 11-11 | 3 | 2/3 ⚠️ | Final guarded optimization + packet-final evidence landed with green governance, but PERF-03 quickjs-ratio checker remains red (`5.755257x`). |
 
-Net: **22/27 truths verified**.
+Net: **26/33 truths verified**.
 
 ## Requirement Cross-Reference (Plan Frontmatter ↔ Traceability)
 
-All nine Phase 11 plans (`11-01..11-09`) declare the same requirement set in frontmatter:
+All eleven Phase 11 plans (`11-01..11-11`) declare the same requirement set in frontmatter:
 - `PERF-03`
 - `PERF-04`
 - `PERF-05`
@@ -92,15 +96,15 @@ Verification conclusion per requirement:
 
 | Requirement | Verification result | Evidence summary |
 |---|---|---|
-| PERF-03 | ❌ Unsatisfied | Latest authoritative 11-09 packet-e checker run failed: `qjs-rs/quickjs-c 6.136312 > 1.25` (`qjs-rs=98.181000`, `quickjs-c=16.000000`). |
+| PERF-03 | ❌ Unsatisfied | Latest authoritative 11-11 packet-final checker run failed: `qjs-rs/quickjs-c 5.755257 > 1.25` (`qjs-rs=76.668243`, `quickjs-c=13.321429`). |
 | PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03. |
 | PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduced; guarded fallback patterns and layer-local changes are present; milestone traceability remains open until PERF-03 is satisfied in authoritative bundle checks. |
 
 ## Governance/Boundary Checks
 
 - Pure-Rust runtime-core boundary: no C FFI indicators found in `crates/vm`, `crates/runtime`, `crates/bytecode`, `crates/builtins` scan.
-- Authoritative 11-09 governance/test outcomes (from command outputs used for packet-e evidence):
-  - `fmt`: ❌
+- Authoritative 11-11 governance/test outcomes (from command outputs used for packet-final evidence):
+  - `fmt`: ✅
   - `clippy`: ✅
   - `test (targeted packet suites)`: ✅
 
@@ -111,5 +115,4 @@ Verification conclusion per requirement:
 
 ### Top remaining blockers
 
-1. **PERF-03 target not met**: latest authoritative packet-e ratio is `6.136312x`, above `1.25x` closure threshold.
-2. **Governance bundle not fully green in 11-09 run set**: `cargo fmt --check` remains red, so joint closure evidence is still incomplete.
+1. **PERF-03 target not met**: latest authoritative packet-final ratio is `5.755257x`, above `1.25x` closure threshold.

@@ -334,4 +334,113 @@ Packet hotspot attribution snapshot (`qjs_rs_hotspot_attribution.total`, packet-
 - PERF-05 maintainability boundary: ✅ retained (guarded fallback semantics, no runtime-core C FFI)
 - PERF-03 active closure (`qjs-rs <= 1.25x quickjs-c`): ❌ still open (`6.136312x`)
 
+## 12) Plan 11-10 packet-f authoritative quickjs-ratio attempt (2026-03-02)
+
+### 12.1 Optimization scope
+
+- Added guarded packet-D slot-cache revalidation path for generation-churn scenarios:
+  - New packet-D counters: `slot_guard_revalidate_hits`, `slot_guard_revalidate_misses`.
+  - Revalidation only accepts stale slot entries when cached binding remains valid in the current top lexical scope.
+  - Guard rejection immediately falls back to canonical identifier resolution and clears stale slot entries.
+- Added packet-D parity coverage:
+  - `perf_packet_d_slot_revalidation_fallback_parity`.
+- Extended benchmark packet toggle inference/tests for packet-f and packet-final output paths.
+
+### 12.2 Governance + parity command transcript
+
+1. `cargo fmt --check` ✅
+2. `cargo clippy -p vm -p benchmarks -- -D warnings` ✅
+3. `cargo test -p vm perf_packet_d -- --nocapture` ✅ (`6 passed; 0 failed`)
+4. `cargo test -p vm perf_hotspot_attribution -- --nocapture` ✅ (`1 passed; 0 failed`)
+
+### 12.3 Authoritative packet-f artifact and checker outcomes
+
+- Candidate artifact: `target/benchmarks/engine-comparison.local-dev.packet-f.json`
+- `generated_at_utc`: `2026-03-02T16:51:43.510Z`
+- `sha256`: `42aeb5097a68577c680589fd8a0bfe2cdc441a71841c535bf01320dfad4fe333`
+
+Commands:
+
+1. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-f.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators` ✅
+2. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-f.json` ✅
+3. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-f.json --require-qjs-lte-quickjs-ratio 1.25` ❌
+
+Exact checker output:
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-quickjs-ratio failed: candidate qjs-rs/quickjs-c 6.085281 > 1.250000 (qjs-rs=83.020621, quickjs-c=13.642857)
+```
+
+Packet-f aggregate means:
+
+- `qjs-rs`: `83.020621`
+- `quickjs-c`: `13.642857`
+- `qjs-rs/quickjs-c`: `6.085281x`
+
+Packet-f hotspot attribution snapshot (`qjs_rs_hotspot_attribution.total`):
+
+- `numeric_ops`: `157087`
+- `identifier_resolution`: `349965`
+- `array_indexed_property_get`: `14007`
+- `array_indexed_property_set`: `14000`
+
+### 12.4 Verdict
+
+- Governance bundle (fmt + clippy + targeted packet tests): ✅ PASS
+- PERF-03 quickjs-ratio gate: ❌ FAIL (`6.085281x > 1.25x`)
+
+## 13) Plan 11-11 packet-final authoritative quickjs-ratio attempt (2026-03-02)
+
+### 13.1 Final optimization scope
+
+- Added two-scope specialized fast path in `resolve_binding_id_slow` for common lexical lookup shape (`[global, local]`) while preserving canonical fallback scanning for larger scope stacks.
+- Kept packet-D guarded slot revalidation/fallback semantics from 11-10 unchanged.
+
+### 13.2 Governance + parity command transcript
+
+1. `cargo fmt --check` ✅
+2. `cargo clippy -p vm -p benchmarks -- -D warnings` ✅
+3. `cargo test -p vm perf_packet_d -- --nocapture` ✅ (`6 passed; 0 failed`)
+4. `cargo test -p vm perf_hotspot_attribution -- --nocapture` ✅ (`1 passed; 0 failed`)
+
+### 13.3 Authoritative packet-final artifact and checker outcomes
+
+- Candidate artifact: `target/benchmarks/engine-comparison.local-dev.packet-final.json`
+- `generated_at_utc`: `2026-03-02T16:52:08.444Z`
+- `sha256`: `b351b97e14c70018f3b0f2837fec738e15f4d2dd6543e049f36472bb2a87d60c`
+
+Commands:
+
+1. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-final.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators` ✅
+2. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-final.json` ✅
+3. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-final.json --require-qjs-lte-quickjs-ratio 1.25` ❌
+
+Exact checker output:
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-quickjs-ratio failed: candidate qjs-rs/quickjs-c 5.755257 > 1.250000 (qjs-rs=76.668243, quickjs-c=13.321429)
+```
+
+Packet-final aggregate means:
+
+- `qjs-rs`: `76.668243`
+- `quickjs-c`: `13.321429`
+- `qjs-rs/quickjs-c`: `5.755257x`
+
+Packet-final hotspot attribution snapshot (`qjs_rs_hotspot_attribution.total`):
+
+- `numeric_ops`: `157087`
+- `identifier_resolution`: `349965`
+- `array_indexed_property_get`: `14007`
+- `array_indexed_property_set`: `14000`
+
+### 13.4 Final gate verdict after 11-11
+
+- Governance bundle (fmt + clippy + targeted packet tests): ✅ PASS
+- PERF-03 quickjs-ratio gate: ❌ FAIL (`5.755257x > 1.25x`)
+
+Phase 11 closure remains **open**. No authoritative quickjs-ratio-green candidate is recorded in plans 11-10/11-11.
+
 

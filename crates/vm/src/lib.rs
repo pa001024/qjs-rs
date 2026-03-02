@@ -15506,22 +15506,38 @@ impl Vm {
     #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
         let scope_count = self.scopes.len();
-        if scope_count == 0 {
-            return None;
-        }
+        match scope_count {
+            0 => None,
+            1 => self.scopes[0]
+                .borrow()
+                .get(name)
+                .copied()
+                .map(|binding_id| (0, binding_id)),
+            2 => {
+                if let Some(binding_id) = self.scopes[1].borrow().get(name).copied() {
+                    return Some((1, binding_id));
+                }
+                self.scopes[0]
+                    .borrow()
+                    .get(name)
+                    .copied()
+                    .map(|binding_id| (0, binding_id))
+            }
+            _ => {
+                let mut scope_index = scope_count - 1;
+                if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
+                    return Some((scope_index, binding_id));
+                }
 
-        let mut scope_index = scope_count - 1;
-        if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
-            return Some((scope_index, binding_id));
-        }
-
-        while scope_index > 0 {
-            scope_index -= 1;
-            if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
-                return Some((scope_index, binding_id));
+                while scope_index > 0 {
+                    scope_index -= 1;
+                    if let Some(binding_id) = self.scopes[scope_index].borrow().get(name).copied() {
+                        return Some((scope_index, binding_id));
+                    }
+                }
+                None
             }
         }
-        None
     }
 
     #[inline(always)]
