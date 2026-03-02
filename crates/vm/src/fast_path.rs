@@ -264,6 +264,8 @@ pub struct PacketDSlotCacheEntry {
 pub struct PacketDFastPathCounters {
     pub slot_guard_hits: u64,
     pub slot_guard_misses: u64,
+    pub slot_guard_revalidate_hits: u64,
+    pub slot_guard_revalidate_misses: u64,
     pub global_guard_hits: u64,
     pub global_guard_misses: u64,
     pub identifier_call_direct_hits: u64,
@@ -317,6 +319,16 @@ impl PacketDFastPathState {
 
     pub fn record_slot_guard_miss(&mut self) {
         self.counters.slot_guard_misses = self.counters.slot_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_slot_guard_revalidate_hit(&mut self) {
+        self.counters.slot_guard_revalidate_hits =
+            self.counters.slot_guard_revalidate_hits.wrapping_add(1);
+    }
+
+    pub fn record_slot_guard_revalidate_miss(&mut self) {
+        self.counters.slot_guard_revalidate_misses =
+            self.counters.slot_guard_revalidate_misses.wrapping_add(1);
     }
 
     pub fn record_global_guard_hit(&mut self) {

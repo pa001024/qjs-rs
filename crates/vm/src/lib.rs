@@ -34,7 +34,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::external_host::ExternalHostCallbacks;
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
-    PacketCFastPathState, PacketDFastPathState,
+    PacketCFastPathState, PacketDFastPathState, PacketDSlotCacheEntry,
 };
 use crate::opaque_bindings::OpaqueBindings;
 
@@ -2406,15 +2406,16 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot = if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
-                        Self::packet_d_slot_for_opcode(
-                            identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Load,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Load,
+                            )
+                        } else {
+                            None
+                        };
                     let resolved = if with_objects_empty {
                         let binding_id = if packet_d_slot_direct_mode {
                             if let Some(slot) = identifier_slot {
@@ -2557,15 +2558,16 @@ impl Vm {
                         self.hotspot_attribution
                             .record_identifier_resolution_unchecked();
                     }
-                    let identifier_slot = if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
-                        Self::packet_d_slot_for_opcode(
-                            identifier_slot_metadata,
-                            pc,
-                            IdentifierOpcodeFamily::Store,
-                        )
-                    } else {
-                        None
-                    };
+                    let identifier_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_d_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Store,
+                            )
+                        } else {
+                            None
+                        };
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     let mut store_error = None;
@@ -2701,8 +2703,8 @@ impl Vm {
                                     Ok(updated) => {
                                         if let Some(binding) = self.binding_mut(binding_id) {
                                             binding.value = updated.clone();
-                                            if let Err(err) =
-                                                self.sync_global_property_from_binding(name, binding_id)
+                                            if let Err(err) = self
+                                                .sync_global_property_from_binding(name, binding_id)
                                             {
                                                 result = Err(err);
                                             } else {
@@ -4144,7 +4146,9 @@ impl Vm {
         identifier_slot: Option<u32>,
     ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
-        if let Some(callee) = self.try_resolve_identifier_call_direct_binding(name, identifier_slot)? {
+        if let Some(callee) =
+            self.try_resolve_identifier_call_direct_binding(name, identifier_slot)?
+        {
             if name == "super" {
                 return self.execute_super_constructor_call(callee, args, realm, caller_strict);
             }
@@ -4193,7 +4197,9 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
-        if let Some(callee) = self.try_resolve_identifier_call_direct_binding(name, identifier_slot)? {
+        if let Some(callee) =
+            self.try_resolve_identifier_call_direct_binding(name, identifier_slot)?
+        {
             if name == "super" {
                 return self.execute_super_constructor_call(callee, args, realm, caller_strict);
             }
@@ -6626,8 +6632,8 @@ impl Vm {
             }
             next
         } else {
-            let arg_count =
-                i64::try_from(args.len()).map_err(|_| VmError::TypeError("invalid array length"))?;
+            let arg_count = i64::try_from(args.len())
+                .map_err(|_| VmError::TypeError("invalid array length"))?;
             length
                 .checked_add(arg_count)
                 .filter(|next| *next <= MAX_SAFE_INTEGER_F64 as i64)
@@ -6638,7 +6644,9 @@ impl Vm {
         if let JsValue::Object(object_id) = target.clone() {
             if let Ok(mut fast_index) = usize::try_from(length) {
                 for (offset, arg) in args.iter().enumerate() {
-                    if self.try_packet_b_dense_array_index_set_with_index(object_id, fast_index, arg)? {
+                    if self
+                        .try_packet_b_dense_array_index_set_with_index(object_id, fast_index, arg)?
+                    {
                         fast_index += 1;
                         generic_start = offset + 1;
                     } else {
@@ -15381,6 +15389,20 @@ impl Vm {
         }
     }
 
+    #[inline(always)]
+    fn record_packet_d_slot_guard_revalidate_hit(&mut self) {
+        if self.packet_d_fast_path_metrics_enabled() {
+            self.packet_d_fast_path.record_slot_guard_revalidate_hit();
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_d_slot_guard_revalidate_miss(&mut self) {
+        if self.packet_d_fast_path_metrics_enabled() {
+            self.packet_d_fast_path.record_slot_guard_revalidate_miss();
+        }
+    }
+
     fn record_packet_d_global_guard_hit(&mut self) {
         if self.packet_d_fast_path_metrics_enabled() {
             self.packet_d_fast_path.record_global_guard_hit();
@@ -15458,6 +15480,30 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn try_revalidate_packet_d_slot_cache_entry(
+        &mut self,
+        name: &str,
+        slot: u32,
+        entry: PacketDSlotCacheEntry,
+    ) -> Option<BindingId> {
+        if entry.scope_index + 1 == self.scopes.len()
+            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        {
+            self.packet_d_fast_path.remember_slot_cache_entry(
+                slot,
+                entry.scope_index,
+                entry.binding_id,
+                self.packet_d_scope_generation,
+            );
+            self.record_packet_d_slot_guard_revalidate_hit();
+            return Some(entry.binding_id);
+        }
+        self.record_packet_d_slot_guard_revalidate_miss();
+        self.packet_d_fast_path.remove_slot_cache_entry(slot);
+        None
+    }
+
+    #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
         let scope_count = self.scopes.len();
         if scope_count == 0 {
@@ -15488,7 +15534,8 @@ impl Vm {
             if entry.scope_generation == self.packet_d_scope_generation {
                 #[cfg(debug_assertions)]
                 {
-                    if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                    if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+                    {
                         return Some(entry.binding_id);
                     }
                     self.packet_d_fast_path.remove_slot_cache_entry(slot);
@@ -15497,8 +15544,10 @@ impl Vm {
                 {
                     return Some(entry.binding_id);
                 }
-            } else {
-                self.packet_d_fast_path.remove_slot_cache_entry(slot);
+            } else if let Some(binding_id) =
+                self.try_revalidate_packet_d_slot_cache_entry(name, slot, entry)
+            {
+                return Some(binding_id);
             }
         }
         if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
@@ -15528,7 +15577,11 @@ impl Vm {
                 if entry.scope_generation == self.packet_d_scope_generation {
                     #[cfg(debug_assertions)]
                     {
-                        if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
+                        if self.cached_binding_entry_is_valid(
+                            name,
+                            entry.scope_index,
+                            entry.binding_id,
+                        ) {
                             return Some(entry.binding_id);
                         }
                         self.packet_d_fast_path.remove_slot_cache_entry(slot);
@@ -15537,8 +15590,10 @@ impl Vm {
                     {
                         return Some(entry.binding_id);
                     }
-                } else {
-                    self.packet_d_fast_path.remove_slot_cache_entry(slot);
+                } else if let Some(binding_id) =
+                    self.try_revalidate_packet_d_slot_cache_entry(name, slot, entry)
+                {
+                    return Some(binding_id);
                 }
             }
             if let Some((scope_index, binding_id)) = self.resolve_binding_id_slow(name) {
@@ -16061,13 +16116,11 @@ impl Vm {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         }
-        if self.packet_b_prototype_chain_may_have_indexed_property
-            && {
-                let mut key_buf = [0u8; 20];
-                let property = Self::array_index_decimal_key(index, &mut key_buf);
-                self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
-            }
-        {
+        if self.packet_b_prototype_chain_may_have_indexed_property && {
+            let mut key_buf = [0u8; 20];
+            let property = Self::array_index_decimal_key(index, &mut key_buf);
+            self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+        } {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
         }
@@ -16179,13 +16232,11 @@ impl Vm {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
-        if self.packet_b_prototype_chain_may_have_indexed_property
-            && {
-                let mut key_buf = [0u8; 20];
-                let property = Self::array_index_decimal_key(index, &mut key_buf);
-                self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
-            }
-        {
+        if self.packet_b_prototype_chain_may_have_indexed_property && {
+            let mut key_buf = [0u8; 20];
+            let property = Self::array_index_decimal_key(index, &mut key_buf);
+            self.packet_b_prototype_chain_has_indexed_property(prototype, property)?
+        } {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
@@ -20316,7 +20367,9 @@ impl Vm {
                 self.set_array_length_property(object_id, requested_length, false)?;
                 return Ok(value);
             }
-            if let Some(index) = known_array_index.or_else(|| Self::canonical_array_index(&property)) {
+            if let Some(index) =
+                known_array_index.or_else(|| Self::canonical_array_index(&property))
+            {
                 self.set_array_index_property(object_id, index, property, value.clone())?;
                 return Ok(value);
             }

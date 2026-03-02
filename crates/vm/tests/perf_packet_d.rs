@@ -4,7 +4,7 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
-use vm::{perf::HotspotAttribution, PacketDFastPathCounters, Vm};
+use vm::{PacketDFastPathCounters, Vm, perf::HotspotAttribution};
 
 fn run_script(
     source: &str,
@@ -240,5 +240,33 @@ sum;
     assert!(
         hotspot.identifier_resolution > 0,
         "identifier hotspot attribution must remain active with packet-D enabled"
+    );
+}
+
+#[test]
+fn perf_packet_d_slot_revalidation_fallback_parity() {
+    let source = r#"
+let marker = 1;
+let total = marker;
+{
+  let marker = 9;
+  total = total + marker;
+}
+total = total + marker;
+with ({ marker: 20 }) {
+  total = total + marker;
+}
+total;
+"#;
+
+    let (value, counters, hotspot) = assert_packet_d_parity(source);
+    assert_eq!(value, JsValue::Number(31.0));
+    assert!(
+        counters.slot_guard_misses > 0,
+        "fallback path should still emit packet-D slot misses when guard predicates fail"
+    );
+    assert!(
+        hotspot.identifier_resolution > 0,
+        "identifier-resolution hotspot attribution must remain active"
     );
 }
