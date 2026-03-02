@@ -261,6 +261,13 @@ pub struct PacketDSlotCacheEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketGNameCacheEntry {
+    pub scope_index: usize,
+    pub binding_id: BindingId,
+    pub scope_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PacketDFastPathCounters {
     pub slot_guard_hits: u64,
     pub slot_guard_misses: u64,
@@ -350,6 +357,78 @@ impl PacketDFastPathState {
     }
 
     pub fn counters(&self) -> PacketDFastPathCounters {
+        self.counters
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketGFastPathCounters {
+    pub name_guard_hits: u64,
+    pub name_guard_misses: u64,
+    pub name_guard_revalidate_hits: u64,
+    pub name_guard_revalidate_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketGFastPathState {
+    name_cache: HashMap<String, PacketGNameCacheEntry>,
+    counters: PacketGFastPathCounters,
+}
+
+impl PacketGFastPathState {
+    pub fn reset(&mut self) {
+        self.name_cache.clear();
+        self.counters = PacketGFastPathCounters::default();
+    }
+
+    pub fn clear_name_cache(&mut self) {
+        self.name_cache.clear();
+    }
+
+    pub fn remove_name_cache_entry(&mut self, name: &str) {
+        self.name_cache.remove(name);
+    }
+
+    pub fn name_cache_entry(&self, name: &str) -> Option<PacketGNameCacheEntry> {
+        self.name_cache.get(name).copied()
+    }
+
+    pub fn remember_name_cache_entry(
+        &mut self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+        scope_generation: u64,
+    ) {
+        self.name_cache.insert(
+            name.to_string(),
+            PacketGNameCacheEntry {
+                scope_index,
+                binding_id,
+                scope_generation,
+            },
+        );
+    }
+
+    pub fn record_name_guard_hit(&mut self) {
+        self.counters.name_guard_hits = self.counters.name_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_name_guard_miss(&mut self) {
+        self.counters.name_guard_misses = self.counters.name_guard_misses.wrapping_add(1);
+    }
+
+    pub fn record_name_guard_revalidate_hit(&mut self) {
+        self.counters.name_guard_revalidate_hits =
+            self.counters.name_guard_revalidate_hits.wrapping_add(1);
+    }
+
+    pub fn record_name_guard_revalidate_miss(&mut self) {
+        self.counters.name_guard_revalidate_misses =
+            self.counters.name_guard_revalidate_misses.wrapping_add(1);
+    }
+
+    pub fn counters(&self) -> PacketGFastPathCounters {
         self.counters
     }
 }

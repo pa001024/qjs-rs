@@ -6,6 +6,15 @@ const ENV_VM_HOTSPOT_ATTRIBUTION: &str = "QJS_RS_VM_HOTSPOT_ATTRIBUTION";
 pub struct HotspotAttribution {
     pub numeric_ops: u64,
     pub identifier_resolution: u64,
+    pub identifier_resolution_fallback_scans: u64,
+    pub packet_d_slot_guard_hits: u64,
+    pub packet_d_slot_guard_misses: u64,
+    pub packet_d_slot_guard_revalidate_hits: u64,
+    pub packet_d_slot_guard_revalidate_misses: u64,
+    pub packet_g_name_guard_hits: u64,
+    pub packet_g_name_guard_misses: u64,
+    pub packet_g_name_guard_revalidate_hits: u64,
+    pub packet_g_name_guard_revalidate_misses: u64,
     pub array_indexed_property_get: u64,
     pub array_indexed_property_set: u64,
 }
@@ -16,6 +25,33 @@ impl HotspotAttribution {
         self.identifier_resolution = self
             .identifier_resolution
             .saturating_add(other.identifier_resolution);
+        self.identifier_resolution_fallback_scans = self
+            .identifier_resolution_fallback_scans
+            .saturating_add(other.identifier_resolution_fallback_scans);
+        self.packet_d_slot_guard_hits = self
+            .packet_d_slot_guard_hits
+            .saturating_add(other.packet_d_slot_guard_hits);
+        self.packet_d_slot_guard_misses = self
+            .packet_d_slot_guard_misses
+            .saturating_add(other.packet_d_slot_guard_misses);
+        self.packet_d_slot_guard_revalidate_hits = self
+            .packet_d_slot_guard_revalidate_hits
+            .saturating_add(other.packet_d_slot_guard_revalidate_hits);
+        self.packet_d_slot_guard_revalidate_misses = self
+            .packet_d_slot_guard_revalidate_misses
+            .saturating_add(other.packet_d_slot_guard_revalidate_misses);
+        self.packet_g_name_guard_hits = self
+            .packet_g_name_guard_hits
+            .saturating_add(other.packet_g_name_guard_hits);
+        self.packet_g_name_guard_misses = self
+            .packet_g_name_guard_misses
+            .saturating_add(other.packet_g_name_guard_misses);
+        self.packet_g_name_guard_revalidate_hits = self
+            .packet_g_name_guard_revalidate_hits
+            .saturating_add(other.packet_g_name_guard_revalidate_hits);
+        self.packet_g_name_guard_revalidate_misses = self
+            .packet_g_name_guard_revalidate_misses
+            .saturating_add(other.packet_g_name_guard_revalidate_misses);
         self.array_indexed_property_get = self
             .array_indexed_property_get
             .saturating_add(other.array_indexed_property_get);
@@ -67,6 +103,70 @@ impl HotspotAttributionState {
     #[inline(always)]
     pub fn record_identifier_resolution_unchecked(&mut self) {
         self.counters.identifier_resolution = self.counters.identifier_resolution.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_identifier_resolution_fallback_scan_unchecked(&mut self) {
+        self.counters.identifier_resolution_fallback_scans = self
+            .counters
+            .identifier_resolution_fallback_scans
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_d_slot_guard_hit_unchecked(&mut self) {
+        self.counters.packet_d_slot_guard_hits =
+            self.counters.packet_d_slot_guard_hits.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_d_slot_guard_miss_unchecked(&mut self) {
+        self.counters.packet_d_slot_guard_misses =
+            self.counters.packet_d_slot_guard_misses.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_d_slot_guard_revalidate_hit_unchecked(&mut self) {
+        self.counters.packet_d_slot_guard_revalidate_hits = self
+            .counters
+            .packet_d_slot_guard_revalidate_hits
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_d_slot_guard_revalidate_miss_unchecked(&mut self) {
+        self.counters.packet_d_slot_guard_revalidate_misses = self
+            .counters
+            .packet_d_slot_guard_revalidate_misses
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_g_name_guard_hit_unchecked(&mut self) {
+        self.counters.packet_g_name_guard_hits =
+            self.counters.packet_g_name_guard_hits.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_g_name_guard_miss_unchecked(&mut self) {
+        self.counters.packet_g_name_guard_misses =
+            self.counters.packet_g_name_guard_misses.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_g_name_guard_revalidate_hit_unchecked(&mut self) {
+        self.counters.packet_g_name_guard_revalidate_hits = self
+            .counters
+            .packet_g_name_guard_revalidate_hits
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_g_name_guard_revalidate_miss_unchecked(&mut self) {
+        self.counters.packet_g_name_guard_revalidate_misses = self
+            .counters
+            .packet_g_name_guard_revalidate_misses
+            .wrapping_add(1);
     }
 
     #[inline(always)]

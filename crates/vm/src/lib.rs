@@ -9,6 +9,7 @@ pub use fast_path::PacketAFastPathCounters;
 pub use fast_path::PacketBFastPathCounters;
 pub use fast_path::PacketCFastPathCounters;
 pub use fast_path::PacketDFastPathCounters;
+pub use fast_path::PacketGFastPathCounters;
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -34,7 +35,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::external_host::ExternalHostCallbacks;
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
-    PacketCFastPathState, PacketDFastPathState, PacketDSlotCacheEntry,
+    PacketCFastPathState, PacketDFastPathState, PacketDSlotCacheEntry, PacketGFastPathState,
+    PacketGNameCacheEntry,
 };
 use crate::opaque_bindings::OpaqueBindings;
 
@@ -767,6 +769,9 @@ pub struct Vm {
     packet_d_fast_path_metrics_enabled: bool,
     packet_d_scope_generation: u64,
     packet_d_fast_path: PacketDFastPathState,
+    packet_g_fast_path_enabled: bool,
+    packet_g_fast_path_metrics_enabled: bool,
+    packet_g_fast_path: PacketGFastPathState,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
     annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
@@ -867,6 +872,7 @@ impl Vm {
         self.packet_c_fast_path.reset();
         self.packet_d_scope_generation = 0;
         self.packet_d_fast_path.reset();
+        self.packet_g_fast_path.reset();
         self.identifier_slot_metadata_cache.clear();
         self.annex_b_sync_counts_cache.clear();
         self.last_persistent_chunk_key = None;
