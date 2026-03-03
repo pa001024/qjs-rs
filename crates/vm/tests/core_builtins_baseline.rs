@@ -89,3 +89,26 @@ fn core_builtins_string_number_math() {
     let mut vm = Vm::default();
     assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
 }
+
+#[test]
+fn promise_static_surface_baseline() {
+    let script = parse_script(
+        "typeof Promise.resolve === 'function' \
+         && typeof Promise.reject === 'function' \
+         && typeof Promise.all === 'function' \
+         && typeof Promise.any === 'function' \
+         && typeof Promise.race === 'function' \
+         && typeof Promise.allSettled === 'function';",
+    )
+    .expect("script should parse");
+    let chunk = compile_script(&script);
+
+    let mut realm = Realm::default();
+    realm.define_global(
+        "Promise",
+        JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+    );
+
+    let mut vm = Vm::default();
+    assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+}

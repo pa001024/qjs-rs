@@ -4,13 +4,22 @@ mod external_host;
 mod fast_path;
 mod opaque_bindings;
 pub mod perf;
+mod array_builtins;
+mod object_builtins;
+mod promise_builtins;
 mod runtime_limits;
+mod script_runtime;
+mod string_builtins;
 pub use fast_path::PacketAFastPathCounters;
 pub use fast_path::PacketBFastPathCounters;
 pub use fast_path::PacketCFastPathCounters;
 pub use fast_path::PacketDFastPathCounters;
 pub use fast_path::PacketGFastPathCounters;
 pub use fast_path::PacketHFastPathCounters;
+pub use script_runtime::{
+    ScriptHostCallbackRegistration, ScriptRunOutput, ScriptRuntime, ScriptRuntimeError,
+    normalize_script_path, script_result_text,
+};
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -8858,15 +8867,7 @@ impl Vm {
             }
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => self.execute_array_constructor(&args),
-            NativeFunction::ArrayIsArray => {
-                let is_array = match args.first() {
-                    Some(JsValue::Object(object_id)) => self
-                        .has_object_marker(*object_id, ARRAY_OBJECT_MARKER_KEY)
-                        .unwrap_or(false),
-                    _ => false,
-                };
-                Ok(JsValue::Bool(is_array))
-            }
+            NativeFunction::ArrayIsArray => Ok(self.execute_array_is_array(&args)),
             NativeFunction::ObjectKeys => self.execute_object_keys(&args),
             NativeFunction::ObjectEntries => self.execute_object_entries(&args, realm),
             NativeFunction::ObjectValues => self.execute_object_values(&args, realm),
@@ -8937,6 +8938,16 @@ impl Vm {
             }
             NativeFunction::PromiseConstructor => {
                 self.execute_promise_constructor(&args, realm, caller_strict)
+            }
+            NativeFunction::PromiseResolve => {
+                self.execute_promise_resolve(&args, realm, caller_strict)
+            }
+            NativeFunction::PromiseReject => self.execute_promise_reject(&args),
+            NativeFunction::PromiseAll => self.execute_promise_all(&args, realm, caller_strict),
+            NativeFunction::PromiseAny => self.execute_promise_any(&args, realm, caller_strict),
+            NativeFunction::PromiseRace => self.execute_promise_race(&args, realm, caller_strict),
+            NativeFunction::PromiseAllSettled => {
+                self.execute_promise_all_settled(&args, realm, caller_strict)
             }
             NativeFunction::PromiseThen => self.execute_promise_then(&args, realm, caller_strict),
             NativeFunction::PromiseCatch => self.execute_promise_catch(&args, realm, caller_strict),
@@ -9162,26 +9173,10 @@ impl Vm {
                 Ok(JsValue::Number(self.to_number(&value).tanh()))
             }
             NativeFunction::StringConstructor => {
-                let value = match args.first() {
-                    None => String::new(),
-                    Some(value) => {
-                        self.coerce_to_string_runtime(value.clone(), realm, caller_strict)?
-                    }
-                };
-                Ok(JsValue::String(value))
+                self.execute_string_constructor(&args, realm, caller_strict)
             }
             NativeFunction::StringFromCharCode => {
-                let mut output = String::new();
-                for value in args {
-                    let number = self.coerce_number_runtime(value, realm, caller_strict)?;
-                    let code = Self::to_uint32_number(number) & 0xFFFF;
-                    if let Some(ch) = char::from_u32(code) {
-                        output.push(ch);
-                    } else {
-                        output.push('\u{FFFD}');
-                    }
-                }
-                Ok(JsValue::String(output))
+                self.execute_string_from_char_code(&args, realm, caller_strict)
             }
             NativeFunction::SymbolConstructor => {
                 let description = match args.first() {
@@ -11287,68 +11282,33 @@ impl Vm {
     }
 
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
-        match args.first().cloned() {
-            None | Some(JsValue::Null) | Some(JsValue::Undefined) => self.create_object_value(),
-            Some(
-                value @ (JsValue::Object(_)
-                | JsValue::Function(_)
-                | JsValue::NativeFunction(_)
-                | JsValue::HostFunction(_)),
-            ) => value,
-            Some(primitive @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_))) => {
-                self.box_primitive_receiver(primitive)
-            }
-            Some(_) => self.create_object_value(),
-        }
+        object_builtins::execute_object_constructor(self, args)
+    }
+
+    fn execute_array_is_array(&self, args: &[JsValue]) -> JsValue {
+        array_builtins::execute_array_is_array(self, args)
     }
 
     fn execute_array_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let array = self.create_array_value();
-        let object_id = match array {
-            JsValue::Object(id) => id,
-            _ => unreachable!(),
-        };
+        array_builtins::execute_array_constructor(self, args)
+    }
 
-        let object = self
-            .objects
-            .get_mut(&object_id)
-            .expect("array object should exist");
+    fn execute_string_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        string_builtins::execute_string_constructor(self, args, realm, caller_strict)
+    }
 
-        if args.len() == 1 {
-            match args.first() {
-                Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
-                    let int_length = length.floor();
-                    if int_length == *length && int_length <= u32::MAX as f64 {
-                        Self::set_object_array_length(object, int_length as usize);
-                        return Ok(JsValue::Object(object_id));
-                    }
-                    return Err(VmError::UncaughtException(self.create_error_exception(
-                        NativeFunction::RangeErrorConstructor,
-                        "RangeError",
-                        "invalid array length".to_string(),
-                    )));
-                }
-                Some(JsValue::Number(_)) => {
-                    return Err(VmError::UncaughtException(self.create_error_exception(
-                        NativeFunction::RangeErrorConstructor,
-                        "RangeError",
-                        "invalid array length".to_string(),
-                    )));
-                }
-                Some(value) => {
-                    object.properties.insert("0".to_string(), value.clone());
-                    Self::set_object_array_length(object, 1);
-                    return Ok(JsValue::Object(object_id));
-                }
-                None => return Ok(JsValue::Object(object_id)),
-            }
-        }
-
-        for (index, value) in args.iter().enumerate() {
-            object.properties.insert(index.to_string(), value.clone());
-        }
-        Self::set_object_array_length(object, args.len());
-        Ok(JsValue::Object(object_id))
+    fn execute_string_from_char_code(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        string_builtins::execute_string_from_char_code(self, args, realm, caller_strict)
     }
 
     fn execute_array_buffer_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -11874,6 +11834,55 @@ impl Vm {
             caller_strict,
         )?;
         Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_promise_resolve(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_resolve(self, args, realm, caller_strict)
+    }
+
+    fn execute_promise_reject(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_reject(self, args)
+    }
+
+    fn execute_promise_all(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_all(self, args, realm, caller_strict)
+    }
+
+    fn execute_promise_any(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_any(self, args, realm, caller_strict)
+    }
+
+    fn execute_promise_race(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_race(self, args, realm, caller_strict)
+    }
+
+    fn execute_promise_all_settled(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_all_settled(self, args, realm, caller_strict)
     }
 
     fn execute_promise_then(
@@ -12439,29 +12448,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let (prototype, prototype_value) =
-            self.parse_prototype_value(args.first().cloned().unwrap_or(JsValue::Undefined))?;
-
-        let object = self.create_object_value();
-        let object_id = match object {
-            JsValue::Object(id) => id,
-            _ => unreachable!(),
-        };
-        let target = self
-            .objects
-            .get_mut(&object_id)
-            .ok_or(VmError::UnknownObject(object_id))?;
-        target.prototype = prototype;
-        target.prototype_value = prototype_value;
-        if !matches!(args.get(1), None | Some(JsValue::Undefined)) {
-            let descriptors = self.coerce_object_for_object_builtins(
-                args.get(1).cloned().unwrap_or(JsValue::Undefined),
-                "Object.create properties must be coercible",
-            )?;
-            let define_args = [JsValue::Object(object_id), descriptors];
-            let _ = self.execute_object_define_properties(&define_args, realm)?;
-        }
-        Ok(JsValue::Object(object_id))
+        object_builtins::execute_object_create(self, args, realm)
     }
 
     fn execute_object_assign(
@@ -12469,28 +12456,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.coerce_object_for_object_builtins(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-            "Object.assign target must be coercible",
-        )?;
-
-        for source in args.iter().skip(1).cloned() {
-            if matches!(source, JsValue::Null | JsValue::Undefined) {
-                continue;
-            }
-            let source_object = self.coerce_object_for_object_builtins(
-                source,
-                "Object.assign source must be coercible",
-            )?;
-            let keys = self.collect_own_property_keys(&source_object, true)?;
-
-            for key in keys {
-                let value = self.get_property_from_receiver(source_object.clone(), &key, realm)?;
-                self.ensure_assign_target_writable(&target, &key)?;
-                let _ = self.set_property_on_receiver(target.clone(), key, value, realm)?;
-            }
-        }
-        Ok(target)
+        object_builtins::execute_object_assign(self, args, realm)
     }
 
     fn coerce_object_for_object_builtins(
@@ -13698,22 +13664,7 @@ impl Vm {
     }
 
     fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        let target = self.coerce_object_for_object_builtins(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-            "Object.keys target must be object",
-        )?;
-        let snapshot = self.collect_own_property_keys(&target, false)?;
-        let mut keys = Vec::new();
-        for key in snapshot {
-            if !self.has_own_property(&target, &key)? {
-                continue;
-            }
-            if !self.own_property_is_enumerable(&target, &key)? {
-                continue;
-            }
-            keys.push(key);
-        }
-        self.create_array_from_string_keys(keys)
+        object_builtins::execute_object_keys(self, args)
     }
 
     fn execute_object_entries(
@@ -13721,24 +13672,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.coerce_object_for_object_builtins(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-            "Object.entries target must be object",
-        )?;
-        let snapshot = self.collect_own_property_keys(&target, false)?;
-        let mut entries = Vec::with_capacity(snapshot.len());
-        for key in snapshot {
-            if !self.has_own_property(&target, &key)? {
-                continue;
-            }
-            if !self.own_property_is_enumerable(&target, &key)? {
-                continue;
-            }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let entry = self.create_array_from_values(vec![JsValue::String(key), value])?;
-            entries.push(entry);
-        }
-        self.create_array_from_values(entries)
+        object_builtins::execute_object_entries(self, args, realm)
     }
 
     fn execute_object_values(
@@ -13746,35 +13680,14 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = self.coerce_object_for_object_builtins(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-            "Object.values target must be object",
-        )?;
-        let snapshot = self.collect_own_property_keys(&target, false)?;
-        let mut values = Vec::with_capacity(snapshot.len());
-        for key in snapshot {
-            if !self.has_own_property(&target, &key)? {
-                continue;
-            }
-            if !self.own_property_is_enumerable(&target, &key)? {
-                continue;
-            }
-            values.push(self.get_property_from_receiver(target.clone(), &key, realm)?);
-        }
-        self.create_array_from_values(values)
+        object_builtins::execute_object_values(self, args, realm)
     }
 
     fn execute_object_get_own_property_names(
         &mut self,
         args: &[JsValue],
     ) -> Result<JsValue, VmError> {
-        let target = self.coerce_object_for_object_builtins(
-            args.first().cloned().unwrap_or(JsValue::Undefined),
-            "Object.getOwnPropertyNames target must be object",
-        )?;
-        let mut keys = self.collect_own_property_keys(&target, false)?;
-        keys.retain(|key| key != BOXED_PRIMITIVE_VALUE_KEY);
-        self.create_array_from_string_keys(keys)
+        object_builtins::execute_object_get_own_property_names(self, args)
     }
 
     fn execute_object_define_properties(
@@ -13782,30 +13695,7 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
-        if !Self::is_object_like_value(&target) {
-            return Err(VmError::TypeError(
-                "Object.defineProperties target must be object",
-            ));
-        }
-        let descriptors = self.coerce_object_for_object_builtins(
-            args.get(1).cloned().unwrap_or(JsValue::Undefined),
-            "Object.defineProperties descriptors must be object",
-        )?;
-        let descriptor_keys = self.collect_own_property_keys(&descriptors, true)?;
-        let mut normalized_descriptors = Vec::with_capacity(descriptor_keys.len());
-        for property_name in descriptor_keys {
-            let descriptor =
-                self.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
-            let parsed = self.parse_property_descriptor(descriptor, realm)?;
-            let normalized = self.materialize_property_descriptor(&parsed);
-            normalized_descriptors.push((property_name, normalized));
-        }
-        for (property_name, descriptor) in normalized_descriptors {
-            let define_args = [target.clone(), JsValue::String(property_name), descriptor];
-            let _ = self.execute_object_define_property(&define_args, realm)?;
-        }
-        Ok(target)
+        object_builtins::execute_object_define_properties(self, args, realm)
     }
 
     fn execute_object_for_in_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -20542,7 +20432,7 @@ impl Vm {
         property: &str,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        if property == "hasOwnProperty" {
+        if matches!(property, "hasOwnProperty" | "isPrototypeOf") {
             if self.object_prototype_id == Some(object_id) {
                 if let Some(value) = self
                     .objects
@@ -20553,28 +20443,16 @@ impl Vm {
                     return Ok(value);
                 }
             }
-            return Ok(
-                self.create_host_function_value(HostFunction::HasOwnProperty {
+            let host_function = if property == "hasOwnProperty" {
+                HostFunction::HasOwnProperty {
                     target: JsValue::Object(object_id),
-                }),
-            );
-        }
-        if property == "isPrototypeOf" {
-            if self.object_prototype_id == Some(object_id) {
-                if let Some(value) = self
-                    .objects
-                    .get(&object_id)
-                    .and_then(|object| object.properties.get(property))
-                    .cloned()
-                {
-                    return Ok(value);
                 }
-            }
-            return Ok(
-                self.create_host_function_value(HostFunction::IsPrototypeOf {
+            } else {
+                HostFunction::IsPrototypeOf {
                     target: JsValue::Object(object_id),
-                }),
-            );
+                }
+            };
+            return Ok(self.create_host_function_value(host_function));
         }
         if let Some(value) = self.get_object_own_property_with_receiver(
             object_id,
@@ -20584,10 +20462,6 @@ impl Vm {
         )? {
             return Ok(value);
         }
-        let is_array_prototype = self.array_prototype_id == Some(object_id);
-        let is_array_like = self
-            .is_array_length_tracking_object(object_id)
-            .unwrap_or(false);
         if let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) {
             if property == "length" {
                 return Ok(JsValue::Number(Self::utf16_code_unit_length(&value) as f64));
@@ -20600,80 +20474,12 @@ impl Vm {
                     .unwrap_or(JsValue::Undefined));
             }
         }
-        if property == "push" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayPushThis));
-        }
-        if property == "pop" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayPopThis));
-        }
-        if property == "shift" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayShiftThis));
-        }
-        if property == "unshift" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayUnshiftThis));
-        }
-        if property == "concat" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayConcatThis));
-        }
-        if property == "every" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayEveryThis));
-        }
-        if property == "some" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySomeThis));
-        }
-        if property == "filter" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayFilterThis));
-        }
-        if property == "map" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayMapThis));
-        }
-        if property == "fill" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
-        }
-        if property == "find" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayFindThis));
-        }
-        if property == "findIndex" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayFindIndexThis));
-        }
-        if property == "copyWithin" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayCopyWithinThis));
-        }
-        if property == "forEach" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayForEachThis));
-        }
-        if property == "reduce" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayReduceThis));
-        }
-        if property == "reduceRight" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayReduceRightThis));
-        }
-        if property == "join" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayJoinThis));
-        }
-        if property == "splice" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySpliceThis));
-        }
-        if property == "slice" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySliceThis));
-        }
-        if property == "reverse" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayReverseThis));
-        }
-        if property == "sort" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArraySortThis));
-        }
-        if property == "keys" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayKeysThis));
-        }
-        if property == "entries" && is_array_like && !is_array_prototype {
-            return Ok(self.create_host_function_value(HostFunction::ArrayEntriesThis));
-        }
-        if (property == "values" || property == "Symbol.iterator")
-            && is_array_like
-            && !is_array_prototype
-        {
-            return Ok(self.create_host_function_value(HostFunction::ArrayValuesThis));
+        if let Some(host_function) = Self::array_like_method_host_function(property) {
+            let is_array_prototype = self.array_prototype_id == Some(object_id);
+            if !is_array_prototype && self.is_array_length_tracking_object(object_id).unwrap_or(false)
+            {
+                return Ok(self.create_host_function_value(host_function));
+            }
         }
         let receiver = JsValue::Object(object_id);
         let mut current_id = Some(object_id);
@@ -20724,6 +20530,36 @@ impl Vm {
             current_id = None;
         }
         Ok(JsValue::Undefined)
+    }
+
+    fn array_like_method_host_function(property: &str) -> Option<HostFunction> {
+        match property {
+            "push" => Some(HostFunction::ArrayPushThis),
+            "pop" => Some(HostFunction::ArrayPopThis),
+            "shift" => Some(HostFunction::ArrayShiftThis),
+            "unshift" => Some(HostFunction::ArrayUnshiftThis),
+            "concat" => Some(HostFunction::ArrayConcatThis),
+            "every" => Some(HostFunction::ArrayEveryThis),
+            "some" => Some(HostFunction::ArraySomeThis),
+            "filter" => Some(HostFunction::ArrayFilterThis),
+            "map" => Some(HostFunction::ArrayMapThis),
+            "fill" => Some(HostFunction::ArrayFillThis),
+            "find" => Some(HostFunction::ArrayFindThis),
+            "findIndex" => Some(HostFunction::ArrayFindIndexThis),
+            "copyWithin" => Some(HostFunction::ArrayCopyWithinThis),
+            "forEach" => Some(HostFunction::ArrayForEachThis),
+            "reduce" => Some(HostFunction::ArrayReduceThis),
+            "reduceRight" => Some(HostFunction::ArrayReduceRightThis),
+            "join" => Some(HostFunction::ArrayJoinThis),
+            "splice" => Some(HostFunction::ArraySpliceThis),
+            "slice" => Some(HostFunction::ArraySliceThis),
+            "reverse" => Some(HostFunction::ArrayReverseThis),
+            "sort" => Some(HostFunction::ArraySortThis),
+            "keys" => Some(HostFunction::ArrayKeysThis),
+            "entries" => Some(HostFunction::ArrayEntriesThis),
+            "values" | "Symbol.iterator" => Some(HostFunction::ArrayValuesThis),
+            _ => None,
+        }
     }
 
     fn get_object_own_property_with_receiver(
@@ -21632,6 +21468,12 @@ impl Vm {
                 | (NativeFunction::WeakMapConstructor, "prototype")
                 | (NativeFunction::WeakSetConstructor, "prototype")
                 | (NativeFunction::PromiseConstructor, "prototype")
+                | (NativeFunction::PromiseConstructor, "resolve")
+                | (NativeFunction::PromiseConstructor, "reject")
+                | (NativeFunction::PromiseConstructor, "all")
+                | (NativeFunction::PromiseConstructor, "any")
+                | (NativeFunction::PromiseConstructor, "race")
+                | (NativeFunction::PromiseConstructor, "allSettled")
                 | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
                 | (NativeFunction::SymbolConstructor, "prototype")
@@ -23034,6 +22876,12 @@ impl Vm {
             NativeFunction::WeakSetConstructor => "WeakSet",
             NativeFunction::ProxyConstructor => "Proxy",
             NativeFunction::PromiseConstructor => "Promise",
+            NativeFunction::PromiseResolve => "resolve",
+            NativeFunction::PromiseReject => "reject",
+            NativeFunction::PromiseAll => "all",
+            NativeFunction::PromiseAny => "any",
+            NativeFunction::PromiseRace => "race",
+            NativeFunction::PromiseAllSettled => "allSettled",
             NativeFunction::PromiseThen => "then",
             NativeFunction::PromiseCatch => "catch",
             NativeFunction::PromiseFinally => "finally",
@@ -23283,6 +23131,24 @@ impl Vm {
             (NativeFunction::WeakMapConstructor, "prototype") => self.weak_map_prototype_value(),
             (NativeFunction::WeakSetConstructor, "prototype") => self.weak_set_prototype_value(),
             (NativeFunction::PromiseConstructor, "prototype") => self.promise_prototype_value(),
+            (NativeFunction::PromiseConstructor, "resolve") => {
+                JsValue::NativeFunction(NativeFunction::PromiseResolve)
+            }
+            (NativeFunction::PromiseConstructor, "reject") => {
+                JsValue::NativeFunction(NativeFunction::PromiseReject)
+            }
+            (NativeFunction::PromiseConstructor, "all") => {
+                JsValue::NativeFunction(NativeFunction::PromiseAll)
+            }
+            (NativeFunction::PromiseConstructor, "any") => {
+                JsValue::NativeFunction(NativeFunction::PromiseAny)
+            }
+            (NativeFunction::PromiseConstructor, "race") => {
+                JsValue::NativeFunction(NativeFunction::PromiseRace)
+            }
+            (NativeFunction::PromiseConstructor, "allSettled") => {
+                JsValue::NativeFunction(NativeFunction::PromiseAllSettled)
+            }
             (NativeFunction::Uint8ArrayConstructor, "prototype") => {
                 self.uint8_array_prototype_value()
             }
