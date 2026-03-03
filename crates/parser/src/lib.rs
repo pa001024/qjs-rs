@@ -197,13 +197,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
             }
             if let Some(default_expr) = export_body.strip_prefix("default ") {
                 let default_expr = default_expr.trim();
-                if !default_expr.ends_with(';') {
-                    return Err(ParseError {
-                        message: "module declaration must end with ';'".to_string(),
-                        position: 0,
-                    });
-                }
-                let expr = default_expr[..default_expr.len() - 1].trim();
+                let expr = trim_module_declaration_terminator(default_expr);
                 if expr.is_empty() {
                     return Err(ParseError {
                         message: "export default requires an expression".to_string(),
@@ -240,7 +234,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                     },
                 )?;
             }
-            transformed_lines.push(export_body.to_string());
+            transformed_lines.push(ensure_module_statement_terminated(export_body));
             continue;
         }
 
@@ -268,13 +262,13 @@ fn parse_module_import_declaration(
     line: &str,
 ) -> Result<ParsedModuleImportDeclaration, ParseError> {
     let mut rest = line.strip_prefix("import ").expect("prefix checked").trim();
-    if !rest.ends_with(';') {
+    rest = trim_module_declaration_terminator(rest);
+    if rest.is_empty() {
         return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
+            message: "unsupported import declaration form".to_string(),
             position: 0,
         });
     }
-    rest = rest[..rest.len() - 1].trim();
 
     if rest.starts_with('\'') || rest.starts_with('"') {
         return Ok(ParsedModuleImportDeclaration {
@@ -403,13 +397,7 @@ fn parse_named_import_bindings(
 }
 
 fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseError> {
-    if !clause.ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = clause[..clause.len() - 1].trim();
+    let body = trim_module_declaration_terminator(clause);
     let inner = parse_braced_clause_inner(body)?;
     if inner.is_empty() {
         return Ok(Vec::new());
@@ -443,13 +431,7 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
 fn parse_named_reexport_clause(
     clause: &str,
 ) -> Result<Option<(String, Vec<(String, String)>)>, ParseError> {
-    if !clause.ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = clause[..clause.len() - 1].trim();
+    let body = trim_module_declaration_terminator(clause);
     let Some(closing_brace) = body.rfind('}') else {
         return Err(ParseError {
             message: "unsupported export re-export form".to_string(),
@@ -503,13 +485,7 @@ enum ExportStarClause {
 }
 
 fn parse_export_star_clause(clause: &str) -> Result<Option<ExportStarClause>, ParseError> {
-    if !clause.ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = clause[..clause.len() - 1].trim();
+    let body = trim_module_declaration_terminator(clause);
     let Some(after_star) = body.strip_prefix('*') else {
         return Ok(None);
     };
@@ -607,14 +583,7 @@ fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, Pa
 }
 
 fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, ParseError> {
-    if !declarators.trim_end().ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = declarators.trim_end();
-    let body = body[..body.len() - 1].trim();
+    let body = trim_module_declaration_terminator(declarators);
     if body.is_empty() {
         return Err(ParseError {
             message: "unsupported export declaration form".to_string(),
@@ -647,6 +616,15 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
         });
     }
     Ok(names)
+}
+
+fn trim_module_declaration_terminator(source: &str) -> &str {
+    let source = source.trim_end();
+    if let Some(stripped) = source.strip_suffix(';') {
+        stripped.trim_end()
+    } else {
+        source
+    }
 }
 
 fn collect_ts_type_only_declared_bindings(line: &str) -> Vec<String> {
@@ -794,6 +772,15 @@ fn render_module_export_snapshot_statement(exports: &[ModuleExport]) -> String {
     }
     rendered.push_str("});");
     rendered
+}
+
+fn ensure_module_statement_terminated(statement: &str) -> String {
+    let statement = statement.trim_end();
+    if statement.ends_with(';') {
+        statement.to_string()
+    } else {
+        format!("{statement};")
+    }
 }
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
@@ -8748,6 +8735,21 @@ export default value;\n";
     #[test]
     fn module_parse_import_with_extra_from_spacing_baseline() {
         let source = "import { value }   from   './dep.js';\nexport const answer = value;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_semicolonless_import_export_baseline() {
+        let source = "import { value } from './dep.js'\nexport const answer = value\n";
         let parsed = parse_module(source).expect("module parsing should succeed");
         assert_eq!(parsed.imports.len(), 1);
         assert_eq!(parsed.imports[0].specifier, "./dep.js");

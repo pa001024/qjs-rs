@@ -145,3 +145,19 @@ fn module_parse_import_with_extra_from_spacing_baseline() {
         local: "answer".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_semicolonless_import_export_baseline() {
+    let source = "import { value } from './dep.js'\nexport const answer = value\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[0].local, "value");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
