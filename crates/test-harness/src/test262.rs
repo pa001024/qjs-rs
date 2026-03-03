@@ -197,27 +197,21 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
     source.contains("$262")
 }
 
-const SUPPORTED_TEST262_FEATURES: &[&str] = &[
-    "arrow-function",
-    "Map",
-    "Promise",
-    "Reflect.construct",
-    "Set",
-    "Symbol",
-    "Symbol.iterator",
-    "Symbol.species",
-    "Symbol.toPrimitive",
-    "Symbol.toStringTag",
-    "WeakMap",
-    "WeakSet",
+const UNSUPPORTED_TEST262_FEATURES: &[&str] = &[
+    "BigInt",
+    "FinalizationRegistry",
+    "ShadowRealm",
+    "SharedArrayBuffer",
+    "Temporal",
+    "WeakRef",
+    "Atomics",
 ];
 
 fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
-    frontmatter.features.iter().any(|feature| {
-        !SUPPORTED_TEST262_FEATURES
-            .iter()
-            .any(|supported| supported == feature)
-    })
+    frontmatter
+        .features
+        .iter()
+        .any(|feature| UNSUPPORTED_TEST262_FEATURES.iter().any(|blocked| blocked == feature))
 }
 
 fn resolve_suite_root(root: &Path) -> PathBuf {
