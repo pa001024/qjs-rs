@@ -415,28 +415,24 @@ fn module_cycle_and_failure_replay() {
 }
 
 #[test]
-fn module_error_replay_determinism() {
+fn module_namespace_import_replay_determinism() {
     let mut host = MemoryModuleHost::default()
-        .with_module("ns.js", "export const value = 1;\n")
+        .with_module("ns.js", "export const value = 1;\nexport default 7;\n")
         .with_module(
             "entry.js",
-            "import * as ns from './ns.js';\nexport const value = 1;\n",
+            "import * as ns from './ns.js';\nexport const value = ns.value;\nexport const defaultValue = ns.default;\n",
         );
     let mut vm = Vm::default();
-    let first_err = vm
+    let first = vm
         .evaluate_module_entry("entry.js", &mut host)
-        .expect_err("unsupported namespace import execution path should fail");
-    let second_err = vm
+        .expect("namespace import should evaluate");
+    let second = vm
         .evaluate_module_entry("entry.js", &mut host)
-        .expect_err("failed module should replay deterministic error");
-    assert_eq!(
-        first_err,
-        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
-    );
-    assert_eq!(
-        second_err,
-        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
-    );
+        .expect("cached namespace import should replay deterministically");
+    assert_eq!(load_number_export(&first, "value"), 1.0);
+    assert_eq!(load_number_export(&first, "defaultValue"), 7.0);
+    assert_eq!(load_number_export(&second, "value"), 1.0);
+    assert_eq!(load_number_export(&second, "defaultValue"), 7.0);
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("ns.js"), 1);
 }

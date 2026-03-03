@@ -170,27 +170,23 @@ fn cycle_and_failure_paths_are_deterministic() {
     assert_eq!(first_err, VmError::TypeError("ModuleLifecycle:LoadFailed"));
     assert_eq!(second_err, VmError::TypeError("ModuleLifecycle:LoadFailed"));
 
-    let mut evaluate_fail_host = HarnessModuleHost::default()
-        .with_module("ns.js", "export const value = 1;\n")
+    let mut namespace_host = HarnessModuleHost::default()
+        .with_module("ns.js", "export const value = 1;\nexport default 7;\n")
         .with_module(
             "entry.js",
-            "import * as ns from './ns.js';\nexport const value = 1;\n",
+            "import * as ns from './ns.js';\nexport const value = ns.value;\nexport const defaultValue = ns.default;\n",
         );
     let mut vm = Vm::default();
-    let first_eval_err = vm
-        .evaluate_module_entry("entry.js", &mut evaluate_fail_host)
-        .expect_err("unsupported namespace import should fail deterministically");
-    let second_eval_err = vm
-        .evaluate_module_entry("entry.js", &mut evaluate_fail_host)
-        .expect_err("failed module should replay evaluate failure token");
-    assert_eq!(
-        first_eval_err,
-        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
-    );
-    assert_eq!(
-        second_eval_err,
-        VmError::TypeError("ModuleLifecycle:EvaluateFailed")
-    );
-    assert_eq!(evaluate_fail_host.load_count("entry.js"), 1);
-    assert_eq!(evaluate_fail_host.load_count("ns.js"), 1);
+    let first_namespace = vm
+        .evaluate_module_entry("entry.js", &mut namespace_host)
+        .expect("namespace import should evaluate");
+    let second_namespace = vm
+        .evaluate_module_entry("entry.js", &mut namespace_host)
+        .expect("cached namespace import should replay deterministically");
+    assert_eq!(expect_number(&first_namespace, "value"), 1.0);
+    assert_eq!(expect_number(&first_namespace, "defaultValue"), 7.0);
+    assert_eq!(expect_number(&second_namespace, "value"), 1.0);
+    assert_eq!(expect_number(&second_namespace, "defaultValue"), 7.0);
+    assert_eq!(namespace_host.load_count("entry.js"), 1);
+    assert_eq!(namespace_host.load_count("ns.js"), 1);
 }

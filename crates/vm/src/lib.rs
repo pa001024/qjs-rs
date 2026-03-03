@@ -1955,23 +1955,26 @@ impl Vm {
             let dependency_key = resolved_dependencies
                 .get(index)
                 .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
-            let dependency = self
+            let dependency_exports = self
                 .module_records
                 .get(dependency_key)
-                .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?;
+                .ok_or(VmError::TypeError(TYPE_ERROR_MODULE_HOST_CONTRACT))?
+                .exports
+                .clone();
             for binding in &import.bindings {
                 if binding.imported == "*" {
-                    return Err(VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED));
+                    let namespace = self.create_module_namespace_value(&dependency_exports);
+                    realm.define_global(&binding.local, namespace);
+                } else {
+                    let imported_value = dependency_exports
+                        .get(&binding.imported)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined);
+                    realm.define_global(
+                        &binding.local,
+                        Self::sanitize_module_value_for_exchange(imported_value),
+                    );
                 }
-                let imported_value = dependency
-                    .exports
-                    .get(&binding.imported)
-                    .cloned()
-                    .unwrap_or(JsValue::Undefined);
-                realm.define_global(
-                    &binding.local,
-                    Self::sanitize_module_value_for_exchange(imported_value),
-                );
             }
         }
 
@@ -2077,6 +2080,23 @@ impl Vm {
             | JsValue::Undefined => value,
             _ => JsValue::Undefined,
         }
+    }
+
+    fn create_module_namespace_value(&mut self, exports: &BTreeMap<String, JsValue>) -> JsValue {
+        let namespace = self.create_object_value();
+        let JsValue::Object(namespace_id) = namespace.clone() else {
+            return JsValue::Undefined;
+        };
+        let Some(namespace_object) = self.objects.get_mut(&namespace_id) else {
+            return JsValue::Undefined;
+        };
+        for (name, value) in exports {
+            namespace_object.properties.insert(
+                name.clone(),
+                Self::sanitize_module_value_for_exchange(value.clone()),
+            );
+        }
+        namespace
     }
 
     fn module_cached_error(&self, canonical_key: &str, fallback: &'static str) -> VmError {
