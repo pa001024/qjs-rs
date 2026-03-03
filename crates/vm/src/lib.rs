@@ -3471,13 +3471,18 @@ impl Vm {
                     if self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
                     }
+                    let exited_scope_index = self.scopes.len();
                     if !exited_scope.borrow().is_empty() {
                         let removed_names: Vec<String> =
                             exited_scope.borrow().keys().cloned().collect();
                         for name in removed_names {
-                            self.invalidate_binding_fast_path_cache_for_name(&name);
+                            self.clear_identifier_name_fast_path_entries(&name);
                         }
                     }
+                    self.packet_d_fast_path
+                        .remove_slot_cache_entries_for_scope(exited_scope_index);
+                    self.packet_h_fast_path
+                        .remove_slot_cache_entries_for_scope(exited_scope_index);
                 }
                 Opcode::EnterParamInitScope => {
                     if self.scopes.len() < 2 {
