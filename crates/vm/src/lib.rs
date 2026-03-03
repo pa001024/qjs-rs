@@ -1794,6 +1794,14 @@ impl Vm {
         self.promise_job_queue.jobs.len()
     }
 
+    pub fn global_property(&self, name: &str) -> Option<JsValue> {
+        let global_object_id = self.global_object_id?;
+        self.objects
+            .get(&global_object_id)
+            .and_then(|object| object.properties.get(name))
+            .cloned()
+    }
+
     pub fn enqueue_host_promise_job(
         &mut self,
         value: JsValue,

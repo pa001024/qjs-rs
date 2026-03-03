@@ -9,7 +9,7 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::Realm;
-use vm::{GcStats, ModuleHost, ModuleHostError, PromiseJobDrainStopReason, Vm};
+use vm::{GcStats, ModuleHost, ModuleHostError, PromiseJobDrainStopReason, Vm, VmError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativePhase {
@@ -208,10 +208,11 @@ const UNSUPPORTED_TEST262_FEATURES: &[&str] = &[
 ];
 
 fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
-    frontmatter
-        .features
-        .iter()
-        .any(|feature| UNSUPPORTED_TEST262_FEATURES.iter().any(|blocked| blocked == feature))
+    frontmatter.features.iter().any(|feature| {
+        UNSUPPORTED_TEST262_FEATURES
+            .iter()
+            .any(|blocked| blocked == feature)
+    })
 }
 
 fn resolve_suite_root(root: &Path) -> PathBuf {
@@ -283,7 +284,7 @@ if (typeof $262 === "undefined") {
   var $262 = {};
 }
 if (typeof $262.global !== "object") {
-  $262.global = this;
+  $262.global = globalThis;
 }
 if (typeof $262.evalScript !== "function") {
   $262.evalScript = function (source) {
@@ -333,20 +334,20 @@ if (typeof $262.destroy !== "function") {
 "#;
 
 const ASYNC_DONE_PRELUDE: &str = r#"
-var __qjs_test262_done_state__ = 0;
-var __qjs_test262_prev_done__ = (typeof $DONE === "function") ? $DONE : null;
-$DONE = function (error) {
-  if (__qjs_test262_done_state__ !== 0) {
+globalThis.__qjs_test262_done_state__ = 0;
+var __qjs_test262_prev_done__ = (typeof globalThis.$DONE === "function") ? globalThis.$DONE : null;
+globalThis.$DONE = function (error) {
+  if (globalThis.__qjs_test262_done_state__ !== 0) {
     throw new Error("$DONE called multiple times");
   }
   if (error === undefined) {
-    __qjs_test262_done_state__ = 1;
+    globalThis.__qjs_test262_done_state__ = 1;
     if (__qjs_test262_prev_done__ !== null) {
       return __qjs_test262_prev_done__();
     }
     return;
   }
-  __qjs_test262_done_state__ = 2;
+  globalThis.__qjs_test262_done_state__ = 2;
   if (__qjs_test262_prev_done__ !== null) {
     __qjs_test262_prev_done__(error);
   }
@@ -539,7 +540,7 @@ fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcSt
                     ExecutionOutcome::Pass
                 }
             }
-            Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+            Err(err) => classify_module_error(err),
         }
     } else {
         if trace_stages {
@@ -577,6 +578,17 @@ fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcSt
         }
     };
     (outcome, vm.gc_stats())
+}
+
+fn classify_module_error(err: VmError) -> ExecutionOutcome {
+    match err {
+        VmError::TypeError(
+            "ModuleLifecycle:ResolveFailed"
+            | "ModuleLifecycle:LoadFailed"
+            | "ModuleLifecycle:ParseFailed",
+        ) => ExecutionOutcome::ParseFail(format!("{err:?}")),
+        _ => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+    }
 }
 
 struct CaseExecutionRequest {
@@ -670,13 +682,8 @@ fn drain_async_jobs_and_assert_done(vm: &mut Vm, realm: &Realm) -> Result<(), St
             report.processed, report.remaining
         ));
     }
-    let done_check_script = parse_script("__qjs_test262_done_state__ === 1;")
-        .map_err(|err| format!("failed to parse async done check: {}", err.message))?;
-    let done_check_chunk = compile_script(&done_check_script);
-    let done_check = vm
-        .execute_in_realm_persistent(&done_check_chunk, realm)
-        .map_err(|err| format!("{err:?}"))?;
-    if matches!(done_check, runtime::JsValue::Bool(true)) {
+    let done_state = vm.global_property("__qjs_test262_done_state__");
+    if matches!(done_state, Some(runtime::JsValue::Number(value)) if value == 1.0) {
         Ok(())
     } else {
         Err("$DONE was not called".to_string())
@@ -1163,7 +1170,7 @@ import "x";
             root.join("cases").join("dep_FIXTURE.js"),
             "export default 1;\n",
         )
-            .expect("module dependency file should be written");
+        .expect("module dependency file should be written");
         fs::write(
             root.join("cases").join("flag-only-strict.js"),
             "/*---\nflags: [onlyStrict]\n---*/\n1;\n",
@@ -1373,6 +1380,99 @@ import "x";
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped_categories.requires_includes, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_module_case_with_relative_import() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-main.js"),
+            "/*---\nflags: [module]\n---*/\nimport value from './module-dep_FIXTURE.js';\nif (value !== 41) { throw new Error('bad import'); }\n",
+        )
+        .expect("module entry file should be written");
+        fs::write(
+            test_root.join("module-dep_FIXTURE.js"),
+            "export default 41;\n",
+        )
+        .expect("module dependency file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.skipped_categories.fixture_file, 1);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_async_module_case_with_done_callback() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-async-main.js"),
+            "/*---\nflags: [module, async]\n---*/\nimport value from './module-async-dep_FIXTURE.js';\nPromise.resolve(value).then(function (v) { if (v !== 7) { $DONE(new Error('bad value')); return; } $DONE(); });\n",
+        )
+        .expect("module async entry file should be written");
+        fs::write(
+            test_root.join("module-async-dep_FIXTURE.js"),
+            "export default 7;\n",
+        )
+        .expect("module async dependency file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.skipped_categories.fixture_file, 1);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn classifies_module_parse_failure_as_parse_outcome() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-parse-fail.js"),
+            "/*---\nnegative:\n  phase: parse\nflags: [module]\n---*/\nimport ;\n",
+        )
+        .expect("module parse failure file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn classifies_module_resolution_failure_as_parse_outcome() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-resolution-fail.js"),
+            "/*---\nnegative:\n  phase: resolution\nflags: [module]\n---*/\nimport './missing-dependency.js';\n",
+        )
+        .expect("module resolution failure file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }
