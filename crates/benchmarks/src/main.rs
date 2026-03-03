@@ -127,14 +127,87 @@ struct SampleMeasurement {
     hotspot_attribution: Option<HotspotAttribution>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct QjsRsEvalConfig {
-    hotspot_attribution_enabled: bool,
+#[derive(Debug, Clone, Copy, Default)]
+struct PacketFeatures {
     packet_c_enabled: bool,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
     packet_i_enabled: bool,
+}
+
+impl PacketFeatures {
+    fn from_cli(cli: &contract::CliArgs) -> Self {
+        let descriptor = contract::infer_optimization_descriptor(&cli.output);
+        let mut features = Self::from_packet_id(descriptor.packet_id.as_deref());
+        if matches!(cli.run_profile, contract::RunProfile::LocalDev) {
+            features.packet_c_enabled = true;
+            features.packet_d_enabled = true;
+        }
+        features
+    }
+
+    fn from_packet_id(packet_id: Option<&str>) -> Self {
+        let packet_id = packet_id.unwrap_or_default();
+        Self {
+            packet_c_enabled: packet_matches_any(
+                packet_id,
+                &[
+                    "packet-c",
+                    "packet-d",
+                    "packet-e",
+                    "packet-f",
+                    "packet-g",
+                    "packet-h",
+                    "packet-i",
+                    "packet-final",
+                ],
+            ),
+            packet_d_enabled: packet_matches_any(
+                packet_id,
+                &[
+                    "packet-d",
+                    "packet-e",
+                    "packet-f",
+                    "packet-g",
+                    "packet-h",
+                    "packet-i",
+                    "packet-final",
+                ],
+            ),
+            packet_g_enabled: packet_matches_any(packet_id, &["packet-g", "packet-h", "packet-i"]),
+            packet_h_enabled: packet_matches_any(packet_id, &["packet-h", "packet-i"]),
+            packet_i_enabled: packet_matches_any(packet_id, &["packet-i"]),
+        }
+    }
+}
+
+fn packet_matches_any(packet_id: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| packet_id.starts_with(prefix))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QjsRsEvalConfig {
+    hotspot_attribution_enabled: bool,
+    packet_features: PacketFeatures,
+}
+
+fn apply_packet_fast_path_settings(vm: &mut Vm, packet_features: PacketFeatures) {
+    vm.set_packet_c_fast_path_enabled(packet_features.packet_c_enabled);
+    vm.set_packet_d_fast_path_enabled(packet_features.packet_d_enabled);
+    vm.set_packet_g_fast_path_enabled(packet_features.packet_g_enabled);
+    vm.set_packet_h_fast_path_enabled(packet_features.packet_h_enabled);
+    vm.set_packet_i_revalidate_enabled(packet_features.packet_i_enabled);
+}
+
+fn apply_packet_metric_settings(
+    vm: &mut Vm,
+    packet_features: PacketFeatures,
+    metrics_enabled: bool,
+) {
+    vm.set_packet_d_fast_path_metrics_enabled(metrics_enabled && packet_features.packet_d_enabled);
+    vm.set_packet_g_fast_path_metrics_enabled(metrics_enabled && packet_features.packet_g_enabled);
+    vm.set_packet_h_fast_path_metrics_enabled(metrics_enabled && packet_features.packet_h_enabled);
 }
 
 fn run_qjs_rs_eval_per_iteration(
@@ -145,14 +218,8 @@ fn run_qjs_rs_eval_per_iteration(
     let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
     vm.set_hotspot_attribution_enabled(false);
-    vm.set_packet_c_fast_path_enabled(config.packet_c_enabled);
-    vm.set_packet_d_fast_path_enabled(config.packet_d_enabled);
-    vm.set_packet_d_fast_path_metrics_enabled(false);
-    vm.set_packet_g_fast_path_enabled(config.packet_g_enabled);
-    vm.set_packet_g_fast_path_metrics_enabled(false);
-    vm.set_packet_h_fast_path_enabled(config.packet_h_enabled);
-    vm.set_packet_h_fast_path_metrics_enabled(false);
-    vm.set_packet_i_revalidate_enabled(config.packet_i_enabled);
+    apply_packet_fast_path_settings(&mut vm, config.packet_features);
+    apply_packet_metric_settings(&mut vm, config.packet_features, false);
 
     let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
     let chunk = compile_script(&parsed);
@@ -165,17 +232,13 @@ fn run_qjs_rs_eval_per_iteration(
         checksum += extract_number(&value);
     }
     let hotspot_attribution = if config.hotspot_attribution_enabled {
-        vm.set_packet_d_fast_path_metrics_enabled(config.packet_d_enabled);
-        vm.set_packet_g_fast_path_metrics_enabled(config.packet_g_enabled);
-        vm.set_packet_h_fast_path_metrics_enabled(config.packet_h_enabled);
+        apply_packet_metric_settings(&mut vm, config.packet_features, true);
         vm.set_hotspot_attribution_enabled(true);
         vm.reset_hotspot_attribution();
         let _ = vm
             .execute_in_realm_persistent(&chunk, &realm)
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
-        vm.set_packet_d_fast_path_metrics_enabled(false);
-        vm.set_packet_g_fast_path_metrics_enabled(false);
-        vm.set_packet_h_fast_path_metrics_enabled(false);
+        apply_packet_metric_settings(&mut vm, config.packet_features, false);
         vm.hotspot_attribution_snapshot()
     } else {
         None
@@ -339,11 +402,7 @@ struct RunEngineCaseContext<'a> {
     iterations: usize,
     comparators: &'a ComparatorConfig,
     hotspot_attribution_enabled: bool,
-    packet_c_enabled: bool,
-    packet_d_enabled: bool,
-    packet_g_enabled: bool,
-    packet_h_enabled: bool,
-    packet_i_enabled: bool,
+    packet_features: PacketFeatures,
 }
 
 fn run_engine_case(
@@ -358,11 +417,7 @@ fn run_engine_case(
                 context.iterations,
                 QjsRsEvalConfig {
                     hotspot_attribution_enabled: context.hotspot_attribution_enabled,
-                    packet_c_enabled: context.packet_c_enabled,
-                    packet_d_enabled: context.packet_d_enabled,
-                    packet_g_enabled: context.packet_g_enabled,
-                    packet_h_enabled: context.packet_h_enabled,
-                    packet_i_enabled: context.packet_i_enabled,
+                    packet_features: context.packet_features,
                 },
             ),
             EngineKind::BoaEngine => {
@@ -684,55 +739,29 @@ pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool
     test_support::infer_hotspot_attribution_default(cli)
 }
 
+#[cfg(test)]
 pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-c")
-            || packet_id.starts_with("packet-d")
-            || packet_id.starts_with("packet-e")
-            || packet_id.starts_with("packet-f")
-            || packet_id.starts_with("packet-g")
-            || packet_id.starts_with("packet-h")
-            || packet_id.starts_with("packet-i")
-            || packet_id.starts_with("packet-final")
-    }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
+    PacketFeatures::from_cli(cli).packet_c_enabled
 }
 
+#[cfg(test)]
 pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-d")
-            || packet_id.starts_with("packet-e")
-            || packet_id.starts_with("packet-f")
-            || packet_id.starts_with("packet-g")
-            || packet_id.starts_with("packet-h")
-            || packet_id.starts_with("packet-i")
-            || packet_id.starts_with("packet-final")
-    }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
+    PacketFeatures::from_cli(cli).packet_d_enabled
 }
 
+#[cfg(test)]
 pub(crate) fn infer_packet_g_enabled(cli: &contract::CliArgs) -> bool {
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-g")
-            || packet_id.starts_with("packet-h")
-            || packet_id.starts_with("packet-i")
-    })
+    PacketFeatures::from_cli(cli).packet_g_enabled
 }
 
+#[cfg(test)]
 pub(crate) fn infer_packet_h_enabled(cli: &contract::CliArgs) -> bool {
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-h") || packet_id.starts_with("packet-i")
-    })
+    PacketFeatures::from_cli(cli).packet_h_enabled
 }
 
+#[cfg(test)]
 pub(crate) fn infer_packet_i_enabled(cli: &contract::CliArgs) -> bool {
-    let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor
-        .packet_id
-        .as_deref()
-        .is_some_and(|packet_id| packet_id.starts_with("packet-i"))
+    PacketFeatures::from_cli(cli).packet_i_enabled
 }
 
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
@@ -1231,11 +1260,7 @@ fn main() -> Result<()> {
     let preflight_metadata = preflight_engine_execution(&cli.comparators)?;
     let environment = collect_environment(&preflight_metadata);
     let optimization_descriptor = contract::infer_optimization_descriptor(&cli.output);
-    let packet_c_enabled = infer_packet_c_enabled(&cli);
-    let packet_d_enabled = infer_packet_d_enabled(&cli);
-    let packet_g_enabled = infer_packet_g_enabled(&cli);
-    let packet_h_enabled = infer_packet_h_enabled(&cli);
-    let packet_i_enabled = infer_packet_i_enabled(&cli);
+    let packet_features = PacketFeatures::from_cli(&cli);
     let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
     let perf_target = build_perf_target_metadata(&cli.output, &environment);
 
@@ -1245,11 +1270,11 @@ fn main() -> Result<()> {
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
         hotspot_attribution_enabled,
-        packet_c_enabled,
-        packet_d_enabled,
-        packet_g_enabled,
-        packet_h_enabled,
-        packet_i_enabled,
+        packet_features.packet_c_enabled,
+        packet_features.packet_d_enabled,
+        packet_features.packet_g_enabled,
+        packet_features.packet_h_enabled,
+        packet_features.packet_i_enabled,
         optimization_descriptor.mode,
         perf_target.optimization_tag,
         perf_target.packet_id.as_deref().unwrap_or("none"),
@@ -1292,11 +1317,7 @@ fn main() -> Result<()> {
                     iterations: cli.config.warmup_iterations,
                     comparators: &cli.comparators,
                     hotspot_attribution_enabled,
-                    packet_c_enabled,
-                    packet_d_enabled,
-                    packet_g_enabled,
-                    packet_h_enabled,
-                    packet_i_enabled,
+                    packet_features,
                 },
             )?;
 
@@ -1310,11 +1331,7 @@ fn main() -> Result<()> {
                         iterations: cli.config.iterations,
                         comparators: &cli.comparators,
                         hotspot_attribution_enabled,
-                        packet_c_enabled,
-                        packet_d_enabled,
-                        packet_g_enabled,
-                        packet_h_enabled,
-                        packet_i_enabled,
+                        packet_features,
                     },
                 )?;
                 samples.push(sample);
