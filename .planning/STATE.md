@@ -86,10 +86,16 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 Last session: 2026-03-03T18:06:00+08:00  
 Stopped at: Completed 11-16 authoritative packet-i closure rerun and traceability sync  
 Resume file: none
+Last activity: 2026-03-03 - Completed quick task 1: ts类型抹除
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 1 | ts类型抹除 | 2026-03-03 | af12670 | [1-ts](./quick/1-ts/) |
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 13 added: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
-
