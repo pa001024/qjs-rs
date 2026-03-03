@@ -740,28 +740,28 @@ pub(crate) fn infer_hotspot_attribution_default(cli: &contract::CliArgs) -> bool
 }
 
 #[cfg(test)]
-pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
-    PacketFeatures::from_cli(cli).packet_c_enabled
-}
+fn packet_features_for_test(
+    profile: &str,
+    output: &str,
+    strict_comparators: bool,
+) -> PacketFeatures {
+    let mut args = vec![
+        "--profile".to_string(),
+        profile.to_string(),
+        "--output".to_string(),
+        output.to_string(),
+    ];
+    args.push(if strict_comparators {
+        "--strict-comparators".to_string()
+    } else {
+        "--allow-missing-comparators".to_string()
+    });
 
-#[cfg(test)]
-pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
-    PacketFeatures::from_cli(cli).packet_d_enabled
-}
-
-#[cfg(test)]
-pub(crate) fn infer_packet_g_enabled(cli: &contract::CliArgs) -> bool {
-    PacketFeatures::from_cli(cli).packet_g_enabled
-}
-
-#[cfg(test)]
-pub(crate) fn infer_packet_h_enabled(cli: &contract::CliArgs) -> bool {
-    PacketFeatures::from_cli(cli).packet_h_enabled
-}
-
-#[cfg(test)]
-pub(crate) fn infer_packet_i_enabled(cli: &contract::CliArgs) -> bool {
-    PacketFeatures::from_cli(cli).packet_i_enabled
+    let cli = match contract::parse_cli_args_with_env(args, &[]).expect("cli args should parse") {
+        contract::CliParseResult::Run(cli) => *cli,
+        contract::CliParseResult::Help => panic!("expected parsed run config"),
+    };
+    PacketFeatures::from_cli(&cli)
 }
 
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
@@ -994,24 +994,14 @@ fn comparator_preflight_metadata_is_complete() {
 #[cfg(test)]
 #[test]
 fn packet_c_output_path_enables_packet_c_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-c.json".to_string(),
-            "--allow-missing-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-c.json",
+        false,
+    );
 
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-c output artifacts must enable packet-c runtime fast path for qjs-rs runs"
     );
 }
@@ -1019,28 +1009,18 @@ fn packet_c_output_path_enables_packet_c_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_d_output_path_enables_packet_d_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-d.json".to_string(),
-            "--allow-missing-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-d.json",
+        false,
+    );
 
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-d output artifacts must enable packet-d runtime fast path for qjs-rs runs"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-d output artifacts keep packet-c enabled so packet-d composes with earlier fast paths"
     );
 }
@@ -1048,28 +1028,18 @@ fn packet_d_output_path_enables_packet_d_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_e_output_path_enables_packet_d_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "ci-linux".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.ci-linux.packet-e.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "ci-linux",
+        "target/benchmarks/engine-comparison.ci-linux.packet-e.json",
+        true,
+    );
 
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-e output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-e output artifacts must keep packet-c runtime fast path enabled"
     );
 }
@@ -1077,28 +1047,18 @@ fn packet_e_output_path_enables_packet_d_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_f_output_path_enables_packet_d_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-f.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-f.json",
+        true,
+    );
 
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-f output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-f output artifacts must keep packet-c runtime fast path enabled"
     );
 }
@@ -1106,32 +1066,22 @@ fn packet_f_output_path_enables_packet_d_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_g_output_path_enables_packet_g_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-g.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-g.json",
+        true,
+    );
 
     assert!(
-        infer_packet_g_enabled(&cli),
+        packet_features.packet_g_enabled,
         "packet-g output artifacts must enable packet-g runtime fast path"
     );
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-g output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-g output artifacts must keep packet-c runtime fast path enabled"
     );
 }
@@ -1139,40 +1089,30 @@ fn packet_g_output_path_enables_packet_g_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_h_output_path_enables_packet_h_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json",
+        true,
+    );
 
     assert!(
-        infer_packet_h_enabled(&cli),
+        packet_features.packet_h_enabled,
         "packet-h output artifacts must enable packet-h runtime fast path"
     );
     assert!(
-        !infer_packet_i_enabled(&cli),
+        !packet_features.packet_i_enabled,
         "packet-h output artifacts must not implicitly enable packet-i revalidation"
     );
     assert!(
-        infer_packet_g_enabled(&cli),
+        packet_features.packet_g_enabled,
         "packet-h output artifacts must keep packet-g runtime fast path enabled"
     );
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-h output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-h output artifacts must keep packet-c runtime fast path enabled"
     );
 }
@@ -1180,40 +1120,30 @@ fn packet_h_output_path_enables_packet_h_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_i_output_path_enables_packet_i_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-i.smoke.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-i.smoke.json",
+        true,
+    );
 
     assert!(
-        infer_packet_i_enabled(&cli),
+        packet_features.packet_i_enabled,
         "packet-i output artifacts must enable packet-i revalidation runtime behavior"
     );
     assert!(
-        infer_packet_h_enabled(&cli),
+        packet_features.packet_h_enabled,
         "packet-i output artifacts must keep packet-h runtime fast path enabled"
     );
     assert!(
-        infer_packet_g_enabled(&cli),
+        packet_features.packet_g_enabled,
         "packet-i output artifacts must keep packet-g runtime fast path enabled"
     );
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-i output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-i output artifacts must keep packet-c runtime fast path enabled"
     );
 }
@@ -1221,28 +1151,18 @@ fn packet_i_output_path_enables_packet_i_runtime_toggle() {
 #[cfg(test)]
 #[test]
 fn packet_final_output_path_enables_packet_d_runtime_toggle() {
-    let cli = match contract::parse_cli_args_with_env(
-        vec![
-            "--profile".to_string(),
-            "local-dev".to_string(),
-            "--output".to_string(),
-            "target/benchmarks/engine-comparison.local-dev.packet-final.json".to_string(),
-            "--strict-comparators".to_string(),
-        ],
-        &[],
-    )
-    .expect("cli args should parse")
-    {
-        contract::CliParseResult::Run(cli) => *cli,
-        contract::CliParseResult::Help => panic!("expected parsed run config"),
-    };
+    let packet_features = packet_features_for_test(
+        "local-dev",
+        "target/benchmarks/engine-comparison.local-dev.packet-final.json",
+        true,
+    );
 
     assert!(
-        infer_packet_d_enabled(&cli),
+        packet_features.packet_d_enabled,
         "packet-final output artifacts must keep packet-d runtime fast path enabled"
     );
     assert!(
-        infer_packet_c_enabled(&cli),
+        packet_features.packet_c_enabled,
         "packet-final output artifacts must keep packet-c runtime fast path enabled"
     );
 }
