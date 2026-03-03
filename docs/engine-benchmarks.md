@@ -164,7 +164,7 @@ must be documented as evidence-only (no closure claim).
 toggles enabled. `packet-g` additionally enables the packet-G name-guard runtime toggle so
 identifier packet experiments compose with existing guarded fast paths. `packet-h` additionally
 enables packet-H lexical-slot guards and is inferred deterministically from `packet-h*` output names
-(for example `packet-h.smoke`).
+(for example `packet-h` and `packet-h.smoke`).
 
 ```bash
 cargo run -p benchmarks --release -- \
@@ -211,12 +211,17 @@ python .github/scripts/check_perf_target.py \
 
 cargo run -p benchmarks --release -- \
   --profile local-dev \
-  --output target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json \
+  --output target/benchmarks/engine-comparison.local-dev.packet-h.json \
   --quickjs-path scripts/quickjs-wsl.cmd \
   --strict-comparators
 
 python .github/scripts/check_engine_benchmark_contract.py \
-  --input target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json
+  --input target/benchmarks/engine-comparison.local-dev.packet-h.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-h.json \
+  --require-qjs-lte-quickjs-ratio 1.25
 
 cargo run -p benchmarks --release -- \
   --profile local-dev \
