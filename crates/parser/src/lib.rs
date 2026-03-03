@@ -1010,12 +1010,18 @@ fn parse_module_import_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
     }
+    if name.starts_with('\'') || name.starts_with('"') {
+        return parse_module_string_literal(name);
+    }
     parse_module_identifier_name(name)
 }
 
 fn parse_module_export_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
+    }
+    if name.starts_with('\'') || name.starts_with('"') {
+        return parse_module_string_literal(name);
     }
     parse_module_identifier_name(name)
 }
@@ -1076,12 +1082,31 @@ fn render_module_export_snapshot_statement(exports: &[ModuleExport]) -> String {
         if index > 0 {
             rendered.push_str(", ");
         }
-        rendered.push_str(&export.exported);
+        render_module_export_property_key(&mut rendered, &export.exported);
         rendered.push_str(": ");
         rendered.push_str(&export.local);
     }
     rendered.push_str("});");
     rendered
+}
+
+fn render_module_export_property_key(rendered: &mut String, key: &str) {
+    if is_valid_module_identifier(key) {
+        rendered.push_str(key);
+        return;
+    }
+    rendered.push('"');
+    for ch in key.chars() {
+        match ch {
+            '\\' => rendered.push_str("\\\\"),
+            '"' => rendered.push_str("\\\""),
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            _ => rendered.push(ch),
+        }
+    }
+    rendered.push('"');
 }
 
 fn ensure_module_statement_terminated(statement: &str) -> String {

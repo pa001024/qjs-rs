@@ -337,3 +337,27 @@ fn module_parse_generator_export_declaration_baseline() {
         local: "values".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_string_named_import_export_clauses() {
+    let source = "const value = 42;\nexport { value as \"kebab-name\" };\nimport { \"kebab-name\" as kebabName } from './dep.js';\nexport { kebabName as answer };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "kebab-name".to_string(),
+            local: "kebabName".to_string(),
+        }]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "kebab-name".to_string(),
+        local: "value".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "kebabName".to_string(),
+    }));
+}
