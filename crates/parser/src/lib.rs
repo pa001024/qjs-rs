@@ -632,12 +632,45 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
 }
 
 fn trim_module_declaration_terminator(source: &str) -> &str {
-    let source = source.trim_end();
+    let source = strip_module_trailing_line_comment(source).trim_end();
     if let Some(stripped) = source.strip_suffix(';') {
         stripped.trim_end()
     } else {
         source
     }
+}
+
+fn strip_module_trailing_line_comment(source: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '/' {
+            let next = source[index + ch.len_utf8()..].chars().next();
+            if next == Some('/') {
+                return source[..index].trim_end();
+            }
+        }
+    }
+    source
 }
 
 fn normalize_module_declaration_keyword(
@@ -8800,6 +8833,21 @@ export default value;\n";
         let parsed = parse_module(source).expect("module parsing should succeed");
         assert_eq!(parsed.imports.len(), 1);
         assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_trailing_line_comment_baseline() {
+        let source = "import { value } from './from-token-dep.js' // from trailing comment\nexport const answer = value // still semicolonless\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./from-token-dep.js");
         assert_eq!(parsed.imports[0].bindings.len(), 1);
         assert_eq!(parsed.imports[0].bindings[0].imported, "value");
         assert_eq!(parsed.imports[0].bindings[0].local, "value");

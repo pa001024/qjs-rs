@@ -340,3 +340,21 @@ fn compact_keyword_spacing_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn trailing_line_comment_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("from-token-dep.js", "export const value = 41;\n")
+        .with_module(
+            "entry.js",
+            "import { value } from './from-token-dep.js' // from trailing comment\n\
+             export const answer = value + 1 // semicolonless with comment\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("trailing comment module declarations should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("from-token-dep.js"), 1);
+}
