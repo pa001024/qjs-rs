@@ -2763,7 +2763,11 @@ impl Vm {
                         pc = target;
                         continue;
                     }
-                    self.stack.push(value);
+                    if Self::next_opcode_is_pop(code, pc) {
+                        pc += 1;
+                    } else {
+                        self.stack.push(value);
+                    }
                 }
                 Opcode::IncrementVariable(name) => {
                     if hotspot_enabled {
@@ -2888,7 +2892,13 @@ impl Vm {
                     }
 
                     match result {
-                        Ok(value) => self.stack.push(value),
+                        Ok(value) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(value);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -15539,6 +15549,11 @@ impl Vm {
             debug_assert_eq!(entry.family, family);
         }
         entry.and_then(|entry| entry.lexical_binding.then_some(entry.slot))
+    }
+
+    #[inline(always)]
+    fn next_opcode_is_pop(code: &[Opcode], pc: usize) -> bool {
+        matches!(code.get(pc + 1), Some(Opcode::Pop))
     }
 
     fn invalidate_binding_fast_path_cache(&mut self) {
