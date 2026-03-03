@@ -295,8 +295,9 @@ fn parse_module_import_declaration(
     let clause = raw_clause.trim();
     let specifier = parse_module_string_literal(raw_specifier.trim())?;
     let (bindings, type_only_locals) = parse_module_import_clause_bindings(clause)?;
+    let keep_runtime_import = !bindings.is_empty() || type_only_locals.is_empty();
     Ok(ParsedModuleImportDeclaration {
-        import: (!bindings.is_empty()).then_some(ModuleImport {
+        import: keep_runtime_import.then_some(ModuleImport {
             specifier,
             bindings,
         }),
@@ -8680,6 +8681,22 @@ export default value;\n";
         assert_eq!(parsed.exports.len(), 1);
         assert_eq!(parsed.exports[0].exported, "ns");
         assert_eq!(parsed.exports[0].local, parsed.imports[0].bindings[0].local);
+    }
+
+    #[test]
+    fn module_parse_empty_named_import_keeps_runtime_dependency() {
+        let source = "import {} from './dep.js';\nexport const answer = 42;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert!(
+            parsed.imports[0].bindings.is_empty(),
+            "empty named import should keep dependency edge without local bindings"
+        );
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
     }
 
     #[test]

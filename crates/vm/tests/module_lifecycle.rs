@@ -518,6 +518,25 @@ fn module_export_star_namespace_replay_determinism() {
 }
 
 #[test]
+fn module_empty_named_import_keeps_dependency_edge() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 1;\n")
+        .with_module(
+            "entry.js",
+            "import {} from './dep.js';\nexport const answer = 42;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("empty named import should still evaluate dependency");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+    assert_eq!(vm.module_evaluation_count("entry.js"), Some(1));
+    assert_eq!(vm.module_evaluation_count("dep.js"), Some(1));
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");
