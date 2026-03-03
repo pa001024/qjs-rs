@@ -11,6 +11,7 @@ fn run_hotspot_sample(
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
+    packet_i_enabled: bool,
 ) -> (JsValue, Option<HotspotAttribution>) {
     let script = parse_script(source).expect("script should parse");
     let chunk = compile_script(&script);
@@ -23,6 +24,7 @@ fn run_hotspot_sample(
     vm.set_packet_g_fast_path_metrics_enabled(true);
     vm.set_packet_h_fast_path_enabled(packet_h_enabled);
     vm.set_packet_h_fast_path_metrics_enabled(true);
+    vm.set_packet_i_revalidate_enabled(packet_i_enabled);
     let value = vm.execute(&chunk).expect("script should execute");
     (value, vm.hotspot_attribution_snapshot())
 }
@@ -36,8 +38,8 @@ fn perf_hotspot_attribution_records_opcode_families() {
                     total = total + arr[i]; \
                   } \
                   total;";
-    let (value_a, snapshot_a) = run_hotspot_sample(source, true, true, false, false);
-    let (value_b, snapshot_b) = run_hotspot_sample(source, true, true, false, false);
+    let (value_a, snapshot_a) = run_hotspot_sample(source, true, true, false, false, false);
+    let (value_b, snapshot_b) = run_hotspot_sample(source, true, true, false, false, false);
 
     assert_eq!(value_a, JsValue::Number(10.0));
     assert_eq!(value_b, JsValue::Number(10.0));
@@ -87,8 +89,8 @@ typeof neverDeclared;
 total;
 "#;
 
-    let (value_a, snapshot_a) = run_hotspot_sample(source, true, true, false, false);
-    let (value_b, snapshot_b) = run_hotspot_sample(source, true, true, false, false);
+    let (value_a, snapshot_a) = run_hotspot_sample(source, true, true, false, false, false);
+    let (value_b, snapshot_b) = run_hotspot_sample(source, true, true, false, false, false);
     assert_eq!(value_a, value_b);
 
     let snapshot_a = snapshot_a.expect("hotspot attribution should be present");
@@ -161,8 +163,8 @@ typeof unknownToken;
 total;
 "#;
 
-    let (_, stable_snapshot) = run_hotspot_sample(stable_source, true, true, false, false);
-    let (_, churn_snapshot) = run_hotspot_sample(churn_source, true, true, false, false);
+    let (_, stable_snapshot) = run_hotspot_sample(stable_source, true, true, false, false, false);
+    let (_, churn_snapshot) = run_hotspot_sample(churn_source, true, true, false, false, false);
     let stable_snapshot = stable_snapshot.expect("stable run should expose hotspot counters");
     let churn_snapshot = churn_snapshot.expect("churn run should expose hotspot counters");
 
@@ -190,8 +192,10 @@ fn perf_hotspot_toggle_preserves_semantics() {
                     total = total + arr[i]; \
                   } \
                   total;";
-    let (disabled_value, disabled_snapshot) = run_hotspot_sample(source, false, true, false, false);
-    let (enabled_value, enabled_snapshot) = run_hotspot_sample(source, true, true, false, false);
+    let (disabled_value, disabled_snapshot) =
+        run_hotspot_sample(source, false, true, false, false, false);
+    let (enabled_value, enabled_snapshot) =
+        run_hotspot_sample(source, true, true, false, false, false);
 
     assert_eq!(disabled_value, enabled_value);
     assert!(
@@ -230,9 +234,9 @@ with ({ stable: 9 }) {
 typeof neverDeclared;
 "#;
 
-    let (_, packet_g_stable) = run_hotspot_sample(stable_source, true, true, true, false);
-    let (_, packet_h_stable) = run_hotspot_sample(stable_source, true, true, true, true);
-    let (_, packet_h_missy) = run_hotspot_sample(miss_source, true, true, true, true);
+    let (_, packet_g_stable) = run_hotspot_sample(stable_source, true, true, true, false, false);
+    let (_, packet_h_stable) = run_hotspot_sample(stable_source, true, true, true, true, false);
+    let (_, packet_h_missy) = run_hotspot_sample(miss_source, true, true, true, true, false);
     let packet_g_stable = packet_g_stable.expect("packet-g snapshot should exist");
     let packet_h_stable = packet_h_stable.expect("packet-h stable snapshot should exist");
     let packet_h_missy = packet_h_missy.expect("packet-h miss snapshot should exist");
@@ -257,5 +261,69 @@ typeof neverDeclared;
         packet_h_stable.identifier_resolution_fallback_scans
             < packet_g_stable.identifier_resolution_fallback_scans,
         "packet-h should reduce fallback scans versus packet-g baseline for stable lexical loops"
+    );
+}
+
+#[test]
+fn perf_hotspot_attribution_packet_i_revalidate_hits_reduce_fallback_scans_vs_packet_h() {
+    let stable_lexical_source = r#"
+let stable = 2;
+let total = 0;
+for (let i = 0; i < 90; i = i + 1) {
+  total = total + stable;
+  {
+    let local = i;
+    total = total + local;
+  }
+}
+total;
+"#;
+    let stable_global_source = r#"
+globalThis.packetIGlobalStable = 7;
+let total = 0;
+for (let i = 0; i < 90; i = i + 1) {
+  total = total + packetIGlobalStable;
+  {
+    let local = i;
+    total = total + local;
+  }
+}
+delete globalThis.packetIGlobalStable;
+total;
+"#;
+
+    let (_, baseline_lexical) =
+        run_hotspot_sample(stable_lexical_source, true, true, false, true, false);
+    let (_, packet_i_lexical) =
+        run_hotspot_sample(stable_lexical_source, true, true, false, true, true);
+    let (_, baseline_global) =
+        run_hotspot_sample(stable_global_source, true, false, true, true, false);
+    let (_, packet_i_global) =
+        run_hotspot_sample(stable_global_source, true, false, true, true, true);
+
+    let baseline_lexical = baseline_lexical.expect("packet-h lexical baseline should exist");
+    let packet_i_lexical = packet_i_lexical.expect("packet-i lexical snapshot should exist");
+    let baseline_global = baseline_global.expect("packet-h global baseline should exist");
+    let packet_i_global = packet_i_global.expect("packet-i global snapshot should exist");
+
+    assert!(
+        packet_i_lexical.packet_d_slot_guard_revalidate_hits
+            > baseline_lexical.packet_d_slot_guard_revalidate_hits,
+        "packet-i should increase packet-d lexical revalidate-hit coverage under inner-block churn"
+    );
+    assert!(
+        packet_i_global.packet_g_name_guard_revalidate_hits
+            > baseline_global.packet_g_name_guard_revalidate_hits,
+        "packet-i should increase packet-g name revalidate-hit coverage for loop-stable globals"
+    );
+    assert!(
+        packet_i_lexical.identifier_resolution_fallback_scans
+            < baseline_lexical.identifier_resolution_fallback_scans,
+        "packet-i should reduce lexical fallback scans versus packet-h baseline"
+    );
+    assert!(
+        packet_i_global.identifier_resolution_fallback_scans
+            < baseline_global.identifier_resolution_fallback_scans,
+        "packet-i should reduce global fallback scans versus packet-h baseline"
     );
 }

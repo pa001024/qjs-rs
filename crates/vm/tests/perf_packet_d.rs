@@ -14,6 +14,7 @@ fn run_script(
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
+    packet_i_enabled: bool,
 ) -> (
     JsValue,
     PacketDFastPathCounters,
@@ -36,6 +37,7 @@ fn run_script(
     vm.set_packet_g_fast_path_metrics_enabled(true);
     vm.set_packet_h_fast_path_enabled(packet_h_enabled);
     vm.set_packet_h_fast_path_metrics_enabled(true);
+    vm.set_packet_i_revalidate_enabled(packet_i_enabled);
 
     let value = vm
         .execute_in_realm(&chunk, &realm)
@@ -51,9 +53,9 @@ fn run_script(
 
 fn assert_packet_d_parity(source: &str) -> (JsValue, PacketDFastPathCounters, HotspotAttribution) {
     let (slow_value, slow_d_counters, slow_g_counters, slow_h_counters, _slow_hotspot) =
-        run_script(source, false, false, false);
+        run_script(source, false, false, false, false);
     let (fast_value, fast_d_counters, fast_g_counters, fast_h_counters, fast_hotspot) =
-        run_script(source, true, false, false);
+        run_script(source, true, false, false, false);
 
     assert_eq!(fast_value, slow_value);
     assert_eq!(
@@ -94,9 +96,9 @@ fn assert_packet_g_toggle_parity(
     packet_d_enabled: bool,
 ) -> (JsValue, PacketGFastPathCounters, HotspotAttribution) {
     let (slow_value, _slow_d_counters, slow_g_counters, _slow_h_counters, _slow_hotspot) =
-        run_script(source, packet_d_enabled, false, false);
+        run_script(source, packet_d_enabled, false, false, false);
     let (fast_value, _fast_d_counters, fast_g_counters, _fast_h_counters, fast_hotspot) =
-        run_script(source, packet_d_enabled, true, false);
+        run_script(source, packet_d_enabled, true, false, false);
     assert_eq!(fast_value, slow_value);
     assert_eq!(
         slow_g_counters,
@@ -116,9 +118,9 @@ fn assert_packet_h_toggle_parity(
     packet_g_enabled: bool,
 ) -> (JsValue, PacketHFastPathCounters, HotspotAttribution, HotspotAttribution) {
     let (baseline_value, _baseline_d, _baseline_g, baseline_h, baseline_hotspot) =
-        run_script(source, packet_d_enabled, packet_g_enabled, false);
+        run_script(source, packet_d_enabled, packet_g_enabled, false, false);
     let (packet_h_value, _packet_h_d, _packet_h_g, packet_h_counters, packet_h_hotspot) =
-        run_script(source, packet_d_enabled, packet_g_enabled, true);
+        run_script(source, packet_d_enabled, packet_g_enabled, true, false);
 
     assert_eq!(packet_h_value, baseline_value);
     assert_eq!(
@@ -131,6 +133,60 @@ fn assert_packet_h_toggle_parity(
         packet_h_counters,
         baseline_hotspot.expect("baseline hotspot attribution should be present"),
         packet_h_hotspot.expect("packet-h hotspot attribution should be present"),
+    )
+}
+
+fn assert_packet_i_toggle_parity(
+    source: &str,
+    packet_d_enabled: bool,
+    packet_g_enabled: bool,
+    packet_h_enabled: bool,
+) -> (
+    (
+        JsValue,
+        PacketDFastPathCounters,
+        PacketGFastPathCounters,
+        PacketHFastPathCounters,
+        HotspotAttribution,
+    ),
+    (
+        JsValue,
+        PacketDFastPathCounters,
+        PacketGFastPathCounters,
+        PacketHFastPathCounters,
+        HotspotAttribution,
+    ),
+) {
+    let (baseline_value, baseline_d, baseline_g, baseline_h, baseline_hotspot) = run_script(
+        source,
+        packet_d_enabled,
+        packet_g_enabled,
+        packet_h_enabled,
+        false,
+    );
+    let (packet_i_value, packet_i_d, packet_i_g, packet_i_h, packet_i_hotspot) = run_script(
+        source,
+        packet_d_enabled,
+        packet_g_enabled,
+        packet_h_enabled,
+        true,
+    );
+    assert_eq!(packet_i_value, baseline_value);
+    (
+        (
+            baseline_value,
+            baseline_d,
+            baseline_g,
+            baseline_h,
+            baseline_hotspot.expect("baseline hotspot attribution should be present"),
+        ),
+        (
+            packet_i_value,
+            packet_i_d,
+            packet_i_g,
+            packet_i_h,
+            packet_i_hotspot.expect("packet-i hotspot attribution should be present"),
+        ),
     )
 }
 
@@ -662,5 +718,89 @@ total;
         packet_h_hotspot.identifier_resolution_fallback_scans
             < packet_g_hotspot.identifier_resolution_fallback_scans,
         "packet-h should reduce fallback scans compared with packet-g baseline"
+    );
+}
+
+#[test]
+fn perf_packet_d_packet_i_toggle_matches_loop_block_with_stress_scripts() {
+    let scripts = [
+        r#"
+let stable = 3;
+let total = 0;
+for (let i = 0; i < 24; i = i + 1) {
+  total = total + stable;
+  {
+    let inner = i;
+    total = total + inner;
+  }
+}
+with ({ stable: 7 }) {
+  total = total + stable;
+}
+total;
+"#,
+        r#"
+let marker = 2;
+let total = marker;
+{
+  let marker = 9;
+  total = total + marker;
+}
+with ({ marker: 11 }) {
+  total = total + marker;
+}
+total + marker;
+"#,
+        r#"
+let globalTotal = 0;
+globalThis.packetIProbe = 5;
+for (let i = 0; i < 8; i = i + 1) {
+  globalTotal = globalTotal + packetIProbe;
+}
+delete globalThis.packetIProbe;
+globalTotal;
+"#,
+    ];
+
+    for source in scripts {
+        let ((_baseline_value, _, _, _, _), (_packet_i_value, _, _, _, _)) =
+            assert_packet_i_toggle_parity(source, true, true, true);
+    }
+}
+
+#[test]
+fn perf_packet_d_packet_i_miss_paths_preserve_fallback_scan_attribution() {
+    let source = r#"
+let stable = 2;
+let total = 0;
+with ({ stable: 9 }) {
+  total = total + stable;
+}
+{
+  let stable = 5;
+  total = total + stable;
+}
+Object.defineProperty(globalThis, "packetIMissProbe", {
+  get: function() { return 7; },
+  configurable: true
+});
+total = total + packetIMissProbe;
+delete globalThis.packetIMissProbe;
+typeof neverDeclared;
+total;
+"#;
+
+    let (
+        (_baseline_value, _baseline_d, _baseline_g, _baseline_h, _baseline_hotspot),
+        (_packet_i_value, packet_i_d, packet_i_g, _packet_i_h, packet_i_hotspot),
+    ) = assert_packet_i_toggle_parity(source, true, true, true);
+
+    assert!(
+        packet_i_d.slot_guard_misses > 0 || packet_i_g.name_guard_misses > 0,
+        "with/object-shadow/unknown lookups must continue to produce guarded packet-i misses"
+    );
+    assert!(
+        packet_i_hotspot.identifier_resolution_fallback_scans > 0,
+        "packet-i miss paths must preserve non-zero fallback-scan hotspot attribution"
     );
 }
