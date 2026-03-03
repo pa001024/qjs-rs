@@ -8,7 +8,7 @@ current_plan: 11-16 completed (all Phase 11 plans executed; PERF-03 remains open
 status: 11-16 authoritative packet-i closure rerun completed (machine-checkable `phase11-closure-bundle.packet-i.json`, governance bundle green, PERF-03 still red at `qjs-rs/quickjs-c=6.345517x`)
 stopped_at: Completed 11-16 authoritative packet-i closure rerun and traceability sync
 last_updated: "2026-03-03T18:06:00+08:00"
-last_activity: 2026-03-03
+last_activity: 2026-03-04
 progress:
   total_phases: 3
   completed_phases: 1
@@ -86,10 +86,18 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 Last session: 2026-03-03T18:06:00+08:00  
 Stopped at: Completed 11-16 authoritative packet-i closure rerun and traceability sync  
 Resume file: none
+Last activity: 2026-03-04 - Completed quick task 3: ts类型抹除覆盖扩展
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 1 | ts类型抹除 | 2026-03-03 | af12670 | [1-ts](./quick/1-ts/) |
+| 2 | ts类型抹除回归收口 | 2026-03-04 | 7c71944 | [2-ts-regression](./quick/2-ts-regression/) |
+| 3 | ts类型抹除覆盖扩展 | 2026-03-04 | 9e9b31a | [3-ts-erasure-coverage](./quick/3-ts-erasure-coverage/) |
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 13 added: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
-
