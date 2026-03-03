@@ -15400,7 +15400,11 @@ impl Vm {
         if strict {
             return Ok(false);
         }
-        let mut pending_syncs = self.annex_b_sync_counts_for_code(code).as_ref().clone();
+        let sync_counts = self.annex_b_sync_counts_for_code(code);
+        if sync_counts.is_empty() {
+            return Ok(false);
+        }
+        let mut pending_syncs = sync_counts.as_ref().clone();
         for name in excluded_names {
             pending_syncs.remove(name);
         }
