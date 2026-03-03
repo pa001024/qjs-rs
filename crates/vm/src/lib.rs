@@ -7590,22 +7590,25 @@ impl Vm {
             .cloned()
             .ok_or(VmError::UnknownHostFunction(host_id))?;
         match host {
-            HostFunction::BoundMethod { target, method } => match method {
+            HostFunction::BoundMethod { method, .. } => match method {
                 FunctionMethod::Call => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = args.get(1..).map_or_else(Vec::new, |slice| slice.to_vec());
-                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
+                    self.execute_callable(callable, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Apply => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = self.collect_apply_arguments(args.get(1))?;
-                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
+                    self.execute_callable(callable, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Bind => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let bound_args = args.get(1..).map_or_else(Vec::new, |slice| slice.to_vec());
                     Ok(self.create_host_function_value(HostFunction::BoundCall {
-                        target,
+                        target: callable,
                         this_arg,
                         bound_args,
                     }))
@@ -25657,6 +25660,41 @@ mod tests {
              try { bound.caller; } catch (e) { readThrows = true; } \
              try { bound.caller = {}; } catch (e) { writeThrows = true; } \
              readThrows && writeThrows;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn function_prototype_call_bind_uncurry_works_for_has_own_property() {
+        let script = parse_script(
+            "var hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty); \
+             hasOwn({ x: 1 }, 'x') && !hasOwn({ x: 1 }, 'y');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn extracted_function_prototype_call_requires_callable_this() {
+        let script = parse_script(
+            "var call = (function () {}).call; \
+             var threw = false; \
+             try { call(undefined, 1); } catch (e) { threw = true; } \
+             threw;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);

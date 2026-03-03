@@ -1478,6 +1478,33 @@ import "x";
     }
 
     #[test]
+    fn executes_case_with_uncurried_has_own_property_helper_include() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("propertyHelper.js"),
+            "var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);\nfunction verifyProperty(obj, name) {\n  assert(__hasOwnProperty(obj, name), 'obj should have an own property ' + name);\n}\n",
+        )
+        .expect("property helper include should be written");
+        fs::write(
+            test_root.join("property-helper-annexb.js"),
+            "/*---\nincludes: [propertyHelper.js]\n---*/\nverifyProperty(Date.prototype, 'getYear');\n",
+        )
+        .expect("annex-b include case file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
     fn detects_unsupported_harness_globals_in_body() {
         assert!(!super::requires_unsupported_harness_globals(
             "assert(true);"
