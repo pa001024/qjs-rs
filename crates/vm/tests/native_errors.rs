@@ -8,14 +8,14 @@ use vm::Vm;
 #[test]
 fn native_error_constructor_prototype_chain() {
     let script = parse_script(
-        "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError];\
+        "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError, AggregateError];\
          var ok = true;\
          for (var i = 0; i < ctors.length; i++) {\
            var C = ctors[i];\
            ok = ok && C.prototype !== Error.prototype;\
            ok = ok && C.prototype.constructor === C;\
            ok = ok && Object.getPrototypeOf(C.prototype) === Error.prototype;\
-           var e = new C('boom');\
+           var e = (C === AggregateError) ? new C([], 'boom') : new C('boom');\
            ok = ok && Object.getPrototypeOf(e) === C.prototype;\
            ok = ok && (e instanceof C) && (e instanceof Error);\
          }\
@@ -55,6 +55,10 @@ fn native_error_constructor_prototype_chain() {
     realm.define_global(
         "URIError",
         JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
+    );
+    realm.define_global(
+        "AggregateError",
+        JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
     );
     let mut vm = Vm::default();
     assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));

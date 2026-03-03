@@ -1472,6 +1472,15 @@ struct ForHeadArrayPatternElement {
     default_initializer: Option<Expr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentKind {
+    Simple,
+    Compound(BinaryOp),
+    LogicalAnd,
+    LogicalOr,
+    Nullish,
+}
+
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
@@ -1486,6 +1495,9 @@ struct Parser {
     class_temp_index: usize,
     allow_super_reference: bool,
     async_function_depth: usize,
+    generator_function_depth: usize,
+    generator_yield_bindings: Vec<String>,
+    generator_yield_seen: Vec<bool>,
 }
 
 impl Parser {
@@ -1503,6 +1515,9 @@ impl Parser {
             class_temp_index: 0,
             allow_super_reference: false,
             async_function_depth: 0,
+            generator_function_depth: 0,
+            generator_yield_bindings: Vec::new(),
+            generator_yield_seen: Vec::new(),
         }
     }
 
@@ -1623,6 +1638,9 @@ impl Parser {
         if self.matches_keyword("return") {
             return self.parse_return_statement();
         }
+        if self.generator_function_depth > 0 && self.matches_keyword("yield") {
+            return self.parse_generator_yield_statement();
+        }
         if self.check_keyword("let") && self.statement_starts_with_lexical_let_declaration() {
             self.advance();
             return self.parse_variable_declaration(BindingKind::Let);
@@ -1675,8 +1693,15 @@ impl Parser {
         start_error: &str,
         end_error: &str,
         allow_super_reference: bool,
+        is_generator: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
-        self.parse_function_body_with_context(start_error, end_error, allow_super_reference, false)
+        self.parse_function_body_with_context(
+            start_error,
+            end_error,
+            allow_super_reference,
+            false,
+            is_generator,
+        )
     }
 
     fn parse_function_body_with_context(
@@ -1685,19 +1710,98 @@ impl Parser {
         end_error: &str,
         allow_super_reference: bool,
         is_async: bool,
+        is_generator: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
         let saved_allow_super_reference = self.allow_super_reference;
         let saved_async_function_depth = self.async_function_depth;
+        let saved_generator_function_depth = self.generator_function_depth;
         self.allow_super_reference = allow_super_reference;
         self.async_function_depth = if is_async {
             saved_async_function_depth + 1
         } else {
             0
         };
-        let body = self.parse_function_body(start_error, end_error);
+        self.generator_function_depth = if is_generator {
+            saved_generator_function_depth + 1
+        } else {
+            0
+        };
+        let generator_binding = if is_generator {
+            let binding = format!("$__qjs_generator_values_{}__$", self.class_temp_index);
+            self.class_temp_index += 1;
+            self.generator_yield_bindings.push(binding.clone());
+            self.generator_yield_seen.push(false);
+            Some(binding)
+        } else {
+            None
+        };
+        let mut body = self.parse_function_body(start_error, end_error);
+        if let Some(binding) = generator_binding {
+            let saw_yield = self.generator_yield_seen.pop().unwrap_or(false);
+            let _ = self.generator_yield_bindings.pop();
+            if saw_yield && let Ok(statements) = body.as_mut() {
+                self.lower_generator_yield_statements(statements, &binding);
+            }
+        }
         self.allow_super_reference = saved_allow_super_reference;
         self.async_function_depth = saved_async_function_depth;
+        self.generator_function_depth = saved_generator_function_depth;
         body
+    }
+
+    fn parse_generator_yield_statement(&mut self) -> Result<Stmt, ParseError> {
+        let binding_name = self
+            .generator_yield_bindings
+            .last()
+            .cloned()
+            .ok_or_else(|| ParseError {
+                message: "yield is only valid in generator function".to_string(),
+                position: self.previous_position(),
+            })?;
+        let delegated = self.matches(&TokenKind::Star);
+        let omit_expression = !delegated
+            && (self.check(&TokenKind::Semicolon)
+                || self.check(&TokenKind::RBrace)
+                || self.is_eof()
+                || self.has_line_terminator_between_prev_and_current());
+        let yielded = if delegated {
+            self.parse_expression_with_commas()?
+        } else if omit_expression {
+            Expr::Identifier(Identifier("undefined".to_string()))
+        } else {
+            self.parse_expression_with_commas()?
+        };
+        if let Some(seen) = self.generator_yield_seen.last_mut() {
+            *seen = true;
+        }
+        Ok(Stmt::Expression(Expr::Call {
+            callee: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(Identifier(binding_name))),
+                property: "push".to_string(),
+            }),
+            arguments: vec![yielded],
+        }))
+    }
+
+    fn lower_generator_yield_statements(&self, body: &mut Vec<Stmt>, binding_name: &str) {
+        let declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: Identifier(binding_name.to_string()),
+            initializer: Some(Expr::ArrayLiteral(Vec::new())),
+        });
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, declaration);
+        body.push(Stmt::Return(Some(Expr::Identifier(Identifier(
+            binding_name.to_string(),
+        )))));
     }
 
     fn prepend_marker(&self, body: &mut Vec<Stmt>, marker: &str) {
@@ -1838,6 +1942,7 @@ impl Parser {
             "expected '}' after function body",
             false,
             is_async,
+            is_generator,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -1925,6 +2030,10 @@ impl Parser {
     }
 
     fn parse_for_statement(&mut self) -> Result<Stmt, ParseError> {
+        let is_await = self.matches_keyword("await");
+        if is_await && self.async_function_depth == 0 {
+            return Err(self.error_current("for-await is only valid in async functions"));
+        }
         self.expect(TokenKind::LParen, "expected '(' after 'for'")?;
 
         let initializer = if self.check(&TokenKind::Semicolon) {
@@ -1941,6 +2050,22 @@ impl Parser {
                 let declarations =
                     self.parse_for_head_array_pattern_declaration(BindingKind::Let, elements)?;
                 Some(ForInitializer::VariableDeclarations(declarations))
+            } else if self.check(&TokenKind::LBrace) {
+                let binding_name = self.next_for_in_temp_identifier("for_object");
+                let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self.parse_for_in_of_object_pattern_statement(
+                        BindingKind::Let,
+                        binding_name,
+                        effects,
+                    );
+                }
+                let declarations = self.parse_for_head_object_pattern_declaration(
+                    BindingKind::Let,
+                    binding_name,
+                    effects,
+                )?;
+                Some(ForInitializer::VariableDeclarations(declarations))
             } else {
                 Some(self.parse_for_head_variable_declaration(BindingKind::Let)?)
             }
@@ -1954,6 +2079,22 @@ impl Parser {
                 }
                 let declarations =
                     self.parse_for_head_array_pattern_declaration(BindingKind::Const, elements)?;
+                Some(ForInitializer::VariableDeclarations(declarations))
+            } else if self.check(&TokenKind::LBrace) {
+                let binding_name = self.next_for_in_temp_identifier("for_object");
+                let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self.parse_for_in_of_object_pattern_statement(
+                        BindingKind::Const,
+                        binding_name,
+                        effects,
+                    );
+                }
+                let declarations = self.parse_for_head_object_pattern_declaration(
+                    BindingKind::Const,
+                    binding_name,
+                    effects,
+                )?;
                 Some(ForInitializer::VariableDeclarations(declarations))
             } else {
                 Some(self.parse_for_head_variable_declaration(BindingKind::Const)?)
@@ -1969,6 +2110,22 @@ impl Parser {
                 let declarations =
                     self.parse_for_head_array_pattern_declaration(BindingKind::Var, elements)?;
                 Some(ForInitializer::VariableDeclarations(declarations))
+            } else if self.check(&TokenKind::LBrace) {
+                let binding_name = self.next_for_in_temp_identifier("for_object");
+                let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                if self.check_keyword("in") || self.check_keyword("of") {
+                    return self.parse_for_in_of_object_pattern_statement(
+                        BindingKind::Var,
+                        binding_name,
+                        effects,
+                    );
+                }
+                let declarations = self.parse_for_head_object_pattern_declaration(
+                    BindingKind::Var,
+                    binding_name,
+                    effects,
+                )?;
+                Some(ForInitializer::VariableDeclarations(declarations))
             } else {
                 Some(self.parse_for_head_variable_declaration(BindingKind::Var)?)
             }
@@ -1982,6 +2139,9 @@ impl Parser {
         } else {
             None
         };
+        if is_await && loop_kind != Some("of") {
+            return Err(self.error_current("for-await only supports 'of'"));
+        }
         if let Some(loop_kind) = loop_kind {
             let iterable = self.parse_for_in_of_rhs_expression()?;
             self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
@@ -1993,6 +2153,17 @@ impl Parser {
             self.breakable_depth = self.breakable_depth.saturating_sub(1);
             let body = body?;
 
+            if is_await {
+                if Self::supports_for_of_lowering(initializer.as_ref()) {
+                    return self.lower_for_await_of_statement(initializer, iterable, body);
+                }
+                return Ok(Stmt::For {
+                    initializer: None,
+                    condition: Some(Expr::Bool(false)),
+                    update: None,
+                    body: Box::new(body),
+                });
+            }
             if loop_kind == "in" && Self::supports_for_in_lowering(initializer.as_ref()) {
                 return self.lower_for_in_statement(initializer, iterable, body);
             }
@@ -2186,11 +2357,61 @@ impl Parser {
         Ok(declarations)
     }
 
+    fn parse_for_head_object_pattern_declaration(
+        &mut self,
+        kind: BindingKind,
+        binding_name: Identifier,
+        effects: Vec<Stmt>,
+    ) -> Result<Vec<VariableDeclaration>, ParseError> {
+        self.expect(
+            TokenKind::Equal,
+            "expected '=' after object binding pattern",
+        )?;
+        let source = self.parse_expression_no_in()?;
+        let mut declarations = vec![VariableDeclaration {
+            kind,
+            name: binding_name,
+            initializer: Some(source),
+        }];
+        declarations.extend(self.lower_object_pattern_variable_declarations(kind, effects)?);
+        Ok(declarations)
+    }
+
+    fn parse_for_in_of_object_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        binding_name: Identifier,
+        effects: Vec<Stmt>,
+    ) -> Result<Stmt, ParseError> {
+        let loop_kind = if self.matches_keyword("in") {
+            "in"
+        } else if self.matches_keyword("of") {
+            "of"
+        } else {
+            return Err(self.error_current("expected 'in' or 'of' after object binding pattern"));
+        };
+        let iterable = self.parse_for_in_of_rhs_expression()?;
+        self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
+
+        self.loop_depth += 1;
+        self.breakable_depth += 1;
+        let body = self.parse_embedded_statement(false);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.breakable_depth = self.breakable_depth.saturating_sub(1);
+        let body = body?;
+
+        if loop_kind == "in" {
+            self.lower_for_in_object_pattern_statement(kind, binding_name, effects, iterable, body)
+        } else {
+            self.lower_for_of_object_pattern_statement(kind, binding_name, effects, iterable, body)
+        }
+    }
+
     fn for_head_starts_with_lexical_let_declaration(&self) -> bool {
         if !self.check_keyword("let") {
             return false;
         }
-        if self.check_next(&TokenKind::LBracket) {
+        if self.check_next(&TokenKind::LBracket) || self.check_next(&TokenKind::LBrace) {
             return true;
         }
         if !matches!(
@@ -2211,6 +2432,7 @@ impl Parser {
             return false;
         }
         self.check_next(&TokenKind::LBracket)
+            || self.check_next(&TokenKind::LBrace)
             || matches!(
                 self.tokens.get(self.pos + 1).map(|token| &token.kind),
                 Some(TokenKind::Identifier(_))
@@ -2310,7 +2532,7 @@ impl Parser {
                 let assignment = self.rewrite_assignment_target(
                     target,
                     current_key_value_expr.clone(),
-                    None,
+                    AssignmentKind::Simple,
                     self.current_position(),
                 )?;
                 iteration_statements.push(Stmt::Expression(Expr::Unary {
@@ -2491,7 +2713,165 @@ impl Parser {
                 let assignment = self.rewrite_assignment_target(
                     target,
                     current_identifier_expr.clone(),
-                    None,
+                    AssignmentKind::Simple,
+                    self.current_position(),
+                )?;
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(assignment),
+                }));
+            }
+        }
+
+        iteration_statements.push(body);
+
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(Expr::Member {
+                object: Box::new(Expr::Identifier(step_name.clone())),
+                property: "value".to_string(),
+            }),
+        });
+        let condition = Expr::Sequence(vec![
+            Expr::Assign {
+                target: step_name.clone(),
+                value: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfStep".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterator_name.clone())],
+                }),
+            },
+            Expr::Assign {
+                target: done_name.clone(),
+                value: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(step_name.clone())),
+                    property: "done".to_string(),
+                }),
+            },
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name.clone())),
+            },
+        ]);
+        let loop_body = Stmt::Block(vec![current_declaration, Stmt::Block(iteration_statements)]);
+        let try_block = vec![Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: None,
+            body: Box::new(loop_body),
+        }];
+        let finally_block = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name)),
+            },
+            consequent: Box::new(Stmt::Block(vec![Stmt::VariableDeclaration(
+                VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: close_name,
+                    initializer: Some(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "__forOfClose".to_string(),
+                        }),
+                        arguments: vec![Expr::Identifier(iterator_name)],
+                    }),
+                },
+            )])),
+            alternate: None,
+        }];
+        statements.push(Stmt::Try {
+            try_block,
+            catch_param: None,
+            catch_block: None,
+            finally_block: Some(finally_block),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_await_of_statement(
+        &mut self,
+        initializer: Option<ForInitializer>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let iterator_name = self.next_for_in_temp_identifier("iterator");
+        let done_name = self.next_for_in_temp_identifier("done");
+        let step_name = self.next_for_in_temp_identifier("step");
+        let current_name = self.next_for_in_temp_identifier("current");
+        let close_name = self.next_for_in_temp_identifier("close");
+
+        let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
+            .into_iter()
+            .map(Self::tdz_marker_declaration)
+            .collect::<Vec<_>>();
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterator_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forAwaitIterator".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterable_name)],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: step_name.clone(),
+                initializer: Some(Expr::Identifier(Identifier("undefined".to_string()))),
+            }),
+        ]);
+
+        let current_identifier_expr = Expr::Identifier(current_name.clone());
+
+        let mut iteration_statements = Vec::new();
+        match initializer {
+            None => {}
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                if declarations.len() != 1 || declarations[0].initializer.is_some() {
+                    return Err(self.error_current("invalid for-await-of initializer"));
+                }
+                let declaration = declarations
+                    .into_iter()
+                    .next()
+                    .expect("for-await-of declaration should exist");
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::Expression(target)) => {
+                let assignment = self.rewrite_assignment_target(
+                    target,
+                    current_identifier_expr.clone(),
+                    AssignmentKind::Simple,
                     self.current_position(),
                 )?;
                 iteration_statements.push(Stmt::Expression(Expr::Unary {
@@ -2824,6 +3204,267 @@ impl Parser {
         Ok(Stmt::Block(statements))
     }
 
+    fn lower_for_in_object_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        binding_name: Identifier,
+        effects: Vec<Stmt>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let keys_name = self.next_for_in_temp_identifier("keys");
+        let index_name = self.next_for_in_temp_identifier("index");
+        let current_name = self.next_for_in_temp_identifier("current");
+        let iterable_identifier = Expr::Identifier(iterable_name.clone());
+
+        let binding_targets = Self::object_pattern_binding_targets(&effects);
+        let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
+            binding_targets
+                .iter()
+                .cloned()
+                .map(Self::tdz_marker_declaration)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(Expr::Conditional {
+                    condition: Box::new(Expr::Binary {
+                        op: BinaryOp::LogicalOr,
+                        left: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable.clone()),
+                            right: Box::new(Expr::Null),
+                        }),
+                        right: Box::new(Expr::Binary {
+                            op: BinaryOp::StrictEqual,
+                            left: Box::new(iterable.clone()),
+                            right: Box::new(Expr::Identifier(Identifier("undefined".to_string()))),
+                        }),
+                    }),
+                    consequent: Box::new(Expr::ObjectLiteral(Vec::new())),
+                    alternate: Box::new(iterable),
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: keys_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forInKeys".to_string(),
+                    }),
+                    arguments: vec![iterable_identifier],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: index_name.clone(),
+                initializer: Some(Expr::Number(0.0)),
+            }),
+        ]);
+
+        let current_key_expr = Expr::MemberComputed {
+            object: Box::new(Expr::Identifier(keys_name.clone())),
+            property: Box::new(Expr::Identifier(index_name.clone())),
+        };
+        let current_key_value_expr = Expr::Identifier(current_name.clone());
+
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name,
+            initializer: Some(current_key_expr),
+        });
+        let mut iteration_statements = Vec::new();
+        self.lower_object_pattern_bindings(
+            kind,
+            binding_name,
+            &effects,
+            &current_key_value_expr,
+            &mut statements,
+            &mut iteration_statements,
+        );
+        iteration_statements.push(body);
+
+        let guarded_iteration_body = Stmt::If {
+            condition: Expr::Binary {
+                op: BinaryOp::In,
+                left: Box::new(current_key_value_expr),
+                right: Box::new(Expr::Identifier(iterable_name.clone())),
+            },
+            consequent: Box::new(Stmt::Block(iteration_statements)),
+            alternate: None,
+        };
+
+        let condition = Expr::Binary {
+            op: BinaryOp::Less,
+            left: Box::new(Expr::Identifier(index_name.clone())),
+            right: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(keys_name)),
+                property: "length".to_string(),
+            }),
+        };
+        let update = Expr::Assign {
+            target: index_name.clone(),
+            value: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Identifier(index_name)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        };
+
+        statements.push(Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: Some(update),
+            body: Box::new(Stmt::Block(vec![
+                current_declaration,
+                guarded_iteration_body,
+            ])),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_of_object_pattern_statement(
+        &mut self,
+        kind: BindingKind,
+        binding_name: Identifier,
+        effects: Vec<Stmt>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let iterator_name = self.next_for_in_temp_identifier("iterator");
+        let done_name = self.next_for_in_temp_identifier("done");
+        let step_name = self.next_for_in_temp_identifier("step");
+        let current_name = self.next_for_in_temp_identifier("current");
+        let close_name = self.next_for_in_temp_identifier("close");
+
+        let binding_targets = Self::object_pattern_binding_targets(&effects);
+        let mut statements = if matches!(kind, BindingKind::Let | BindingKind::Const) {
+            binding_targets
+                .iter()
+                .cloned()
+                .map(Self::tdz_marker_declaration)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterator_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfIterator".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterable_name)],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: step_name.clone(),
+                initializer: Some(Expr::Identifier(Identifier("undefined".to_string()))),
+            }),
+        ]);
+
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(Expr::Member {
+                object: Box::new(Expr::Identifier(step_name.clone())),
+                property: "value".to_string(),
+            }),
+        });
+        let current_identifier_expr = Expr::Identifier(current_name);
+
+        let mut iteration_statements = Vec::new();
+        self.lower_object_pattern_bindings(
+            kind,
+            binding_name,
+            &effects,
+            &current_identifier_expr,
+            &mut statements,
+            &mut iteration_statements,
+        );
+        iteration_statements.push(body);
+
+        let condition = Expr::Sequence(vec![
+            Expr::Assign {
+                target: step_name.clone(),
+                value: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfStep".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterator_name.clone())],
+                }),
+            },
+            Expr::Assign {
+                target: done_name.clone(),
+                value: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(step_name.clone())),
+                    property: "done".to_string(),
+                }),
+            },
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name.clone())),
+            },
+        ]);
+        let loop_body = Stmt::Block(vec![current_declaration, Stmt::Block(iteration_statements)]);
+        let try_block = vec![Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: None,
+            body: Box::new(loop_body),
+        }];
+        let finally_block = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name)),
+            },
+            consequent: Box::new(Stmt::Block(vec![Stmt::VariableDeclaration(
+                VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: close_name,
+                    initializer: Some(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "__forOfClose".to_string(),
+                        }),
+                        arguments: vec![Expr::Identifier(iterator_name)],
+                    }),
+                },
+            )])),
+            alternate: None,
+        }];
+        statements.push(Stmt::Try {
+            try_block,
+            catch_param: None,
+            catch_block: None,
+            finally_block: Some(finally_block),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
     fn lower_array_pattern_bindings(
         &mut self,
         kind: BindingKind,
@@ -2858,6 +3499,65 @@ impl Parser {
                     name: element.name.clone(),
                     initializer: Some(value),
                 }));
+            }
+        }
+    }
+
+    fn object_pattern_binding_targets(effects: &[Stmt]) -> Vec<Identifier> {
+        effects
+            .iter()
+            .filter_map(|statement| match statement {
+                Stmt::Expression(Expr::Assign { target, .. }) => Some(target.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lower_object_pattern_bindings(
+        &mut self,
+        kind: BindingKind,
+        binding_name: Identifier,
+        effects: &[Stmt],
+        current_value_expr: &Expr,
+        outer_statements: &mut Vec<Stmt>,
+        iteration_statements: &mut Vec<Stmt>,
+    ) {
+        if kind == BindingKind::Var {
+            for name in Self::object_pattern_binding_targets(effects) {
+                outer_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+                    kind: BindingKind::Var,
+                    name,
+                    initializer: None,
+                }));
+            }
+        }
+
+        iteration_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: binding_name,
+            initializer: Some(current_value_expr.clone()),
+        }));
+
+        for effect in effects {
+            match effect {
+                Stmt::Expression(Expr::Assign { target, value }) => {
+                    if kind == BindingKind::Var {
+                        iteration_statements.push(Stmt::Expression(Expr::Unary {
+                            op: UnaryOp::Void,
+                            expr: Box::new(Expr::Assign {
+                                target: target.clone(),
+                                value: value.clone(),
+                            }),
+                        }));
+                    } else {
+                        iteration_statements.push(Stmt::VariableDeclaration(VariableDeclaration {
+                            kind,
+                            name: target.clone(),
+                            initializer: Some((**value).clone()),
+                        }));
+                    }
+                }
+                other => iteration_statements.push(other.clone()),
             }
         }
     }
@@ -3350,32 +4050,68 @@ impl Parser {
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
         let mut declarations = Vec::new();
         loop {
-            let name = if kind == BindingKind::Var {
-                self.expect_var_binding_identifier("expected binding name")?
+            if self.matches(&TokenKind::LBracket) {
+                let source_name = self.next_for_in_temp_identifier("decl_array");
+                let source_expr = Expr::Identifier(source_name.clone());
+                let elements = self.parse_for_head_array_pattern_after_lbracket(kind)?;
+                self.expect(TokenKind::Equal, "expected '=' after array binding pattern")?;
+                let initializer = self.parse_expression_inner()?;
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: source_name,
+                    initializer: Some(initializer),
+                });
+                for element in elements {
+                    let value = Self::array_pattern_element_value_expr(&source_expr, &element);
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: element.name,
+                        initializer: Some(value),
+                    });
+                }
+            } else if self.check(&TokenKind::LBrace) {
+                let source_name = self.next_for_in_temp_identifier("decl_object");
+                let effects = self.parse_object_parameter_pattern_effects(&source_name)?;
+                self.expect(
+                    TokenKind::Equal,
+                    "expected '=' after object binding pattern",
+                )?;
+                let initializer = self.parse_expression_inner()?;
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: source_name,
+                    initializer: Some(initializer),
+                });
+                declarations
+                    .extend(self.lower_object_pattern_variable_declarations(kind, effects)?);
             } else {
-                self.expect_binding_identifier("expected binding name")?
-            };
-            let initializer = if self.matches(&TokenKind::Equal) {
-                Some(self.parse_expression_inner()?)
-            } else {
-                None
-            };
+                let name = if kind == BindingKind::Var {
+                    self.expect_var_binding_identifier("expected binding name")?
+                } else {
+                    self.expect_binding_identifier("expected binding name")?
+                };
+                let initializer = if self.matches(&TokenKind::Equal) {
+                    Some(self.parse_expression_inner()?)
+                } else {
+                    None
+                };
 
-            if kind == BindingKind::Const
-                && initializer.is_none()
-                && !(self.check_keyword("in") || self.check_keyword("of"))
-            {
-                return Err(ParseError {
-                    message: "const declaration requires an initializer".to_string(),
-                    position: self.current_position(),
+                if kind == BindingKind::Const
+                    && initializer.is_none()
+                    && !(self.check_keyword("in") || self.check_keyword("of"))
+                {
+                    return Err(ParseError {
+                        message: "const declaration requires an initializer".to_string(),
+                        position: self.current_position(),
+                    });
+                }
+
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: Identifier(name),
+                    initializer,
                 });
             }
-
-            declarations.push(VariableDeclaration {
-                kind,
-                name: Identifier(name),
-                initializer,
-            });
 
             if !self.matches(&TokenKind::Comma) {
                 break;
@@ -3394,8 +4130,37 @@ impl Parser {
         }
     }
 
+    fn lower_object_pattern_variable_declarations(
+        &mut self,
+        kind: BindingKind,
+        effects: Vec<Stmt>,
+    ) -> Result<Vec<VariableDeclaration>, ParseError> {
+        let mut declarations = Vec::new();
+        for statement in effects {
+            match statement {
+                Stmt::Expression(Expr::Assign { target, value }) => {
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: target,
+                        initializer: Some(*value),
+                    });
+                }
+                Stmt::Expression(expr) => {
+                    let effect_name = self.next_for_in_temp_identifier("decl_object_effect");
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: effect_name,
+                        initializer: Some(expr),
+                    });
+                }
+                _ => return Err(self.error_current("unsupported object binding pattern")),
+            }
+        }
+        Ok(declarations)
+    }
+
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        const MAX_EXPRESSION_DEPTH: usize = 80;
+        const MAX_EXPRESSION_DEPTH: usize = 40;
         self.expression_depth += 1;
         if self.expression_depth > MAX_EXPRESSION_DEPTH {
             self.expression_depth = self.expression_depth.saturating_sub(1);
@@ -3452,83 +4217,171 @@ impl Parser {
         }
 
         let left = self.parse_conditional()?;
-        let (binary_op, assignment_position) = if self.matches(&TokenKind::Equal) {
-            (None, self.previous_position())
+        let (assignment_kind, assignment_position) = if self.matches(&TokenKind::Equal) {
+            (AssignmentKind::Simple, self.previous_position())
         } else if self.matches(&TokenKind::PlusEqual) {
-            (Some(BinaryOp::Add), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Add),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::MinusEqual) {
-            (Some(BinaryOp::Sub), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Sub),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::StarEqual) {
-            (Some(BinaryOp::Mul), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Mul),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::SlashEqual) {
-            (Some(BinaryOp::Div), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Div),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::PercentEqual) {
-            (Some(BinaryOp::Mod), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Mod),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::LessLessEqual) {
-            (Some(BinaryOp::ShiftLeft), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::ShiftLeft),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::GreaterGreaterEqual) {
-            (Some(BinaryOp::ShiftRight), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::ShiftRight),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::GreaterGreaterGreaterEqual) {
-            (Some(BinaryOp::UnsignedShiftRight), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::UnsignedShiftRight),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::AmpEqual) {
-            (Some(BinaryOp::BitAnd), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitAnd),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::PipeEqual) {
-            (Some(BinaryOp::BitOr), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitOr),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::CaretEqual) {
-            (Some(BinaryOp::BitXor), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitXor),
+                self.previous_position(),
+            )
+        } else if self.matches(&TokenKind::AndAndEqual) {
+            (AssignmentKind::LogicalAnd, self.previous_position())
+        } else if self.matches(&TokenKind::OrOrEqual) {
+            (AssignmentKind::LogicalOr, self.previous_position())
+        } else if self.matches(&TokenKind::QuestionQuestionEqual) {
+            (AssignmentKind::Nullish, self.previous_position())
         } else {
             return Ok(left);
         };
 
         let right = self.parse_assignment()?;
-        self.rewrite_assignment_target(left, right, binary_op, assignment_position)
+        self.rewrite_assignment_target(left, right, assignment_kind, assignment_position)
     }
 
     fn rewrite_assignment_target(
         &mut self,
         left: Expr,
         right: Expr,
-        binary_op: Option<BinaryOp>,
+        assignment_kind: AssignmentKind,
         assignment_position: usize,
     ) -> Result<Expr, ParseError> {
         match left {
             Expr::Identifier(target) => {
-                let value = self.wrap_compound_assignment_value(
-                    Expr::Identifier(target.clone()),
-                    right,
-                    binary_op,
-                );
-                Ok(Expr::Assign {
-                    target,
-                    value: Box::new(value),
-                })
+                let read = Expr::Identifier(target.clone());
+                let assign = Expr::Assign {
+                    target: target.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::Assign { value, .. } = value {
+                            Ok(Expr::Assign { target, value })
+                        } else {
+                            unreachable!("assignment rewrite should preserve identifier target")
+                        }
+                    }
+                }
             }
             Expr::Member { object, property } => {
                 let read = Expr::Member {
                     object: object.clone(),
                     property: property.clone(),
                 };
-                let value = self.wrap_compound_assignment_value(read, right, binary_op);
-                Ok(Expr::AssignMember {
-                    object,
-                    property,
-                    value: Box::new(value),
-                })
+                let assign = Expr::AssignMember {
+                    object: object.clone(),
+                    property: property.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::AssignMember { value, .. } = value {
+                            Ok(Expr::AssignMember {
+                                object,
+                                property,
+                                value,
+                            })
+                        } else {
+                            unreachable!("assignment rewrite should preserve member target")
+                        }
+                    }
+                }
             }
             Expr::MemberComputed { object, property } => {
                 let read = Expr::MemberComputed {
                     object: object.clone(),
                     property: property.clone(),
                 };
-                let value = self.wrap_compound_assignment_value(read, right, binary_op);
-                Ok(Expr::AssignMemberComputed {
-                    object,
-                    property,
-                    value: Box::new(value),
-                })
+                let assign = Expr::AssignMemberComputed {
+                    object: object.clone(),
+                    property: property.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::AssignMemberComputed { value, .. } = value {
+                            Ok(Expr::AssignMemberComputed {
+                                object,
+                                property,
+                                value,
+                            })
+                        } else {
+                            unreachable!(
+                                "assignment rewrite should preserve computed member target"
+                            )
+                        }
+                    }
+                }
             }
             Expr::ArrayLiteral(elements) => {
-                if binary_op.is_some() {
+                if assignment_kind != AssignmentKind::Simple {
                     return Err(ParseError {
                         message: "invalid assignment target".to_string(),
                         position: assignment_position,
@@ -3537,7 +4390,7 @@ impl Parser {
                 self.lower_array_assignment_pattern(elements, right, assignment_position)
             }
             Expr::ObjectLiteral(properties) => {
-                if binary_op.is_some() {
+                if assignment_kind != AssignmentKind::Simple {
                     return Err(ParseError {
                         message: "invalid assignment target".to_string(),
                         position: assignment_position,
@@ -3547,7 +4400,7 @@ impl Parser {
             }
             other if Self::is_annex_b_call_assignment_target(&other) => {
                 let _ = right;
-                let _ = binary_op;
+                let _ = assignment_kind;
                 Ok(Expr::AnnexBCallAssignmentTarget {
                     target: Box::new(other),
                 })
@@ -3559,20 +4412,91 @@ impl Parser {
         }
     }
 
-    fn wrap_compound_assignment_value(
+    fn wrap_assignment_value(
         &self,
-        left: Expr,
-        right: Expr,
-        binary_op: Option<BinaryOp>,
+        read: Expr,
+        assign_expr: Expr,
+        assignment_kind: AssignmentKind,
     ) -> Expr {
-        if let Some(binary_op) = binary_op {
-            Expr::Binary {
-                op: binary_op,
-                left: Box::new(left),
-                right: Box::new(right),
+        match assignment_kind {
+            AssignmentKind::Simple => assign_expr,
+            AssignmentKind::Compound(binary_op) => match assign_expr {
+                Expr::Assign { target, value } => Expr::Assign {
+                    target,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                Expr::AssignMember {
+                    object,
+                    property,
+                    value,
+                } => Expr::AssignMember {
+                    object,
+                    property,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                Expr::AssignMemberComputed {
+                    object,
+                    property,
+                    value,
+                } => Expr::AssignMemberComputed {
+                    object,
+                    property,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                _ => unreachable!("assignment rewrite should produce assignment expression"),
+            },
+            AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                unreachable!("short-circuit assignment is rewritten separately")
             }
-        } else {
-            right
+        }
+    }
+
+    fn lower_short_circuit_assignment(
+        &mut self,
+        current_value: Expr,
+        assign_expr: Expr,
+        assignment_kind: AssignmentKind,
+    ) -> Expr {
+        let current_name = self.next_for_in_temp_identifier("logical_assign_current");
+        let current_ref = Expr::Identifier(current_name.clone());
+        let condition = match assignment_kind {
+            AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr => current_ref.clone(),
+            AssignmentKind::Nullish => self.build_nullish_check_expression(current_ref.clone()),
+            AssignmentKind::Simple | AssignmentKind::Compound(_) => {
+                unreachable!("expected short-circuit assignment kind")
+            }
+        };
+        let (consequent, alternate) = match assignment_kind {
+            AssignmentKind::LogicalAnd => (assign_expr, current_ref),
+            AssignmentKind::LogicalOr => (current_ref, assign_expr),
+            AssignmentKind::Nullish => (assign_expr, current_ref),
+            AssignmentKind::Simple | AssignmentKind::Compound(_) => {
+                unreachable!("expected short-circuit assignment kind")
+            }
+        };
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![current_name],
+                body: vec![Stmt::Return(Some(Expr::Conditional {
+                    condition: Box::new(condition),
+                    consequent: Box::new(consequent),
+                    alternate: Box::new(alternate),
+                }))],
+            }),
+            arguments: vec![current_value],
         }
     }
 
@@ -3865,6 +4789,12 @@ impl Parser {
     }
 
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
+        // Deeply nested parenthesized expressions should trip the expression-depth guard
+        // instead of recursing through arrow-function lookahead.
+        if self.expression_depth >= 64 {
+            return Ok(None);
+        }
+
         let saved_pos = self.pos;
         let mut is_async = false;
 
@@ -3953,6 +4883,7 @@ impl Parser {
                 "expected '}' after function body",
                 false,
                 is_async,
+                false,
             )?
         } else {
             let saved_async_function_depth = self.async_function_depth;
@@ -3992,8 +4923,57 @@ impl Parser {
         Ok(expr)
     }
 
+    fn nullish_undefined_expression() -> Expr {
+        Expr::Unary {
+            op: UnaryOp::Void,
+            expr: Box::new(Expr::Number(0.0)),
+        }
+    }
+
+    fn build_nullish_check_expression(&self, value: Expr) -> Expr {
+        Expr::Binary {
+            op: BinaryOp::LogicalOr,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(value.clone()),
+                right: Box::new(Expr::Null),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(value),
+                right: Box::new(Self::nullish_undefined_expression()),
+            }),
+        }
+    }
+
+    fn lower_nullish_coalesce_expression(&mut self, left: Expr, right: Expr) -> Expr {
+        let current_name = self.next_for_in_temp_identifier("coalesce_value");
+        let current_ref = Expr::Identifier(current_name.clone());
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![current_name],
+                body: vec![Stmt::Return(Some(Expr::Conditional {
+                    condition: Box::new(self.build_nullish_check_expression(current_ref.clone())),
+                    consequent: Box::new(right),
+                    alternate: Box::new(current_ref),
+                }))],
+            }),
+            arguments: vec![left],
+        }
+    }
+
+    fn parse_coalesce(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_logical_or()?;
+        while self.matches(&TokenKind::QuestionQuestion) {
+            let right = self.parse_logical_or()?;
+            expr = self.lower_nullish_coalesce_expression(expr, right);
+        }
+        Ok(expr)
+    }
+
     fn parse_conditional(&mut self) -> Result<Expr, ParseError> {
-        let condition = self.parse_logical_or()?;
+        let condition = self.parse_coalesce()?;
         if !self.matches(&TokenKind::Question) {
             return Ok(condition);
         }
@@ -4236,7 +5216,11 @@ impl Parser {
             });
         }
         if self.async_function_depth > 0 && self.matches_keyword("await") {
-            return self.parse_unary();
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Await,
+                expr: Box::new(expr),
+            });
         }
         if self.matches_keyword("new") {
             return self.parse_new_expression();
@@ -4789,6 +5773,7 @@ impl Parser {
             "expected '}' after function body",
             false,
             is_async,
+            is_generator,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -4865,7 +5850,7 @@ impl Parser {
             } else {
                 ClassElementKind::Method
             };
-            let _is_generator = self.matches(&TokenKind::Star);
+            let is_generator_method = self.matches(&TokenKind::Star);
 
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
@@ -4876,6 +5861,7 @@ impl Parser {
                 "expected '{' before method body",
                 "expected '}' after method body",
                 true,
+                is_generator_method,
             );
             let mut body = body?;
             if matches!(kind, ClassElementKind::Getter) && !params.is_empty() {
@@ -4887,6 +5873,9 @@ impl Parser {
             self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
+            }
+            if is_generator_method {
+                self.insert_generator_function_marker(&mut body);
             }
             parsed.methods.push(ClassMethodDefinition {
                 key,
@@ -5918,7 +6907,11 @@ impl Parser {
             | TokenKind::GreaterGreaterGreaterEqual
             | TokenKind::GreaterEqual
             | TokenKind::AndAnd
+            | TokenKind::AndAndEqual
             | TokenKind::OrOr
+            | TokenKind::OrOrEqual
+            | TokenKind::QuestionQuestion
+            | TokenKind::QuestionQuestionEqual
             | TokenKind::Ellipsis
             | TokenKind::Dot
             | TokenKind::Comma
@@ -6196,6 +7189,16 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
+            if let Some(async_method) = self.try_parse_async_object_method()? {
+                properties.push(async_method);
+                if self.matches(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
             let is_generator_method = self.matches(&TokenKind::Star);
             let mut key = self.parse_object_property_key()?;
             if let Some((accessor_key, accessor_value)) = self.try_parse_object_accessor(&key)? {
@@ -6217,14 +7220,14 @@ impl Parser {
                 break;
             }
             let value = if is_generator_method {
-                self.parse_object_method_value()?
+                self.parse_object_method_value(true, false)?
             } else if self.matches(&TokenKind::Colon) {
                 if matches!(&key, ObjectPropertyKey::Static(name) if name == "__proto__") {
                     key = ObjectPropertyKey::ProtoSetter;
                 }
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
-                self.parse_object_method_value()?
+                self.parse_object_method_value(false, false)?
             } else {
                 match &key {
                     ObjectPropertyKey::Static(name) => {
@@ -6234,7 +7237,16 @@ impl Parser {
                                 position: self.previous_position(),
                             });
                         }
-                        Expr::Identifier(Identifier(name.clone()))
+                        let identifier = Identifier(name.clone());
+                        if self.matches(&TokenKind::Equal) {
+                            let initializer = self.parse_assignment()?;
+                            Expr::Assign {
+                                target: identifier,
+                                value: Box::new(initializer),
+                            }
+                        } else {
+                            Expr::Identifier(identifier)
+                        }
                     }
                     ObjectPropertyKey::Computed(_) => {
                         return Err(self.error_current(
@@ -6265,6 +7277,34 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
         Ok(Expr::ObjectLiteral(properties))
+    }
+
+    fn try_parse_async_object_method(&mut self) -> Result<Option<ObjectProperty>, ParseError> {
+        if !self.check_keyword("async") {
+            return Ok(None);
+        }
+        if self.has_line_terminator_between_tokens(self.pos, self.pos + 1) {
+            return Ok(None);
+        }
+
+        let checkpoint = self.pos;
+        self.matches_keyword("async");
+        let is_generator_method = self.matches(&TokenKind::Star);
+        let key = match self.parse_object_property_key() {
+            Ok(key) => key,
+            Err(_) => {
+                self.pos = checkpoint;
+                return Ok(None);
+            }
+        };
+
+        if !self.check(&TokenKind::LParen) {
+            self.pos = checkpoint;
+            return Ok(None);
+        }
+
+        let value = self.parse_object_method_value(is_generator_method, true)?;
+        Ok(Some(ObjectProperty { key, value }))
     }
 
     fn try_parse_object_accessor(
@@ -6322,6 +7362,7 @@ impl Parser {
             "expected '{' before function body",
             "expected '}' after function body",
             true,
+            false,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -6374,20 +7415,41 @@ impl Parser {
         }
     }
 
-    fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
+    fn parse_object_method_value(
+        &mut self,
+        is_generator: bool,
+        is_async: bool,
+    ) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body_with_super_policy(
-            "expected '{' before method body",
-            "expected '}' after method body",
-            true,
-        )?;
+        let mut body = if is_async {
+            self.parse_function_body_with_context(
+                "expected '{' before method body",
+                "expected '}' after method body",
+                true,
+                true,
+                is_generator,
+            )?
+        } else {
+            self.parse_function_body_with_super_policy(
+                "expected '{' before method body",
+                "expected '}' after method body",
+                true,
+                is_generator,
+            )?
+        };
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_async {
+            self.insert_async_function_marker(&mut body);
+        }
+        if is_generator {
+            self.insert_generator_function_marker(&mut body);
         }
         self.insert_no_prototype_marker(&mut body);
         Ok(Expr::Function {
@@ -6672,7 +7734,10 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_METHOD_NO_PROTOTYPE_MARKER, parse_expression, parse_module, parse_script};
+    use super::{
+        CLASS_METHOD_NO_PROTOTYPE_MARKER, GENERATOR_FUNCTION_MARKER, parse_expression,
+        parse_module, parse_script,
+    };
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ModuleExport,
         ModuleImportBinding, ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral,
@@ -6830,6 +7895,10 @@ export default value;\n";
                     params: vec![],
                     body: vec![
                         Stmt::Expression(Expr::String(StringLiteral {
+                            value: GENERATOR_FUNCTION_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Expression(Expr::String(StringLiteral {
                             value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
                             has_escape: false,
                         })),
@@ -6846,6 +7915,10 @@ export default value;\n";
                     params: vec![],
                     body: vec![
                         Stmt::Expression(Expr::String(StringLiteral {
+                            value: GENERATOR_FUNCTION_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Expression(Expr::String(StringLiteral {
                             value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
                             has_escape: false,
                         })),
@@ -6855,6 +7928,15 @@ export default value;\n";
             },
         ]);
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_async_methods_in_object_literal_baseline() {
+        parse_script(
+            "var iter = { async next() { return { done: true }; }, async *gen() { yield 1; } };",
+        )
+        .expect("script parsing should succeed");
+        parse_expression("({ async [k]() { await 2; } })").expect("parser should succeed");
     }
 
     #[test]
@@ -7520,6 +8602,24 @@ export default value;\n";
     }
 
     #[test]
+    fn parses_nullish_coalesce_expression_baseline() {
+        let parsed = parse_expression("a ?? b").expect("parser should succeed");
+        assert!(matches!(parsed, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn parses_logical_assignment_operators_baseline() {
+        parse_script("var x = 1; x &&= 2; x ||= 3; x ??= 4;")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_object_assignment_pattern_with_default_initializer() {
+        parse_script("var x, count = 0; ({x = (count = count + 1)} = {x: 1});")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
     fn parses_function_declaration_and_return() {
         let parsed = parse_script("function add(a, b) { return a + b; } add(1, 2);")
             .expect("script parsing should succeed");
@@ -7634,9 +8734,86 @@ export default value;\n";
     }
 
     #[test]
+    fn parses_generator_yield_statements_baseline() {
+        parse_script("function* g() { yield 1; if (true) { yield; } yield ''; }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_generator_yield_star_baseline() {
+        parse_script("function* g(iter) { yield* iter; }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn lowers_generator_yield_star_in_function_expression() {
+        let parsed = parse_script("var g = function* (iter) { yield* iter; };")
+            .expect("script parsing should succeed");
+        let debug = format!("{parsed:?}");
+        assert!(
+            debug.contains("$__qjs_generator_values_"),
+            "lowered generator should introduce an internal yield buffer"
+        );
+        assert!(
+            debug.contains("property: \"push\""),
+            "lowered generator yield* should push delegated value into the internal buffer"
+        );
+    }
+
+    #[test]
+    fn lowers_generator_yield_statements_into_array_collection() {
+        let parsed = parse_script("function* g() { yield 1; yield ''; }")
+            .expect("script parsing should succeed");
+        let debug = format!("{parsed:?}");
+        assert!(
+            debug.contains("$__qjs_generator_values_"),
+            "lowered generator should introduce an internal yield buffer"
+        );
+        assert!(
+            debug.contains("property: \"push\""),
+            "lowered generator yield should push values into the internal buffer"
+        );
+    }
+
+    #[test]
     fn parses_async_function_await_expression_baseline() {
         parse_script("async function foo() { await new Promise(); }")
             .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_await_expression_as_unary_in_async_function_body() {
+        let parsed = parse_expression("async () => await value").expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected async arrow to parse as function expression");
+        };
+        let has_await_return = body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Return(Some(Expr::Unary {
+                    op: UnaryOp::Await,
+                    ..
+                }))
+            )
+        });
+        assert!(has_await_return, "async arrow body should preserve await");
+    }
+
+    #[test]
+    fn parses_await_expression_inside_async_function_expression_body() {
+        let parsed = parse_expression("(async function () { return await value; })")
+            .expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected async function expression");
+        };
+        assert!(body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Return(Some(Expr::Unary {
+                    op: UnaryOp::Await,
+                    ..
+                }))
+            )
+        }));
     }
 
     #[test]
@@ -7918,6 +9095,12 @@ export default value;\n";
     }
 
     #[test]
+    fn parses_for_head_let_object_destructuring_declaration() {
+        parse_script("for (let {x = init()} = values; ; ) { break; }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
     fn parses_for_head_async_of_arrow_expression() {
         parse_script("for (async of => {}; i < 10; ++i) { counter = counter + 1; }")
             .expect("script parsing should succeed");
@@ -7962,6 +9145,40 @@ for ( [let][0]; ; )
     #[test]
     fn parses_for_of_const_initializerless_declaration_baseline() {
         parse_script("for (const x of [1, 2, 3]) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_of_let_object_pattern_with_default_binding() {
+        parse_script("for (let { era, aliases = [] } of records) {}")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_await_of_inside_async_function() {
+        parse_script("async function f() { for await (const x of xs) { x; } }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn rejects_for_await_of_outside_async_function() {
+        let err = parse_script("for await (const x of xs) {}")
+            .expect_err("for-await should fail outside async function");
+        assert_eq!(err.message, "for-await is only valid in async functions");
+    }
+
+    #[test]
+    fn parses_variable_array_destructuring_declaration_baseline() {
+        parse_script("const [x = init()] = values;").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_variable_object_destructuring_declaration_baseline() {
+        parse_script("const {x = init()} = values;").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_let_object_destructuring_declaration_baseline() {
+        parse_script("let {x = init()} = values;").expect("script parsing should succeed");
     }
 
     #[test]

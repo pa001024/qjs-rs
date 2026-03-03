@@ -54,7 +54,11 @@ pub enum TokenKind {
     GreaterGreaterGreaterEqual,
     GreaterEqual,
     AndAnd,
+    AndAndEqual,
     OrOr,
+    OrOrEqual,
+    QuestionQuestion,
+    QuestionQuestionEqual,
     Ellipsis,
     Dot,
     Comma,
@@ -912,6 +916,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte == b'&' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'&' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::AndAndEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
                 tokens.push(Token {
                     kind: TokenKind::AndAnd,
                     span: Span {
@@ -946,6 +961,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte == b'|' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'|' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::OrOrEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
                 tokens.push(Token {
                     kind: TokenKind::OrOr,
                     span: Span {
@@ -1108,6 +1134,28 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'?' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'?' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::QuestionQuestionEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
+                tokens.push(Token {
+                    kind: TokenKind::QuestionQuestion,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Question,
                 span: Span {
@@ -1328,18 +1376,48 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
             let mut has_dot = false;
             let mut has_exponent = false;
+            let mut has_separator = false;
+            let mut prev_was_separator = false;
             while pos < bytes.len() {
                 let current = bytes[pos];
                 if current.is_ascii_digit() {
+                    prev_was_separator = false;
+                    pos += 1;
+                    continue;
+                }
+                if current == b'_' {
+                    let next_is_digit = pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit();
+                    let prev_is_digit = pos > start && bytes[pos - 1].is_ascii_digit();
+                    if prev_was_separator || !next_is_digit || !prev_is_digit {
+                        return Err(LexError {
+                            message: format!("invalid number literal '{}'", &source[start..=pos]),
+                            position: pos,
+                        });
+                    }
+                    has_separator = true;
+                    prev_was_separator = true;
                     pos += 1;
                     continue;
                 }
                 if current == b'.' && !has_dot {
+                    if prev_was_separator {
+                        return Err(LexError {
+                            message: format!("invalid number literal '{}'", &source[start..=pos]),
+                            position: pos,
+                        });
+                    }
                     has_dot = true;
+                    prev_was_separator = false;
                     pos += 1;
                     continue;
                 }
                 break;
+            }
+            if prev_was_separator {
+                return Err(LexError {
+                    message: format!("invalid number literal '{}'", &source[start..pos]),
+                    position: pos.saturating_sub(1),
+                });
             }
             if pos < bytes.len() && matches!(bytes[pos], b'e' | b'E') {
                 let exponent_start = pos;
@@ -1348,10 +1426,40 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     pos += 1;
                 }
                 let exponent_digits_start = pos;
-                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                    pos += 1;
+                let mut exponent_prev_separator = false;
+                while pos < bytes.len() {
+                    let current = bytes[pos];
+                    if current.is_ascii_digit() {
+                        exponent_prev_separator = false;
+                        pos += 1;
+                        continue;
+                    }
+                    if current == b'_' {
+                        let next_is_digit =
+                            pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit();
+                        let prev_is_digit =
+                            pos > exponent_digits_start && bytes[pos - 1].is_ascii_digit();
+                        if pos == exponent_digits_start
+                            || exponent_prev_separator
+                            || !next_is_digit
+                            || !prev_is_digit
+                        {
+                            return Err(LexError {
+                                message: format!(
+                                    "invalid number literal '{}'",
+                                    &source[start..=pos]
+                                ),
+                                position: pos,
+                            });
+                        }
+                        has_separator = true;
+                        exponent_prev_separator = true;
+                        pos += 1;
+                        continue;
+                    }
+                    break;
                 }
-                if exponent_digits_start == pos {
+                if exponent_digits_start == pos || exponent_prev_separator {
                     let raw = &source[start..exponent_start];
                     return Err(LexError {
                         message: format!("invalid number literal '{}'", &source[start..pos]),
@@ -1362,7 +1470,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
             let numeric_end = pos;
             let raw = &source[start..numeric_end];
-            let value = raw.parse::<f64>().map_err(|_| LexError {
+            let normalized = if has_separator {
+                raw.replace('_', "")
+            } else {
+                raw.to_string()
+            };
+            let value = normalized.parse::<f64>().map_err(|_| LexError {
                 message: format!("invalid number literal '{raw}'"),
                 position: start,
             })?;
@@ -1703,6 +1816,28 @@ mod tests {
     }
 
     #[test]
+    fn lexes_numeric_separators_in_decimal_and_bigint_baseline() {
+        let tokens = lex("1_000 + 2_500n + 3_2.5_0 + 9e1_0").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Number(1000.0));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::Number(2500.0));
+        assert_eq!(tokens[3].kind, TokenKind::Plus);
+        assert_eq!(tokens[4].kind, TokenKind::Number(32.5));
+        assert_eq!(tokens[5].kind, TokenKind::Plus);
+        assert_eq!(tokens[6].kind, TokenKind::Number(9e10));
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_separator_placements() {
+        assert!(lex("1__0").is_err());
+        assert!(lex("1_.0").is_err());
+        assert!(lex("1._0").is_err());
+        assert!(lex("1e_2").is_err());
+        assert!(lex("1e2_").is_err());
+    }
+
+    #[test]
     fn rejects_hex_without_digits() {
         let err = lex("0x").expect_err("tokenization should fail");
         assert!(err.message.starts_with("invalid number literal"));
@@ -2032,6 +2167,17 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::OrOr);
         assert_eq!(tokens[4].kind, TokenKind::Identifier("c".to_string()));
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_nullish_and_logical_assignment_operators() {
+        let tokens =
+            lex("a ?? b; x &&= y; m ||= n; p ??= q;").expect("tokenization should succeed");
+        let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
+        assert!(kinds.contains(&TokenKind::QuestionQuestion));
+        assert!(kinds.contains(&TokenKind::AndAndEqual));
+        assert!(kinds.contains(&TokenKind::OrOrEqual));
+        assert!(kinds.contains(&TokenKind::QuestionQuestionEqual));
     }
 
     #[test]

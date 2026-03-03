@@ -1,15 +1,15 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
-use runtime::Realm;
-use vm::{GcStats, Vm};
+use runtime::{JsValue, NativeFunction, Realm};
+use vm::{GcStats, ModuleHost, ModuleHostError, PromiseJobDrainStopReason, Vm, VmError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativePhase {
@@ -185,23 +185,8 @@ pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
 }
 
 fn classify_frontmatter_skip(frontmatter: &Test262Frontmatter) -> Option<SkipCategory> {
-    // Current engine is script-only, non-strict baseline without harness includes.
-    if frontmatter.flags.iter().any(|flag| flag == "module") {
-        return Some(SkipCategory::FlagModule);
-    }
-    if frontmatter.flags.iter().any(|flag| flag == "onlyStrict") {
-        return Some(SkipCategory::FlagOnlyStrict);
-    }
-    if frontmatter.flags.iter().any(|flag| flag == "async") {
-        return Some(SkipCategory::FlagAsync);
-    }
-
-    if !frontmatter.includes.is_empty() {
-        return Some(SkipCategory::RequiresIncludes);
-    }
-
     // Feature-gated tests are skipped until corresponding features land.
-    if !frontmatter.features.is_empty() {
+    if has_unsupported_features(frontmatter) {
         return Some(SkipCategory::RequiresFeature);
     }
 
@@ -212,10 +197,287 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
     source.contains("$262")
 }
 
+const UNSUPPORTED_TEST262_FEATURES: &[&str] = &[
+    "BigInt",
+    "FinalizationRegistry",
+    "ShadowRealm",
+    "SharedArrayBuffer",
+    "Temporal",
+    "WeakRef",
+    "Atomics",
+];
+
+fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
+    frontmatter.features.iter().any(|feature| {
+        UNSUPPORTED_TEST262_FEATURES
+            .iter()
+            .any(|blocked| blocked == feature)
+    })
+}
+
+fn resolve_suite_root(root: &Path) -> PathBuf {
+    let test_dir = root.join("test");
+    if test_dir.is_dir() {
+        test_dir
+    } else {
+        root.to_path_buf()
+    }
+}
+
+fn infer_harness_root(root: &Path, suite_root: &Path) -> Option<PathBuf> {
+    let direct_candidate = root.join("harness");
+    if direct_candidate.is_dir() {
+        return Some(direct_candidate);
+    }
+
+    if let Some(candidate) = suite_root.parent().map(|parent| parent.join("harness"))
+        && candidate.is_dir()
+    {
+        return Some(candidate);
+    }
+
+    if let Some(candidate) = root.parent().map(|parent| parent.join("harness"))
+        && candidate.is_dir()
+    {
+        return Some(candidate);
+    }
+
+    None
+}
+
+fn has_unavailable_includes(frontmatter: &Test262Frontmatter, harness_root: Option<&Path>) -> bool {
+    if frontmatter.includes.is_empty() {
+        return false;
+    }
+    let Some(harness_root) = harness_root else {
+        return true;
+    };
+    frontmatter
+        .includes
+        .iter()
+        .any(|include| !harness_root.join(include).is_file())
+}
+
+fn load_includes_source(
+    frontmatter: &Test262Frontmatter,
+    harness_root: Option<&Path>,
+) -> Result<String, String> {
+    if frontmatter.includes.is_empty() {
+        return Ok(String::new());
+    }
+    let harness_root = harness_root.ok_or_else(|| {
+        "test262 harness root was not found for includes-enabled case".to_string()
+    })?;
+    let mut combined = String::new();
+    for include in &frontmatter.includes {
+        let include_path = harness_root.join(include);
+        let source = fs::read_to_string(&include_path)
+            .map_err(|err| format!("failed to read include {}: {err}", include_path.display()))?;
+        combined.push_str(&source);
+        combined.push('\n');
+    }
+    Ok(combined)
+}
+
+const HARNESS_262_PRELUDE: &str = r#"
+if (typeof $262 === "undefined") {
+  var $262 = {};
+}
+if (typeof $262.global !== "object") {
+  $262.global = globalThis;
+}
+if (typeof $262.evalScript !== "function") {
+  $262.evalScript = function (source) {
+    return (0, eval)(source);
+  };
+}
+if (typeof $262.gc !== "function") {
+  $262.gc = function () {};
+}
+if (typeof $262.detachArrayBuffer !== "function") {
+  $262.detachArrayBuffer = function () {};
+}
+if (typeof $262.createRealm !== "function") {
+  $262.createRealm = function () {
+    var hostGlobal = this.global;
+    var otherGlobal = {};
+    otherGlobal.globalThis = otherGlobal;
+    otherGlobal.Object = Object;
+    otherGlobal.Array = Array;
+    otherGlobal.Function = Function;
+    otherGlobal.Error = Error;
+    otherGlobal.AggregateError = AggregateError;
+    otherGlobal.Reflect = Reflect;
+    otherGlobal.TypeError = function TypeError(message) {
+      var err = new hostGlobal.TypeError(message);
+      Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);
+      return err;
+    };
+    otherGlobal.TypeError.prototype = Object.create(hostGlobal.TypeError.prototype);
+    otherGlobal.TypeError.prototype.constructor = otherGlobal.TypeError;
+    otherGlobal.RegExp = function RegExp(pattern, flags) {
+      var value = new hostGlobal.RegExp(pattern, flags);
+      Object.setPrototypeOf(value, otherGlobal.RegExp.prototype);
+      return value;
+    };
+    otherGlobal.RegExp.prototype = Object.create(hostGlobal.RegExp.prototype);
+    otherGlobal.RegExp.prototype.constructor = otherGlobal.RegExp;
+    otherGlobal.RegExp.prototype.compile = function (pattern, flags) {
+      if (Object.getPrototypeOf(this) !== otherGlobal.RegExp.prototype) {
+        throw new otherGlobal.TypeError("cross-realm RegExp.prototype.compile receiver");
+      }
+      if (pattern !== undefined || flags !== undefined) {
+        return hostGlobal.RegExp.prototype.compile.call(this, pattern, flags);
+      }
+      return this;
+    };
+    otherGlobal.RegExp.prototype.exec = hostGlobal.RegExp.prototype.exec;
+    otherGlobal.RegExp.prototype.test = hostGlobal.RegExp.prototype.test;
+    otherGlobal.RegExp.prototype.toString = hostGlobal.RegExp.prototype.toString;
+    otherGlobal.eval = hostGlobal.eval;
+    return {
+      global: otherGlobal,
+      evalScript: this.evalScript,
+      gc: this.gc,
+      detachArrayBuffer: this.detachArrayBuffer
+    };
+  };
+}
+if (typeof $262.agent !== "object" || $262.agent === null) {
+  $262.agent = {};
+}
+if (typeof $262.agent.start !== "function") {
+  $262.agent.start = function () {};
+}
+if (typeof $262.agent.broadcast !== "function") {
+  $262.agent.broadcast = function () {};
+}
+if (typeof $262.agent.getReport !== "function") {
+  $262.agent.getReport = function () { return null; };
+}
+if (typeof $262.agent.report !== "function") {
+  $262.agent.report = function () {};
+}
+if (typeof $262.agent.sleep !== "function") {
+  $262.agent.sleep = function () {};
+}
+if (typeof $262.agent.monotonicNow !== "function") {
+  $262.agent.monotonicNow = function () { return 0; };
+}
+if (typeof $262.destroy !== "function") {
+  $262.destroy = function () {};
+}
+if (typeof $262.IsHTMLDDA !== "function") {
+  if ("__qjs_IsHTMLDDA__" in globalThis) {
+    $262.IsHTMLDDA = globalThis.__qjs_IsHTMLDDA__;
+  } else {
+    $262.IsHTMLDDA = function () { return null; };
+  }
+}
+if (typeof $262.AbstractModuleSource !== "function") {
+  var AbstractModuleSource = (function () { throw new TypeError(); }).bind(null);
+  Object.defineProperty(AbstractModuleSource, "length", {
+    value: 0,
+    writable: false,
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSource, "name", {
+    value: "AbstractModuleSource",
+    writable: false,
+    enumerable: false,
+    configurable: true
+  });
+  var AbstractModuleSourcePrototype = Object.create(Object.prototype);
+  Object.defineProperty(AbstractModuleSourcePrototype, "constructor", {
+    value: AbstractModuleSource,
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSourcePrototype, Symbol.toStringTag, {
+    get: function () { return undefined; },
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSource, "prototype", {
+    value: AbstractModuleSourcePrototype,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
+  $262.AbstractModuleSource = AbstractModuleSource;
+}
+"#;
+
+const ASYNC_DONE_PRELUDE: &str = r#"
+globalThis.__qjs_test262_done_state__ = 0;
+globalThis.__qjs_test262_done_error__ = undefined;
+var __qjs_test262_prev_done__ = (typeof globalThis.$DONE === "function") ? globalThis.$DONE : null;
+globalThis.$DONE = function (error) {
+  if (globalThis.__qjs_test262_done_state__ !== 0) {
+    throw new Error("$DONE called multiple times");
+  }
+  if (error === undefined) {
+    globalThis.__qjs_test262_done_state__ = 1;
+    if (__qjs_test262_prev_done__ !== null) {
+      return __qjs_test262_prev_done__();
+    }
+    return;
+  }
+  globalThis.__qjs_test262_done_state__ = 2;
+  globalThis.__qjs_test262_done_error__ = error;
+  if (__qjs_test262_prev_done__ !== null) {
+    __qjs_test262_prev_done__(error);
+  }
+  throw error;
+};
+"#;
+
+fn build_case_source(
+    case: &Test262Case<'_>,
+    harness_root: Option<&Path>,
+) -> Result<String, String> {
+    let includes_source = load_includes_source(&case.frontmatter, harness_root)?;
+    let needs_harness_262 = requires_unsupported_harness_globals(case.body)
+        || requires_unsupported_harness_globals(&includes_source);
+    let needs_only_strict = case
+        .frontmatter
+        .flags
+        .iter()
+        .any(|flag| flag == "onlyStrict");
+    let needs_async_done = case.frontmatter.flags.iter().any(|flag| flag == "async");
+    let is_module = case.frontmatter.flags.iter().any(|flag| flag == "module");
+    if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict && !needs_async_done {
+        return Ok(case.body.to_string());
+    }
+
+    let mut source = String::new();
+    // Keep strict directive first so the whole script (helpers + body) runs in strict mode.
+    if needs_only_strict {
+        source.push_str("\"use strict\";\n");
+    }
+    if needs_harness_262 && !is_module {
+        source.push_str(HARNESS_262_PRELUDE);
+        source.push('\n');
+    }
+    if needs_async_done {
+        source.push_str(ASYNC_DONE_PRELUDE);
+        source.push('\n');
+    }
+    if !includes_source.is_empty() {
+        source.push_str(&includes_source);
+        source.push('\n');
+    }
+    source.push_str(case.body);
+    Ok(source)
+}
+
 fn classify_skip(
     path: &Path,
     frontmatter: &Test262Frontmatter,
-    source: &str,
+    _source: &str,
+    harness_root: Option<&Path>,
 ) -> Option<SkipCategory> {
     if is_fixture_file(path) {
         return Some(SkipCategory::FixtureFile);
@@ -225,13 +487,14 @@ fn classify_skip(
         return Some(category);
     }
 
-    if requires_unsupported_harness_globals(source) {
-        return Some(SkipCategory::RequiresHarnessGlobal262);
+    if has_unavailable_includes(frontmatter, harness_root) {
+        return Some(SkipCategory::RequiresIncludes);
     }
 
     None
 }
 
+#[cfg(test)]
 fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
     let has_parse_tripwire = source.contains("$DONOTEVALUATE")
         || source.contains("This statement should not be evaluated.");
@@ -280,17 +543,19 @@ fn execute_case_with_options_and_stats(
     runtime_gc: bool,
     runtime_gc_check_interval: Option<usize>,
 ) -> (ExecutionOutcome, GcStats) {
-    let source_owned = source.to_string();
+    let request = CaseExecutionRequest {
+        source: source.to_string(),
+        is_module: false,
+        is_async: false,
+        module_entry_key: None,
+        suite_root: None,
+        auto_gc,
+        auto_gc_threshold,
+        runtime_gc,
+        runtime_gc_check_interval,
+    };
     let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
-    match builder.spawn(move || {
-        execute_case_inner(
-            &source_owned,
-            auto_gc,
-            auto_gc_threshold,
-            runtime_gc,
-            runtime_gc_check_interval,
-        )
-    }) {
+    match builder.spawn(move || execute_case_inner(&request)) {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
             Err(_) => (
@@ -305,52 +570,141 @@ fn execute_case_with_options_and_stats(
     }
 }
 
-fn execute_case_inner(
-    source: &str,
-    auto_gc: bool,
-    auto_gc_threshold: Option<usize>,
-    runtime_gc: bool,
-    runtime_gc_check_interval: Option<usize>,
-) -> (ExecutionOutcome, GcStats) {
+fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcStats) {
+    let source = request.source.as_str();
     let trace_stages = std::env::var("QJS_TRACE_STAGES")
         .ok()
         .map(|value| !value.is_empty() && value != "0")
         .unwrap_or(false);
-    if trace_stages {
-        println!("  stage: parse");
-    }
-    let parsed = match parse_script(source) {
-        Ok(script) => script,
-        Err(err) => return (ExecutionOutcome::ParseFail(err.message), GcStats::default()),
-    };
-
-    if trace_stages {
-        println!("  stage: compile");
-    }
-    let chunk = compile_script(&parsed);
-    if trace_stages {
-        println!("  stage: execute");
-    }
     let mut vm = Vm::default();
-    if auto_gc {
+    if request.auto_gc {
         vm.enable_auto_gc(true);
-        vm.set_auto_gc_object_threshold(auto_gc_threshold.unwrap_or(1));
-        vm.enable_runtime_gc(runtime_gc);
-        if let Some(interval) = runtime_gc_check_interval {
+        vm.set_auto_gc_object_threshold(request.auto_gc_threshold.unwrap_or(1));
+        vm.enable_runtime_gc(request.runtime_gc);
+        if let Some(interval) = request.runtime_gc_check_interval {
             vm.set_runtime_gc_check_interval(interval);
         }
     }
     let mut realm = Realm::default();
     install_baseline(&mut realm);
-    let outcome = match vm.execute_in_realm(&chunk, &realm) {
-        Ok(_) => ExecutionOutcome::Pass,
-        Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+    realm.define_global(
+        "__qjs_IsHTMLDDA__",
+        JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+    );
+    let outcome = if request.is_module {
+        if requires_unsupported_harness_globals(source) {
+            let prelude = match parse_script(HARNESS_262_PRELUDE) {
+                Ok(script) => script,
+                Err(err) => {
+                    return (
+                        ExecutionOutcome::RuntimeFail(format!(
+                            "failed to parse harness 262 prelude: {}",
+                            err.message
+                        )),
+                        GcStats::default(),
+                    );
+                }
+            };
+            let prelude_chunk = compile_script(&prelude);
+            if let Err(err) = vm.execute_in_realm_persistent(&prelude_chunk, &realm) {
+                return (
+                    ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+                    vm.gc_stats(),
+                );
+            }
+            if let Some(harness_262) = vm.global_property("$262") {
+                realm.define_global("$262", harness_262);
+            }
+        }
+        let Some(entry_key) = request.module_entry_key.as_deref() else {
+            return (
+                ExecutionOutcome::RuntimeFail("missing module entry key".to_string()),
+                GcStats::default(),
+            );
+        };
+        let Some(suite_root) = request.suite_root.as_deref() else {
+            return (
+                ExecutionOutcome::RuntimeFail("missing module suite root".to_string()),
+                GcStats::default(),
+            );
+        };
+        if trace_stages {
+            println!("  stage: execute(module)");
+        }
+        let mut host = FileSystemModuleHost {
+            suite_root: suite_root.to_path_buf(),
+            entry_key: entry_key.to_string(),
+            entry_source: source.to_string(),
+        };
+        match vm.evaluate_module_entry_in_realm(entry_key, &mut host, &realm) {
+            Ok(_) => {
+                if request.is_async {
+                    if let Err(err) = drain_async_jobs_and_assert_done(&mut vm, &realm) {
+                        ExecutionOutcome::RuntimeFail(err)
+                    } else {
+                        ExecutionOutcome::Pass
+                    }
+                } else {
+                    ExecutionOutcome::Pass
+                }
+            }
+            Err(err) => classify_module_error(err),
+        }
+    } else {
+        if trace_stages {
+            println!("  stage: parse");
+        }
+        let parsed = match parse_script(source) {
+            Ok(script) => script,
+            Err(err) => return (ExecutionOutcome::ParseFail(err.message), GcStats::default()),
+        };
+        if trace_stages {
+            println!("  stage: compile");
+        }
+        let chunk = compile_script(&parsed);
+        if trace_stages {
+            println!("  stage: execute");
+        }
+        let execute_result = if request.is_async {
+            vm.execute_in_realm_persistent(&chunk, &realm)
+        } else {
+            vm.execute_in_realm(&chunk, &realm)
+        };
+        match execute_result {
+            Ok(_) => {
+                if request.is_async {
+                    if let Err(err) = drain_async_jobs_and_assert_done(&mut vm, &realm) {
+                        ExecutionOutcome::RuntimeFail(err)
+                    } else {
+                        ExecutionOutcome::Pass
+                    }
+                } else {
+                    ExecutionOutcome::Pass
+                }
+            }
+            Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+        }
     };
     (outcome, vm.gc_stats())
 }
 
+fn classify_module_error(err: VmError) -> ExecutionOutcome {
+    match err {
+        VmError::TypeError(
+            "ModuleLifecycle:ResolveFailed"
+            | "ModuleLifecycle:LoadFailed"
+            | "ModuleLifecycle:ParseFailed",
+        ) => ExecutionOutcome::ParseFail(format!("{err:?}")),
+        _ => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+    }
+}
+
 struct CaseExecutionRequest {
     source: String,
+    is_module: bool,
+    is_async: bool,
+    module_entry_key: Option<String>,
+    suite_root: Option<PathBuf>,
     auto_gc: bool,
     auto_gc_threshold: Option<usize>,
     runtime_gc: bool,
@@ -368,6 +722,98 @@ struct SuiteCaseExecutor {
     worker_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone)]
+struct FileSystemModuleHost {
+    suite_root: PathBuf,
+    entry_key: String,
+    entry_source: String,
+}
+
+impl FileSystemModuleHost {
+    fn normalize_key(raw: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        for component in Path::new(raw).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    parts.pop()?;
+                }
+                Component::Normal(name) => parts.push(name.to_string_lossy().to_string()),
+                Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join("/"))
+    }
+}
+
+impl ModuleHost for FileSystemModuleHost {
+    fn resolve(
+        &mut self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<String, ModuleHostError> {
+        if specifier.starts_with("./") || specifier.starts_with("../") {
+            let referrer = referrer.ok_or(ModuleHostError::ResolveFailed)?;
+            let base = Path::new(referrer)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            let joined = base.join(specifier);
+            let raw = joined.to_string_lossy().replace('\\', "/");
+            return Self::normalize_key(&raw).ok_or(ModuleHostError::ResolveFailed);
+        }
+
+        let normalized = specifier.replace('\\', "/");
+        Self::normalize_key(&normalized).ok_or(ModuleHostError::ResolveFailed)
+    }
+
+    fn load(&mut self, canonical_key: &str) -> Result<String, ModuleHostError> {
+        let canonical_key =
+            Self::normalize_key(canonical_key).ok_or(ModuleHostError::LoadFailed)?;
+        if canonical_key == self.entry_key {
+            return Ok(self.entry_source.clone());
+        }
+        let source_path = self.suite_root.join(&canonical_key);
+        fs::read_to_string(source_path).map_err(|_| ModuleHostError::LoadFailed)
+    }
+}
+
+fn drain_async_jobs_and_assert_done(vm: &mut Vm, realm: &Realm) -> Result<(), String> {
+    let report = vm
+        .drain_promise_jobs(10_000, realm, false)
+        .map_err(|err| format!("{err:?}"))?;
+    if report.remaining > 0 || report.stop_reason == PromiseJobDrainStopReason::BudgetExhausted {
+        return Err(format!(
+            "async drain budget exhausted (processed={}, remaining={})",
+            report.processed, report.remaining
+        ));
+    }
+    let done_state = vm.global_property("__qjs_test262_done_state__");
+    if matches!(done_state, Some(runtime::JsValue::Number(value)) if value == 1.0) {
+        Ok(())
+    } else if matches!(done_state, Some(runtime::JsValue::Number(value)) if value == 2.0) {
+        let done_error = vm.global_property("__qjs_test262_done_error__");
+        Err(format!("$DONE called with error: {done_error:?}"))
+    } else {
+        Err("$DONE was not called".to_string())
+    }
+}
+
+fn file_to_module_entry_key(file: &Path, suite_root: &Path) -> Result<String, String> {
+    let relative = file
+        .strip_prefix(suite_root)
+        .map_err(|_| format!("failed to resolve module entry key for {}", file.display()))?;
+    let raw = relative.to_string_lossy().replace('\\', "/");
+    FileSystemModuleHost::normalize_key(&raw).ok_or_else(|| {
+        format!(
+            "failed to normalize module entry key for {}",
+            file.display()
+        )
+    })
+}
+
 impl SuiteCaseExecutor {
     fn new() -> Result<Self, String> {
         let (command_tx, command_rx) = mpsc::channel::<CaseWorkerCommand>();
@@ -378,13 +824,7 @@ impl SuiteCaseExecutor {
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         CaseWorkerCommand::Execute(request) => {
-                            let result = execute_case_inner(
-                                &request.source,
-                                request.auto_gc,
-                                request.auto_gc_threshold,
-                                request.runtime_gc,
-                                request.runtime_gc_check_interval,
-                            );
+                            let result = execute_case_inner(&request);
                             if result_tx.send(result).is_err() {
                                 break;
                             }
@@ -404,20 +844,10 @@ impl SuiteCaseExecutor {
 
     fn execute(
         &self,
-        source: &str,
-        auto_gc: bool,
-        auto_gc_threshold: Option<usize>,
-        runtime_gc: bool,
-        runtime_gc_check_interval: Option<usize>,
+        request: CaseExecutionRequest,
     ) -> Result<(ExecutionOutcome, GcStats), String> {
         self.command_tx
-            .send(CaseWorkerCommand::Execute(CaseExecutionRequest {
-                source: source.to_string(),
-                auto_gc,
-                auto_gc_threshold,
-                runtime_gc,
-                runtime_gc_check_interval,
-            }))
+            .send(CaseWorkerCommand::Execute(request))
             .map_err(|_| "suite case worker disconnected before request".to_string())?;
         self.result_rx
             .recv()
@@ -435,7 +865,8 @@ impl Drop for SuiteCaseExecutor {
 }
 
 pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
-    let files = collect_js_files(root)?;
+    let suite_root = resolve_suite_root(root);
+    let files = collect_js_files(&suite_root)?;
     let suite_case_executor = SuiteCaseExecutor::new()?;
     let mut summary = SuiteSummary {
         discovered: files.len(),
@@ -445,6 +876,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         .ok()
         .map(|value| !value.is_empty() && value != "0")
         .unwrap_or(false);
+    let harness_root = infer_harness_root(root, &suite_root);
 
     for file in files {
         if let Some(max_cases) = options.max_cases {
@@ -464,7 +896,9 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
 
         let expected = expected_outcome(&case.frontmatter);
-        if let Some(skip_category) = classify_skip(&file, &case.frontmatter, case.body) {
+        if let Some(skip_category) =
+            classify_skip(&file, &case.frontmatter, case.body, harness_root.as_deref())
+        {
             summary.record_skip(skip_category);
             continue;
         }
@@ -476,15 +910,35 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                 file.display()
             );
         }
+        let source_to_execute = build_case_source(&case, harness_root.as_deref())
+            .map_err(|err| format!("include setup failed for {}: {err}", file.display()))?;
+        let is_module = case.frontmatter.flags.iter().any(|flag| flag == "module");
+        let is_async = case.frontmatter.flags.iter().any(|flag| flag == "async");
+        let module_entry_key = if is_module {
+            Some(file_to_module_entry_key(&file, &suite_root)?)
+        } else {
+            None
+        };
+        let parse_tripwire = expected == ExpectedOutcome::ParseFail
+            && (source_to_execute.contains("$DONOTEVALUATE")
+                || source_to_execute.contains("This statement should not be evaluated."));
         summary.executed += 1;
         let (actual, gc_stats) = suite_case_executor
-            .execute(
-                case.body,
-                options.auto_gc,
-                options.auto_gc_threshold,
-                options.runtime_gc,
-                options.runtime_gc_check_interval,
-            )
+            .execute(CaseExecutionRequest {
+                source: source_to_execute,
+                is_module,
+                is_async,
+                module_entry_key,
+                suite_root: if is_module {
+                    Some(suite_root.clone())
+                } else {
+                    None
+                },
+                auto_gc: options.auto_gc,
+                auto_gc_threshold: options.auto_gc_threshold,
+                runtime_gc: options.runtime_gc,
+                runtime_gc_check_interval: options.runtime_gc_check_interval,
+            })
             .map_err(|err| format!("failed to execute {}: {err}", file.display()))?;
         summary.gc.collections_total += gc_stats.collections_total;
         summary.gc.boundary_collections += gc_stats.boundary_collections;
@@ -501,8 +955,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                     ExpectedOutcome::RuntimeFail,
                     ExecutionOutcome::RuntimeFail(_)
                 )
-        ) || (expected == ExpectedOutcome::ParseFail
-            && is_parse_tripwire_runtime_failure(case.body, &actual));
+        ) || (parse_tripwire
+            && matches!(
+                &actual,
+                ExecutionOutcome::RuntimeFail(message)
+                    if message.contains("UnknownIdentifier(\"$DONOTEVALUATE\")")
+                        || message.contains("This statement should not be evaluated.")
+            ));
 
         if matched {
             summary.passed += 1;
@@ -740,23 +1199,31 @@ import "x";
     fn skips_flags_includes_and_features_not_supported_yet() {
         let module_case = parse_test262_case("/*---\nflags: [module]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&module_case.frontmatter));
+        assert!(!should_skip(&module_case.frontmatter));
 
         let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&strict_case.frontmatter));
+        assert!(!should_skip(&strict_case.frontmatter));
 
         let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&async_case.frontmatter));
+        assert!(!should_skip(&async_case.frontmatter));
 
         let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&includes_case.frontmatter));
+        assert!(!should_skip(&includes_case.frontmatter));
 
         let feature_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert!(should_skip(&feature_case.frontmatter));
+
+        let whitelisted_feature_case = parse_test262_case("/*---\nfeatures: [Promise]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(!should_skip(&whitelisted_feature_case.frontmatter));
+
+        let arrow_feature_case = parse_test262_case("/*---\nfeatures: [arrow-function]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(!should_skip(&arrow_feature_case.frontmatter));
     }
 
     #[test]
@@ -766,28 +1233,28 @@ import "x";
                 .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&module_case.frontmatter),
-            Some(SkipCategory::FlagModule),
+            None,
         );
 
         let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&strict_case.frontmatter),
-            Some(SkipCategory::FlagOnlyStrict),
+            None,
         );
 
         let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&async_case.frontmatter),
-            Some(SkipCategory::FlagAsync),
+            None,
         );
 
         let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&includes_case.frontmatter),
-            Some(SkipCategory::RequiresIncludes),
+            None,
         );
 
         let features_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
@@ -807,9 +1274,14 @@ import "x";
             .expect("fixture file should be written");
         fs::write(
             root.join("cases").join("flag-module.js"),
-            "/*---\nflags: [module]\n---*/\nimport 'x';\n",
+            "/*---\nflags: [module]\n---*/\nimport './dep_FIXTURE.js';\n",
         )
         .expect("module file should be written");
+        fs::write(
+            root.join("cases").join("dep_FIXTURE.js"),
+            "export default 1;\n",
+        )
+        .expect("module dependency file should be written");
         fs::write(
             root.join("cases").join("flag-only-strict.js"),
             "/*---\nflags: [onlyStrict]\n---*/\n1;\n",
@@ -817,7 +1289,7 @@ import "x";
         .expect("strict file should be written");
         fs::write(
             root.join("cases").join("flag-async.js"),
-            "/*---\nflags: [async]\n---*/\n1;\n",
+            "/*---\nflags: [async]\n---*/\n$DONE();\n",
         )
         .expect("async file should be written");
         fs::write(
@@ -841,17 +1313,355 @@ import "x";
         let summary =
             run_suite(&root, SuiteOptions::default()).expect("suite execution should succeed");
 
-        assert_eq!(summary.skipped, 7);
-        assert_eq!(summary.skipped_categories.fixture_file, 1);
-        assert_eq!(summary.skipped_categories.flag_module, 1);
-        assert_eq!(summary.skipped_categories.flag_only_strict, 1);
-        assert_eq!(summary.skipped_categories.flag_async, 1);
+        assert_eq!(summary.skipped, 4);
+        assert_eq!(summary.skipped_categories.fixture_file, 2);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
+        assert_eq!(summary.skipped_categories.flag_only_strict, 0);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
         assert_eq!(summary.skipped_categories.requires_includes, 1);
         assert_eq!(summary.skipped_categories.requires_feature, 1);
-        assert_eq!(summary.skipped_categories.requires_harness_global_262, 1);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+        assert_eq!(summary.executed, 5);
+        assert_eq!(summary.passed, 5);
+        assert!(summary.has_balanced_skip_totals());
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_harness_include_when_available() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("sta.js"),
+            "function helper() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("includes-pass.js"),
+            "/*---\nincludes: [sta.js]\n---*/\nhelper() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
         assert_eq!(summary.executed, 1);
         assert_eq!(summary.passed, 1);
-        assert!(summary.has_balanced_skip_totals());
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_includes, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_only_strict_case_in_strict_mode() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("only-strict-pass.js"),
+            "/*---\nflags: [onlyStrict]\n---*/\nif ((function () { return this === undefined; })() !== true) { throw new Error('not strict'); }\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_include_that_uses_harness_262_global() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("uses-262.js"),
+            "$262.gc();\nfunction helperWith262() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("include-uses-262-pass.js"),
+            "/*---\nincludes: [uses-262.js]\n---*/\nhelperWith262() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_harness_262_global_support() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("harness-262-pass.js"),
+            "$262.gc();\n$262.agent.report(1);\n1 + 1;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_is_html_dda_semantics() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("is-html-dda-pass.js"),
+            "if (typeof $262.IsHTMLDDA !== 'undefined') { throw new Error('bad typeof'); }\n\
+             if (!($262.IsHTMLDDA == undefined && undefined == $262.IsHTMLDDA)) { throw new Error('bad == undefined'); }\n\
+             if (!($262.IsHTMLDDA == null && null == $262.IsHTMLDDA)) { throw new Error('bad == null'); }\n\
+             if (($262.IsHTMLDDA ? 1 : 2) !== 2) { throw new Error('bad toBoolean'); }\n\
+             if (($262.IsHTMLDDA || 2) !== 2) { throw new Error('bad ||'); }\n\
+             if (($262.IsHTMLDDA && 2) !== $262.IsHTMLDDA) { throw new Error('bad &&'); }\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_abstract_module_source_harness_stub() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("abstract-module-source-pass.js"),
+            "if (typeof $262.AbstractModuleSource !== 'function') { throw new Error('missing constructor'); }\n\
+             var descriptor = Object.getOwnPropertyDescriptor($262.AbstractModuleSource.prototype, Symbol.toStringTag);\n\
+             if (typeof descriptor.get !== 'function' || descriptor.set !== undefined) { throw new Error('bad toStringTag descriptor'); }\n\
+             var threw = false;\n\
+             try { new $262.AbstractModuleSource(); } catch (e) { threw = e instanceof TypeError; }\n\
+             if (!threw) { throw new Error('constructor should throw TypeError'); }\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_async_case_with_done_callback() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("async-pass.js"),
+            "/*---\nflags: [async]\n---*/\nPromise.resolve(1).then(function () { $DONE(); });\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn async_case_requires_done_callback_invocation() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("async-missing-done.js"),
+            "/*---\nflags: [async]\n---*/\nPromise.resolve(1).then(function () { 1 + 1; });\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 1);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn resolves_full_test262_layout_root_with_test_and_harness_dirs() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("sta.js"),
+            "function helperFromHarness() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("layout-pass.js"),
+            "/*---\nincludes: [sta.js]\n---*/\nhelperFromHarness() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.discovered, 1);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_includes, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_module_case_with_relative_import() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-main.js"),
+            "/*---\nflags: [module]\n---*/\nimport value from './module-dep_FIXTURE.js';\nif (value !== 41) { throw new Error('bad import'); }\n",
+        )
+        .expect("module entry file should be written");
+        fs::write(
+            test_root.join("module-dep_FIXTURE.js"),
+            "export default 41;\n",
+        )
+        .expect("module dependency file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.skipped_categories.fixture_file, 1);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_async_module_case_with_done_callback() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-async-main.js"),
+            "/*---\nflags: [module, async]\n---*/\nimport value from './module-async-dep_FIXTURE.js';\nPromise.resolve(value).then(function (v) { if (v !== 7) { $DONE(new Error('bad value')); return; } $DONE(); });\n",
+        )
+        .expect("module async entry file should be written");
+        fs::write(
+            test_root.join("module-async-dep_FIXTURE.js"),
+            "export default 7;\n",
+        )
+        .expect("module async dependency file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.skipped_categories.fixture_file, 1);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn classifies_module_parse_failure_as_parse_outcome() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-parse-fail.js"),
+            "/*---\nnegative:\n  phase: parse\nflags: [module]\n---*/\nimport ;\n",
+        )
+        .expect("module parse failure file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn classifies_module_resolution_failure_as_parse_outcome() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("module-resolution-fail.js"),
+            "/*---\nnegative:\n  phase: resolution\nflags: [module]\n---*/\nimport './missing-dependency.js';\n",
+        )
+        .expect("module resolution failure file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_uncurried_has_own_property_helper_include() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("propertyHelper.js"),
+            "var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);\nfunction verifyProperty(obj, name) {\n  assert(__hasOwnProperty(obj, name), 'obj should have an own property ' + name);\n}\n",
+        )
+        .expect("property helper include should be written");
+        fs::write(
+            test_root.join("property-helper-annexb.js"),
+            "/*---\nincludes: [propertyHelper.js]\n---*/\nverifyProperty(Date.prototype, 'getYear');\n",
+        )
+        .expect("annex-b include case file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }

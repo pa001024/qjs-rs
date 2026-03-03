@@ -45,6 +45,7 @@ pub enum UnaryOp {
     Typeof,
     Void,
     Delete,
+    Await,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -86,6 +86,7 @@ pub enum Opcode {
     Neg,
     Not,
     BitNot,
+    Await,
     Typeof,
     TypeofIdentifier(String),
     ToNumber,
@@ -2194,6 +2195,7 @@ impl Compiler {
                     UnaryOp::Minus => Opcode::Neg,
                     UnaryOp::Not => Opcode::Not,
                     UnaryOp::BitNot => Opcode::BitNot,
+                    UnaryOp::Await => Opcode::Await,
                     UnaryOp::Typeof | UnaryOp::Void | UnaryOp::Delete => unreachable!(),
                 };
                 code.push(opcode);
@@ -4113,6 +4115,22 @@ mod tests {
                     Opcode::LoadIdentifier("obj".to_string()),
                     Opcode::LoadIdentifier("key".to_string()),
                     Opcode::DeletePropertyByValue,
+                    Opcode::Halt,
+                ],
+                functions: vec![],
+            }
+        );
+
+        let await_expr = compile_expression(&Expr::Unary {
+            op: UnaryOp::Await,
+            expr: Box::new(Expr::Identifier(Identifier("promise".to_string()))),
+        });
+        assert_eq!(
+            await_expr,
+            Chunk {
+                code: vec![
+                    Opcode::LoadIdentifier("promise".to_string()),
+                    Opcode::Await,
                     Opcode::Halt,
                 ],
                 functions: vec![],

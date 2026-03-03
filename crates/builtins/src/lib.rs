@@ -187,6 +187,10 @@ pub fn install_baseline(realm: &mut Realm) {
         "URIError",
         JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
     );
+    realm.define_global(
+        "AggregateError",
+        JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+    );
 }
 
 #[cfg(test)]
@@ -264,6 +268,12 @@ mod tests {
             realm.get_global("URIError"),
             Some(&JsValue::NativeFunction(
                 NativeFunction::URIErrorConstructor
+            ))
+        );
+        assert_eq!(
+            realm.get_global("AggregateError"),
+            Some(&JsValue::NativeFunction(
+                NativeFunction::AggregateErrorConstructor
             ))
         );
     }

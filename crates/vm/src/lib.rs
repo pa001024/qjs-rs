@@ -37,7 +37,7 @@ use rustc_hash::FxHashMap as HashMap;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -59,8 +59,10 @@ const CLASS_CONSTRUCTOR_PARENT_MARKER: &str = "$__qjs_class_constructor_parent__
 const CLASS_HERITAGE_RESTRICTED_MARKER: &str = "$__qjs_class_heritage_restricted__$";
 const CLASS_METHOD_NO_PROTOTYPE_MARKER: &str = "$__qjs_class_method_no_prototype__$";
 const GENERATOR_FUNCTION_MARKER: &str = "$__qjs_generator_function__$";
+const PARSER_GENERATOR_VALUES_BINDING_PREFIX: &str = "$__qjs_generator_values_";
 const ASYNC_FUNCTION_MARKER: &str = "$__qjs_async_function__$";
 const NAMED_FUNCTION_EXPR_MARKER: &str = "$__qjs_named_function_expr__$";
+const SYMBOL_PRIMITIVE_MARKER_PREFIX: &str = "$__qjs_symbol_primitive__$:";
 const DERIVED_THIS_BINDING: &str = "$__qjs_derived_this__$";
 const BOXED_PRIMITIVE_VALUE_KEY: &str = "$__qjs_boxed_primitive_value__$";
 const ARGUMENTS_OBJECT_MARKER_KEY: &str = "$__qjs_arguments_object__$";
@@ -120,6 +122,307 @@ const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
+const AWAIT_DRAIN_STEP_BUDGET: usize = 10_000;
+const AWAIT_DRAIN_MAX_CYCLES: usize = 64;
+const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
+const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
+  var C = this;
+  var asyncIteratorKey = "Symbol.asyncIterator";
+  var iteratorKey = "Symbol.iterator";
+
+  function makeResult(lengthHint) {
+    if (useConstructor) {
+      if (lengthHint === undefined) {
+        return new C();
+      }
+      return new C(lengthHint);
+    }
+    return [];
+  }
+
+  function ensureObject(step, message) {
+    if (typeof step !== "object" || step === null) {
+      throw new TypeError(message);
+    }
+    return step;
+  }
+
+  function toLength(lengthValue) {
+    var numericLength = Number(lengthValue);
+    if (!(numericLength > 0)) {
+      return 0;
+    }
+    if (numericLength > 9007199254740991) {
+      numericLength = 9007199254740991;
+    }
+    return Math.floor(numericLength);
+  }
+
+  function defineDataPropertyOrThrow(target, key, value) {
+    var success = Reflect.defineProperty(target, key, {
+      value: value,
+      writable: true,
+      enumerable: true,
+      configurable: true
+    });
+    if (!success) {
+      throw new TypeError("Array.fromAsync cannot define property");
+    }
+  }
+
+  return new Promise(function(resolve, reject) {
+    function closeIterator(iterator, onClosed) {
+      if (iterator === null || iterator === undefined) {
+        onClosed();
+        return;
+      }
+      var returnMethod;
+      try {
+        returnMethod = iterator["return"];
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      if (returnMethod === null || returnMethod === undefined) {
+        onClosed();
+        return;
+      }
+      if (typeof returnMethod !== "function") {
+        onClosed();
+        return;
+      }
+      var returnResult;
+      try {
+        returnResult = returnMethod.call(iterator);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      Promise.resolve(returnResult).then(function() { onClosed(); }, reject);
+    }
+
+    function rejectWithIteratorClose(iterator, reason) {
+      closeIterator(iterator, function() { reject(reason); });
+    }
+
+    function resolveArrayResult(result, index, iteratorForClose) {
+      try {
+        result.length = index;
+      } catch (err) {
+        if (iteratorForClose === undefined) {
+          reject(err);
+        } else {
+          rejectWithIteratorClose(iteratorForClose, err);
+        }
+        return;
+      }
+      resolve(result);
+    }
+
+    try {
+      if (items === null || items === undefined) {
+        throw new TypeError("Array.fromAsync items must be coercible");
+      }
+      if (hasMapFn && typeof mapfn !== "function") {
+        throw new TypeError("Array.fromAsync mapfn must be callable");
+      }
+
+      var usingAsyncIterator = items[asyncIteratorKey];
+      if (usingAsyncIterator !== null && usingAsyncIterator !== undefined) {
+        if (typeof usingAsyncIterator !== "function") {
+          throw new TypeError("Array.fromAsync async iterator must be callable");
+        }
+        var asyncIterator = usingAsyncIterator.call(items);
+        var asyncResult = makeResult();
+        var asyncIndex = 0;
+
+        function nextAsync() {
+          var nextResult;
+          try {
+            nextResult = asyncIterator.next();
+          } catch (err) {
+            rejectWithIteratorClose(asyncIterator, err);
+            return;
+          }
+          Promise.resolve(nextResult).then(function(stepValue) {
+            var step;
+            try {
+              step = ensureObject(
+                stepValue,
+                "Array.fromAsync iterator next must return object"
+              );
+            } catch (err) {
+              rejectWithIteratorClose(asyncIterator, err);
+              return;
+            }
+            if (step.done) {
+              resolveArrayResult(asyncResult, asyncIndex, asyncIterator);
+              return;
+            }
+            function appendAsyncValue(nextValue) {
+              if (hasMapFn) {
+                var mappedValue;
+                try {
+                  mappedValue = mapfn.call(thisArg, nextValue, asyncIndex);
+                } catch (err) {
+                  rejectWithIteratorClose(asyncIterator, err);
+                  return;
+                }
+                Promise.resolve(mappedValue).then(function(mapped) {
+                  try {
+                    defineDataPropertyOrThrow(asyncResult, asyncIndex, mapped);
+                    asyncIndex++;
+                  } catch (err) {
+                    rejectWithIteratorClose(asyncIterator, err);
+                    return;
+                  }
+                  nextAsync();
+                }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+                return;
+              }
+              try {
+                defineDataPropertyOrThrow(asyncResult, asyncIndex, nextValue);
+                asyncIndex++;
+              } catch (err) {
+                rejectWithIteratorClose(asyncIterator, err);
+                return;
+              }
+              nextAsync();
+            }
+
+            var nextValue = step.value;
+            if (asyncIterator["$__qjs_generator_iterator__$"] === true) {
+              Promise.resolve(nextValue).then(function(awaitedValue) {
+                appendAsyncValue(awaitedValue);
+              }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+              return;
+            }
+            appendAsyncValue(nextValue);
+          }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+        }
+
+        nextAsync();
+        return;
+      }
+
+      var usingSyncIterator = items[iteratorKey];
+      if (usingSyncIterator !== null && usingSyncIterator !== undefined) {
+        if (typeof usingSyncIterator !== "function") {
+          throw new TypeError("Array.fromAsync iterator must be callable");
+        }
+        var syncIterator = usingSyncIterator.call(items);
+        var syncResult = makeResult();
+        var syncIndex = 0;
+
+        function nextSync() {
+          var step;
+          try {
+            step = ensureObject(
+              syncIterator.next(),
+              "Array.fromAsync iterator next must return object"
+            );
+          } catch (err) {
+            rejectWithIteratorClose(syncIterator, err);
+            return;
+          }
+          if (step.done) {
+            resolveArrayResult(syncResult, syncIndex, syncIterator);
+            return;
+          }
+          Promise.resolve(step.value).then(function(awaitedValue) {
+            if (hasMapFn) {
+              var mappedValue;
+              try {
+                mappedValue = mapfn.call(thisArg, awaitedValue, syncIndex);
+              } catch (err) {
+                rejectWithIteratorClose(syncIterator, err);
+                return;
+              }
+              Promise.resolve(mappedValue).then(function(mapped) {
+                try {
+                  defineDataPropertyOrThrow(syncResult, syncIndex, mapped);
+                  syncIndex++;
+                } catch (err) {
+                  rejectWithIteratorClose(syncIterator, err);
+                  return;
+                }
+                nextSync();
+              }, function(reason) { rejectWithIteratorClose(syncIterator, reason); });
+              return;
+            }
+            try {
+              defineDataPropertyOrThrow(syncResult, syncIndex, awaitedValue);
+              syncIndex++;
+            } catch (err) {
+              rejectWithIteratorClose(syncIterator, err);
+              return;
+            }
+            nextSync();
+          }, function(reason) { rejectWithIteratorClose(syncIterator, reason); });
+        }
+
+        nextSync();
+        return;
+      }
+
+      var source = Object(items);
+      var length = toLength(source.length);
+      if (!useConstructor && length > 4294967295) {
+        throw new RangeError("Invalid array length");
+      }
+      var arrayLikeResult = makeResult(length);
+      var index = 0;
+
+      function nextArrayLike() {
+        if (index >= length) {
+          resolveArrayResult(arrayLikeResult, index);
+          return;
+        }
+        var sourceValue;
+        try {
+          sourceValue = source[index];
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        Promise.resolve(sourceValue).then(function(awaitedValue) {
+          if (hasMapFn) {
+            var mappedValue;
+            try {
+              mappedValue = mapfn.call(thisArg, awaitedValue, index);
+            } catch (err) {
+              reject(err);
+              return;
+            }
+            Promise.resolve(mappedValue).then(function(mapped) {
+              try {
+                defineDataPropertyOrThrow(arrayLikeResult, index, mapped);
+                index++;
+              } catch (err) {
+                reject(err);
+                return;
+              }
+              nextArrayLike();
+            }, reject);
+            return;
+          }
+          try {
+            defineDataPropertyOrThrow(arrayLikeResult, index, awaitedValue);
+            index++;
+          } catch (err) {
+            reject(err);
+            return;
+          }
+          nextArrayLike();
+        }, reject);
+      }
+
+      nextArrayLike();
+    } catch (err) {
+      reject(err);
+    }
+  });
+})"#;
 
 type BindingId = usize;
 type ObjectId = u64;
@@ -233,6 +536,16 @@ enum FunctionMethod {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegExpLegacyStaticProperty {
+    Input,
+    LastMatch,
+    LastParen,
+    LeftContext,
+    RightContext,
+    Capture(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CollectionAddMode {
     Map,
     Set,
@@ -259,14 +572,20 @@ enum HostFunction {
         producer: JsValue,
     },
     GeneratorIteratorNextThis,
+    GeneratorIteratorReturnThis,
+    GeneratorIteratorThrowThis,
     StringReplaceThis,
     StringMatchThis,
+    StringMatchAllThis,
     StringSearchThis,
+    StringReplaceAllThis,
     StringIndexOfThis,
     StringSplitThis,
     StringToLowerCaseThis,
     StringToUpperCase,
     StringTrim,
+    StringTrimStart,
+    StringTrimEnd,
     StringToString,
     StringValueOf,
     StringCharAt,
@@ -345,6 +664,7 @@ enum HostFunction {
     ArrayLastIndexOfThis,
     ArrayFrom,
     ArrayOf,
+    ArraySpeciesGetter,
     ArrayEveryThis,
     ArraySomeThis,
     ArrayFilterThis,
@@ -363,7 +683,11 @@ enum HostFunction {
     RegExpExecThis,
     RegExpCompileThis,
     RegExpToStringThis,
+    RegExpSymbolSplitThis,
+    RegExpLegacyStaticGetter(RegExpLegacyStaticProperty),
+    RegExpLegacyInputSetter,
     ReflectDefineProperty,
+    ReflectConstruct,
     ReflectGetOwnPropertyDescriptor,
     HasOwnProperty {
         target: JsValue,
@@ -586,7 +910,6 @@ struct IdentifierFamilySlots {
     call: Option<u32>,
     call_with_spread: Option<u32>,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GcStats {
     pub roots: usize,
@@ -718,6 +1041,7 @@ pub struct Vm {
     next_host_pin_id: u64,
     module_records: BTreeMap<String, ModuleRecord>,
     module_evaluation_order: Vec<String>,
+    module_realm_override: Option<Realm>,
     module_cache_root_candidates: BTreeMap<u64, JsValue>,
     next_module_cache_root_candidate_id: u64,
     pending_job_root_candidates: BTreeMap<u64, JsValue>,
@@ -741,8 +1065,15 @@ pub struct Vm {
     eval_error_prototype_id: Option<ObjectId>,
     range_error_prototype_id: Option<ObjectId>,
     uri_error_prototype_id: Option<ObjectId>,
+    aggregate_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     regexp_prototype_id: Option<ObjectId>,
+    regexp_legacy_input: String,
+    regexp_legacy_last_match: String,
+    regexp_legacy_last_paren: String,
+    regexp_legacy_left_context: String,
+    regexp_legacy_right_context: String,
+    regexp_legacy_captures: [String; 9],
     array_buffer_prototype_id: Option<ObjectId>,
     data_view_prototype_id: Option<ObjectId>,
     map_prototype_id: Option<ObjectId>,
@@ -803,7 +1134,6 @@ pub struct Vm {
     packet_h_fast_path_enabled: bool,
     packet_h_fast_path_metrics_enabled: bool,
     packet_h_fast_path: PacketHFastPathState,
-    packet_i_revalidate_enabled: bool,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
     identifier_family_slots_cache:
@@ -841,6 +1171,7 @@ impl Vm {
         self.next_host_pin_id = 0;
         self.clear_module_cache();
         self.module_evaluation_order.clear();
+        self.module_realm_override = None;
         self.clear_module_cache_root_candidates();
         self.next_module_cache_root_candidate_id = 0;
         self.clear_pending_job_root_candidates();
@@ -866,8 +1197,15 @@ impl Vm {
         self.eval_error_prototype_id = None;
         self.range_error_prototype_id = None;
         self.uri_error_prototype_id = None;
+        self.aggregate_error_prototype_id = None;
         self.date_prototype_id = None;
         self.regexp_prototype_id = None;
+        self.regexp_legacy_input.clear();
+        self.regexp_legacy_last_match.clear();
+        self.regexp_legacy_last_paren.clear();
+        self.regexp_legacy_left_context.clear();
+        self.regexp_legacy_right_context.clear();
+        self.regexp_legacy_captures.fill(String::new());
         self.array_buffer_prototype_id = None;
         self.data_view_prototype_id = None;
         self.map_prototype_id = None;
@@ -927,6 +1265,7 @@ impl Vm {
         let _ = self.math_object_value()?;
         let _ = self.json_object_value()?;
         let _ = self.reflect_object_value()?;
+        self.ensure_regexp_legacy_static_accessors();
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
             let to_locale_string =
@@ -1279,14 +1618,6 @@ impl Vm {
         self.packet_h_fast_path.counters()
     }
 
-    pub fn set_packet_i_revalidate_enabled(&mut self, enabled: bool) {
-        self.packet_i_revalidate_enabled = enabled;
-    }
-
-    pub fn packet_i_revalidate_enabled(&self) -> bool {
-        self.packet_i_revalidate_enabled
-    }
-
     pub fn enable_auto_gc(&mut self, enabled: bool) {
         self.auto_gc_enabled = enabled;
     }
@@ -1384,6 +1715,27 @@ impl Vm {
     }
 
     pub fn evaluate_module_entry(
+        &mut self,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        self.evaluate_module_entry_impl(specifier, host)
+    }
+
+    pub fn evaluate_module_entry_in_realm(
+        &mut self,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+        realm: &Realm,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        let saved_override = self.module_realm_override.clone();
+        self.module_realm_override = Some(realm.clone());
+        let result = self.evaluate_module_entry_impl(specifier, host);
+        self.module_realm_override = saved_override;
+        result
+    }
+
+    fn evaluate_module_entry_impl(
         &mut self,
         specifier: &str,
         host: &mut dyn ModuleHost,
@@ -1613,8 +1965,13 @@ impl Vm {
             (compiled, record.resolved_dependencies.clone())
         };
 
-        let mut realm = Realm::default();
-        install_baseline(&mut realm);
+        let mut realm = if let Some(realm) = &self.module_realm_override {
+            realm.clone()
+        } else {
+            let mut realm = Realm::default();
+            install_baseline(&mut realm);
+            realm
+        };
         for (index, import) in compiled.imports.iter().enumerate() {
             let dependency_key = resolved_dependencies
                 .get(index)
@@ -1690,6 +2047,7 @@ impl Vm {
             let binding_id = self.create_binding(value.clone(), true);
             module_scope.insert(name.to_string(), binding_id);
         }
+        self.ensure_regexp_legacy_static_accessors();
         let saved_scopes =
             std::mem::replace(&mut self.scopes, vec![Rc::new(RefCell::new(module_scope))]);
         let saved_with_objects = std::mem::take(&mut self.with_objects);
@@ -1823,6 +2181,14 @@ impl Vm {
 
     pub fn pending_promise_job_count(&self) -> usize {
         self.promise_job_queue.jobs.len()
+    }
+
+    pub fn global_property(&self, name: &str) -> Option<JsValue> {
+        let global_object_id = self.global_object_id?;
+        self.objects
+            .get(&global_object_id)
+            .and_then(|object| object.properties.get(name))
+            .cloned()
     }
 
     pub fn enqueue_host_promise_job(
@@ -2065,6 +2431,7 @@ impl Vm {
             self.eval_error_prototype_id,
             self.range_error_prototype_id,
             self.uri_error_prototype_id,
+            self.aggregate_error_prototype_id,
             self.date_prototype_id,
             self.regexp_prototype_id,
             self.array_buffer_prototype_id,
@@ -2276,12 +2643,16 @@ impl Vm {
             HostFunction::ExternalCallback { .. }
             | HostFunction::StringReplaceThis
             | HostFunction::StringMatchThis
+            | HostFunction::StringMatchAllThis
             | HostFunction::StringSearchThis
+            | HostFunction::StringReplaceAllThis
             | HostFunction::StringIndexOfThis
             | HostFunction::StringSplitThis
             | HostFunction::StringToLowerCaseThis
             | HostFunction::StringToUpperCase
             | HostFunction::StringTrim
+            | HostFunction::StringTrimStart
+            | HostFunction::StringTrimEnd
             | HostFunction::StringToString
             | HostFunction::StringValueOf
             | HostFunction::StringCharAt
@@ -2359,6 +2730,7 @@ impl Vm {
             | HostFunction::ObjectPropertyIsEnumerable
             | HostFunction::ObjectValueOf
             | HostFunction::ReflectDefineProperty
+            | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ArrayJoinThis
             | HostFunction::ArrayToStringThis
@@ -2377,6 +2749,7 @@ impl Vm {
             | HostFunction::ArrayLastIndexOfThis
             | HostFunction::ArrayFrom
             | HostFunction::ArrayOf
+            | HostFunction::ArraySpeciesGetter
             | HostFunction::ArrayEveryThis
             | HostFunction::ArraySomeThis
             | HostFunction::ArrayFilterThis
@@ -2390,10 +2763,15 @@ impl Vm {
             | HostFunction::ArrayValuesThis
             | HostFunction::ArrayIteratorNextThis
             | HostFunction::GeneratorIteratorNextThis
+            | HostFunction::GeneratorIteratorReturnThis
+            | HostFunction::GeneratorIteratorThrowThis
             | HostFunction::RegExpTestThis
             | HostFunction::RegExpExecThis
             | HostFunction::RegExpCompileThis
             | HostFunction::RegExpToStringThis
+            | HostFunction::RegExpSymbolSplitThis
+            | HostFunction::RegExpLegacyStaticGetter(_)
+            | HostFunction::RegExpLegacyInputSetter
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
             | HostFunction::AssertThrows
@@ -2872,11 +3250,11 @@ impl Vm {
                             store_error = Some(err);
                         }
                     } else {
-                        self.invalidate_identifier_resolution_fast_path_entries(
-                            name,
-                            identifier_slot,
-                            packet_h_slot,
-                        );
+                        self.packet_a_fast_path.remove_binding_cache_entry(name);
+                        self.packet_c_fast_path.remove_binding_cache_entry(name);
+                        self.packet_g_fast_path.remove_name_cache_entry(name);
+                        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                         if strict {
                             store_error = Some(VmError::UnknownIdentifier(name.clone()));
                         } else if let Some(global_object_id) = self.global_object_id {
@@ -3626,18 +4004,13 @@ impl Vm {
                     if self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
                     }
-                    let exited_scope_index = self.scopes.len();
                     if !exited_scope.borrow().is_empty() {
                         let removed_names: Vec<String> =
                             exited_scope.borrow().keys().cloned().collect();
                         for name in removed_names {
-                            self.clear_identifier_name_fast_path_entries(&name);
+                            self.invalidate_binding_fast_path_cache_for_name(&name);
                         }
                     }
-                    self.packet_d_fast_path
-                        .remove_slot_cache_entries_for_scope(exited_scope_index);
-                    self.packet_h_fast_path
-                        .remove_slot_cache_entries_for_scope(exited_scope_index);
                 }
                 Opcode::EnterParamInitScope => {
                     if self.scopes.len() < 2 {
@@ -3994,6 +4367,20 @@ impl Vm {
                         let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                         let value = self.coerce_int32_runtime(value, realm, strict)?;
                         Ok(JsValue::Number((!value) as f64))
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::Await => {
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        self.await_resolved_value(value, realm, strict)
                     })();
                     match result {
                         Ok(value) => self.stack.push(value),
@@ -4686,13 +5073,10 @@ impl Vm {
                 }
                 let constructed = self.create_object_value();
                 let prototype = self.get_or_create_function_prototype_property(closure_id)?;
-                if let Ok((prototype, prototype_value)) = self.parse_prototype_value(prototype) {
-                    self.apply_prototype_components_to_value(
-                        &constructed,
-                        prototype,
-                        prototype_value,
-                    );
-                }
+                let default_proto = self.object_prototype_value();
+                let (prototype, prototype_value) =
+                    self.constructor_prototype_components_or_default(prototype, default_proto)?;
+                self.apply_prototype_components_to_value(&constructed, prototype, prototype_value);
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
                 if Self::is_object_like_value(&result) {
@@ -4754,15 +5138,17 @@ impl Vm {
                         let constructed = self.create_object_value();
                         let prototype =
                             self.get_or_create_host_function_prototype_property(host_id)?;
-                        if let Ok((prototype, prototype_value)) =
-                            self.parse_prototype_value(prototype)
-                        {
-                            self.apply_prototype_components_to_value(
-                                &constructed,
+                        let default_proto = self.object_prototype_value();
+                        let (prototype, prototype_value) = self
+                            .constructor_prototype_components_or_default(
                                 prototype,
-                                prototype_value,
-                            );
-                        }
+                                default_proto,
+                            )?;
+                        self.apply_prototype_components_to_value(
+                            &constructed,
+                            prototype,
+                            prototype_value,
+                        );
                         let result = self.execute_external_host_callback(
                             callback_id,
                             Some(constructed.clone()),
@@ -4810,6 +5196,7 @@ impl Vm {
                 | NativeFunction::EvalErrorConstructor
                 | NativeFunction::RangeErrorConstructor
                 | NativeFunction::URIErrorConstructor
+                | NativeFunction::AggregateErrorConstructor
                 | NativeFunction::Test262Error
         )
     }
@@ -5093,11 +5480,25 @@ impl Vm {
                     ));
                 }
                 if self.closure_is_generator(closure_id)? {
-                    if !self.closure_uses_yield_identifier(closure_id)? {
-                        return self.execute_closure_call(closure_id, args, this_arg, realm);
+                    let is_async_generator = self.closure_is_async(closure_id)?;
+                    if self.closure_uses_yield_identifier(closure_id)? {
+                        return self.create_generator_iterator_from_closure_call(
+                            closure_id, args, this_arg,
+                        );
                     }
-                    return self
-                        .create_generator_iterator_from_closure_call(closure_id, args, this_arg);
+                    if self.closure_uses_lowered_generator_values_buffer(closure_id)? {
+                        let mut produced_values =
+                            self.execute_closure_call(closure_id, args, this_arg, realm)?;
+                        if is_async_generator {
+                            produced_values = self.resolve_async_generator_values_buffer(
+                                produced_values,
+                                realm,
+                                caller_strict,
+                            )?;
+                        }
+                        return self.create_generator_iterator_from_values(produced_values);
+                    }
+                    return self.execute_closure_call(closure_id, args, this_arg, realm);
                 }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
@@ -5113,6 +5514,26 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         self.execute_closure_call_internal(closure_id, args, this_arg, realm, None)
+    }
+
+    fn resolve_async_generator_values_buffer(
+        &mut self,
+        produced_values: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let JsValue::Object(object_id) = produced_values.clone() else {
+            return Ok(produced_values);
+        };
+        let is_promise = self
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get("__promiseTag"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+        if !is_promise {
+            return Ok(produced_values);
+        }
+        self.await_promise_settlement(object_id, realm, caller_strict)
     }
 
     fn execute_closure_call_with_generator_resume(
@@ -5422,7 +5843,14 @@ impl Vm {
             let promise = if let Some(rejection) = async_rejection {
                 self.create_async_settled_promise(false, rejection)?
             } else {
-                self.create_async_settled_promise(true, value)?
+                self.execute_promise_resolve(
+                    &[
+                        JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+                        value,
+                    ],
+                    realm,
+                    closure.strict,
+                )?
             };
             self.restore_caller_state(
                 saved_handlers,
@@ -6395,13 +6823,7 @@ impl Vm {
         }
 
         let constructor = this_arg.unwrap_or(JsValue::Undefined);
-        let use_constructor = match &constructor {
-            JsValue::NativeFunction(native) => Self::native_function_is_constructor(*native),
-            JsValue::Function(closure_id) => {
-                !self.closure_is_arrow(*closure_id)? && !self.closure_has_no_prototype(*closure_id)
-            }
-            _ => false,
-        };
+        let use_constructor = self.is_constructor_value(&constructor)?;
         let iterator_method = match items.clone() {
             JsValue::Null | JsValue::Undefined => {
                 return Err(VmError::TypeError("Array.from items must be coercible"));
@@ -6413,22 +6835,8 @@ impl Vm {
             if !Self::is_callable_value(&iterator_method) {
                 return Err(VmError::TypeError("Array.from iterator must be callable"));
             }
-            let iterator = self.execute_callable(
-                iterator_method,
-                Some(items.clone()),
-                Vec::new(),
-                realm,
-                caller_strict,
-            )?;
-            if !Self::is_object_like_value(&iterator) {
-                return Err(VmError::TypeError("Array.from iterator must return object"));
-            }
-            let next_method = self.get_property_from_receiver(iterator.clone(), "next", realm)?;
-            if !Self::is_callable_value(&next_method) {
-                return Err(VmError::TypeError(
-                    "Array.from iterator next must be callable",
-                ));
-            }
+            let iterator_record =
+                self.create_for_of_runtime_iterator_record(items.clone(), realm)?;
             let result = if use_constructor {
                 let result = self.execute_construct_value(
                     constructor.clone(),
@@ -6448,40 +6856,52 @@ impl Vm {
 
             let mut index = 0usize;
             loop {
-                let step = self.execute_callable(
-                    next_method.clone(),
-                    Some(iterator.clone()),
-                    Vec::new(),
-                    realm,
-                    caller_strict,
-                )?;
-                if !Self::is_object_like_value(&step) {
-                    return Err(VmError::TypeError(
-                        "Array.from iterator next must return object",
-                    ));
-                }
+                let step =
+                    self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
                 let done = self
                     .get_property_from_receiver(step.clone(), "done", realm)
                     .map(|value| self.is_truthy(&value))?;
                 if done {
                     break;
                 }
-                let mut value = self.get_property_from_receiver(step, "value", realm)?;
+                let mut value = match self.get_property_from_receiver(step, "value", realm) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let _ = self.execute_object_for_of_close(
+                            std::slice::from_ref(&iterator_record),
+                            realm,
+                        );
+                        return Err(err);
+                    }
+                };
                 if mapping {
-                    value = self.execute_callable(
+                    value = match self.execute_callable(
                         map_fn.clone(),
                         Some(this_for_map.clone()),
                         vec![value, JsValue::Number(index as f64)],
                         realm,
                         caller_strict,
-                    )?;
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            let _ = self.execute_object_for_of_close(
+                                std::slice::from_ref(&iterator_record),
+                                realm,
+                            );
+                            return Err(err);
+                        }
+                    };
                 }
-                self.create_data_property_or_throw(
+                if let Err(err) = self.create_data_property_or_throw(
                     result.clone(),
                     index.to_string(),
                     value,
                     realm,
-                )?;
+                ) {
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
                 index += 1;
             }
             let _ = self.set_property_on_receiver(
@@ -6541,6 +6961,74 @@ impl Vm {
             realm,
         )?;
         Ok(result)
+    }
+
+    fn ensure_array_from_async_impl(
+        &mut self,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        if let Some(existing) = self.global_property(ARRAY_FROM_ASYNC_IMPL_GLOBAL)
+            && Self::is_callable_value(&existing)
+        {
+            return Ok(existing);
+        }
+
+        let helper = self.execute_eval(
+            ARRAY_FROM_ASYNC_IMPL_SOURCE,
+            realm,
+            caller_strict,
+            EvalCallKind::Indirect,
+        )?;
+        if !Self::is_callable_value(&helper) {
+            return Err(VmError::TypeError(
+                "Array.fromAsync helper must be callable",
+            ));
+        }
+        let global_object_id = self
+            .global_object_id
+            .ok_or(VmError::RuntimeIntegrity("missing global object"))?;
+        self.define_global_property_with_attributes(
+            global_object_id,
+            ARRAY_FROM_ASYNC_IMPL_GLOBAL,
+            helper.clone(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        )?;
+        Ok(helper)
+    }
+
+    fn execute_array_from_async_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let items = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let map_fn = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let this_for_map = args.get(2).cloned().unwrap_or(JsValue::Undefined);
+        let mapping = !matches!(map_fn, JsValue::Undefined);
+        let constructor = this_arg.unwrap_or(JsValue::Undefined);
+        let use_constructor = self.is_constructor_value(&constructor)?;
+
+        let helper = self.ensure_array_from_async_impl(realm, caller_strict)?;
+        self.execute_callable(
+            helper,
+            Some(constructor),
+            vec![
+                items,
+                map_fn,
+                this_for_map,
+                JsValue::Bool(mapping),
+                JsValue::Bool(use_constructor),
+            ],
+            realm,
+            caller_strict,
+        )
     }
 
     fn execute_array_of_this(
@@ -7776,22 +8264,25 @@ impl Vm {
             .cloned()
             .ok_or(VmError::UnknownHostFunction(host_id))?;
         match host {
-            HostFunction::BoundMethod { target, method } => match method {
+            HostFunction::BoundMethod { method, .. } => match method {
                 FunctionMethod::Call => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = args.get(1..).map_or_else(Vec::new, |slice| slice.to_vec());
-                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
+                    self.execute_callable(callable, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Apply => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let call_args = self.collect_apply_arguments(args.get(1))?;
-                    self.execute_callable(target, Some(this_arg), call_args, realm, caller_strict)
+                    self.execute_callable(callable, Some(this_arg), call_args, realm, caller_strict)
                 }
                 FunctionMethod::Bind => {
+                    let callable = this_arg.unwrap_or(JsValue::Undefined);
                     let this_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
                     let bound_args = args.get(1..).map_or_else(Vec::new, |slice| slice.to_vec());
                     Ok(self.create_host_function_value(HostFunction::BoundCall {
-                        target,
+                        target: callable,
                         this_arg,
                         bound_args,
                     }))
@@ -7820,13 +8311,88 @@ impl Vm {
             HostFunction::GeneratorIteratorNextThis => {
                 self.execute_generator_iterator_next(this_arg, args.first().cloned(), realm)
             }
+            HostFunction::GeneratorIteratorReturnThis => {
+                self.execute_generator_iterator_return(this_arg, args.first().cloned(), realm)
+            }
+            HostFunction::GeneratorIteratorThrowThis => {
+                self.execute_generator_iterator_throw(this_arg, args.first().cloned(), realm)
+            }
             HostFunction::StringReplaceThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
+                let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(search_value, JsValue::Undefined | JsValue::Null) {
+                    let replacer = self.get_property_from_receiver(
+                        search_value.clone(),
+                        "Symbol.replace",
+                        realm,
+                    )?;
+                    if !matches!(replacer, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&replacer) {
+                            return Err(VmError::NotCallable);
+                        }
+                        let replace_value = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                        return self.execute_callable(
+                            replacer,
+                            Some(search_value),
+                            vec![JsValue::String(receiver), replace_value],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
                 self.execute_string_replace(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringMatchThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let matcher = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(matcher, JsValue::Undefined | JsValue::Null) {
+                    let method =
+                        self.get_property_from_receiver(matcher.clone(), "Symbol.match", realm)?;
+                    if !matches!(method, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&method) {
+                            return Err(VmError::NotCallable);
+                        }
+                        return self.execute_callable(
+                            method,
+                            Some(matcher),
+                            vec![JsValue::String(receiver)],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
+                let exec = self.get_property_from_receiver(matcher.clone(), "exec", realm)?;
+                if !Self::is_callable_value(&exec) {
+                    return Err(VmError::NotCallable);
+                }
+                self.execute_callable(
+                    exec,
+                    Some(matcher),
+                    vec![JsValue::String(receiver)],
+                    realm,
+                    caller_strict,
+                )
+            }
+            HostFunction::StringMatchAllThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let matcher = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(matcher, JsValue::Undefined | JsValue::Null) {
+                    let method =
+                        self.get_property_from_receiver(matcher.clone(), "Symbol.matchAll", realm)?;
+                    if !matches!(method, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&method) {
+                            return Err(VmError::NotCallable);
+                        }
+                        return self.execute_callable(
+                            method,
+                            Some(matcher),
+                            vec![JsValue::String(receiver)],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
+                // Fallback keeps baseline behavior until full matchAll iterator semantics land.
                 let exec = self.get_property_from_receiver(matcher.clone(), "exec", realm)?;
                 if !Self::is_callable_value(&exec) {
                     return Err(VmError::NotCallable);
@@ -7842,6 +8408,22 @@ impl Vm {
             HostFunction::StringSearchThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let matcher = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(matcher, JsValue::Undefined | JsValue::Null) {
+                    let method =
+                        self.get_property_from_receiver(matcher.clone(), "Symbol.search", realm)?;
+                    if !matches!(method, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&method) {
+                            return Err(VmError::NotCallable);
+                        }
+                        return self.execute_callable(
+                            method,
+                            Some(matcher),
+                            vec![JsValue::String(receiver)],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
                 let test = self.get_property_from_receiver(matcher.clone(), "test", realm)?;
                 if !Self::is_callable_value(&test) {
                     return Err(VmError::NotCallable);
@@ -7859,12 +8441,55 @@ impl Vm {
                     -1.0
                 }))
             }
+            HostFunction::StringReplaceAllThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(search_value, JsValue::Undefined | JsValue::Null) {
+                    let replacer = self.get_property_from_receiver(
+                        search_value.clone(),
+                        "Symbol.replace",
+                        realm,
+                    )?;
+                    if !matches!(replacer, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&replacer) {
+                            return Err(VmError::NotCallable);
+                        }
+                        let replace_value = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                        return self.execute_callable(
+                            replacer,
+                            Some(search_value),
+                            vec![JsValue::String(receiver), replace_value],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
+                self.execute_string_replace(receiver, &args, realm, caller_strict)
+            }
             HostFunction::StringIndexOfThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(self.execute_string_index_of(receiver, &args))
             }
             HostFunction::StringSplitThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
+                let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !matches!(separator, JsValue::Undefined | JsValue::Null) {
+                    let method =
+                        self.get_property_from_receiver(separator.clone(), "Symbol.split", realm)?;
+                    if !matches!(method, JsValue::Undefined | JsValue::Null) {
+                        if !Self::is_callable_value(&method) {
+                            return Err(VmError::NotCallable);
+                        }
+                        let limit = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                        return self.execute_callable(
+                            method,
+                            Some(separator),
+                            vec![JsValue::String(receiver), limit],
+                            realm,
+                            caller_strict,
+                        );
+                    }
+                }
                 self.execute_string_split(receiver, &args)
             }
             HostFunction::StringToLowerCaseThis => {
@@ -7878,6 +8503,14 @@ impl Vm {
             HostFunction::StringTrim => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(JsValue::String(receiver.trim().to_string()))
+            }
+            HostFunction::StringTrimStart => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(JsValue::String(receiver.trim_start().to_string()))
+            }
+            HostFunction::StringTrimEnd => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                Ok(JsValue::String(receiver.trim_end().to_string()))
             }
             HostFunction::StringToString | HostFunction::StringValueOf => {
                 let receiver = self.strict_this_string(this_arg)?;
@@ -7969,7 +8602,7 @@ impl Vm {
             }
             HostFunction::StringSubstr => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
-                Ok(self.execute_string_substr(receiver, &args))
+                self.execute_string_substr(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringAnchor => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
@@ -8634,6 +9267,7 @@ impl Vm {
             HostFunction::ArrayOf => {
                 self.execute_array_of_this(this_arg, &args, realm, caller_strict)
             }
+            HostFunction::ArraySpeciesGetter => Ok(this_arg.unwrap_or(JsValue::Undefined)),
             HostFunction::ArrayEveryThis => {
                 self.execute_array_every_this(this_arg, &args, realm, caller_strict)
             }
@@ -8732,6 +9366,24 @@ impl Vm {
                 self.execute_regexp_to_string(receiver_id)
                     .map(JsValue::String)
             }
+            HostFunction::RegExpSymbolSplitThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
+                self.execute_regexp_symbol_split_this(receiver_id, &args, realm, caller_strict)
+            }
+            HostFunction::RegExpLegacyStaticGetter(property) => {
+                Self::ensure_regexp_legacy_accessor_receiver(this_arg)?;
+                Ok(JsValue::String(self.regexp_legacy_property_value(property)))
+            }
+            HostFunction::RegExpLegacyInputSetter => {
+                Self::ensure_regexp_legacy_accessor_receiver(this_arg)?;
+                let input = self.coerce_to_string_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                self.regexp_legacy_input = input;
+                Ok(JsValue::Undefined)
+            }
             HostFunction::ReflectDefineProperty => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let property = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -8739,6 +9391,39 @@ impl Vm {
                 let _ =
                     self.execute_object_define_property(&[target, property, descriptor], realm)?;
                 Ok(JsValue::Bool(true))
+            }
+            HostFunction::ReflectConstruct => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !self.is_constructor_value(&target)? {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct target must be constructor",
+                    ));
+                }
+                let new_target = args.get(2).cloned().unwrap_or_else(|| target.clone());
+                if !self.is_constructor_value(&new_target)? {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct newTarget must be constructor",
+                    ));
+                }
+                let arguments_list = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&arguments_list) {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct argumentsList must be object",
+                    ));
+                }
+                let construct_args = self.collect_apply_arguments(Some(&arguments_list))?;
+                match target {
+                    JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor) => self
+                        .execute_aggregate_error_constructor(
+                            &construct_args,
+                            realm,
+                            caller_strict,
+                            Some(new_target),
+                        ),
+                    other => {
+                        self.execute_construct_value(other, construct_args, realm, caller_strict)
+                    }
+                }
             }
             HostFunction::ReflectGetOwnPropertyDescriptor => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
@@ -8978,7 +9663,7 @@ impl Vm {
             HostFunction::AssertCompareArray => {
                 let actual = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let expected = args.get(1).cloned().unwrap_or(JsValue::Undefined);
-                if self.compare_array_like(&actual, &expected)? {
+                if self.compare_array_like(&actual, &expected, realm)? {
                     Ok(JsValue::Undefined)
                 } else {
                     let detail = if args.len() >= 3 {
@@ -9091,6 +9776,9 @@ impl Vm {
             NativeFunction::ObjectForOfValues => self.execute_object_for_of_values(&args, realm),
             NativeFunction::ObjectForOfIterator => {
                 self.execute_object_for_of_iterator(&args, realm)
+            }
+            NativeFunction::ObjectForAwaitIterator => {
+                self.execute_object_for_await_iterator(&args, realm)
             }
             NativeFunction::ObjectForOfStep => self.execute_object_for_of_step(&args, realm),
             NativeFunction::ObjectForOfClose => self.execute_object_for_of_close(&args, realm),
@@ -9373,12 +10061,8 @@ impl Vm {
                     None | Some(JsValue::Undefined) => String::new(),
                     Some(value) => self.coerce_to_string(value),
                 };
-                let value = if description.is_empty() {
-                    "Symbol()".to_string()
-                } else {
-                    format!("Symbol({description})")
-                };
-                Ok(JsValue::String(value))
+                let marker = format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{description}");
+                Ok(JsValue::String(marker))
             }
             NativeFunction::IsNaN => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -9425,6 +10109,7 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 Ok(JsValue::String(self.coerce_to_string(&value)))
             }
+            NativeFunction::IsHTMLDDA => Ok(JsValue::Null),
             NativeFunction::Escape => self.execute_escape(&args, realm, caller_strict),
             NativeFunction::Unescape => self.execute_unescape(&args, realm, caller_strict),
             NativeFunction::Assert => {
@@ -9477,6 +10162,9 @@ impl Vm {
                 "URIError",
                 &args,
             )),
+            NativeFunction::AggregateErrorConstructor => {
+                self.execute_aggregate_error_constructor(&args, realm, caller_strict, None)
+            }
             NativeFunction::RegExpConstructor => {
                 let (pattern, flags) = self.resolve_regexp_constructor_inputs(&args)?;
                 self.create_regexp_value(pattern, flags)
@@ -9502,6 +10190,143 @@ impl Vm {
             Some(value) => self.coerce_to_string(value),
         };
         self.create_error_exception(constructor, name, message)
+    }
+
+    fn execute_aggregate_error_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+        new_target: Option<JsValue>,
+    ) -> Result<JsValue, VmError> {
+        let message = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => None,
+            Some(value) => Some(self.coerce_to_string_runtime(value, realm, caller_strict)?),
+        };
+
+        let aggregate = self.create_object_value();
+        let aggregate_id = match aggregate {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let default_proto = self.aggregate_error_prototype_value();
+        let default_components = self.parse_prototype_value(default_proto)?;
+        let (prototype, prototype_value) = if let Some(target) = new_target {
+            let target_prototype = self.get_constructor_prototype_property(target, realm)?;
+            match target_prototype {
+                JsValue::Object(object_id) => (Some(object_id), None),
+                JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                    (None, Some(target_prototype))
+                }
+                _ => (default_components.0, default_components.1.clone()),
+            }
+        } else {
+            (default_components.0, default_components.1.clone())
+        };
+        self.apply_prototype_components_to_value(&aggregate, prototype, prototype_value);
+
+        if let Some(object) = self.objects.get_mut(&aggregate_id) {
+            object.properties.insert(
+                "constructor".to_string(),
+                JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+            );
+            object.properties.insert(
+                "name".to_string(),
+                JsValue::String("AggregateError".to_string()),
+            );
+            object.property_attributes.insert(
+                "constructor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            object.property_attributes.insert(
+                "name".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            if let Some(text) = message {
+                object
+                    .properties
+                    .insert("message".to_string(), JsValue::String(text));
+                object.property_attributes.insert(
+                    "message".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+        }
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let iterator_record = self.create_for_of_runtime_iterator_record(iterable, realm)?;
+        let mut errors = Vec::new();
+        loop {
+            let step =
+                self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+            let done = self
+                .get_property_from_receiver(step.clone(), "done", realm)
+                .map(|value| self.is_truthy(&value))?;
+            if done {
+                break;
+            }
+            let next = match self.get_property_from_receiver(step, "value", realm) {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
+            };
+            errors.push(next);
+        }
+
+        let errors_list = self.create_array_from_values(errors)?;
+        let errors_descriptor = self.create_descriptor_object(vec![
+            ("value", errors_list),
+            ("writable", JsValue::Bool(true)),
+            ("enumerable", JsValue::Bool(false)),
+            ("configurable", JsValue::Bool(true)),
+        ]);
+        let _ = self.execute_object_define_property(
+            &[
+                JsValue::Object(aggregate_id),
+                JsValue::String("errors".to_string()),
+                errors_descriptor,
+            ],
+            realm,
+        )?;
+
+        if let Some(options) = args.get(2).cloned() {
+            if Self::is_object_like_value(&options)
+                && self.has_property_on_receiver(&options, "cause", realm)?
+            {
+                let cause = self.get_property_from_receiver(options, "cause", realm)?;
+                let cause_descriptor = self.create_descriptor_object(vec![
+                    ("value", cause),
+                    ("writable", JsValue::Bool(true)),
+                    ("enumerable", JsValue::Bool(false)),
+                    ("configurable", JsValue::Bool(true)),
+                ]);
+                let _ = self.execute_object_define_property(
+                    &[
+                        JsValue::Object(aggregate_id),
+                        JsValue::String("cause".to_string()),
+                        cause_descriptor,
+                    ],
+                    realm,
+                )?;
+            }
+        }
+
+        Ok(JsValue::Object(aggregate_id))
     }
 
     fn error_prototype_for_constructor(&mut self, constructor: NativeFunction) -> Option<ObjectId> {
@@ -9536,6 +10361,12 @@ impl Vm {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
+            NativeFunction::AggregateErrorConstructor => {
+                match self.aggregate_error_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -9791,6 +10622,13 @@ impl Vm {
         flags: &str,
     ) -> Result<(), VmError> {
         self.validate_regexp_flags(flags)?;
+        if Self::has_duplicate_named_groups_in_same_alternative(pattern) {
+            return Err(VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            )));
+        }
         let unicode = flags.contains('u');
         let normalized_pattern =
             Self::normalize_regexp_pattern(pattern, unicode).map_err(|_| {
@@ -9817,6 +10655,16 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let receiver_is_direct_regexp = self
+            .objects
+            .get(&receiver_id)
+            .is_some_and(|object| object.prototype == self.regexp_prototype_id);
+        if !receiver_is_direct_regexp {
+            return Err(VmError::TypeError(
+                "RegExp.prototype.compile receiver must be direct RegExp instance",
+            ));
+        }
+
         let pattern_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
         let flags_arg = args.get(1).cloned().unwrap_or(JsValue::Undefined);
 
@@ -9869,6 +10717,213 @@ impl Vm {
     fn execute_regexp_to_string(&self, object_id: ObjectId) -> Result<String, VmError> {
         let (source, flags) = self.regexp_slot_strings(object_id)?;
         Ok(format!("/{source}/{flags}"))
+    }
+
+    fn execute_regexp_symbol_split_this(
+        &mut self,
+        receiver_id: ObjectId,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = self.coerce_to_string_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+
+        // IsRegExp/SpeciesConstructor observable reads can mutate the source regexp.
+        let _ =
+            self.get_property_from_receiver(JsValue::Object(receiver_id), "Symbol.match", realm)?;
+
+        let (pattern, flags) = self.regexp_slot_strings(receiver_id)?;
+        let unicode = flags.contains('u');
+        let normalized_pattern =
+            Self::normalize_regexp_pattern(&pattern, unicode).map_err(|_| {
+                VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::SyntaxErrorConstructor,
+                    "SyntaxError",
+                    "invalid regular expression pattern".to_string(),
+                ))
+            })?;
+        let splitter = Self::build_regexp_matcher(&normalized_pattern, &flags).map_err(|_| {
+            VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            ))
+        })?;
+
+        let limit = match args.get(1) {
+            None | Some(JsValue::Undefined) => u32::MAX as usize,
+            Some(value) => {
+                let number = self.coerce_number_runtime(value.clone(), realm, caller_strict)?;
+                Self::to_uint32_number(number) as usize
+            }
+        };
+        if limit == 0 {
+            return self.create_array_from_values(Vec::new());
+        }
+
+        let mut output: Vec<JsValue> = Vec::new();
+        let mut last_end = 0usize;
+        for candidate in splitter.find_iter(&input) {
+            let Ok(matched) = candidate else {
+                break;
+            };
+            if matched.start() < last_end {
+                continue;
+            }
+            output.push(JsValue::String(
+                input[last_end..matched.start()].to_string(),
+            ));
+            if output.len() >= limit {
+                return self.create_array_from_values(output);
+            }
+            last_end = matched.end();
+        }
+        output.push(JsValue::String(input[last_end..].to_string()));
+        if output.len() > limit {
+            output.truncate(limit);
+        }
+        self.create_array_from_values(output)
+    }
+
+    fn regexp_legacy_property_from_name(property: &str) -> Option<RegExpLegacyStaticProperty> {
+        match property {
+            "input" | "$_" => Some(RegExpLegacyStaticProperty::Input),
+            "lastMatch" | "$&" => Some(RegExpLegacyStaticProperty::LastMatch),
+            "lastParen" | "$+" => Some(RegExpLegacyStaticProperty::LastParen),
+            "leftContext" | "$`" => Some(RegExpLegacyStaticProperty::LeftContext),
+            "rightContext" | "$'" => Some(RegExpLegacyStaticProperty::RightContext),
+            "$1" => Some(RegExpLegacyStaticProperty::Capture(0)),
+            "$2" => Some(RegExpLegacyStaticProperty::Capture(1)),
+            "$3" => Some(RegExpLegacyStaticProperty::Capture(2)),
+            "$4" => Some(RegExpLegacyStaticProperty::Capture(3)),
+            "$5" => Some(RegExpLegacyStaticProperty::Capture(4)),
+            "$6" => Some(RegExpLegacyStaticProperty::Capture(5)),
+            "$7" => Some(RegExpLegacyStaticProperty::Capture(6)),
+            "$8" => Some(RegExpLegacyStaticProperty::Capture(7)),
+            "$9" => Some(RegExpLegacyStaticProperty::Capture(8)),
+            _ => None,
+        }
+    }
+
+    fn regexp_legacy_property_value(&self, property: RegExpLegacyStaticProperty) -> String {
+        match property {
+            RegExpLegacyStaticProperty::Input => self.regexp_legacy_input.clone(),
+            RegExpLegacyStaticProperty::LastMatch => self.regexp_legacy_last_match.clone(),
+            RegExpLegacyStaticProperty::LastParen => self.regexp_legacy_last_paren.clone(),
+            RegExpLegacyStaticProperty::LeftContext => self.regexp_legacy_left_context.clone(),
+            RegExpLegacyStaticProperty::RightContext => self.regexp_legacy_right_context.clone(),
+            RegExpLegacyStaticProperty::Capture(index) => self
+                .regexp_legacy_captures
+                .get(index)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    fn ensure_regexp_legacy_accessor_receiver(this_arg: Option<JsValue>) -> Result<(), VmError> {
+        if matches!(
+            this_arg,
+            Some(JsValue::NativeFunction(NativeFunction::RegExpConstructor))
+        ) {
+            Ok(())
+        } else {
+            Err(VmError::TypeError(
+                "RegExp legacy accessor receiver must be RegExp constructor",
+            ))
+        }
+    }
+
+    fn ensure_regexp_legacy_static_accessors(&mut self) {
+        if self
+            .native_function_objects
+            .get(&NativeFunction::RegExpConstructor)
+            .is_some_and(|object| object.getters.contains_key("input"))
+        {
+            return;
+        }
+        let input_getter = self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+            RegExpLegacyStaticProperty::Input,
+        ));
+        let input_setter = self.create_host_function_value(HostFunction::RegExpLegacyInputSetter);
+        let last_match_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LastMatch),
+        );
+        let last_paren_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LastParen),
+        );
+        let left_context_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LeftContext),
+        );
+        let right_context_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::RightContext),
+        );
+        let capture_getters = [
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(0),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(1),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(2),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(3),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(4),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(5),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(6),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(7),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(8),
+            )),
+        ];
+
+        let object = self
+            .native_function_objects
+            .entry(NativeFunction::RegExpConstructor)
+            .or_default();
+        let mut define_accessor = |name: &str, getter: &JsValue, setter: Option<&JsValue>| {
+            object.getters.insert(name.to_string(), getter.clone());
+            if let Some(setter) = setter {
+                object.setters.insert(name.to_string(), setter.clone());
+            }
+            object.property_attributes.insert(
+                name.to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        };
+
+        define_accessor("input", &input_getter, Some(&input_setter));
+        define_accessor("$_", &input_getter, Some(&input_setter));
+        define_accessor("lastMatch", &last_match_getter, None);
+        define_accessor("$&", &last_match_getter, None);
+        define_accessor("lastParen", &last_paren_getter, None);
+        define_accessor("$+", &last_paren_getter, None);
+        define_accessor("leftContext", &left_context_getter, None);
+        define_accessor("$`", &left_context_getter, None);
+        define_accessor("rightContext", &right_context_getter, None);
+        define_accessor("$'", &right_context_getter, None);
+        for (index, getter) in capture_getters.iter().enumerate() {
+            let name = format!("${}", index + 1);
+            define_accessor(&name, getter, None);
+        }
     }
 
     fn set_regexp_last_index(
@@ -9978,6 +11033,24 @@ impl Vm {
             capture_groups.push(captures.get(index).map(|value| value.as_str().to_string()));
         }
 
+        self.regexp_legacy_input = input.to_string();
+        self.regexp_legacy_last_match = full_match.as_str().to_string();
+        self.regexp_legacy_left_context = normalized_input[..full_match.start()].to_string();
+        self.regexp_legacy_right_context = normalized_input[full_match.end()..].to_string();
+        self.regexp_legacy_captures.fill(String::new());
+        for (slot, capture) in capture_groups.iter().take(9).enumerate() {
+            if let Some(value) = capture {
+                self.regexp_legacy_captures[slot] = value.clone();
+            }
+        }
+        self.regexp_legacy_last_paren = self
+            .regexp_legacy_captures
+            .iter()
+            .rev()
+            .find(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_default();
+
         Ok(Some(RegExpMatchResult {
             index: full_match.start(),
             full_match: full_match.as_str().to_string(),
@@ -10014,7 +11087,8 @@ impl Vm {
         let mut normalized = String::with_capacity(pattern.len());
         let mut index = 0usize;
         let mut in_character_class = false;
-        let capture_group_count = Self::count_regexp_capturing_groups(&chars);
+        let total_capture_group_count = Self::count_regexp_capturing_groups(&chars);
+        let mut seen_capturing_groups = 0usize;
         while index < chars.len() {
             let ch = chars[index];
             if !unicode
@@ -10034,6 +11108,21 @@ impl Vm {
                 index = assertion_end + 1 + quantifier_len;
                 continue;
             }
+            if ch == '('
+                && !in_character_class
+                && chars.get(index + 1) == Some(&'?')
+                && chars.get(index + 2) == Some(&'<')
+                && !matches!(chars.get(index + 3), Some('=' | '!'))
+            {
+                // Rust regex expects named groups as (?P<name>...), while JS uses (?<name>...).
+                normalized.push('(');
+                normalized.push('?');
+                normalized.push('P');
+                normalized.push('<');
+                seen_capturing_groups += 1;
+                index += 3;
+                continue;
+            }
             if ch == '\\' && index + 1 < chars.len() {
                 let next = chars[index + 1];
                 if next == '0' {
@@ -10046,21 +11135,30 @@ impl Vm {
                         continue;
                     }
                 }
-                if next == 'c'
-                    && !unicode
-                    && in_character_class
-                    && let Some(control_char) = chars.get(index + 2)
-                    && (control_char.is_ascii_alphabetic()
-                        || control_char.is_ascii_digit()
-                        || *control_char == '_')
-                {
-                    let control_value = (*control_char as u32) % 32;
-                    Self::push_regex_literal_code_unit(
-                        &mut normalized,
-                        control_value,
-                        in_character_class,
-                    );
-                    index += 3;
+                if next == 'c' && !unicode {
+                    if let Some(control_char) = chars.get(index + 2).copied() {
+                        let valid_control = if in_character_class {
+                            control_char.is_ascii_alphabetic()
+                                || control_char.is_ascii_digit()
+                                || control_char == '_'
+                        } else {
+                            control_char.is_ascii_alphabetic()
+                        };
+                        if valid_control {
+                            let control_value = (control_char as u32) % 32;
+                            Self::push_regex_literal_code_unit(
+                                &mut normalized,
+                                control_value,
+                                in_character_class,
+                            );
+                            index += 3;
+                            continue;
+                        }
+                    }
+                    // Annex B fallback: invalid control escapes treat `\c` as a literal sequence.
+                    Self::push_regex_literal_char(&mut normalized, '\\', in_character_class);
+                    Self::push_regex_literal_char(&mut normalized, 'c', in_character_class);
+                    index += 2;
                     continue;
                 }
                 if next == 'u' {
@@ -10152,14 +11250,18 @@ impl Vm {
                         decimal_end += 1;
                     }
                     let decimal_digits: String = chars[index + 1..decimal_end].iter().collect();
-                    if let Ok(decimal_value) = decimal_digits.parse::<usize>()
-                        && decimal_value > 0
-                        && decimal_value <= capture_group_count
-                    {
-                        normalized.push('\\');
-                        normalized.push_str(&decimal_digits);
-                        index = decimal_end;
-                        continue;
+                    if let Ok(decimal_value) = decimal_digits.parse::<usize>() {
+                        if decimal_value > 0 && decimal_value <= seen_capturing_groups {
+                            normalized.push('\\');
+                            normalized.push_str(&decimal_digits);
+                            index = decimal_end;
+                            continue;
+                        }
+                        if decimal_value > 0 && decimal_value <= total_capture_group_count {
+                            // Annex B forward-backreference compatibility: preserve the empty match.
+                            index = decimal_end;
+                            continue;
+                        }
                     }
                     if let Some((code_point, consumed_digits)) =
                         Self::parse_regex_legacy_octal_escape(&chars, index + 1)
@@ -10244,6 +11346,15 @@ impl Vm {
                     continue;
                 }
             }
+            if !in_character_class
+                && ch == '('
+                && (chars.get(index + 1) != Some(&'?')
+                    || (chars.get(index + 1) == Some(&'?')
+                        && chars.get(index + 2) == Some(&'<')
+                        && !matches!(chars.get(index + 3), Some('=' | '!'))))
+            {
+                seen_capturing_groups += 1;
+            }
             normalized.push(ch);
             index += 1;
         }
@@ -10252,7 +11363,7 @@ impl Vm {
 
     fn push_regex_literal_char(target: &mut String, ch: char, in_character_class: bool) {
         let needs_escape = if in_character_class {
-            matches!(ch, '\\' | ']' | '-' | '^')
+            matches!(ch, '\\' | '[' | ']' | '-' | '^')
         } else {
             matches!(
                 ch,
@@ -10328,12 +11439,119 @@ impl Vm {
                 index += 1;
                 continue;
             }
-            if ch == '(' && chars.get(index + 1) != Some(&'?') {
+            if ch == '('
+                && (chars.get(index + 1) != Some(&'?')
+                    || (chars.get(index + 1) == Some(&'?')
+                        && chars.get(index + 2) == Some(&'<')
+                        && !matches!(chars.get(index + 3), Some('=' | '!'))))
+            {
                 count += 1;
             }
             index += 1;
         }
         count
+    }
+
+    fn has_duplicate_named_groups_in_same_alternative(pattern: &str) -> bool {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut start = 0usize;
+        let mut index = 0usize;
+        let mut depth = 0usize;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '(' {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if ch == ')' {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            if ch == '|' && depth == 0 {
+                if Self::alternative_has_duplicate_named_groups(&chars[start..index]) {
+                    return true;
+                }
+                start = index + 1;
+            }
+            index += 1;
+        }
+        Self::alternative_has_duplicate_named_groups(&chars[start..])
+    }
+
+    fn alternative_has_duplicate_named_groups(chars: &[char]) -> bool {
+        let mut seen = HashSet::new();
+        let mut index = 0usize;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '('
+                && chars.get(index + 1) == Some(&'?')
+                && chars.get(index + 2) == Some(&'<')
+                && !matches!(chars.get(index + 3), Some('=' | '!'))
+            {
+                let mut name_end = index + 3;
+                while name_end < chars.len() && chars[name_end] != '>' {
+                    name_end += 1;
+                }
+                if name_end < chars.len() && name_end > index + 3 {
+                    let name: String = chars[index + 3..name_end].iter().collect();
+                    if !seen.insert(name) {
+                        return true;
+                    }
+                }
+            }
+            index += 1;
+        }
+        false
     }
 
     fn find_group_end(chars: &[char], start: usize) -> Option<usize> {
@@ -10666,6 +11884,14 @@ impl Vm {
         }
         let chunk = compile_script(&script);
         let eval_strict = self.code_is_strict(&chunk.code);
+        if !eval_strict
+            && self.eval_targets_global_var_scope(call_kind)
+            && self.eval_lexical_declarations_conflict_with_existing_var_scope(&script, call_kind)
+        {
+            return Err(VmError::UncaughtException(JsValue::String(
+                "SyntaxError: lexical declaration conflicts with existing binding".to_string(),
+            )));
+        }
         let annex_b_eval_var_function_names = if !eval_strict {
             Self::script_annex_b_eval_var_function_names(&script)
         } else {
@@ -10714,7 +11940,7 @@ impl Vm {
         let result = (|| {
             if !annex_b_eval_var_function_names.is_empty() {
                 for name in &annex_b_eval_var_function_names {
-                    self.ensure_annex_b_eval_var_binding(name)?;
+                    self.ensure_annex_b_eval_var_binding(name, true)?;
                 }
                 let var_scope = self.current_var_scope_ref()?;
                 let pending_syncs = annex_b_eval_var_function_names
@@ -10745,6 +11971,32 @@ impl Vm {
             EvalCallKind::Indirect => true,
             EvalCallKind::Direct => self.var_scope_stack.last().copied() == Some(0),
         }
+    }
+
+    fn eval_lexical_declarations_conflict_with_existing_var_scope(
+        &self,
+        script: &Script,
+        call_kind: EvalCallKind,
+    ) -> bool {
+        let lexical_names = Self::script_lexical_declaration_names(script);
+        if lexical_names.is_empty() {
+            return false;
+        }
+
+        let scope_index = match call_kind {
+            EvalCallKind::Indirect => 0,
+            EvalCallKind::Direct => self.var_scope_stack.last().copied().unwrap_or(0),
+        };
+        let Some(scope) = self.scopes.get(scope_index) else {
+            return false;
+        };
+        let scope = scope.borrow();
+        lexical_names.iter().any(|name| {
+            scope.get(name).is_some_and(|binding_id| {
+                self.binding(*binding_id)
+                    .is_some_and(|binding| !binding.deletable)
+            })
+        })
     }
 
     fn snapshot_eval_state(&self) -> EvalStateSnapshot {
@@ -10859,6 +12111,8 @@ impl Vm {
             _ => unreachable!(),
         };
         let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
+        let return_fn = self.create_host_function_value(HostFunction::GeneratorIteratorReturnThis);
+        let throw_fn = self.create_host_function_value(HostFunction::GeneratorIteratorThrowThis);
         let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let object = self
             .objects
@@ -10875,11 +12129,29 @@ impl Vm {
             .properties
             .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
         object.properties.insert("next".to_string(), next);
+        object.properties.insert("return".to_string(), return_fn);
+        object.properties.insert("throw".to_string(), throw_fn);
         object
             .properties
             .insert("Symbol.iterator".to_string(), iterator_method);
         object.property_attributes.insert(
             "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "return".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "throw".to_string(),
             PropertyAttributes {
                 writable: true,
                 enumerable: false,
@@ -10909,6 +12181,8 @@ impl Vm {
             _ => unreachable!(),
         };
         let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
+        let return_fn = self.create_host_function_value(HostFunction::GeneratorIteratorReturnThis);
+        let throw_fn = self.create_host_function_value(HostFunction::GeneratorIteratorThrowThis);
         let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let args_array = self.create_array_from_values(args)?;
         let this_is_missing = this_arg.is_none();
@@ -10942,11 +12216,29 @@ impl Vm {
             JsValue::Bool(this_is_missing),
         );
         object.properties.insert("next".to_string(), next);
+        object.properties.insert("return".to_string(), return_fn);
+        object.properties.insert("throw".to_string(), throw_fn);
         object
             .properties
             .insert("Symbol.iterator".to_string(), iterator_method);
         object.property_attributes.insert(
             "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "return".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "throw".to_string(),
             PropertyAttributes {
                 writable: true,
                 enumerable: false,
@@ -11064,27 +12356,12 @@ impl Vm {
         } else {
             match values {
                 JsValue::Object(values_id) => {
-                    let values_object = self
-                        .objects
-                        .get(&values_id)
-                        .ok_or(VmError::UnknownObject(values_id))?;
-                    let length = values_object
-                        .properties
-                        .get("length")
-                        .map(|length| self.to_number(length))
-                        .unwrap_or(0.0)
-                        .max(0.0) as usize;
+                    let length = self.array_length(values_id)?;
                     if index >= length {
                         (JsValue::Undefined, true)
                     } else {
-                        (
-                            values_object
-                                .properties
-                                .get(&index.to_string())
-                                .cloned()
-                                .unwrap_or(JsValue::Undefined),
-                            false,
-                        )
+                        let key = index.to_string();
+                        (self.get_object_property(values_id, &key, realm)?, false)
                     }
                 }
                 _ => (JsValue::Undefined, true),
@@ -11098,6 +12375,182 @@ impl Vm {
             );
         }
         self.create_for_of_step_result(done, value)
+    }
+
+    fn mark_generator_iterator_completed(&mut self, iterator_id: ObjectId) {
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator
+                .properties
+                .insert(GENERATOR_INDEX_KEY.to_string(), JsValue::Number(2.0));
+        }
+    }
+
+    fn generator_delegate_from_values(
+        &mut self,
+        values: &JsValue,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        let JsValue::Object(values_id) = values else {
+            return Ok(None);
+        };
+        if self.array_length(*values_id)? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.get_object_property(*values_id, "0", realm)?))
+    }
+
+    fn execute_generator_iterator_resume_method(
+        &mut self,
+        this_arg: Option<JsValue>,
+        completion: Option<JsValue>,
+        method_name: &str,
+        is_throw: bool,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "generator iterator receiver must be object",
+                ));
+            }
+        };
+        let (
+            mut values,
+            is_generator_iterator,
+            producer_closure,
+            producer_args,
+            producer_this,
+            producer_this_is_missing,
+        ) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_generator_iterator = iterator
+                .properties
+                .get(GENERATOR_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let producer_closure = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_CLOSURE_KEY)
+                .and_then(|value| match value {
+                    JsValue::String(raw) => raw.parse::<u64>().ok(),
+                    _ => None,
+                });
+            let producer_args = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_ARGS_KEY)
+                .cloned();
+            let producer_this = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_THIS_KEY)
+                .cloned();
+            let producer_this_is_missing = iterator
+                .properties
+                .get(GENERATOR_PRODUCER_THIS_IS_MISSING_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let values = iterator
+                .properties
+                .get(GENERATOR_VALUES_KEY)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            (
+                values,
+                is_generator_iterator,
+                producer_closure,
+                producer_args,
+                producer_this,
+                producer_this_is_missing,
+            )
+        };
+        if !is_generator_iterator {
+            return Err(VmError::TypeError("incompatible generator iterator"));
+        }
+
+        let completion_value = completion.unwrap_or(JsValue::Undefined);
+        if matches!(values, JsValue::Undefined)
+            && let Some(producer_closure_id) = producer_closure
+        {
+            let producer_args = self.collect_apply_arguments(producer_args.as_ref())?;
+            let producer_this = if producer_this_is_missing {
+                None
+            } else {
+                Some(producer_this.unwrap_or(JsValue::Undefined))
+            };
+            values = self.execute_closure_call_with_generator_resume(
+                producer_closure_id,
+                producer_args,
+                producer_this,
+                realm,
+                completion_value.clone(),
+            )?;
+            if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+                iterator
+                    .properties
+                    .insert(GENERATOR_VALUES_KEY.to_string(), values.clone());
+            }
+        }
+
+        let Some(delegate) = self.generator_delegate_from_values(&values, realm)? else {
+            if is_throw {
+                return Err(VmError::TypeError(
+                    "generator delegate missing throw method",
+                ));
+            }
+            self.mark_generator_iterator_completed(iterator_id);
+            return self.create_for_of_step_result(true, completion_value);
+        };
+
+        let delegate_method =
+            self.get_property_from_receiver(delegate.clone(), method_name, realm)?;
+        if matches!(delegate_method, JsValue::Undefined | JsValue::Null) {
+            if is_throw {
+                return Err(VmError::TypeError(
+                    "generator delegate missing throw method",
+                ));
+            }
+            self.mark_generator_iterator_completed(iterator_id);
+            return self.create_for_of_step_result(true, completion_value);
+        }
+        if !Self::is_callable_value(&delegate_method) {
+            return Err(VmError::TypeError(
+                "generator delegate method is not callable",
+            ));
+        }
+
+        let result = self.execute_callable(
+            delegate_method,
+            Some(delegate),
+            vec![completion_value],
+            realm,
+            false,
+        )?;
+        if !matches!(result, JsValue::Object(_)) {
+            return Err(VmError::TypeError(
+                "generator delegate method must return object",
+            ));
+        }
+        self.mark_generator_iterator_completed(iterator_id);
+        Ok(result)
+    }
+
+    fn execute_generator_iterator_return(
+        &mut self,
+        this_arg: Option<JsValue>,
+        completion: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.execute_generator_iterator_resume_method(this_arg, completion, "return", false, realm)
+    }
+
+    fn execute_generator_iterator_throw(
+        &mut self,
+        this_arg: Option<JsValue>,
+        completion: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.execute_generator_iterator_resume_method(this_arg, completion, "throw", true, realm)
     }
 
     fn create_map_iterator_from_this(
@@ -12365,6 +13818,57 @@ impl Vm {
         Ok(JsValue::Object(object_id))
     }
 
+    fn await_resolved_value(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let promise = self.execute_promise_resolve(
+            &[
+                JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+                value,
+            ],
+            realm,
+            caller_strict,
+        )?;
+        let promise_id = match promise {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::RuntimeIntegrity(
+                    "await Promise.resolve must return promise object",
+                ));
+            }
+        };
+        self.await_promise_settlement(promise_id, realm, caller_strict)
+    }
+
+    fn await_promise_settlement(
+        &mut self,
+        promise_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        for _ in 0..AWAIT_DRAIN_MAX_CYCLES {
+            if let Some(settlement) = self.promise_settlement_from_object(promise_id)? {
+                return match settlement {
+                    PromiseSettlement::Fulfilled(value) => Ok(value),
+                    PromiseSettlement::Rejected(reason) => Err(VmError::UncaughtException(reason)),
+                };
+            }
+            let report = self.drain_promise_jobs(AWAIT_DRAIN_STEP_BUDGET, realm, caller_strict)?;
+            if report.remaining == 0 {
+                break;
+            }
+        }
+
+        match self.promise_settlement_from_object(promise_id)? {
+            Some(PromiseSettlement::Fulfilled(value)) => Ok(value),
+            Some(PromiseSettlement::Rejected(reason)) => Err(VmError::UncaughtException(reason)),
+            None => Err(VmError::TypeError("await promise did not settle")),
+        }
+    }
+
     fn call_promise_hook(
         &mut self,
         hooks: &mut dyn PromiseJobHostHooks,
@@ -12884,6 +14388,7 @@ impl Vm {
                     "__forInKeys",
                     "__forOfValues",
                     "__forOfIterator",
+                    "__forAwaitIterator",
                     "__forOfStep",
                     "__forOfClose",
                     "__getTemplateObject",
@@ -12901,6 +14406,7 @@ impl Vm {
                     "valueOf",
                     "isArray",
                     "from",
+                    "fromAsync",
                     "of",
                     "parse",
                     "UTC",
@@ -13304,6 +14810,51 @@ impl Vm {
             _ => Err(VmError::TypeError(
                 "Object prototype may only be an Object or null",
             )),
+        }
+    }
+
+    fn get_constructor_prototype_property(
+        &mut self,
+        constructor: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if let JsValue::Object(object_id) = constructor.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap = self.get_property_from_receiver(proxy_handler.clone(), "get", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                return self.get_property_from_receiver(proxy_target, "prototype", realm);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError("Proxy get trap must be callable"));
+            }
+            return self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![
+                    proxy_target,
+                    JsValue::String("prototype".to_string()),
+                    JsValue::Object(object_id),
+                ],
+                realm,
+                false,
+            );
+        }
+
+        self.get_property_from_receiver(constructor, "prototype", realm)
+    }
+
+    fn constructor_prototype_components_or_default(
+        &self,
+        prototype: JsValue,
+        default_proto: JsValue,
+    ) -> Result<(Option<ObjectId>, Option<JsValue>), VmError> {
+        match prototype {
+            JsValue::Object(object_id) => Ok((Some(object_id), None)),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok((None, Some(prototype)))
+            }
+            _ => self.parse_prototype_value(default_proto),
         }
     }
 
@@ -14017,6 +15568,29 @@ impl Vm {
         }
     }
 
+    fn execute_object_for_await_iterator(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        match target {
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("for-await expects iterable"))
+            }
+            JsValue::String(value) => {
+                self.create_for_await_runtime_iterator_record(JsValue::String(value), realm)
+            }
+            JsValue::Object(object_id) => {
+                self.create_for_await_runtime_iterator_record(JsValue::Object(object_id), realm)
+            }
+            primitive => {
+                let boxed = self.box_primitive_receiver(primitive);
+                self.create_for_await_runtime_iterator_record(boxed, realm)
+            }
+        }
+    }
+
     fn execute_object_for_of_step(
         &mut self,
         args: &[JsValue],
@@ -14183,6 +15757,63 @@ impl Vm {
         if !Self::is_callable_value(&next_method) {
             return Err(VmError::TypeError("for-of iterator next must be callable"));
         }
+        self.create_for_of_iterator_record_object(iterator, next_method)
+    }
+
+    fn create_for_await_runtime_iterator_record(
+        &mut self,
+        target: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let async_iterator_method =
+            self.get_property_from_receiver(target.clone(), "Symbol.asyncIterator", realm)?;
+        if !matches!(async_iterator_method, JsValue::Undefined | JsValue::Null) {
+            if !Self::is_callable_value(&async_iterator_method) {
+                return Err(VmError::TypeError(
+                    "for-await async iterator must be callable",
+                ));
+            }
+            let iterator = self.execute_callable(
+                async_iterator_method,
+                Some(target),
+                Vec::new(),
+                realm,
+                false,
+            )?;
+            if !Self::is_object_like_value(&iterator) {
+                return Err(VmError::TypeError("for-await iterator must return object"));
+            }
+            let next_method = self.get_property_from_receiver(iterator.clone(), "next", realm)?;
+            if !Self::is_callable_value(&next_method) {
+                return Err(VmError::TypeError(
+                    "for-await iterator next must be callable",
+                ));
+            }
+            return self.create_for_of_iterator_record_object(iterator, next_method);
+        }
+
+        match target {
+            JsValue::String(value) => {
+                self.create_for_of_snapshot_record(self.js_string_iterator_values(&value))
+            }
+            JsValue::Object(object_id) => {
+                self.create_for_of_runtime_iterator_record(JsValue::Object(object_id), realm)
+            }
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("for-await expects iterable"))
+            }
+            primitive => {
+                let boxed = self.box_primitive_receiver(primitive);
+                self.create_for_of_runtime_iterator_record(boxed, realm)
+            }
+        }
+    }
+
+    fn create_for_of_iterator_record_object(
+        &mut self,
+        iterator: JsValue,
+        next_method: JsValue,
+    ) -> Result<JsValue, VmError> {
         let record = self.create_object_value();
         let record_id = match record {
             JsValue::Object(id) => id,
@@ -14660,6 +16291,14 @@ impl Vm {
         native: NativeFunction,
         property: &str,
     ) -> Result<JsValue, VmError> {
+        if native == NativeFunction::RegExpConstructor
+            && Self::regexp_legacy_property_from_name(property).is_some()
+        {
+            self.ensure_regexp_legacy_static_accessors();
+        }
+        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
+            self.ensure_array_species_accessor();
+        }
         if let Some(object) = self.native_function_objects.get(&native).cloned() {
             let data_value = object.properties.get(property).cloned();
             let getter_value = object.getters.get(property).cloned();
@@ -15519,18 +17158,31 @@ impl Vm {
             .ok_or(VmError::ScopeUnderflow)
     }
 
-    fn ensure_annex_b_eval_var_binding(&mut self, name: &str) -> Result<(), VmError> {
+    fn ensure_annex_b_eval_var_binding(
+        &mut self,
+        name: &str,
+        default_deletable: bool,
+    ) -> Result<(), VmError> {
         let var_scope = self.current_var_scope_ref()?;
         let existing_binding_id = var_scope.borrow().get(name).copied();
         if existing_binding_id.is_none() {
-            let binding_id = self.create_binding_with_flags(
-                JsValue::Undefined,
-                true,
-                self.eval_deletable_binding_depth > 0,
-            );
+            let mut initial_value = JsValue::Undefined;
+            let mut deletable = default_deletable;
+            if self.var_scope_stack.last().copied() == Some(0)
+                && let Some(global_object_id) = self.global_object_id
+                && let Some(object) = self.objects.get(&global_object_id)
+            {
+                if let Some(value) = object.properties.get(name) {
+                    initial_value = value.clone();
+                }
+                if let Some(attributes) = object.property_attributes.get(name) {
+                    deletable = attributes.configurable;
+                }
+            }
+            let binding_id = self.create_binding_with_flags(initial_value, true, deletable);
             var_scope.borrow_mut().insert(name.to_string(), binding_id);
         }
-        self.define_global_var_property(name)?;
+        self.define_annex_b_eval_var_property(name)?;
         Ok(())
     }
 
@@ -15555,7 +17207,7 @@ impl Vm {
             return Ok(false);
         }
         for name in pending_syncs.keys() {
-            self.ensure_annex_b_eval_var_binding(name)?;
+            self.ensure_annex_b_eval_var_binding(name, false)?;
         }
         let var_scope = self.current_var_scope_ref()?;
         self.annex_b_eval_var_function_contexts
@@ -15598,7 +17250,7 @@ impl Vm {
             self.eval_deletable_binding_depth > 0,
         );
         var_scope.borrow_mut().insert(name.to_string(), binding_id);
-        self.define_global_var_property(name)?;
+        self.define_annex_b_eval_var_property(name)?;
         Ok(())
     }
 
@@ -15627,61 +17279,6 @@ impl Vm {
             return Ok(Some(context.var_scope.clone()));
         }
         Ok(None)
-    }
-
-    #[inline(always)]
-    fn identifier_fast_path_flags(&self) -> IdentifierFastPathFlags {
-        IdentifierFastPathFlags {
-            packet_a_metrics_enabled: self.packet_a_fast_path_enabled()
-                && self.packet_a_fast_path_metrics_enabled(),
-            packet_c_enabled: self.packet_c_fast_path_enabled(),
-            packet_d_enabled: self.packet_d_fast_path_enabled(),
-            packet_g_enabled: self.packet_g_fast_path_enabled(),
-            packet_h_enabled: self.packet_h_fast_path_enabled(),
-        }
-    }
-
-    #[inline(always)]
-    fn record_identifier_fast_path_guard_misses(
-        &mut self,
-        flags: IdentifierFastPathFlags,
-        identifier_slot: Option<u32>,
-        packet_h_slot: Option<u32>,
-    ) {
-        if flags.packet_a_metrics_enabled {
-            self.record_packet_a_binding_guard_miss();
-        }
-        if flags.packet_c_enabled {
-            self.record_packet_c_identifier_guard_miss();
-        }
-        if flags.packet_d_enabled && identifier_slot.is_some() {
-            self.record_packet_d_slot_guard_miss();
-        }
-        if flags.packet_g_enabled {
-            self.record_packet_g_name_guard_miss();
-        }
-        if flags.packet_h_enabled && packet_h_slot.is_some() {
-            self.record_packet_h_lexical_slot_guard_miss();
-        }
-    }
-
-    #[inline(always)]
-    fn clear_identifier_name_fast_path_entries(&mut self, name: &str) {
-        self.packet_a_fast_path.remove_binding_cache_entry(name);
-        self.packet_c_fast_path.remove_binding_cache_entry(name);
-        self.packet_g_fast_path.remove_name_cache_entry(name);
-    }
-
-    #[inline(always)]
-    fn invalidate_identifier_resolution_fast_path_entries(
-        &mut self,
-        name: &str,
-        identifier_slot: Option<u32>,
-        packet_h_slot: Option<u32>,
-    ) {
-        self.clear_identifier_name_fast_path_entries(name);
-        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
     }
 
     #[inline(always)]
@@ -15729,7 +17326,6 @@ impl Vm {
             self.stack.push(value);
         }
     }
-
     fn invalidate_binding_fast_path_cache(&mut self) {
         self.packet_a_fast_path.clear_binding_cache();
         self.packet_c_fast_path.clear_binding_cache();
@@ -15738,7 +17334,9 @@ impl Vm {
 
     #[inline(always)]
     fn invalidate_binding_fast_path_cache_for_name(&mut self, name: &str) {
-        self.clear_identifier_name_fast_path_entries(name);
+        self.packet_a_fast_path.remove_binding_cache_entry(name);
+        self.packet_c_fast_path.remove_binding_cache_entry(name);
+        self.packet_g_fast_path.remove_name_cache_entry(name);
         self.packet_d_scope_generation = self.packet_d_scope_generation.wrapping_add(1);
     }
 
@@ -16032,17 +17630,9 @@ impl Vm {
         slot: u32,
         entry: PacketDSlotCacheEntry,
     ) -> Option<BindingId> {
-        let revalidate_allowed = if self.packet_i_revalidate_enabled() {
-            self.cached_binding_entry_is_visible_without_shadowing(
-                name,
-                entry.scope_index,
-                entry.binding_id,
-            )
-        } else {
-            entry.scope_index + 1 == self.scopes.len()
-                && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
-        };
-        if revalidate_allowed {
+        if entry.scope_index + 1 == self.scopes.len()
+            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        {
             self.packet_d_fast_path.remember_slot_cache_entry(
                 slot,
                 entry.scope_index,
@@ -16063,17 +17653,9 @@ impl Vm {
         name: &str,
         entry: PacketGNameCacheEntry,
     ) -> Option<(usize, BindingId)> {
-        let revalidate_allowed = if self.packet_i_revalidate_enabled() {
-            self.cached_binding_entry_is_visible_without_shadowing(
-                name,
-                entry.scope_index,
-                entry.binding_id,
-            )
-        } else {
-            entry.scope_index + 1 == self.scopes.len()
-                && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
-        };
-        if revalidate_allowed {
+        if entry.scope_index + 1 == self.scopes.len()
+            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        {
             self.packet_g_fast_path.remember_name_cache_entry(
                 name,
                 entry.scope_index,
@@ -16295,9 +17877,7 @@ impl Vm {
         identifier_slot: Option<u32>,
         packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
-        let flags = self.identifier_fast_path_flags();
-
-        if flags.packet_d_enabled
+        if self.packet_d_fast_path_enabled()
             && !self.packet_d_fast_path_metrics_enabled()
             && !self.packet_a_fast_path_metrics_enabled()
             && let Some(slot) = identifier_slot
@@ -16325,9 +17905,9 @@ impl Vm {
                     return Some(binding_id);
                 }
             }
-            let fallback = if flags.packet_h_enabled && packet_h_slot.is_some() {
+            let fallback = if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
-            } else if flags.packet_g_enabled {
+            } else if self.packet_g_fast_path_enabled() {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -16345,9 +17925,14 @@ impl Vm {
             return None;
         }
 
-        if flags.packet_d_enabled
-            && let Some(slot) = identifier_slot
-        {
+        let packet_a_metrics_enabled =
+            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
+        let packet_c_enabled = self.packet_c_fast_path_enabled();
+        let packet_d_enabled = self.packet_d_fast_path_enabled();
+        let packet_g_enabled = self.packet_g_fast_path_enabled();
+        let packet_h_enabled = self.packet_h_fast_path_enabled();
+
+        if packet_d_enabled && let Some(slot) = identifier_slot {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
                 let guard_matches_generation =
                     entry.scope_generation == self.packet_d_scope_generation;
@@ -16360,7 +17945,7 @@ impl Vm {
                             entry.binding_id,
                         ) {
                             self.record_packet_d_slot_guard_hit();
-                            if flags.packet_a_metrics_enabled {
+                            if packet_a_metrics_enabled {
                                 self.record_packet_a_binding_guard_hit();
                             }
                             return Some(entry.binding_id);
@@ -16369,29 +17954,21 @@ impl Vm {
                     #[cfg(not(debug_assertions))]
                     {
                         self.record_packet_d_slot_guard_hit();
-                        if flags.packet_a_metrics_enabled {
+                        if packet_a_metrics_enabled {
                             self.record_packet_a_binding_guard_hit();
                         }
                         return Some(entry.binding_id);
                     }
                 }
-                if let Some(binding_id) =
-                    self.try_revalidate_packet_d_slot_cache_entry(name, slot, entry)
-                {
-                    if flags.packet_a_metrics_enabled {
-                        self.record_packet_a_binding_guard_hit();
-                    }
-                    return Some(binding_id);
-                }
                 self.packet_d_fast_path.remove_slot_cache_entry(slot);
             }
             self.record_packet_d_slot_guard_miss();
-            if flags.packet_a_metrics_enabled {
+            if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
-            let fallback = if flags.packet_h_enabled && packet_h_slot.is_some() {
+            let fallback = if packet_h_enabled && packet_h_slot.is_some() {
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
-            } else if flags.packet_g_enabled {
+            } else if packet_g_enabled {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -16410,35 +17987,35 @@ impl Vm {
             return None;
         }
 
-        if flags.packet_h_enabled
+        if packet_h_enabled
             && let Some((_, binding_id)) =
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
         {
-            if flags.packet_a_metrics_enabled {
+            if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_hit();
             }
             return Some(binding_id);
         }
 
-        if flags.packet_g_enabled {
+        if packet_g_enabled {
             if let Some((_, binding_id)) = self.resolve_binding_entry_with_packet_g_name_cache(name)
             {
-                if flags.packet_a_metrics_enabled {
+                if packet_a_metrics_enabled {
                     self.record_packet_a_binding_guard_hit();
                 }
                 return Some(binding_id);
             }
-            if flags.packet_a_metrics_enabled {
+            if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
             return None;
         }
 
-        if flags.packet_c_enabled {
+        if packet_c_enabled {
             if let Some(entry) = self.packet_c_fast_path.binding_cache_entry(name) {
                 if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
                     self.record_packet_c_identifier_guard_hit();
-                    if flags.packet_a_metrics_enabled {
+                    if packet_a_metrics_enabled {
                         self.record_packet_a_binding_guard_hit();
                     }
                     return Some(entry.binding_id);
@@ -16447,7 +18024,7 @@ impl Vm {
             }
 
             self.record_packet_c_identifier_guard_miss();
-            if flags.packet_a_metrics_enabled {
+            if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
 
@@ -16461,7 +18038,7 @@ impl Vm {
             return None;
         }
 
-        if !flags.packet_a_metrics_enabled {
+        if !packet_a_metrics_enabled {
             self.resolve_binding_id(name)
         } else {
             if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
@@ -16499,8 +18076,27 @@ impl Vm {
             );
         }
 
-        let flags = self.identifier_fast_path_flags();
-        self.record_identifier_fast_path_guard_misses(flags, identifier_slot, packet_h_slot);
+        let packet_a_metrics_enabled =
+            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
+        let packet_c_enabled = self.packet_c_fast_path_enabled();
+        let packet_d_enabled = self.packet_d_fast_path_enabled();
+        let packet_g_enabled = self.packet_g_fast_path_enabled();
+
+        if packet_a_metrics_enabled {
+            self.record_packet_a_binding_guard_miss();
+        }
+        if packet_c_enabled {
+            self.record_packet_c_identifier_guard_miss();
+        }
+        if packet_d_enabled && identifier_slot.is_some() {
+            self.record_packet_d_slot_guard_miss();
+        }
+        if packet_g_enabled {
+            self.record_packet_g_name_guard_miss();
+        }
+        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            self.record_packet_h_lexical_slot_guard_miss();
+        }
         self.resolve_binding_id(name)
     }
 
@@ -16688,8 +18284,10 @@ impl Vm {
                     property,
                     "replace"
                         | "match"
+                        | "matchAll"
                         | "search"
                         | "split"
+                        | "replaceAll"
                         | "indexOf"
                         | "lastIndexOf"
                         | "substring"
@@ -16697,6 +18295,10 @@ impl Vm {
                         | "toLowerCase"
                         | "toUpperCase"
                         | "trim"
+                        | "trimStart"
+                        | "trimLeft"
+                        | "trimEnd"
+                        | "trimRight"
                         | "anchor"
                         | "big"
                         | "blink"
@@ -17055,11 +18657,24 @@ impl Vm {
                 self.get_object_property(object_id, property, realm)
             }
             JsValue::Function(closure_id) => {
-                self.get_function_property(closure_id, property, realm)
+                self.get_function_property_with_receiver(closure_id, property, receiver, realm)
             }
             JsValue::NativeFunction(native) => {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
+                }
+                if native == NativeFunction::RegExpConstructor
+                    && Self::regexp_legacy_property_from_name(property).is_some()
+                {
+                    self.ensure_regexp_legacy_static_accessors();
+                }
+                if let Some(value) = self.get_native_function_own_property_with_receiver(
+                    native,
+                    property,
+                    JsValue::NativeFunction(native),
+                    realm,
+                )? {
+                    return Ok(value);
                 }
                 if self.native_function_has_own_property_runtime(native, property) {
                     return Ok(self.get_native_function_property(native, property));
@@ -17103,6 +18718,14 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        if property == CLASS_HERITAGE_RESTRICTED_MARKER
+            && matches!(value, JsValue::Bool(true))
+            && !self.is_constructor_value(&receiver)?
+        {
+            return Err(VmError::TypeError(
+                "class heritage must be constructor or null",
+            ));
+        }
         match receiver {
             JsValue::Object(object_id) => {
                 if self.try_packet_b_dense_array_index_set(object_id, &property, &value)? {
@@ -17212,6 +18835,19 @@ impl Vm {
             JsValue::NativeFunction(native) => {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
+                }
+                if native == NativeFunction::RegExpConstructor
+                    && Self::regexp_legacy_property_from_name(property).is_some()
+                {
+                    self.ensure_regexp_legacy_static_accessors();
+                }
+                if let Some(value) = self.get_native_function_own_property_with_receiver(
+                    native,
+                    property,
+                    receiver.clone(),
+                    realm,
+                )? {
+                    return Ok(value);
                 }
                 if self.native_function_has_own_property_runtime(native, property) {
                     return Ok(self.get_native_function_property(native, property));
@@ -17688,8 +19324,21 @@ impl Vm {
             }
             return Ok(None);
         }
-        let flags = self.identifier_fast_path_flags();
-        self.record_identifier_fast_path_guard_misses(flags, identifier_slot, packet_h_slot);
+        if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
+            self.record_packet_a_binding_guard_miss();
+        }
+        if self.packet_c_fast_path_enabled() {
+            self.record_packet_c_identifier_guard_miss();
+        }
+        if self.packet_d_fast_path_enabled() && identifier_slot.is_some() {
+            self.record_packet_d_slot_guard_miss();
+        }
+        if self.packet_g_fast_path_enabled() {
+            self.record_packet_g_name_guard_miss();
+        }
+        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            self.record_packet_h_lexical_slot_guard_miss();
+        }
         self.invalidate_binding_fast_path_cache();
         self.record_identifier_resolution_fallback_scan();
 
@@ -17700,11 +19349,11 @@ impl Vm {
                 self.resolve_with_property_base_for_scope_depth(name, realm, scope_depth_marker)?
             {
                 let property = self.intern_identifier_name(name);
-                self.invalidate_identifier_resolution_fast_path_entries(
-                    name,
-                    identifier_slot,
-                    packet_h_slot,
-                );
+                self.packet_a_fast_path.remove_binding_cache_entry(name);
+                self.packet_c_fast_path.remove_binding_cache_entry(name);
+                self.packet_g_fast_path.remove_name_cache_entry(name);
+                self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                 return Ok(Some(IdentifierReference::Property {
                     base,
                     property,
@@ -17724,11 +19373,11 @@ impl Vm {
         }
         if let Some(base) = self.resolve_with_property_base_for_scope_depth(name, realm, 0)? {
             let property = self.intern_identifier_name(name);
-            self.invalidate_identifier_resolution_fast_path_entries(
-                name,
-                identifier_slot,
-                packet_h_slot,
-            );
+            self.packet_a_fast_path.remove_binding_cache_entry(name);
+            self.packet_c_fast_path.remove_binding_cache_entry(name);
+            self.packet_g_fast_path.remove_name_cache_entry(name);
+            self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
             return Ok(Some(IdentifierReference::Property {
                 base,
                 property,
@@ -17754,11 +19403,11 @@ impl Vm {
         }
         if let Some(global_object_id) = self.resolve_global_own_data_property_for_identifier(name) {
             let property = self.intern_identifier_name(name);
-            self.invalidate_identifier_resolution_fast_path_entries(
-                name,
-                identifier_slot,
-                packet_h_slot,
-            );
+            self.packet_a_fast_path.remove_binding_cache_entry(name);
+            self.packet_c_fast_path.remove_binding_cache_entry(name);
+            self.packet_g_fast_path.remove_name_cache_entry(name);
+            self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
             return Ok(IdentifierReference::Property {
                 base: JsValue::Object(global_object_id),
                 property,
@@ -17770,11 +19419,11 @@ impl Vm {
             let base = JsValue::Object(global_object_id);
             if self.has_property_on_receiver(&base, name, realm)? {
                 let property = self.intern_identifier_name(name);
-                self.invalidate_identifier_resolution_fast_path_entries(
-                    name,
-                    identifier_slot,
-                    packet_h_slot,
-                );
+                self.packet_a_fast_path.remove_binding_cache_entry(name);
+                self.packet_c_fast_path.remove_binding_cache_entry(name);
+                self.packet_g_fast_path.remove_name_cache_entry(name);
+                self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                 return Ok(IdentifierReference::Property {
                     base,
                     property,
@@ -17783,11 +19432,11 @@ impl Vm {
                 });
             }
         }
-        self.invalidate_identifier_resolution_fast_path_entries(
-            name,
-            identifier_slot,
-            packet_h_slot,
-        );
+        self.packet_a_fast_path.remove_binding_cache_entry(name);
+        self.packet_c_fast_path.remove_binding_cache_entry(name);
+        self.packet_g_fast_path.remove_name_cache_entry(name);
+        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
         let name = self.intern_identifier_name(name);
         Ok(IdentifierReference::Unresolvable { name })
     }
@@ -18019,7 +19668,11 @@ impl Vm {
         Ok(())
     }
 
-    fn define_global_var_property(&mut self, name: &str) -> Result<(), VmError> {
+    fn define_global_var_property_with_configurable(
+        &mut self,
+        name: &str,
+        configurable: bool,
+    ) -> Result<(), VmError> {
         if self.var_scope_stack.last().copied() != Some(0) {
             return Ok(());
         }
@@ -18063,9 +19716,23 @@ impl Vm {
             PropertyAttributes {
                 writable: true,
                 enumerable: true,
-                configurable: false,
+                configurable,
             },
         )
+    }
+
+    fn define_global_var_property(&mut self, name: &str) -> Result<(), VmError> {
+        self.define_global_var_property_with_configurable(name, false)
+    }
+
+    fn define_annex_b_eval_var_property(&mut self, name: &str) -> Result<(), VmError> {
+        let configurable = self
+            .scopes
+            .first()
+            .and_then(|scope| scope.borrow().get(name).copied())
+            .and_then(|binding_id| self.binding(binding_id).map(|binding| binding.deletable))
+            .unwrap_or(self.eval_deletable_binding_depth > 0);
+        self.define_global_var_property_with_configurable(name, configurable)
     }
 
     fn sync_global_property_from_binding(
@@ -18349,9 +20016,11 @@ impl Vm {
             _ => unreachable!(),
         };
         let define_property = self.create_host_function_value(HostFunction::ReflectDefineProperty);
+        let construct = self.create_host_function_value(HostFunction::ReflectConstruct);
         let get_own_property_descriptor =
             self.create_host_function_value(HostFunction::ReflectGetOwnPropertyDescriptor);
         self.set_builtin_function_length(&define_property, 3.0);
+        self.set_builtin_function_length(&construct, 2.0);
         self.set_builtin_function_length(&get_own_property_descriptor, 2.0);
         if let Some(reflect_object) = self.objects.get_mut(&reflect_id) {
             reflect_object
@@ -18359,6 +20028,17 @@ impl Vm {
                 .insert("defineProperty".to_string(), define_property);
             reflect_object.property_attributes.insert(
                 "defineProperty".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            reflect_object
+                .properties
+                .insert("construct".to_string(), construct);
+            reflect_object.property_attributes.insert(
+                "construct".to_string(),
                 PropertyAttributes {
                     writable: true,
                     enumerable: false,
@@ -18822,9 +20502,13 @@ impl Vm {
                 self.create_host_function_value(HostFunction::StringToLowerCaseThis);
             let to_upper_case = self.create_host_function_value(HostFunction::StringToUpperCase);
             let trim = self.create_host_function_value(HostFunction::StringTrim);
+            let trim_start = self.create_host_function_value(HostFunction::StringTrimStart);
+            let trim_end = self.create_host_function_value(HostFunction::StringTrimEnd);
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
             let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
+            let match_all = self.create_host_function_value(HostFunction::StringMatchAllThis);
             let search = self.create_host_function_value(HostFunction::StringSearchThis);
+            let replace_all = self.create_host_function_value(HostFunction::StringReplaceAllThis);
             let substr = self.create_host_function_value(HostFunction::StringSubstr);
             let anchor = self.create_host_function_value(HostFunction::StringAnchor);
             let big = self.create_host_function_value(HostFunction::StringBig);
@@ -18867,6 +20551,14 @@ impl Vm {
             self.set_builtin_function_name(&sub, "sub");
             self.set_builtin_function_length(&sup, 0.0);
             self.set_builtin_function_name(&sup, "sup");
+            self.set_builtin_function_length(&trim_start, 0.0);
+            self.set_builtin_function_name(&trim_start, "trimStart");
+            self.set_builtin_function_length(&trim_end, 0.0);
+            self.set_builtin_function_name(&trim_end, "trimEnd");
+            self.set_builtin_function_length(&match_all, 1.0);
+            self.set_builtin_function_name(&match_all, "matchAll");
+            self.set_builtin_function_length(&replace_all, 2.0);
+            self.set_builtin_function_name(&replace_all, "replaceAll");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -18903,8 +20595,14 @@ impl Vm {
                     ("toLowerCase", to_lower_case),
                     ("toUpperCase", to_upper_case),
                     ("trim", trim),
+                    ("trimStart", trim_start.clone()),
+                    ("trimLeft", trim_start),
+                    ("trimEnd", trim_end.clone()),
+                    ("trimRight", trim_end),
                     ("replace", replace),
+                    ("replaceAll", replace_all),
                     ("match", match_fn),
+                    ("matchAll", match_all),
                     ("search", search),
                     ("substr", substr),
                     ("anchor", anchor),
@@ -19085,6 +20783,7 @@ impl Vm {
             NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id,
             NativeFunction::RangeErrorConstructor => self.range_error_prototype_id,
             NativeFunction::URIErrorConstructor => self.uri_error_prototype_id,
+            NativeFunction::AggregateErrorConstructor => self.aggregate_error_prototype_id,
             _ => None,
         };
         if let Some(id) = cached_id {
@@ -19130,6 +20829,9 @@ impl Vm {
                 NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id = Some(id),
                 NativeFunction::RangeErrorConstructor => self.range_error_prototype_id = Some(id),
                 NativeFunction::URIErrorConstructor => self.uri_error_prototype_id = Some(id),
+                NativeFunction::AggregateErrorConstructor => {
+                    self.aggregate_error_prototype_id = Some(id)
+                }
                 _ => {}
             }
         }
@@ -19161,6 +20863,13 @@ impl Vm {
 
     fn uri_error_prototype_value(&mut self) -> JsValue {
         self.native_error_prototype_value(NativeFunction::URIErrorConstructor, "URIError")
+    }
+
+    fn aggregate_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(
+            NativeFunction::AggregateErrorConstructor,
+            "AggregateError",
+        )
     }
 
     fn date_prototype_value(&mut self) -> JsValue {
@@ -19288,8 +20997,11 @@ impl Vm {
             let test = self.create_host_function_value(HostFunction::RegExpTestThis);
             let exec = self.create_host_function_value(HostFunction::RegExpExecThis);
             let compile = self.create_host_function_value(HostFunction::RegExpCompileThis);
+            let symbol_split = self.create_host_function_value(HostFunction::RegExpSymbolSplitThis);
             self.set_builtin_function_length(&compile, 2.0);
             self.set_builtin_function_name(&compile, "compile");
+            self.set_builtin_function_length(&symbol_split, 2.0);
+            self.set_builtin_function_name(&symbol_split, "[Symbol.split]");
             let to_string = self.create_host_function_value(HostFunction::RegExpToStringThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -19334,6 +21046,17 @@ impl Vm {
                 object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("Symbol.split".to_string(), symbol_split);
+                object.property_attributes.insert(
+                    "Symbol.split".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -19859,6 +21582,13 @@ impl Vm {
                 }
                 let primitive =
                     self.ordinary_to_primitive_for_add(object_id, true, realm, caller_strict)?;
+                if let JsValue::String(text) = &primitive
+                    && Self::is_symbol_primitive_string(text)
+                {
+                    return Err(VmError::TypeError(
+                        "Cannot convert a Symbol value to a string",
+                    ));
+                }
                 Ok(self.coerce_to_string(&primitive))
             }
             JsValue::Function(closure_id) => {
@@ -19868,8 +21598,18 @@ impl Vm {
                     realm,
                     caller_strict,
                 )?;
+                if let JsValue::String(text) = &primitive
+                    && Self::is_symbol_primitive_string(text)
+                {
+                    return Err(VmError::TypeError(
+                        "Cannot convert a Symbol value to a string",
+                    ));
+                }
                 Ok(self.coerce_to_string(&primitive))
             }
+            JsValue::String(text) if Self::is_symbol_primitive_string(&text) => Err(
+                VmError::TypeError("Cannot convert a Symbol value to a string"),
+            ),
             other => Ok(self.coerce_to_string(&other)),
         }
     }
@@ -19881,6 +21621,28 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let to_primitive = self.get_object_property(object_id, "Symbol.toPrimitive", realm)?;
+        if Self::is_callable_value(&to_primitive) {
+            let hint = if prefer_string {
+                JsValue::String("string".to_string())
+            } else {
+                JsValue::String("number".to_string())
+            };
+            let result = self.execute_callable(
+                to_primitive,
+                Some(JsValue::Object(object_id)),
+                vec![hint],
+                realm,
+                caller_strict,
+            )?;
+            if Self::is_object_like_value(&result) {
+                return Err(VmError::TypeError(
+                    "cannot convert object to primitive value",
+                ));
+            }
+            return Ok(result);
+        }
+
         let method_names = if prefer_string {
             ["toString", "valueOf"]
         } else {
@@ -19901,7 +21663,7 @@ impl Vm {
                 realm,
                 caller_strict,
             )?;
-            if !matches!(result, JsValue::Object(_)) {
+            if !Self::is_object_like_value(&result) {
                 return Ok(result);
             }
         }
@@ -19921,6 +21683,21 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let to_primitive = self.get_object_property(object_id, "Symbol.toPrimitive", realm)?;
+        if Self::is_callable_value(&to_primitive) {
+            let result = self.execute_callable(
+                to_primitive,
+                Some(JsValue::Object(object_id)),
+                vec![JsValue::String("string".to_string())],
+                realm,
+                caller_strict,
+            )?;
+            if !Self::is_object_like_value(&result) {
+                return Ok(result);
+            }
+            return Err(VmError::TypeError("cannot convert object to property key"));
+        }
+
         for method_name in ["toString", "valueOf"] {
             let method = self.get_object_property(object_id, method_name, realm)?;
             if !Self::is_callable_value(&method) {
@@ -19933,13 +21710,7 @@ impl Vm {
                 realm,
                 caller_strict,
             )?;
-            if !matches!(
-                result,
-                JsValue::Object(_)
-                    | JsValue::Function(_)
-                    | JsValue::NativeFunction(_)
-                    | JsValue::HostFunction(_)
-            ) {
+            if !Self::is_object_like_value(&result) {
                 return Ok(result);
             }
         }
@@ -19953,6 +21724,28 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let to_primitive = self.get_function_property(closure_id, "Symbol.toPrimitive", realm)?;
+        if Self::is_callable_value(&to_primitive) {
+            let hint = if prefer_string {
+                JsValue::String("string".to_string())
+            } else {
+                JsValue::String("number".to_string())
+            };
+            let result = self.execute_callable(
+                to_primitive,
+                Some(JsValue::Function(closure_id)),
+                vec![hint],
+                realm,
+                caller_strict,
+            )?;
+            if Self::is_object_like_value(&result) {
+                return Err(VmError::TypeError(
+                    "cannot convert object to primitive value",
+                ));
+            }
+            return Ok(result);
+        }
+
         let method_names = if prefer_string {
             ["toString", "valueOf"]
         } else {
@@ -19973,13 +21766,7 @@ impl Vm {
                 realm,
                 caller_strict,
             )?;
-            if !matches!(
-                result,
-                JsValue::Object(_)
-                    | JsValue::Function(_)
-                    | JsValue::NativeFunction(_)
-                    | JsValue::HostFunction(_)
-            ) {
+            if !Self::is_object_like_value(&result) {
                 return Ok(result);
             }
         }
@@ -20167,6 +21954,16 @@ impl Vm {
         })
     }
 
+    fn function_uses_lowered_generator_values_buffer(&self, function: &CompiledFunction) -> bool {
+        function.code.iter().any(|opcode| {
+            matches!(
+                opcode,
+                Opcode::DefineVariable { name, .. } | Opcode::DefineVar(name)
+                if name.starts_with(PARSER_GENERATOR_VALUES_BINDING_PREFIX)
+            )
+        })
+    }
+
     fn function_is_async(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, ASYNC_FUNCTION_MARKER)
     }
@@ -20221,6 +22018,18 @@ impl Vm {
         Ok(self.function_is_generator(function))
     }
 
+    fn closure_is_async(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_is_async(function))
+    }
+
     fn closure_uses_yield_identifier(&self, closure_id: u64) -> Result<bool, VmError> {
         let closure = self
             .closures
@@ -20231,6 +22040,21 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_uses_yield_identifier(function))
+    }
+
+    fn closure_uses_lowered_generator_values_buffer(
+        &self,
+        closure_id: u64,
+    ) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_uses_lowered_generator_values_buffer(function))
     }
 
     fn closure_is_class_constructor(&self, closure_id: u64) -> bool {
@@ -21259,7 +23083,32 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                        if *proto_native == NativeFunction::RegExpConstructor
+                            && Self::regexp_legacy_property_from_name(&property).is_some()
+                        {
+                            self.ensure_regexp_legacy_static_accessors();
+                        }
+                        let (setter, getter_exists, data_writable) = self
+                            .native_function_objects
+                            .get(proto_native)
+                            .map(|object| {
+                                (
+                                    object.setters.get(&property).cloned(),
+                                    object.getters.contains_key(&property),
+                                    object.properties.get(&property).map(|_| {
+                                        object
+                                            .property_attributes
+                                            .get(&property)
+                                            .is_none_or(|attributes| attributes.writable)
+                                    }),
+                                )
+                            })
+                            .unwrap_or((None, false, None));
+                        if setter.is_some() || getter_exists || data_writable.is_some() {
+                            (setter, getter_exists, data_writable)
+                        } else if self
+                            .native_function_has_own_property_runtime(*proto_native, &property)
+                        {
                             (
                                 None,
                                 false,
@@ -21406,7 +23255,32 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                        if *proto_native == NativeFunction::RegExpConstructor
+                            && Self::regexp_legacy_property_from_name(&property).is_some()
+                        {
+                            self.ensure_regexp_legacy_static_accessors();
+                        }
+                        let (setter, getter_exists, data_writable) = self
+                            .native_function_objects
+                            .get(proto_native)
+                            .map(|object| {
+                                (
+                                    object.setters.get(&property).cloned(),
+                                    object.getters.contains_key(&property),
+                                    object.properties.get(&property).map(|_| {
+                                        object
+                                            .property_attributes
+                                            .get(&property)
+                                            .is_none_or(|attributes| attributes.writable)
+                                    }),
+                                )
+                            })
+                            .unwrap_or((None, false, None));
+                        if setter.is_some() || getter_exists || data_writable.is_some() {
+                            (setter, getter_exists, data_writable)
+                        } else if self
+                            .native_function_has_own_property_runtime(*proto_native, &property)
+                        {
                             (
                                 None,
                                 false,
@@ -21733,6 +23607,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
                 | (NativeFunction::ObjectConstructor, "__forOfValues")
                 | (NativeFunction::ObjectConstructor, "__forOfIterator")
+                | (NativeFunction::ObjectConstructor, "__forAwaitIterator")
                 | (NativeFunction::ObjectConstructor, "__forOfStep")
                 | (NativeFunction::ObjectConstructor, "__forOfClose")
                 | (NativeFunction::ObjectConstructor, "__getTemplateObject")
@@ -21747,7 +23622,9 @@ impl Vm {
                 )
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ArrayConstructor, "from")
+                | (NativeFunction::ArrayConstructor, "fromAsync")
                 | (NativeFunction::ArrayConstructor, "of")
+                | (NativeFunction::ArrayConstructor, "Symbol.species")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "isSealed")
@@ -21804,6 +23681,7 @@ impl Vm {
                 | (NativeFunction::EvalErrorConstructor, "prototype")
                 | (NativeFunction::RangeErrorConstructor, "prototype")
                 | (NativeFunction::URIErrorConstructor, "prototype")
+                | (NativeFunction::AggregateErrorConstructor, "prototype")
                 | (NativeFunction::DateConstructor, "prototype")
                 | (NativeFunction::ArrayBufferConstructor, "prototype")
                 | (NativeFunction::DataViewConstructor, "prototype")
@@ -21821,9 +23699,6 @@ impl Vm {
                 | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
                 | (NativeFunction::SymbolConstructor, "prototype")
-                | (_, "call")
-                | (_, "apply")
-                | (_, "bind")
                 | (_, "name")
                 | (_, "length")
                 | (_, "constructor")
@@ -22613,6 +24488,9 @@ impl Vm {
                 JsValue::NativeFunction(NativeFunction::URIErrorConstructor) => {
                     Ok(Self::error_message_matches(&message, "URIError"))
                 }
+                JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "AggregateError"))
+                }
                 _ => Ok(false),
             },
             _ => {
@@ -22674,6 +24552,36 @@ impl Vm {
             value,
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_)
         )
+    }
+
+    fn is_constructor_value(&mut self, value: &JsValue) -> Result<bool, VmError> {
+        match value {
+            JsValue::Function(closure_id) => {
+                Ok(!self.closure_is_arrow(*closure_id)?
+                    && !self.closure_has_no_prototype(*closure_id))
+            }
+            JsValue::NativeFunction(native) => Ok(Self::native_function_is_constructor(*native)),
+            JsValue::HostFunction(host_id) => {
+                let Some(host) = self.host_functions.get(host_id).cloned() else {
+                    return Ok(false);
+                };
+                match host {
+                    HostFunction::BoundCall { target, .. } => self.is_constructor_value(&target),
+                    HostFunction::ExternalCallback { constructable, .. } => Ok(constructable),
+                    _ => Ok(false),
+                }
+            }
+            JsValue::Object(object_id) => {
+                if self.is_class_constructor_object(*object_id) {
+                    return Ok(true);
+                }
+                if let Some((target, _)) = self.object_proxy_slots(*object_id)? {
+                    return self.is_constructor_value(&target);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn object_is_prototype_of(
@@ -22772,7 +24680,8 @@ impl Vm {
                     | NativeFunction::SyntaxErrorConstructor
                     | NativeFunction::EvalErrorConstructor
                     | NativeFunction::RangeErrorConstructor
-                    | NativeFunction::URIErrorConstructor => {
+                    | NativeFunction::URIErrorConstructor
+                    | NativeFunction::AggregateErrorConstructor => {
                         Ok(JsValue::NativeFunction(NativeFunction::ErrorConstructor))
                     }
                     _ => Ok(self.function_prototype_value()),
@@ -22790,6 +24699,7 @@ impl Vm {
             || Self::error_message_matches(message, "EvalError")
             || Self::error_message_matches(message, "RangeError")
             || Self::error_message_matches(message, "URIError")
+            || Self::error_message_matches(message, "AggregateError")
             || Self::error_message_matches(message, "Error")
     }
 
@@ -22894,6 +24804,7 @@ impl Vm {
     }
 
     fn delete_native_function_property(&mut self, native: NativeFunction, property: &str) -> bool {
+        let has_default_property = self.native_function_has_own_property(native, property);
         if let Some(object) = self.native_function_objects.get_mut(&native) {
             if object.properties.contains_key(property)
                 || object.getters.contains_key(property)
@@ -22912,8 +24823,13 @@ impl Vm {
                 object.setters.remove(property);
                 object.property_attributes.remove(property);
                 object.argument_mappings.remove(property);
-                self.native_function_deleted
-                    .remove(&(native, property.to_string()));
+                if has_default_property {
+                    self.native_function_deleted
+                        .insert((native, property.to_string()));
+                } else {
+                    self.native_function_deleted
+                        .remove(&(native, property.to_string()));
+                }
                 return true;
             }
         }
@@ -22923,7 +24839,7 @@ impl Vm {
         {
             return true;
         }
-        if !self.native_function_has_own_property(native, property) {
+        if !has_default_property {
             return true;
         }
         if !self.native_function_default_property_configurable(native, property) {
@@ -23037,7 +24953,9 @@ impl Vm {
         match property {
             "length" => JsValue::Number(Self::utf16_code_unit_length(receiver) as f64),
             "replace" => self.create_host_function_value(HostFunction::StringReplaceThis),
+            "replaceAll" => self.create_host_function_value(HostFunction::StringReplaceAllThis),
             "match" => self.create_host_function_value(HostFunction::StringMatchThis),
+            "matchAll" => self.create_host_function_value(HostFunction::StringMatchAllThis),
             "search" => self.create_host_function_value(HostFunction::StringSearchThis),
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
             "split" => self.create_host_function_value(HostFunction::StringSplitThis),
@@ -23051,6 +24969,10 @@ impl Vm {
             "substring" => self.create_host_function_value(HostFunction::StringSubstring),
             "substr" => self.create_host_function_value(HostFunction::StringSubstr),
             "trim" => self.create_host_function_value(HostFunction::StringTrim),
+            "trimStart" | "trimLeft" => {
+                self.create_host_function_value(HostFunction::StringTrimStart)
+            }
+            "trimEnd" | "trimRight" => self.create_host_function_value(HostFunction::StringTrimEnd),
             "anchor" => self.create_host_function_value(HostFunction::StringAnchor),
             "big" => self.create_host_function_value(HostFunction::StringBig),
             "blink" => self.create_host_function_value(HostFunction::StringBlink),
@@ -23245,6 +25167,7 @@ impl Vm {
             NativeFunction::EvalErrorConstructor => "EvalError",
             NativeFunction::RangeErrorConstructor => "RangeError",
             NativeFunction::URIErrorConstructor => "URIError",
+            NativeFunction::AggregateErrorConstructor => "AggregateError",
             NativeFunction::ParseInt => "parseInt",
             NativeFunction::ParseFloat => "parseFloat",
             NativeFunction::IsNaN => "isNaN",
@@ -23295,6 +25218,63 @@ impl Vm {
             NativeFunction::Unescape => "unescape",
             _ => "native",
         }
+    }
+
+    fn ensure_array_species_accessor(&mut self) {
+        if self.native_function_deleted.contains(&(
+            NativeFunction::ArrayConstructor,
+            "Symbol.species".to_string(),
+        )) {
+            return;
+        }
+        if self
+            .native_function_objects
+            .get(&NativeFunction::ArrayConstructor)
+            .is_some_and(|object| object.getters.contains_key("Symbol.species"))
+        {
+            return;
+        }
+
+        let getter = self.create_host_function_value(HostFunction::ArraySpeciesGetter);
+        self.set_builtin_function_length(&getter, 0.0);
+        self.set_builtin_function_name(&getter, "get [Symbol.species]");
+        let object = self
+            .native_function_objects
+            .entry(NativeFunction::ArrayConstructor)
+            .or_default();
+        object.getters.insert("Symbol.species".to_string(), getter);
+        object.property_attributes.insert(
+            "Symbol.species".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
+    fn get_native_function_own_property_with_receiver(
+        &mut self,
+        native: NativeFunction,
+        property: &str,
+        receiver: JsValue,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
+            self.ensure_array_species_accessor();
+        }
+        let Some(object) = self.native_function_objects.get(&native).cloned() else {
+            return Ok(None);
+        };
+        if let Some(getter) = object.getters.get(property).cloned() {
+            return self
+                .execute_callable(getter, Some(receiver), Vec::new(), realm, false)
+                .map(Some);
+        }
+        if object.setters.contains_key(property) {
+            return Ok(Some(JsValue::Undefined));
+        }
+        Ok(object.properties.get(property).cloned())
     }
 
     fn get_native_function_property(&mut self, native: NativeFunction, property: &str) -> JsValue {
@@ -23352,11 +25332,22 @@ impl Vm {
             (NativeFunction::ArrayConstructor, "from") => {
                 let from = self.create_host_function_value(HostFunction::ArrayFrom);
                 self.set_builtin_function_length(&from, 1.0);
+                self.set_builtin_function_name(&from, "from");
                 from
             }
+            (NativeFunction::ArrayConstructor, "fromAsync") => self
+                .register_host_callback_function(
+                    "fromAsync",
+                    1.0,
+                    false,
+                    |vm, this_arg, args, realm, caller_strict| {
+                        vm.execute_array_from_async_this(this_arg, &args, realm, caller_strict)
+                    },
+                ),
             (NativeFunction::ArrayConstructor, "of") => {
                 let of = self.create_host_function_value(HostFunction::ArrayOf);
                 self.set_builtin_function_length(&of, 0.0);
+                self.set_builtin_function_name(&of, "of");
                 of
             }
             (NativeFunction::ObjectConstructor, "keys") => {
@@ -23391,6 +25382,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "__forOfIterator") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfIterator)
+            }
+            (NativeFunction::ObjectConstructor, "__forAwaitIterator") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForAwaitIterator)
             }
             (NativeFunction::ObjectConstructor, "__forOfStep") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfStep)
@@ -23468,6 +25462,9 @@ impl Vm {
                 self.range_error_prototype_value()
             }
             (NativeFunction::URIErrorConstructor, "prototype") => self.uri_error_prototype_value(),
+            (NativeFunction::AggregateErrorConstructor, "prototype") => {
+                self.aggregate_error_prototype_value()
+            }
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::ArrayBufferConstructor, "prototype") => {
                 self.array_buffer_prototype_value()
@@ -23628,6 +25625,7 @@ impl Vm {
                 JsValue::Number(7.0)
             }
             (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
+            (NativeFunction::AggregateErrorConstructor, "length") => JsValue::Number(2.0),
             (NativeFunction::MapConstructor, "length")
             | (NativeFunction::SetConstructor, "length")
             | (NativeFunction::WeakMapConstructor, "length")
@@ -23707,6 +25705,13 @@ impl Vm {
             self.record_packet_a_numeric_guard_miss();
         }
         let primitive = self.primitive_for_numeric(value, realm, caller_strict)?;
+        if let JsValue::String(text) = &primitive
+            && Self::is_symbol_primitive_string(text)
+        {
+            return Err(VmError::TypeError(
+                "Cannot convert a Symbol value to a number",
+            ));
+        }
         Ok(self.to_number(&primitive))
     }
 
@@ -23893,6 +25898,10 @@ impl Vm {
         }
     }
 
+    fn has_is_html_dda_internal_slot(value: &JsValue) -> bool {
+        matches!(value, JsValue::NativeFunction(NativeFunction::IsHTMLDDA))
+    }
+
     fn abstract_equality_compare(
         &mut self,
         left: JsValue,
@@ -23900,6 +25909,14 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<bool, VmError> {
+        if (Self::has_is_html_dda_internal_slot(&left)
+            && matches!(right, JsValue::Null | JsValue::Undefined))
+            || (Self::has_is_html_dda_internal_slot(&right)
+                && matches!(left, JsValue::Null | JsValue::Undefined))
+        {
+            return Ok(true);
+        }
+
         if std::mem::discriminant(&left) == std::mem::discriminant(&right) {
             return Ok(self.strict_equality_compare(&left, &right));
         }
@@ -23945,7 +25962,13 @@ impl Vm {
             JsValue::Number(number) => Self::coerce_number_to_string(*number),
             JsValue::Bool(boolean) => boolean.to_string(),
             JsValue::Null => "null".to_string(),
-            JsValue::String(value) => value.clone(),
+            JsValue::String(value) => {
+                if Self::is_symbol_primitive_string(value) {
+                    Self::symbol_primitive_display_string(value)
+                } else {
+                    value.clone()
+                }
+            }
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
                 "[function]".to_string()
             }
@@ -23956,6 +25979,21 @@ impl Vm {
                 }),
             JsValue::Uninitialized => "undefined".to_string(),
             JsValue::Undefined => "undefined".to_string(),
+        }
+    }
+
+    fn is_symbol_primitive_string(value: &str) -> bool {
+        value.starts_with(SYMBOL_PRIMITIVE_MARKER_PREFIX)
+    }
+
+    fn symbol_primitive_display_string(value: &str) -> String {
+        let description = value
+            .strip_prefix(SYMBOL_PRIMITIVE_MARKER_PREFIX)
+            .unwrap_or_default();
+        if description.is_empty() {
+            "Symbol()".to_string()
+        } else {
+            format!("Symbol({description})")
         }
     }
 
@@ -24018,9 +26056,20 @@ impl Vm {
             JsValue::Null => "object",
             JsValue::Bool(_) => "boolean",
             JsValue::Number(_) => "number",
-            JsValue::String(_) => "string",
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                "function"
+            JsValue::String(text) => {
+                if Self::is_symbol_primitive_string(text) {
+                    "symbol"
+                } else {
+                    "string"
+                }
+            }
+            JsValue::Function(_) | JsValue::HostFunction(_) => "function",
+            JsValue::NativeFunction(native) => {
+                if *native == NativeFunction::IsHTMLDDA {
+                    "undefined"
+                } else {
+                    "function"
+                }
             }
             JsValue::Object(_) => "object",
         }
@@ -24495,12 +26544,19 @@ impl Vm {
         }
     }
 
-    fn execute_string_substr(&self, receiver: String, args: &[JsValue]) -> JsValue {
+    fn execute_string_substr(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
         let code_units = self.string_to_js_code_units(&receiver);
         let size = code_units.len() as i64;
         let start_number = args
             .first()
-            .map(|value| self.to_number(value))
+            .map(|value| self.coerce_number_runtime(value.clone(), realm, caller_strict))
+            .transpose()?
             .unwrap_or(0.0);
         let mut int_start = Self::to_integer_or_infinity_i64(start_number);
         if int_start < 0 {
@@ -24511,15 +26567,19 @@ impl Vm {
 
         let mut int_length = match args.get(1) {
             None | Some(JsValue::Undefined) => size,
-            Some(value) => Self::to_integer_or_infinity_i64(self.to_number(value)),
+            Some(value) => Self::to_integer_or_infinity_i64(self.coerce_number_runtime(
+                value.clone(),
+                realm,
+                caller_strict,
+            )?),
         };
         int_length = int_length.max(0).min(size);
 
         let int_end = int_start.saturating_add(int_length).min(size);
         let start = int_start as usize;
         let end = int_end as usize;
-        JsValue::String(Self::string_from_js_code_units_preserving_surrogates(
-            &code_units[start..end],
+        Ok(JsValue::String(
+            Self::string_from_js_code_units_preserving_surrogates(&code_units[start..end]),
         ))
     }
 
@@ -24958,53 +27018,29 @@ impl Vm {
         VmError::UncaughtException(JsValue::String(format!("Assertion failed: {detail}")))
     }
 
-    fn compare_array_like(&self, actual: &JsValue, expected: &JsValue) -> Result<bool, VmError> {
-        let actual_id = match actual {
-            JsValue::Object(id) => *id,
-            _ => return Ok(false),
-        };
-        let expected_id = match expected {
-            JsValue::Object(id) => *id,
-            _ => return Ok(false),
-        };
-
-        let actual_object = self
-            .objects
-            .get(&actual_id)
-            .ok_or(VmError::UnknownObject(actual_id))?;
-        let expected_object = self
-            .objects
-            .get(&expected_id)
-            .ok_or(VmError::UnknownObject(expected_id))?;
-
-        let actual_length = actual_object
-            .properties
-            .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
-        let expected_length = expected_object
-            .properties
-            .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
+    fn compare_array_like(
+        &mut self,
+        actual: &JsValue,
+        expected: &JsValue,
+        realm: &Realm,
+    ) -> Result<bool, VmError> {
+        if !Self::is_object_like_value(actual) || !Self::is_object_like_value(expected) {
+            return Ok(false);
+        }
+        let actual_length = self
+            .get_property_from_receiver(actual.clone(), "length", realm)
+            .map(|value| Self::to_length_from_number(self.to_number(&value)).max(0) as usize)?;
+        let expected_length = self
+            .get_property_from_receiver(expected.clone(), "length", realm)
+            .map(|value| Self::to_length_from_number(self.to_number(&value)).max(0) as usize)?;
         if actual_length != expected_length {
             return Ok(false);
         }
 
         for index in 0..actual_length {
             let key = index.to_string();
-            let actual_value = actual_object
-                .properties
-                .get(&key)
-                .cloned()
-                .unwrap_or(JsValue::Undefined);
-            let expected_value = expected_object
-                .properties
-                .get(&key)
-                .cloned()
-                .unwrap_or(JsValue::Undefined);
+            let actual_value = self.get_property_from_receiver(actual.clone(), &key, realm)?;
+            let expected_value = self.get_property_from_receiver(expected.clone(), &key, realm)?;
             if !self.same_value(&actual_value, &expected_value) {
                 return Ok(false);
             }
@@ -25022,7 +27058,8 @@ impl Vm {
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
             JsValue::String(value) => !value.is_empty(),
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => true,
+            JsValue::Function(_) | JsValue::HostFunction(_) => true,
+            JsValue::NativeFunction(native) => *native != NativeFunction::IsHTMLDDA,
             JsValue::Object(_) => true,
         }
     }
@@ -25777,8 +27814,13 @@ mod tests {
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -25875,8 +27917,13 @@ mod tests {
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -25907,6 +27954,41 @@ mod tests {
              try { bound.caller; } catch (e) { readThrows = true; } \
              try { bound.caller = {}; } catch (e) { writeThrows = true; } \
              readThrows && writeThrows;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn function_prototype_call_bind_uncurry_works_for_has_own_property() {
+        let script = parse_script(
+            "var hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty); \
+             hasOwn({ x: 1 }, 'x') && !hasOwn({ x: 1 }, 'y');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn extracted_function_prototype_call_requires_callable_this() {
+        let script = parse_script(
+            "var call = (function () {}).call; \
+             var threw = false; \
+             try { call(undefined, 1); } catch (e) { threw = true; } \
+             threw;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
@@ -27453,14 +29535,14 @@ mod tests {
     #[test]
     fn native_error_constructor_prototype_chain() {
         let script = parse_script(
-            "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError];\
+            "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError, AggregateError];\
              var ok = true;\
              for (var i = 0; i < ctors.length; i++) {\
                var C = ctors[i];\
                ok = ok && C.prototype !== Error.prototype;\
                ok = ok && C.prototype.constructor === C;\
                ok = ok && Object.getPrototypeOf(C.prototype) === Error.prototype;\
-               var e = new C('boom');\
+               var e = (C === AggregateError) ? new C([], 'boom') : new C('boom');\
                ok = ok && Object.getPrototypeOf(e) === C.prototype;\
                ok = ok && (e instanceof C) && (e instanceof Error);\
              }\
@@ -27501,8 +29583,379 @@ mod tests {
             "URIError",
             JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
         );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn aggregate_error_constructor_materializes_errors_and_cause() {
+        let script = parse_script(
+            "var e = new AggregateError([1, 2], 'boom', { cause: 42 });\
+             var errorsDesc = Object.getOwnPropertyDescriptor(e, 'errors');\
+             var causeDesc = Object.getOwnPropertyDescriptor(e, 'cause');\
+             var ok = true;\
+             ok = ok && errorsDesc.enumerable === false;\
+             ok = ok && errorsDesc.configurable === true;\
+             ok = ok && errorsDesc.writable === true;\
+             ok = ok && causeDesc.enumerable === false;\
+             ok = ok && causeDesc.configurable === true;\
+             ok = ok && causeDesc.writable === true;\
+             ok = ok && e.errors.length === 2;\
+             ok = ok && e.errors[0] === 1;\
+             ok = ok && e.errors[1] === 2;\
+             ok = ok && e.cause === 42;\
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn aggregate_error_consumes_iterable_with_iterator_step_value_order() {
+        let script = parse_script(
+            "var count = 0;\
+             var values = [];\
+             var case1 = {\
+               [Symbol.iterator]: function() {\
+                 return {\
+                   next: function() {\
+                     count += 1;\
+                     return {\
+                       done: count === 3,\
+                       get value() {\
+                         values.push(count);\
+                       }\
+                     };\
+                   }\
+                 };\
+               }\
+             };\
+             new AggregateError(case1);\
+             count === 3 && values.length === 2 && values[0] === 1 && values[1] === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_descriptors_are_configurable() {
+        let script = parse_script(
+            "var fromDesc = Object.getOwnPropertyDescriptor(Array, 'from');\
+             var speciesDesc = Object.getOwnPropertyDescriptor(Array, Symbol.species);\
+             fromDesc.configurable === true && fromDesc.writable === true && fromDesc.enumerable === false &&\
+             speciesDesc.configurable === true && speciesDesc.enumerable === false &&\
+             typeof speciesDesc.get === 'function' && speciesDesc.set === undefined;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_can_be_deleted() {
+        let script = parse_script(
+            "var beforeFrom = Object.prototype.hasOwnProperty.call(Array, 'from');\
+             var deletedFrom = delete Array.from;\
+             var afterFrom = Object.prototype.hasOwnProperty.call(Array, 'from');\
+             var beforeSpecies = Object.prototype.hasOwnProperty.call(Array, Symbol.species);\
+             var deletedSpecies = delete Array[Symbol.species];\
+             var afterSpecies = Object.prototype.hasOwnProperty.call(Array, Symbol.species);\
+             beforeFrom && deletedFrom && !afterFrom &&\
+             beforeSpecies && deletedSpecies && !afterSpecies;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_configurable_with_property_helper_bind_pattern() {
+        let script = parse_script(
+            "var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);\
+             function isConfigurable(obj, name) {\
+               delete obj[name];\
+               return !__hasOwnProperty(obj, name);\
+             }\
+             isConfigurable(Array, 'from') && isConfigurable(Array, Symbol.species);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_async_descriptor_surface_baseline() {
+        let script = parse_script(
+            "var method = Array.fromAsync;\
+             var desc = Object.getOwnPropertyDescriptor(Array, 'fromAsync');\
+             var nameDesc = Object.getOwnPropertyDescriptor(method, 'name');\
+             var lengthDesc = Object.getOwnPropertyDescriptor(method, 'length');\
+             typeof method === 'function' &&\
+             desc.configurable === true && desc.writable === true && desc.enumerable === false &&\
+             nameDesc.value === 'fromAsync' && nameDesc.writable === false && nameDesc.enumerable === false && nameDesc.configurable === true &&\
+             lengthDesc.value === 1 && lengthDesc.writable === false && lengthDesc.enumerable === false && lengthDesc.configurable === true;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_async_resolves_array_like_values_with_mapfn() {
+        let setup = parse_script(
+            "var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync({ length: 2, 0: Promise.resolve(2), 1: Promise.resolve(4) }, function (value) { return value / 2; })\
+               .then(function (result) { output = result; state = 'fulfilled'; }, function () { state = 'rejected'; });",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 2 && output[0] === 1 && output[1] === 2;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Object(_)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_from_async_resolves_sync_iterable_baseline() {
+        let setup = parse_script(
+            "var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync([1, 2, 3]).then(\
+               function (result) { output = result; state = 'fulfilled'; },\
+               function () { state = 'rejected'; }\
+             );",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 3 && output[0] === 1 && output[1] === 2 && output[2] === 3;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Object(_)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_from_async_observes_array_growth_after_call_boundary() {
+        let setup = parse_script(
+            "var items = [1, 2, 3];\
+             var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync(items).then(\
+               function (result) { output = result; state = 'fulfilled'; },\
+               function () { state = 'rejected'; }\
+             );\
+             items.push(4);",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 4 && output[0] === 1 && output[1] === 2 && output[2] === 3 && output[3] === 4;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Number(4.0)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_from_async_applies_async_mapfn_to_array_like() {
+        let setup = parse_script(
+            "var output = undefined;\
+             Array.fromAsync({ length: 4, 0: 0, 1: 2, 2: Promise.resolve(4), 3: 6 }, async function (val, ix) { return Promise.resolve(val * ix); })\
+               .then(function (value) { output = value; });",
+        )
+        .expect("script should parse");
+        let verify =
+            parse_script("output[0] + ':' + output[1] + ':' + output[2] + ':' + output[3];")
+                .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let _ = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        vm.drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::String("0:2:8:18".to_string()))
+        );
+    }
+
+    #[test]
+    fn array_from_async_applies_mapfn_to_async_generator_input() {
+        let setup = parse_script(
+            "async function* asyncGen() {\
+               for (let i = 0; i < 4; i++) {\
+                 yield Promise.resolve(i * 2);\
+               }\
+             }\
+             function syncMap(val, ix) { return val * ix; }\
+             var output = undefined;\
+             Array.fromAsync({ ['Symbol.asyncIterator']: asyncGen }, syncMap)\
+               .then(function (value) { output = value; });",
+        )
+        .expect("script should parse");
+        let verify =
+            parse_script("output[0] + ':' + output[1] + ':' + output[2] + ':' + output[3];")
+                .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let _ = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        vm.drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::String("0:2:8:18".to_string()))
+        );
     }
 
     #[test]
@@ -27718,6 +30171,293 @@ mod tests {
     }
 
     #[test]
+    fn annex_b_eval_lexical_declaration_rejects_existing_var_binding() {
+        let script = parse_script(
+            "if (true) { function test262Fn() {} } \
+             var threw = false; \
+             try { eval('var x; let test262Fn;'); } catch (e) { threw = e instanceof SyntaxError; } \
+             var xThrew = false; \
+             try { x; } catch (e) { xThrew = e instanceof ReferenceError; } \
+             threw && xThrew;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global(
+            "SyntaxError",
+            JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_eval_lexical_declaration_allows_configurable_eval_function_binding() {
+        let script = parse_script(
+            "eval('if (true) { function test262Fn() {} }'); \
+             (0, eval)('let test262Fn = 1;'); \
+             test262Fn === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_global_block_function_binding_is_non_configurable() {
+        let script = parse_script(
+            "var global = globalThis; \
+             var ok = f === undefined; \
+             var desc = Object.getOwnPropertyDescriptor(global, 'f'); \
+             ok = ok && desc && desc.enumerable === true && desc.writable === true && desc.configurable === false; \
+             { function f() {} } \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_global_eval_block_function_binding_is_configurable() {
+        let script = parse_script(
+            "eval(\"var ok = f === undefined; \
+                  var desc = Object.getOwnPropertyDescriptor(globalThis, 'f'); \
+                  ok = ok && desc && desc.enumerable === true && desc.writable === true && desc.configurable === true; \
+                  { function f() {} } \
+                  ok;\");",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_is_html_dda_truthiness_typeof_and_equality_semantics() {
+        let script = parse_script(
+            "var IsHTMLDDA = __qjs_IsHTMLDDA__; \
+             var ok = true; \
+             ok = ok && typeof IsHTMLDDA === 'undefined'; \
+             ok = ok && (IsHTMLDDA == undefined) && (undefined == IsHTMLDDA); \
+             ok = ok && (IsHTMLDDA == null) && (null == IsHTMLDDA); \
+             ok = ok && (IsHTMLDDA !== undefined) && (IsHTMLDDA !== null); \
+             ok = ok && ((IsHTMLDDA ? 1 : 2) === 2); \
+             ok = ok && ((IsHTMLDDA && 1) === IsHTMLDDA); \
+             ok = ok && ((IsHTMLDDA || 2) === 2); \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "__qjs_IsHTMLDDA__",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_class_heritage_checks_constructor_before_prototype_lookup() {
+        let script = parse_script(
+            "var superclass = IsHTMLDDA; \
+             var prototypeGets = 0; \
+             Object.defineProperty(superclass, 'prototype', { \
+               get: function() { prototypeGets += 1; } \
+             }); \
+             var threw = false; \
+             try { class C extends superclass {} } catch (e) { threw = e instanceof TypeError; } \
+             threw && prototypeGets === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_for_await_iterator_uses_symbol_async_iterator_first() {
+        let script = parse_script(
+            "var iter = { \
+               [Symbol.asyncIterator]: IsHTMLDDA, \
+               get [Symbol.iterator]() { throw new Test262Error('should not touch Symbol.iterator'); } \
+             }; \
+             var threw = false; \
+             try { Object.__forAwaitIterator(iter); } catch (e) { threw = e instanceof TypeError; } \
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        realm.define_global(
+            "Test262Error",
+            JsValue::NativeFunction(NativeFunction::Test262Error),
+        );
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_yield_star_return_with_is_html_dda_result_requires_object() {
+        let script = parse_script(
+            "var iter = { \
+               [Symbol.iterator]() { return this; }, \
+               next() { return {}; }, \
+               return: IsHTMLDDA \
+             }; \
+             var outer = (function*() { yield* iter; })(); \
+             outer.next(); \
+             var threw = false; \
+             try { outer.return(''); } catch (e) { threw = e instanceof TypeError; } \
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_yield_star_throw_with_is_html_dda_does_not_call_return_fallback() {
+        let script = parse_script(
+            "var returnCalls = 0; \
+             var inner = { \
+               [Symbol.iterator]() { return this; }, \
+               next() { return { done: false }; }, \
+               throw: IsHTMLDDA, \
+               return() { returnCalls += 1; return { done: true }; } \
+             }; \
+             var outer = (function*() { yield* inner; })(); \
+             outer.next(); \
+             var threw = false; \
+             try { outer.throw(''); } catch (e) { threw = e instanceof TypeError; } \
+             threw && returnCalls === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn generator_yield_star_function_expression_prefers_lowered_buffer_path() {
+        let script = parse_script(
+            "var iter = { \
+               [Symbol.iterator]() { return this; }, \
+               next() { return {}; }, \
+               return: IsHTMLDDA \
+             }; \
+             (function* () { yield* iter; });",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        let value = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+        let JsValue::Function(closure_id) = value else {
+            panic!("expected function value");
+        };
+        assert!(
+            vm.closure_is_generator(closure_id)
+                .expect("generator marker should be readable")
+        );
+        assert!(
+            vm.closure_uses_lowered_generator_values_buffer(closure_id)
+                .expect("lowered generator marker should be readable")
+        );
+        assert!(
+            !vm.closure_uses_yield_identifier(closure_id)
+                .expect("yield identifier marker should be readable")
+        );
+    }
+
+    #[test]
     fn annex_b_regexp_compile_reinitializes_existing_instance() {
         let script = parse_script(
             "var r = /abc/gim; \
@@ -27811,6 +30551,217 @@ mod tests {
         realm.define_global(
             "TypeError",
             JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_legacy_accessors_expose_descriptor_and_receiver_guards() {
+        let script = parse_script(
+            "var descCapture = Object.getOwnPropertyDescriptor(RegExp, '$1'); \
+             var descInput = Object.getOwnPropertyDescriptor(RegExp, 'input'); \
+             var ok = typeof descCapture.get === 'function' \
+               && descCapture.set === undefined \
+               && descCapture.enumerable === false \
+               && descCapture.configurable === true \
+               && typeof descInput.get === 'function' \
+               && typeof descInput.set === 'function' \
+               && descInput.enumerable === false \
+               && descInput.configurable === true; \
+             var throwNotCtor = false; \
+             try { descCapture.get.call(/ /); } catch (e) { throwNotCtor = e instanceof TypeError; } \
+             class MyRegExp extends RegExp {} \
+             var throwSubclass = false; \
+             try { MyRegExp['$1']; } catch (e) { throwSubclass = e instanceof TypeError; } \
+             var throwSubclassInputGet = false; \
+             try { MyRegExp.input; } catch (e) { throwSubclassInputGet = e instanceof TypeError; } \
+             var throwSubclassInputSet = false; \
+             try { MyRegExp.input = ''; } catch (e) { throwSubclassInputSet = e instanceof TypeError; } \
+             var throwSubclassInputAliasGet = false; \
+             try { MyRegExp.$_; } catch (e) { throwSubclassInputAliasGet = e instanceof TypeError; } \
+             var throwSubclassInputAliasSet = false; \
+             try { MyRegExp.$_ = ''; } catch (e) { throwSubclassInputAliasSet = e instanceof TypeError; } \
+             ok && throwNotCtor && throwSubclass \
+               && throwSubclassInputGet && throwSubclassInputSet \
+               && throwSubclassInputAliasGet && throwSubclassInputAliasSet;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_legacy_accessors_track_last_successful_match() {
+        let script = parse_script(
+            "var re = /(a)(b)/; \
+             re.exec('zabq'); \
+             var ok = RegExp['$1'] === 'a' \
+               && RegExp['$2'] === 'b' \
+               && RegExp.lastMatch === 'ab' \
+               && RegExp['$&'] === 'ab' \
+               && RegExp.leftContext === 'z' \
+               && RegExp['$`'] === 'z' \
+               && RegExp.rightContext === 'q' \
+               && RegExp[\"$'\"] === 'q' \
+               && RegExp.input === 'zabq'; \
+             RegExp.input = 'changed'; \
+             ok && RegExp['$_'] === 'changed';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_invalid_control_escape_falls_back_to_literal_backslash_c() {
+        let script = parse_script(
+            "var letter = '\\u0410'; \
+             var source = '\\\\c' + letter; \
+             var re = new RegExp(source); \
+             var wrapped = String.fromCharCode(letter.charCodeAt(0) % 32); \
+             re.exec(source) !== null && re.exec(source.substring(1)) === null && re.exec(wrapped) === null;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_control_escape_matrix_without_generator_matches_literal_fallback() {
+        let script = parse_script(
+            "var letters = []; \
+             for (var alpha = 0x0410; alpha <= 0x042F; alpha++) { letters.push(String.fromCharCode(alpha)); } \
+             for (alpha = 0x0430; alpha <= 0x044F; alpha++) { letters.push(String.fromCharCode(alpha)); } \
+             for (alpha = 0x00; alpha <= 0x7F; alpha++) { \
+               var letter = String.fromCharCode(alpha); \
+               if (!letter.match(/[0-9A-Za-z_\\$(|)\\[\\]\\/\\\\^]/)) { letters.push(letter); } \
+             } \
+             letters.push(''); \
+             var ok = true; \
+             for (var i = 0; i < letters.length; i++) { \
+               var letter = letters[i]; \
+               var source = '\\\\c' + letter; \
+               var re; \
+               try { re = new RegExp(source); } catch (e) { ok = false; break; } \
+               if (letter.length > 0) { \
+                 var wrapped = String.fromCharCode(letter.charCodeAt(0) % 32); \
+                 if (re.exec(wrapped) !== null) { ok = false; break; } \
+               } \
+               if (re.exec(source.substring(1)) !== null) { ok = false; break; } \
+               if (re.exec(source) === null) { ok = false; break; } \
+             } \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_invalid_control_escape_in_class_preserves_literal_backslash_c() {
+        let script = parse_script(
+            "var letter = '\\u0410'; \
+             var source = '[\\\\c' + letter + ']'; \
+             var re = new RegExp(source); \
+             re.exec('\\\\') !== null && re.exec('c') !== null && re.exec(letter) !== null;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_non_unicode_named_group_malformed_fallback_semantics() {
+        let script = parse_script(
+            "/\\k<a>/.test('k<a>') \
+             && /\\k<4>/.test('k<4>') \
+             && /\\k<a/.test('k<a') \
+             && /\\k/.test('k') \
+             && /(?<a>\\a)/.test('a') \
+             && /\\k<a>(<a>x)/.test('k<a><a>x') \
+             && /\\k<a>\\1/.test('k<a>\\x01') \
+             && /\\1(b)\\k<a>/.test('bk<a>');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn regexp_compile_duplicate_named_groups_match_annex_b_expectations() {
+        let script = parse_script(
+            "let r = /[ab]/; \
+             let sameAlternativeThrows = false; \
+             try { r.compile('(?<x>a)(?<x>b)'); } catch (e) { sameAlternativeThrows = e instanceof SyntaxError; } \
+             let source = '(?<x>a)|(?<x>b)'; \
+             let separateAlternativesParse = true; \
+             try { r.compile(source); separateAlternativesParse = separateAlternativesParse && r.source === source; } \
+             catch (e) { separateAlternativesParse = false; } \
+             sameAlternativeThrows && separateAlternativesParse;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "SyntaxError",
+            JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
@@ -27945,6 +30896,50 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn async_function_await_drains_promise_chain_before_returning() {
+        let script = parse_script(
+            "async function f() { return await Promise.resolve(3).then(function (value) { return value + 1; }); } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        let promise = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(
+            promise_state(&vm, promise),
+            ("fulfilled".to_string(), JsValue::Number(4.0))
+        );
+    }
+
+    #[test]
+    fn async_function_await_rejection_sets_rejected_result_promise() {
+        let script = parse_script(
+            "async function f() { return await Promise.resolve(0).then(function () { throw 'boom'; }); } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        let promise = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(
+            promise_state(&vm, promise),
+            ("rejected".to_string(), JsValue::String("boom".to_string()))
+        );
     }
 
     #[test]
