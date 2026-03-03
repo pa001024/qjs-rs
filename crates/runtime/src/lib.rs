@@ -32,6 +32,7 @@ pub enum NativeFunction {
     ObjectForInKeys,
     ObjectForOfValues,
     ObjectForOfIterator,
+    ObjectForAwaitIterator,
     ObjectForOfStep,
     ObjectForOfClose,
     ObjectGetTemplateObject,
@@ -122,6 +123,7 @@ pub enum NativeFunction {
     EvalErrorConstructor,
     RangeErrorConstructor,
     URIErrorConstructor,
+    AggregateErrorConstructor,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,7 +245,7 @@ pub enum ModuleLifecycleState {
     Errored,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Realm {
     globals: BTreeMap<String, JsValue>,
 }

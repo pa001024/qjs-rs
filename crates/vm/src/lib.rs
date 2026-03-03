@@ -363,6 +363,7 @@ enum HostFunction {
     ArrayLastIndexOfThis,
     ArrayFrom,
     ArrayOf,
+    ArraySpeciesGetter,
     ArrayEveryThis,
     ArraySomeThis,
     ArrayFilterThis,
@@ -385,6 +386,7 @@ enum HostFunction {
     RegExpLegacyStaticGetter(RegExpLegacyStaticProperty),
     RegExpLegacyInputSetter,
     ReflectDefineProperty,
+    ReflectConstruct,
     ReflectGetOwnPropertyDescriptor,
     HasOwnProperty {
         target: JsValue,
@@ -721,6 +723,7 @@ pub struct Vm {
     next_host_pin_id: u64,
     module_records: BTreeMap<String, ModuleRecord>,
     module_evaluation_order: Vec<String>,
+    module_realm_override: Option<Realm>,
     module_cache_root_candidates: BTreeMap<u64, JsValue>,
     next_module_cache_root_candidate_id: u64,
     pending_job_root_candidates: BTreeMap<u64, JsValue>,
@@ -744,6 +747,7 @@ pub struct Vm {
     eval_error_prototype_id: Option<ObjectId>,
     range_error_prototype_id: Option<ObjectId>,
     uri_error_prototype_id: Option<ObjectId>,
+    aggregate_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     regexp_prototype_id: Option<ObjectId>,
     regexp_legacy_input: String,
@@ -847,6 +851,7 @@ impl Vm {
         self.next_host_pin_id = 0;
         self.clear_module_cache();
         self.module_evaluation_order.clear();
+        self.module_realm_override = None;
         self.clear_module_cache_root_candidates();
         self.next_module_cache_root_candidate_id = 0;
         self.clear_pending_job_root_candidates();
@@ -872,6 +877,7 @@ impl Vm {
         self.eval_error_prototype_id = None;
         self.range_error_prototype_id = None;
         self.uri_error_prototype_id = None;
+        self.aggregate_error_prototype_id = None;
         self.date_prototype_id = None;
         self.regexp_prototype_id = None;
         self.regexp_legacy_input.clear();
@@ -1391,6 +1397,27 @@ impl Vm {
         specifier: &str,
         host: &mut dyn ModuleHost,
     ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        self.evaluate_module_entry_impl(specifier, host)
+    }
+
+    pub fn evaluate_module_entry_in_realm(
+        &mut self,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+        realm: &Realm,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
+        let saved_override = self.module_realm_override.clone();
+        self.module_realm_override = Some(realm.clone());
+        let result = self.evaluate_module_entry_impl(specifier, host);
+        self.module_realm_override = saved_override;
+        result
+    }
+
+    fn evaluate_module_entry_impl(
+        &mut self,
+        specifier: &str,
+        host: &mut dyn ModuleHost,
+    ) -> Result<BTreeMap<String, JsValue>, VmError> {
         let canonical_key = self.resolve_module_key(None, specifier, host)?;
         self.instantiate_module_graph(&canonical_key, host)?;
         self.evaluate_module_graph(&canonical_key)?;
@@ -1616,8 +1643,13 @@ impl Vm {
             (compiled, record.resolved_dependencies.clone())
         };
 
-        let mut realm = Realm::default();
-        install_baseline(&mut realm);
+        let mut realm = if let Some(realm) = &self.module_realm_override {
+            realm.clone()
+        } else {
+            let mut realm = Realm::default();
+            install_baseline(&mut realm);
+            realm
+        };
         for (index, import) in compiled.imports.iter().enumerate() {
             let dependency_key = resolved_dependencies
                 .get(index)
@@ -2077,6 +2109,7 @@ impl Vm {
             self.eval_error_prototype_id,
             self.range_error_prototype_id,
             self.uri_error_prototype_id,
+            self.aggregate_error_prototype_id,
             self.date_prototype_id,
             self.regexp_prototype_id,
             self.array_buffer_prototype_id,
@@ -2375,6 +2408,7 @@ impl Vm {
             | HostFunction::ObjectPropertyIsEnumerable
             | HostFunction::ObjectValueOf
             | HostFunction::ReflectDefineProperty
+            | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ArrayJoinThis
             | HostFunction::ArrayToStringThis
@@ -2393,6 +2427,7 @@ impl Vm {
             | HostFunction::ArrayLastIndexOfThis
             | HostFunction::ArrayFrom
             | HostFunction::ArrayOf
+            | HostFunction::ArraySpeciesGetter
             | HostFunction::ArrayEveryThis
             | HostFunction::ArraySomeThis
             | HostFunction::ArrayFilterThis
@@ -4544,13 +4579,10 @@ impl Vm {
                 }
                 let constructed = self.create_object_value();
                 let prototype = self.get_or_create_function_prototype_property(closure_id)?;
-                if let Ok((prototype, prototype_value)) = self.parse_prototype_value(prototype) {
-                    self.apply_prototype_components_to_value(
-                        &constructed,
-                        prototype,
-                        prototype_value,
-                    );
-                }
+                let default_proto = self.object_prototype_value();
+                let (prototype, prototype_value) =
+                    self.constructor_prototype_components_or_default(prototype, default_proto)?;
+                self.apply_prototype_components_to_value(&constructed, prototype, prototype_value);
                 let result =
                     self.execute_closure_call(closure_id, args, Some(constructed.clone()), realm)?;
                 if Self::is_object_like_value(&result) {
@@ -4612,15 +4644,17 @@ impl Vm {
                         let constructed = self.create_object_value();
                         let prototype =
                             self.get_or_create_host_function_prototype_property(host_id)?;
-                        if let Ok((prototype, prototype_value)) =
-                            self.parse_prototype_value(prototype)
-                        {
-                            self.apply_prototype_components_to_value(
-                                &constructed,
+                        let default_proto = self.object_prototype_value();
+                        let (prototype, prototype_value) = self
+                            .constructor_prototype_components_or_default(
                                 prototype,
-                                prototype_value,
-                            );
-                        }
+                                default_proto,
+                            )?;
+                        self.apply_prototype_components_to_value(
+                            &constructed,
+                            prototype,
+                            prototype_value,
+                        );
                         let result = self.execute_external_host_callback(
                             callback_id,
                             Some(constructed.clone()),
@@ -4668,6 +4702,7 @@ impl Vm {
                 | NativeFunction::EvalErrorConstructor
                 | NativeFunction::RangeErrorConstructor
                 | NativeFunction::URIErrorConstructor
+                | NativeFunction::AggregateErrorConstructor
                 | NativeFunction::Test262Error
         )
     }
@@ -6259,13 +6294,7 @@ impl Vm {
         }
 
         let constructor = this_arg.unwrap_or(JsValue::Undefined);
-        let use_constructor = match &constructor {
-            JsValue::NativeFunction(native) => Self::native_function_is_constructor(*native),
-            JsValue::Function(closure_id) => {
-                !self.closure_is_arrow(*closure_id)? && !self.closure_has_no_prototype(*closure_id)
-            }
-            _ => false,
-        };
+        let use_constructor = self.is_constructor_value(&constructor)?;
         let iterator_method = match items.clone() {
             JsValue::Null | JsValue::Undefined => {
                 return Err(VmError::TypeError("Array.from items must be coercible"));
@@ -6277,22 +6306,8 @@ impl Vm {
             if !Self::is_callable_value(&iterator_method) {
                 return Err(VmError::TypeError("Array.from iterator must be callable"));
             }
-            let iterator = self.execute_callable(
-                iterator_method,
-                Some(items.clone()),
-                Vec::new(),
-                realm,
-                caller_strict,
-            )?;
-            if !Self::is_object_like_value(&iterator) {
-                return Err(VmError::TypeError("Array.from iterator must return object"));
-            }
-            let next_method = self.get_property_from_receiver(iterator.clone(), "next", realm)?;
-            if !Self::is_callable_value(&next_method) {
-                return Err(VmError::TypeError(
-                    "Array.from iterator next must be callable",
-                ));
-            }
+            let iterator_record =
+                self.create_for_of_runtime_iterator_record(items.clone(), realm)?;
             let result = if use_constructor {
                 let result = self.execute_construct_value(
                     constructor.clone(),
@@ -6312,40 +6327,52 @@ impl Vm {
 
             let mut index = 0usize;
             loop {
-                let step = self.execute_callable(
-                    next_method.clone(),
-                    Some(iterator.clone()),
-                    Vec::new(),
-                    realm,
-                    caller_strict,
-                )?;
-                if !Self::is_object_like_value(&step) {
-                    return Err(VmError::TypeError(
-                        "Array.from iterator next must return object",
-                    ));
-                }
+                let step =
+                    self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
                 let done = self
                     .get_property_from_receiver(step.clone(), "done", realm)
                     .map(|value| self.is_truthy(&value))?;
                 if done {
                     break;
                 }
-                let mut value = self.get_property_from_receiver(step, "value", realm)?;
+                let mut value = match self.get_property_from_receiver(step, "value", realm) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let _ = self.execute_object_for_of_close(
+                            std::slice::from_ref(&iterator_record),
+                            realm,
+                        );
+                        return Err(err);
+                    }
+                };
                 if mapping {
-                    value = self.execute_callable(
+                    value = match self.execute_callable(
                         map_fn.clone(),
                         Some(this_for_map.clone()),
                         vec![value, JsValue::Number(index as f64)],
                         realm,
                         caller_strict,
-                    )?;
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            let _ = self.execute_object_for_of_close(
+                                std::slice::from_ref(&iterator_record),
+                                realm,
+                            );
+                            return Err(err);
+                        }
+                    };
                 }
-                self.create_data_property_or_throw(
+                if let Err(err) = self.create_data_property_or_throw(
                     result.clone(),
                     index.to_string(),
                     value,
                     realm,
-                )?;
+                ) {
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
                 index += 1;
             }
             let _ = self.set_property_on_receiver(
@@ -8643,6 +8670,7 @@ impl Vm {
             HostFunction::ArrayOf => {
                 self.execute_array_of_this(this_arg, &args, realm, caller_strict)
             }
+            HostFunction::ArraySpeciesGetter => Ok(this_arg.unwrap_or(JsValue::Undefined)),
             HostFunction::ArrayEveryThis => {
                 self.execute_array_every_this(this_arg, &args, realm, caller_strict)
             }
@@ -8766,6 +8794,39 @@ impl Vm {
                 let _ =
                     self.execute_object_define_property(&[target, property, descriptor], realm)?;
                 Ok(JsValue::Bool(true))
+            }
+            HostFunction::ReflectConstruct => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !self.is_constructor_value(&target)? {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct target must be constructor",
+                    ));
+                }
+                let new_target = args.get(2).cloned().unwrap_or_else(|| target.clone());
+                if !self.is_constructor_value(&new_target)? {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct newTarget must be constructor",
+                    ));
+                }
+                let arguments_list = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&arguments_list) {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct argumentsList must be object",
+                    ));
+                }
+                let construct_args = self.collect_apply_arguments(Some(&arguments_list))?;
+                match target {
+                    JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor) => self
+                        .execute_aggregate_error_constructor(
+                            &construct_args,
+                            realm,
+                            caller_strict,
+                            Some(new_target),
+                        ),
+                    other => {
+                        self.execute_construct_value(other, construct_args, realm, caller_strict)
+                    }
+                }
             }
             HostFunction::ReflectGetOwnPropertyDescriptor => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
@@ -9005,7 +9066,7 @@ impl Vm {
             HostFunction::AssertCompareArray => {
                 let actual = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let expected = args.get(1).cloned().unwrap_or(JsValue::Undefined);
-                if self.compare_array_like(&actual, &expected)? {
+                if self.compare_array_like(&actual, &expected, realm)? {
                     Ok(JsValue::Undefined)
                 } else {
                     let detail = if args.len() >= 3 {
@@ -9118,6 +9179,9 @@ impl Vm {
             NativeFunction::ObjectForOfValues => self.execute_object_for_of_values(&args, realm),
             NativeFunction::ObjectForOfIterator => {
                 self.execute_object_for_of_iterator(&args, realm)
+            }
+            NativeFunction::ObjectForAwaitIterator => {
+                self.execute_object_for_await_iterator(&args, realm)
             }
             NativeFunction::ObjectForOfStep => self.execute_object_for_of_step(&args, realm),
             NativeFunction::ObjectForOfClose => self.execute_object_for_of_close(&args, realm),
@@ -9501,6 +9565,9 @@ impl Vm {
                 "URIError",
                 &args,
             )),
+            NativeFunction::AggregateErrorConstructor => {
+                self.execute_aggregate_error_constructor(&args, realm, caller_strict, None)
+            }
             NativeFunction::RegExpConstructor => {
                 let (pattern, flags) = self.resolve_regexp_constructor_inputs(&args)?;
                 self.create_regexp_value(pattern, flags)
@@ -9526,6 +9593,143 @@ impl Vm {
             Some(value) => self.coerce_to_string(value),
         };
         self.create_error_exception(constructor, name, message)
+    }
+
+    fn execute_aggregate_error_constructor(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+        new_target: Option<JsValue>,
+    ) -> Result<JsValue, VmError> {
+        let message = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => None,
+            Some(value) => Some(self.coerce_to_string_runtime(value, realm, caller_strict)?),
+        };
+
+        let aggregate = self.create_object_value();
+        let aggregate_id = match aggregate {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let default_proto = self.aggregate_error_prototype_value();
+        let default_components = self.parse_prototype_value(default_proto)?;
+        let (prototype, prototype_value) = if let Some(target) = new_target {
+            let target_prototype = self.get_constructor_prototype_property(target, realm)?;
+            match target_prototype {
+                JsValue::Object(object_id) => (Some(object_id), None),
+                JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                    (None, Some(target_prototype))
+                }
+                _ => (default_components.0, default_components.1.clone()),
+            }
+        } else {
+            (default_components.0, default_components.1.clone())
+        };
+        self.apply_prototype_components_to_value(&aggregate, prototype, prototype_value);
+
+        if let Some(object) = self.objects.get_mut(&aggregate_id) {
+            object.properties.insert(
+                "constructor".to_string(),
+                JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+            );
+            object.properties.insert(
+                "name".to_string(),
+                JsValue::String("AggregateError".to_string()),
+            );
+            object.property_attributes.insert(
+                "constructor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            object.property_attributes.insert(
+                "name".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            if let Some(text) = message {
+                object
+                    .properties
+                    .insert("message".to_string(), JsValue::String(text));
+                object.property_attributes.insert(
+                    "message".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+        }
+
+        let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let iterator_record = self.create_for_of_runtime_iterator_record(iterable, realm)?;
+        let mut errors = Vec::new();
+        loop {
+            let step =
+                self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+            let done = self
+                .get_property_from_receiver(step.clone(), "done", realm)
+                .map(|value| self.is_truthy(&value))?;
+            if done {
+                break;
+            }
+            let next = match self.get_property_from_receiver(step, "value", realm) {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
+            };
+            errors.push(next);
+        }
+
+        let errors_list = self.create_array_from_values(errors)?;
+        let errors_descriptor = self.create_descriptor_object(vec![
+            ("value", errors_list),
+            ("writable", JsValue::Bool(true)),
+            ("enumerable", JsValue::Bool(false)),
+            ("configurable", JsValue::Bool(true)),
+        ]);
+        let _ = self.execute_object_define_property(
+            &[
+                JsValue::Object(aggregate_id),
+                JsValue::String("errors".to_string()),
+                errors_descriptor,
+            ],
+            realm,
+        )?;
+
+        if let Some(options) = args.get(2).cloned() {
+            if Self::is_object_like_value(&options)
+                && self.has_property_on_receiver(&options, "cause", realm)?
+            {
+                let cause = self.get_property_from_receiver(options, "cause", realm)?;
+                let cause_descriptor = self.create_descriptor_object(vec![
+                    ("value", cause),
+                    ("writable", JsValue::Bool(true)),
+                    ("enumerable", JsValue::Bool(false)),
+                    ("configurable", JsValue::Bool(true)),
+                ]);
+                let _ = self.execute_object_define_property(
+                    &[
+                        JsValue::Object(aggregate_id),
+                        JsValue::String("cause".to_string()),
+                        cause_descriptor,
+                    ],
+                    realm,
+                )?;
+            }
+        }
+
+        Ok(JsValue::Object(aggregate_id))
     }
 
     fn error_prototype_for_constructor(&mut self, constructor: NativeFunction) -> Option<ObjectId> {
@@ -9560,6 +9764,12 @@ impl Vm {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
+            NativeFunction::AggregateErrorConstructor => {
+                match self.aggregate_error_prototype_value() {
+                    JsValue::Object(id) => Some(id),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -11077,6 +11287,14 @@ impl Vm {
         }
         let chunk = compile_script(&script);
         let eval_strict = self.code_is_strict(&chunk.code);
+        if !eval_strict
+            && self.eval_targets_global_var_scope(call_kind)
+            && self.eval_lexical_declarations_conflict_with_existing_var_scope(&script, call_kind)
+        {
+            return Err(VmError::UncaughtException(JsValue::String(
+                "SyntaxError: lexical declaration conflicts with existing binding".to_string(),
+            )));
+        }
         let annex_b_eval_var_function_names = if !eval_strict {
             Self::script_annex_b_eval_var_function_names(&script)
         } else {
@@ -11156,6 +11374,32 @@ impl Vm {
             EvalCallKind::Indirect => true,
             EvalCallKind::Direct => self.var_scope_stack.last().copied() == Some(0),
         }
+    }
+
+    fn eval_lexical_declarations_conflict_with_existing_var_scope(
+        &self,
+        script: &Script,
+        call_kind: EvalCallKind,
+    ) -> bool {
+        let lexical_names = Self::script_lexical_declaration_names(script);
+        if lexical_names.is_empty() {
+            return false;
+        }
+
+        let scope_index = match call_kind {
+            EvalCallKind::Indirect => 0,
+            EvalCallKind::Direct => self.var_scope_stack.last().copied().unwrap_or(0),
+        };
+        let Some(scope) = self.scopes.get(scope_index) else {
+            return false;
+        };
+        let scope = scope.borrow();
+        lexical_names.iter().any(|name| {
+            scope.get(name).is_some_and(|binding_id| {
+                self.binding(*binding_id)
+                    .is_some_and(|binding| !binding.deletable)
+            })
+        })
     }
 
     fn snapshot_eval_state(&self) -> EvalStateSnapshot {
@@ -13496,6 +13740,7 @@ impl Vm {
                     "__forInKeys",
                     "__forOfValues",
                     "__forOfIterator",
+                    "__forAwaitIterator",
                     "__forOfStep",
                     "__forOfClose",
                     "__getTemplateObject",
@@ -13916,6 +14161,51 @@ impl Vm {
             _ => Err(VmError::TypeError(
                 "Object prototype may only be an Object or null",
             )),
+        }
+    }
+
+    fn get_constructor_prototype_property(
+        &mut self,
+        constructor: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if let JsValue::Object(object_id) = constructor.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap = self.get_property_from_receiver(proxy_handler.clone(), "get", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                return self.get_property_from_receiver(proxy_target, "prototype", realm);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError("Proxy get trap must be callable"));
+            }
+            return self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![
+                    proxy_target,
+                    JsValue::String("prototype".to_string()),
+                    JsValue::Object(object_id),
+                ],
+                realm,
+                false,
+            );
+        }
+
+        self.get_property_from_receiver(constructor, "prototype", realm)
+    }
+
+    fn constructor_prototype_components_or_default(
+        &self,
+        prototype: JsValue,
+        default_proto: JsValue,
+    ) -> Result<(Option<ObjectId>, Option<JsValue>), VmError> {
+        match prototype {
+            JsValue::Object(object_id) => Ok((Some(object_id), None)),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok((None, Some(prototype)))
+            }
+            _ => self.parse_prototype_value(default_proto),
         }
     }
 
@@ -14629,6 +14919,29 @@ impl Vm {
         }
     }
 
+    fn execute_object_for_await_iterator(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+        match target {
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("for-await expects iterable"))
+            }
+            JsValue::String(value) => {
+                self.create_for_await_runtime_iterator_record(JsValue::String(value), realm)
+            }
+            JsValue::Object(object_id) => {
+                self.create_for_await_runtime_iterator_record(JsValue::Object(object_id), realm)
+            }
+            primitive => {
+                let boxed = self.box_primitive_receiver(primitive);
+                self.create_for_await_runtime_iterator_record(boxed, realm)
+            }
+        }
+    }
+
     fn execute_object_for_of_step(
         &mut self,
         args: &[JsValue],
@@ -14795,6 +15108,63 @@ impl Vm {
         if !Self::is_callable_value(&next_method) {
             return Err(VmError::TypeError("for-of iterator next must be callable"));
         }
+        self.create_for_of_iterator_record_object(iterator, next_method)
+    }
+
+    fn create_for_await_runtime_iterator_record(
+        &mut self,
+        target: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let async_iterator_method =
+            self.get_property_from_receiver(target.clone(), "Symbol.asyncIterator", realm)?;
+        if !matches!(async_iterator_method, JsValue::Undefined | JsValue::Null) {
+            if !Self::is_callable_value(&async_iterator_method) {
+                return Err(VmError::TypeError(
+                    "for-await async iterator must be callable",
+                ));
+            }
+            let iterator = self.execute_callable(
+                async_iterator_method,
+                Some(target),
+                Vec::new(),
+                realm,
+                false,
+            )?;
+            if !Self::is_object_like_value(&iterator) {
+                return Err(VmError::TypeError("for-await iterator must return object"));
+            }
+            let next_method = self.get_property_from_receiver(iterator.clone(), "next", realm)?;
+            if !Self::is_callable_value(&next_method) {
+                return Err(VmError::TypeError(
+                    "for-await iterator next must be callable",
+                ));
+            }
+            return self.create_for_of_iterator_record_object(iterator, next_method);
+        }
+
+        match target {
+            JsValue::String(value) => {
+                self.create_for_of_snapshot_record(self.js_string_iterator_values(&value))
+            }
+            JsValue::Object(object_id) => {
+                self.create_for_of_runtime_iterator_record(JsValue::Object(object_id), realm)
+            }
+            JsValue::Null | JsValue::Undefined => {
+                Err(VmError::TypeError("for-await expects iterable"))
+            }
+            primitive => {
+                let boxed = self.box_primitive_receiver(primitive);
+                self.create_for_of_runtime_iterator_record(boxed, realm)
+            }
+        }
+    }
+
+    fn create_for_of_iterator_record_object(
+        &mut self,
+        iterator: JsValue,
+        next_method: JsValue,
+    ) -> Result<JsValue, VmError> {
         let record = self.create_object_value();
         let record_id = match record {
             JsValue::Object(id) => id,
@@ -15276,6 +15646,9 @@ impl Vm {
             && Self::regexp_legacy_property_from_name(property).is_some()
         {
             self.ensure_regexp_legacy_static_accessors();
+        }
+        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
+            self.ensure_array_species_accessor();
         }
         if let Some(object) = self.native_function_objects.get(&native).cloned() {
             let data_value = object.properties.get(property).cloned();
@@ -17679,6 +18052,14 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        if property == CLASS_HERITAGE_RESTRICTED_MARKER
+            && matches!(value, JsValue::Bool(true))
+            && !self.is_constructor_value(&receiver)?
+        {
+            return Err(VmError::TypeError(
+                "class heritage must be constructor or null",
+            ));
+        }
         match receiver {
             JsValue::Object(object_id) => {
                 if self.try_packet_b_dense_array_index_set(object_id, &property, &value)? {
@@ -18969,9 +19350,11 @@ impl Vm {
             _ => unreachable!(),
         };
         let define_property = self.create_host_function_value(HostFunction::ReflectDefineProperty);
+        let construct = self.create_host_function_value(HostFunction::ReflectConstruct);
         let get_own_property_descriptor =
             self.create_host_function_value(HostFunction::ReflectGetOwnPropertyDescriptor);
         self.set_builtin_function_length(&define_property, 3.0);
+        self.set_builtin_function_length(&construct, 2.0);
         self.set_builtin_function_length(&get_own_property_descriptor, 2.0);
         if let Some(reflect_object) = self.objects.get_mut(&reflect_id) {
             reflect_object
@@ -18979,6 +19362,17 @@ impl Vm {
                 .insert("defineProperty".to_string(), define_property);
             reflect_object.property_attributes.insert(
                 "defineProperty".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            reflect_object
+                .properties
+                .insert("construct".to_string(), construct);
+            reflect_object.property_attributes.insert(
+                "construct".to_string(),
                 PropertyAttributes {
                     writable: true,
                     enumerable: false,
@@ -19723,6 +20117,7 @@ impl Vm {
             NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id,
             NativeFunction::RangeErrorConstructor => self.range_error_prototype_id,
             NativeFunction::URIErrorConstructor => self.uri_error_prototype_id,
+            NativeFunction::AggregateErrorConstructor => self.aggregate_error_prototype_id,
             _ => None,
         };
         if let Some(id) = cached_id {
@@ -19768,6 +20163,9 @@ impl Vm {
                 NativeFunction::EvalErrorConstructor => self.eval_error_prototype_id = Some(id),
                 NativeFunction::RangeErrorConstructor => self.range_error_prototype_id = Some(id),
                 NativeFunction::URIErrorConstructor => self.uri_error_prototype_id = Some(id),
+                NativeFunction::AggregateErrorConstructor => {
+                    self.aggregate_error_prototype_id = Some(id)
+                }
                 _ => {}
             }
         }
@@ -19799,6 +20197,13 @@ impl Vm {
 
     fn uri_error_prototype_value(&mut self) -> JsValue {
         self.native_error_prototype_value(NativeFunction::URIErrorConstructor, "URIError")
+    }
+
+    fn aggregate_error_prototype_value(&mut self) -> JsValue {
+        self.native_error_prototype_value(
+            NativeFunction::AggregateErrorConstructor,
+            "AggregateError",
+        )
     }
 
     fn date_prototype_value(&mut self) -> JsValue {
@@ -22524,6 +22929,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
                 | (NativeFunction::ObjectConstructor, "__forOfValues")
                 | (NativeFunction::ObjectConstructor, "__forOfIterator")
+                | (NativeFunction::ObjectConstructor, "__forAwaitIterator")
                 | (NativeFunction::ObjectConstructor, "__forOfStep")
                 | (NativeFunction::ObjectConstructor, "__forOfClose")
                 | (NativeFunction::ObjectConstructor, "__getTemplateObject")
@@ -22539,6 +22945,7 @@ impl Vm {
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ArrayConstructor, "from")
                 | (NativeFunction::ArrayConstructor, "of")
+                | (NativeFunction::ArrayConstructor, "Symbol.species")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "isSealed")
@@ -22595,6 +23002,7 @@ impl Vm {
                 | (NativeFunction::EvalErrorConstructor, "prototype")
                 | (NativeFunction::RangeErrorConstructor, "prototype")
                 | (NativeFunction::URIErrorConstructor, "prototype")
+                | (NativeFunction::AggregateErrorConstructor, "prototype")
                 | (NativeFunction::DateConstructor, "prototype")
                 | (NativeFunction::ArrayBufferConstructor, "prototype")
                 | (NativeFunction::DataViewConstructor, "prototype")
@@ -23401,6 +23809,9 @@ impl Vm {
                 JsValue::NativeFunction(NativeFunction::URIErrorConstructor) => {
                     Ok(Self::error_message_matches(&message, "URIError"))
                 }
+                JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor) => {
+                    Ok(Self::error_message_matches(&message, "AggregateError"))
+                }
                 _ => Ok(false),
             },
             _ => {
@@ -23462,6 +23873,36 @@ impl Vm {
             value,
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_)
         )
+    }
+
+    fn is_constructor_value(&mut self, value: &JsValue) -> Result<bool, VmError> {
+        match value {
+            JsValue::Function(closure_id) => {
+                Ok(!self.closure_is_arrow(*closure_id)?
+                    && !self.closure_has_no_prototype(*closure_id))
+            }
+            JsValue::NativeFunction(native) => Ok(Self::native_function_is_constructor(*native)),
+            JsValue::HostFunction(host_id) => {
+                let Some(host) = self.host_functions.get(host_id).cloned() else {
+                    return Ok(false);
+                };
+                match host {
+                    HostFunction::BoundCall { target, .. } => self.is_constructor_value(&target),
+                    HostFunction::ExternalCallback { constructable, .. } => Ok(constructable),
+                    _ => Ok(false),
+                }
+            }
+            JsValue::Object(object_id) => {
+                if self.is_class_constructor_object(*object_id) {
+                    return Ok(true);
+                }
+                if let Some((target, _)) = self.object_proxy_slots(*object_id)? {
+                    return self.is_constructor_value(&target);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn object_is_prototype_of(
@@ -23560,7 +24001,8 @@ impl Vm {
                     | NativeFunction::SyntaxErrorConstructor
                     | NativeFunction::EvalErrorConstructor
                     | NativeFunction::RangeErrorConstructor
-                    | NativeFunction::URIErrorConstructor => {
+                    | NativeFunction::URIErrorConstructor
+                    | NativeFunction::AggregateErrorConstructor => {
                         Ok(JsValue::NativeFunction(NativeFunction::ErrorConstructor))
                     }
                     _ => Ok(self.function_prototype_value()),
@@ -23578,6 +24020,7 @@ impl Vm {
             || Self::error_message_matches(message, "EvalError")
             || Self::error_message_matches(message, "RangeError")
             || Self::error_message_matches(message, "URIError")
+            || Self::error_message_matches(message, "AggregateError")
             || Self::error_message_matches(message, "Error")
     }
 
@@ -23682,6 +24125,7 @@ impl Vm {
     }
 
     fn delete_native_function_property(&mut self, native: NativeFunction, property: &str) -> bool {
+        let has_default_property = self.native_function_has_own_property(native, property);
         if let Some(object) = self.native_function_objects.get_mut(&native) {
             if object.properties.contains_key(property)
                 || object.getters.contains_key(property)
@@ -23700,8 +24144,13 @@ impl Vm {
                 object.setters.remove(property);
                 object.property_attributes.remove(property);
                 object.argument_mappings.remove(property);
-                self.native_function_deleted
-                    .remove(&(native, property.to_string()));
+                if has_default_property {
+                    self.native_function_deleted
+                        .insert((native, property.to_string()));
+                } else {
+                    self.native_function_deleted
+                        .remove(&(native, property.to_string()));
+                }
                 return true;
             }
         }
@@ -23711,7 +24160,7 @@ impl Vm {
         {
             return true;
         }
-        if !self.native_function_has_own_property(native, property) {
+        if !has_default_property {
             return true;
         }
         if !self.native_function_default_property_configurable(native, property) {
@@ -24039,6 +24488,7 @@ impl Vm {
             NativeFunction::EvalErrorConstructor => "EvalError",
             NativeFunction::RangeErrorConstructor => "RangeError",
             NativeFunction::URIErrorConstructor => "URIError",
+            NativeFunction::AggregateErrorConstructor => "AggregateError",
             NativeFunction::ParseInt => "parseInt",
             NativeFunction::ParseFloat => "parseFloat",
             NativeFunction::IsNaN => "isNaN",
@@ -24091,6 +24541,39 @@ impl Vm {
         }
     }
 
+    fn ensure_array_species_accessor(&mut self) {
+        if self.native_function_deleted.contains(&(
+            NativeFunction::ArrayConstructor,
+            "Symbol.species".to_string(),
+        )) {
+            return;
+        }
+        if self
+            .native_function_objects
+            .get(&NativeFunction::ArrayConstructor)
+            .is_some_and(|object| object.getters.contains_key("Symbol.species"))
+        {
+            return;
+        }
+
+        let getter = self.create_host_function_value(HostFunction::ArraySpeciesGetter);
+        self.set_builtin_function_length(&getter, 0.0);
+        self.set_builtin_function_name(&getter, "get [Symbol.species]");
+        let object = self
+            .native_function_objects
+            .entry(NativeFunction::ArrayConstructor)
+            .or_default();
+        object.getters.insert("Symbol.species".to_string(), getter);
+        object.property_attributes.insert(
+            "Symbol.species".to_string(),
+            PropertyAttributes {
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
     fn get_native_function_own_property_with_receiver(
         &mut self,
         native: NativeFunction,
@@ -24098,6 +24581,9 @@ impl Vm {
         receiver: JsValue,
         realm: &Realm,
     ) -> Result<Option<JsValue>, VmError> {
+        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
+            self.ensure_array_species_accessor();
+        }
         let Some(object) = self.native_function_objects.get(&native).cloned() else {
             return Ok(None);
         };
@@ -24167,11 +24653,13 @@ impl Vm {
             (NativeFunction::ArrayConstructor, "from") => {
                 let from = self.create_host_function_value(HostFunction::ArrayFrom);
                 self.set_builtin_function_length(&from, 1.0);
+                self.set_builtin_function_name(&from, "from");
                 from
             }
             (NativeFunction::ArrayConstructor, "of") => {
                 let of = self.create_host_function_value(HostFunction::ArrayOf);
                 self.set_builtin_function_length(&of, 0.0);
+                self.set_builtin_function_name(&of, "of");
                 of
             }
             (NativeFunction::ObjectConstructor, "keys") => {
@@ -24206,6 +24694,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "__forOfIterator") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfIterator)
+            }
+            (NativeFunction::ObjectConstructor, "__forAwaitIterator") => {
+                JsValue::NativeFunction(NativeFunction::ObjectForAwaitIterator)
             }
             (NativeFunction::ObjectConstructor, "__forOfStep") => {
                 JsValue::NativeFunction(NativeFunction::ObjectForOfStep)
@@ -24283,6 +24774,9 @@ impl Vm {
                 self.range_error_prototype_value()
             }
             (NativeFunction::URIErrorConstructor, "prototype") => self.uri_error_prototype_value(),
+            (NativeFunction::AggregateErrorConstructor, "prototype") => {
+                self.aggregate_error_prototype_value()
+            }
             (NativeFunction::DateConstructor, "prototype") => self.date_prototype_value(),
             (NativeFunction::ArrayBufferConstructor, "prototype") => {
                 self.array_buffer_prototype_value()
@@ -24443,6 +24937,7 @@ impl Vm {
                 JsValue::Number(7.0)
             }
             (NativeFunction::ProxyConstructor, "length") => JsValue::Number(2.0),
+            (NativeFunction::AggregateErrorConstructor, "length") => JsValue::Number(2.0),
             (NativeFunction::MapConstructor, "length")
             | (NativeFunction::SetConstructor, "length")
             | (NativeFunction::WeakMapConstructor, "length")
@@ -25835,53 +26330,29 @@ impl Vm {
         VmError::UncaughtException(JsValue::String(format!("Assertion failed: {detail}")))
     }
 
-    fn compare_array_like(&self, actual: &JsValue, expected: &JsValue) -> Result<bool, VmError> {
-        let actual_id = match actual {
-            JsValue::Object(id) => *id,
-            _ => return Ok(false),
-        };
-        let expected_id = match expected {
-            JsValue::Object(id) => *id,
-            _ => return Ok(false),
-        };
-
-        let actual_object = self
-            .objects
-            .get(&actual_id)
-            .ok_or(VmError::UnknownObject(actual_id))?;
-        let expected_object = self
-            .objects
-            .get(&expected_id)
-            .ok_or(VmError::UnknownObject(expected_id))?;
-
-        let actual_length = actual_object
-            .properties
-            .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
-        let expected_length = expected_object
-            .properties
-            .get("length")
-            .map(|value| self.to_number(value))
-            .unwrap_or(0.0)
-            .max(0.0) as usize;
+    fn compare_array_like(
+        &mut self,
+        actual: &JsValue,
+        expected: &JsValue,
+        realm: &Realm,
+    ) -> Result<bool, VmError> {
+        if !Self::is_object_like_value(actual) || !Self::is_object_like_value(expected) {
+            return Ok(false);
+        }
+        let actual_length = self
+            .get_property_from_receiver(actual.clone(), "length", realm)
+            .map(|value| Self::to_length_from_number(self.to_number(&value)).max(0) as usize)?;
+        let expected_length = self
+            .get_property_from_receiver(expected.clone(), "length", realm)
+            .map(|value| Self::to_length_from_number(self.to_number(&value)).max(0) as usize)?;
         if actual_length != expected_length {
             return Ok(false);
         }
 
         for index in 0..actual_length {
             let key = index.to_string();
-            let actual_value = actual_object
-                .properties
-                .get(&key)
-                .cloned()
-                .unwrap_or(JsValue::Undefined);
-            let expected_value = expected_object
-                .properties
-                .get(&key)
-                .cloned()
-                .unwrap_or(JsValue::Undefined);
+            let actual_value = self.get_property_from_receiver(actual.clone(), &key, realm)?;
+            let expected_value = self.get_property_from_receiver(expected.clone(), &key, realm)?;
             if !self.same_value(&actual_value, &expected_value) {
                 return Ok(false);
             }
@@ -28375,14 +28846,14 @@ mod tests {
     #[test]
     fn native_error_constructor_prototype_chain() {
         let script = parse_script(
-            "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError];\
+            "var ctors = [TypeError, ReferenceError, SyntaxError, RangeError, EvalError, URIError, AggregateError];\
              var ok = true;\
              for (var i = 0; i < ctors.length; i++) {\
                var C = ctors[i];\
                ok = ok && C.prototype !== Error.prototype;\
                ok = ok && C.prototype.constructor === C;\
                ok = ok && Object.getPrototypeOf(C.prototype) === Error.prototype;\
-               var e = new C('boom');\
+               var e = (C === AggregateError) ? new C([], 'boom') : new C('boom');\
                ok = ok && Object.getPrototypeOf(e) === C.prototype;\
                ok = ok && (e instanceof C) && (e instanceof Error);\
              }\
@@ -28422,6 +28893,190 @@ mod tests {
         realm.define_global(
             "URIError",
             JsValue::NativeFunction(NativeFunction::URIErrorConstructor),
+        );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn aggregate_error_constructor_materializes_errors_and_cause() {
+        let script = parse_script(
+            "var e = new AggregateError([1, 2], 'boom', { cause: 42 });\
+             var errorsDesc = Object.getOwnPropertyDescriptor(e, 'errors');\
+             var causeDesc = Object.getOwnPropertyDescriptor(e, 'cause');\
+             var ok = true;\
+             ok = ok && errorsDesc.enumerable === false;\
+             ok = ok && errorsDesc.configurable === true;\
+             ok = ok && errorsDesc.writable === true;\
+             ok = ok && causeDesc.enumerable === false;\
+             ok = ok && causeDesc.configurable === true;\
+             ok = ok && causeDesc.writable === true;\
+             ok = ok && e.errors.length === 2;\
+             ok = ok && e.errors[0] === 1;\
+             ok = ok && e.errors[1] === 2;\
+             ok = ok && e.cause === 42;\
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn aggregate_error_consumes_iterable_with_iterator_step_value_order() {
+        let script = parse_script(
+            "var count = 0;\
+             var values = [];\
+             var case1 = {\
+               [Symbol.iterator]: function() {\
+                 return {\
+                   next: function() {\
+                     count += 1;\
+                     return {\
+                       done: count === 3,\
+                       get value() {\
+                         values.push(count);\
+                       }\
+                     };\
+                   }\
+                 };\
+               }\
+             };\
+             new AggregateError(case1);\
+             count === 3 && values.length === 2 && values[0] === 1 && values[1] === 2;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "Error",
+            JsValue::NativeFunction(NativeFunction::ErrorConstructor),
+        );
+        realm.define_global(
+            "AggregateError",
+            JsValue::NativeFunction(NativeFunction::AggregateErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_descriptors_are_configurable() {
+        let script = parse_script(
+            "var fromDesc = Object.getOwnPropertyDescriptor(Array, 'from');\
+             var speciesDesc = Object.getOwnPropertyDescriptor(Array, Symbol.species);\
+             fromDesc.configurable === true && fromDesc.writable === true && fromDesc.enumerable === false &&\
+             speciesDesc.configurable === true && speciesDesc.enumerable === false &&\
+             typeof speciesDesc.get === 'function' && speciesDesc.set === undefined;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_can_be_deleted() {
+        let script = parse_script(
+            "var beforeFrom = Object.prototype.hasOwnProperty.call(Array, 'from');\
+             var deletedFrom = delete Array.from;\
+             var afterFrom = Object.prototype.hasOwnProperty.call(Array, 'from');\
+             var beforeSpecies = Object.prototype.hasOwnProperty.call(Array, Symbol.species);\
+             var deletedSpecies = delete Array[Symbol.species];\
+             var afterSpecies = Object.prototype.hasOwnProperty.call(Array, Symbol.species);\
+             beforeFrom && deletedFrom && !afterFrom &&\
+             beforeSpecies && deletedSpecies && !afterSpecies;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_and_species_configurable_with_property_helper_bind_pattern() {
+        let script = parse_script(
+            "var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);\
+             function isConfigurable(obj, name) {\
+               delete obj[name];\
+               return !__hasOwnProperty(obj, name);\
+             }\
+             isConfigurable(Array, 'from') && isConfigurable(Array, Symbol.species);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        realm.define_global(
+            "Function",
+            JsValue::NativeFunction(NativeFunction::FunctionConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
@@ -28640,6 +29295,47 @@ mod tests {
     }
 
     #[test]
+    fn annex_b_eval_lexical_declaration_rejects_existing_var_binding() {
+        let script = parse_script(
+            "if (true) { function test262Fn() {} } \
+             var threw = false; \
+             try { eval('var x; let test262Fn;'); } catch (e) { threw = e instanceof SyntaxError; } \
+             var xThrew = false; \
+             try { x; } catch (e) { xThrew = e instanceof ReferenceError; } \
+             threw && xThrew;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global(
+            "SyntaxError",
+            JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
+        );
+        realm.define_global(
+            "ReferenceError",
+            JsValue::NativeFunction(NativeFunction::ReferenceErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_eval_lexical_declaration_allows_configurable_eval_function_binding() {
+        let script = parse_script(
+            "eval('if (true) { function test262Fn() {} }'); \
+             (0, eval)('let test262Fn = 1;'); \
+             test262Fn === 1;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
     fn annex_b_global_block_function_binding_is_non_configurable() {
         let script = parse_script(
             "var global = globalThis; \
@@ -28700,6 +29396,75 @@ mod tests {
         let mut realm = Realm::default();
         realm.define_global(
             "__qjs_IsHTMLDDA__",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_class_heritage_checks_constructor_before_prototype_lookup() {
+        let script = parse_script(
+            "var superclass = IsHTMLDDA; \
+             var prototypeGets = 0; \
+             Object.defineProperty(superclass, 'prototype', { \
+               get: function() { prototypeGets += 1; } \
+             }); \
+             var threw = false; \
+             try { class C extends superclass {} } catch (e) { threw = e instanceof TypeError; } \
+             threw && prototypeGets === 0;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "IsHTMLDDA",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_for_await_iterator_uses_symbol_async_iterator_first() {
+        let script = parse_script(
+            "var iter = { \
+               [Symbol.asyncIterator]: IsHTMLDDA, \
+               get [Symbol.iterator]() { throw new Test262Error('should not touch Symbol.iterator'); } \
+             }; \
+             var threw = false; \
+             try { Object.__forAwaitIterator(iter); } catch (e) { threw = e instanceof TypeError; } \
+             threw;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Symbol",
+            JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        realm.define_global(
+            "Test262Error",
+            JsValue::NativeFunction(NativeFunction::Test262Error),
+        );
+        realm.define_global(
+            "IsHTMLDDA",
             JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
         );
         let mut vm = Vm::default();

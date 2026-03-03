@@ -2030,6 +2030,10 @@ impl Parser {
     }
 
     fn parse_for_statement(&mut self) -> Result<Stmt, ParseError> {
+        let is_await = self.matches_keyword("await");
+        if is_await && self.async_function_depth == 0 {
+            return Err(self.error_current("for-await is only valid in async functions"));
+        }
         self.expect(TokenKind::LParen, "expected '(' after 'for'")?;
 
         let initializer = if self.check(&TokenKind::Semicolon) {
@@ -2087,6 +2091,9 @@ impl Parser {
         } else {
             None
         };
+        if is_await && loop_kind != Some("of") {
+            return Err(self.error_current("for-await only supports 'of'"));
+        }
         if let Some(loop_kind) = loop_kind {
             let iterable = self.parse_for_in_of_rhs_expression()?;
             self.expect(TokenKind::RParen, "expected ')' after for-in/of clauses")?;
@@ -2098,6 +2105,17 @@ impl Parser {
             self.breakable_depth = self.breakable_depth.saturating_sub(1);
             let body = body?;
 
+            if is_await {
+                if Self::supports_for_of_lowering(initializer.as_ref()) {
+                    return self.lower_for_await_of_statement(initializer, iterable, body);
+                }
+                return Ok(Stmt::For {
+                    initializer: None,
+                    condition: Some(Expr::Bool(false)),
+                    update: None,
+                    body: Box::new(body),
+                });
+            }
             if loop_kind == "in" && Self::supports_for_in_lowering(initializer.as_ref()) {
                 return self.lower_for_in_statement(initializer, iterable, body);
             }
@@ -2585,6 +2603,164 @@ impl Parser {
                     .into_iter()
                     .next()
                     .expect("for-of declaration should exist");
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::Expression(target)) => {
+                let assignment = self.rewrite_assignment_target(
+                    target,
+                    current_identifier_expr.clone(),
+                    AssignmentKind::Simple,
+                    self.current_position(),
+                )?;
+                iteration_statements.push(Stmt::Expression(Expr::Unary {
+                    op: UnaryOp::Void,
+                    expr: Box::new(assignment),
+                }));
+            }
+        }
+
+        iteration_statements.push(body);
+
+        let current_declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: current_name.clone(),
+            initializer: Some(Expr::Member {
+                object: Box::new(Expr::Identifier(step_name.clone())),
+                property: "value".to_string(),
+            }),
+        });
+        let condition = Expr::Sequence(vec![
+            Expr::Assign {
+                target: step_name.clone(),
+                value: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forOfStep".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterator_name.clone())],
+                }),
+            },
+            Expr::Assign {
+                target: done_name.clone(),
+                value: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier(step_name.clone())),
+                    property: "done".to_string(),
+                }),
+            },
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name.clone())),
+            },
+        ]);
+        let loop_body = Stmt::Block(vec![current_declaration, Stmt::Block(iteration_statements)]);
+        let try_block = vec![Stmt::For {
+            initializer: None,
+            condition: Some(condition),
+            update: None,
+            body: Box::new(loop_body),
+        }];
+        let finally_block = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(Expr::Identifier(done_name)),
+            },
+            consequent: Box::new(Stmt::Block(vec![Stmt::VariableDeclaration(
+                VariableDeclaration {
+                    kind: BindingKind::Let,
+                    name: close_name,
+                    initializer: Some(Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                            property: "__forOfClose".to_string(),
+                        }),
+                        arguments: vec![Expr::Identifier(iterator_name)],
+                    }),
+                },
+            )])),
+            alternate: None,
+        }];
+        statements.push(Stmt::Try {
+            try_block,
+            catch_param: None,
+            catch_block: None,
+            finally_block: Some(finally_block),
+        });
+
+        Ok(Stmt::Block(statements))
+    }
+
+    fn lower_for_await_of_statement(
+        &mut self,
+        initializer: Option<ForInitializer>,
+        iterable: Expr,
+        body: Stmt,
+    ) -> Result<Stmt, ParseError> {
+        let iterable_name = self.next_for_in_temp_identifier("iterable");
+        let iterator_name = self.next_for_in_temp_identifier("iterator");
+        let done_name = self.next_for_in_temp_identifier("done");
+        let step_name = self.next_for_in_temp_identifier("step");
+        let current_name = self.next_for_in_temp_identifier("current");
+        let close_name = self.next_for_in_temp_identifier("close");
+
+        let mut statements = Self::for_initializer_tdz_names(initializer.as_ref())
+            .into_iter()
+            .map(Self::tdz_marker_declaration)
+            .collect::<Vec<_>>();
+        statements.extend(vec![
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterable_name.clone(),
+                initializer: Some(iterable),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: iterator_name.clone(),
+                initializer: Some(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier(Identifier("Object".to_string()))),
+                        property: "__forAwaitIterator".to_string(),
+                    }),
+                    arguments: vec![Expr::Identifier(iterable_name)],
+                }),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: done_name.clone(),
+                initializer: Some(Expr::Bool(false)),
+            }),
+            Stmt::VariableDeclaration(VariableDeclaration {
+                kind: BindingKind::Let,
+                name: step_name.clone(),
+                initializer: Some(Expr::Identifier(Identifier("undefined".to_string()))),
+            }),
+        ]);
+
+        let current_identifier_expr = Expr::Identifier(current_name.clone());
+
+        let mut iteration_statements = Vec::new();
+        match initializer {
+            None => {}
+            Some(ForInitializer::VariableDeclaration(declaration)) => {
+                self.lower_for_in_initializer_declaration(
+                    declaration,
+                    &current_identifier_expr,
+                    &mut statements,
+                    &mut iteration_statements,
+                )?;
+            }
+            Some(ForInitializer::VariableDeclarations(declarations)) => {
+                if declarations.len() != 1 || declarations[0].initializer.is_some() {
+                    return Err(self.error_current("invalid for-await-of initializer"));
+                }
+                let declaration = declarations
+                    .into_iter()
+                    .next()
+                    .expect("for-await-of declaration should exist");
                 self.lower_for_in_initializer_declaration(
                     declaration,
                     &current_identifier_expr,
@@ -3455,32 +3631,68 @@ impl Parser {
     fn parse_variable_declaration(&mut self, kind: BindingKind) -> Result<Stmt, ParseError> {
         let mut declarations = Vec::new();
         loop {
-            let name = if kind == BindingKind::Var {
-                self.expect_var_binding_identifier("expected binding name")?
+            if self.matches(&TokenKind::LBracket) {
+                let source_name = self.next_for_in_temp_identifier("decl_array");
+                let source_expr = Expr::Identifier(source_name.clone());
+                let elements = self.parse_for_head_array_pattern_after_lbracket(kind)?;
+                self.expect(TokenKind::Equal, "expected '=' after array binding pattern")?;
+                let initializer = self.parse_expression_inner()?;
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: source_name,
+                    initializer: Some(initializer),
+                });
+                for element in elements {
+                    let value = Self::array_pattern_element_value_expr(&source_expr, &element);
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: element.name,
+                        initializer: Some(value),
+                    });
+                }
+            } else if self.check(&TokenKind::LBrace) {
+                let source_name = self.next_for_in_temp_identifier("decl_object");
+                let effects = self.parse_object_parameter_pattern_effects(&source_name)?;
+                self.expect(
+                    TokenKind::Equal,
+                    "expected '=' after object binding pattern",
+                )?;
+                let initializer = self.parse_expression_inner()?;
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: source_name,
+                    initializer: Some(initializer),
+                });
+                declarations
+                    .extend(self.lower_object_pattern_variable_declarations(kind, effects)?);
             } else {
-                self.expect_binding_identifier("expected binding name")?
-            };
-            let initializer = if self.matches(&TokenKind::Equal) {
-                Some(self.parse_expression_inner()?)
-            } else {
-                None
-            };
+                let name = if kind == BindingKind::Var {
+                    self.expect_var_binding_identifier("expected binding name")?
+                } else {
+                    self.expect_binding_identifier("expected binding name")?
+                };
+                let initializer = if self.matches(&TokenKind::Equal) {
+                    Some(self.parse_expression_inner()?)
+                } else {
+                    None
+                };
 
-            if kind == BindingKind::Const
-                && initializer.is_none()
-                && !(self.check_keyword("in") || self.check_keyword("of"))
-            {
-                return Err(ParseError {
-                    message: "const declaration requires an initializer".to_string(),
-                    position: self.current_position(),
+                if kind == BindingKind::Const
+                    && initializer.is_none()
+                    && !(self.check_keyword("in") || self.check_keyword("of"))
+                {
+                    return Err(ParseError {
+                        message: "const declaration requires an initializer".to_string(),
+                        position: self.current_position(),
+                    });
+                }
+
+                declarations.push(VariableDeclaration {
+                    kind,
+                    name: Identifier(name),
+                    initializer,
                 });
             }
-
-            declarations.push(VariableDeclaration {
-                kind,
-                name: Identifier(name),
-                initializer,
-            });
 
             if !self.matches(&TokenKind::Comma) {
                 break;
@@ -3497,6 +3709,35 @@ impl Parser {
         } else {
             Ok(Stmt::VariableDeclarations(declarations))
         }
+    }
+
+    fn lower_object_pattern_variable_declarations(
+        &mut self,
+        kind: BindingKind,
+        effects: Vec<Stmt>,
+    ) -> Result<Vec<VariableDeclaration>, ParseError> {
+        let mut declarations = Vec::new();
+        for statement in effects {
+            match statement {
+                Stmt::Expression(Expr::Assign { target, value }) => {
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: target,
+                        initializer: Some(*value),
+                    });
+                }
+                Stmt::Expression(expr) => {
+                    let effect_name = self.next_for_in_temp_identifier("decl_object_effect");
+                    declarations.push(VariableDeclaration {
+                        kind,
+                        name: effect_name,
+                        initializer: Some(expr),
+                    });
+                }
+                _ => return Err(self.error_current("unsupported object binding pattern")),
+            }
+        }
+        Ok(declarations)
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
@@ -8375,6 +8616,29 @@ for ( [let][0]; ; )
     #[test]
     fn parses_for_of_const_initializerless_declaration_baseline() {
         parse_script("for (const x of [1, 2, 3]) {}").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_for_await_of_inside_async_function() {
+        parse_script("async function f() { for await (const x of xs) { x; } }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn rejects_for_await_of_outside_async_function() {
+        let err = parse_script("for await (const x of xs) {}")
+            .expect_err("for-await should fail outside async function");
+        assert_eq!(err.message, "for-await is only valid in async functions");
+    }
+
+    #[test]
+    fn parses_variable_array_destructuring_declaration_baseline() {
+        parse_script("const [x = init()] = values;").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_variable_object_destructuring_declaration_baseline() {
+        parse_script("const {x = init()} = values;").expect("script parsing should succeed");
     }
 
     #[test]

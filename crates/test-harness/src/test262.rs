@@ -306,6 +306,8 @@ if (typeof $262.createRealm !== "function") {
     otherGlobal.Array = Array;
     otherGlobal.Function = Function;
     otherGlobal.Error = Error;
+    otherGlobal.AggregateError = AggregateError;
+    otherGlobal.Reflect = Reflect;
     otherGlobal.TypeError = function TypeError(message) {
       var err = new hostGlobal.TypeError(message);
       Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);
@@ -372,6 +374,40 @@ if (typeof $262.IsHTMLDDA !== "function") {
     $262.IsHTMLDDA = function () { return null; };
   }
 }
+if (typeof $262.AbstractModuleSource !== "function") {
+  var AbstractModuleSource = (function () { throw new TypeError(); }).bind(null);
+  Object.defineProperty(AbstractModuleSource, "length", {
+    value: 0,
+    writable: false,
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSource, "name", {
+    value: "AbstractModuleSource",
+    writable: false,
+    enumerable: false,
+    configurable: true
+  });
+  var AbstractModuleSourcePrototype = Object.create(Object.prototype);
+  Object.defineProperty(AbstractModuleSourcePrototype, "constructor", {
+    value: AbstractModuleSource,
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSourcePrototype, Symbol.toStringTag, {
+    get: function () { return undefined; },
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(AbstractModuleSource, "prototype", {
+    value: AbstractModuleSourcePrototype,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
+  $262.AbstractModuleSource = AbstractModuleSource;
+}
 "#;
 
 const ASYNC_DONE_PRELUDE: &str = r#"
@@ -409,6 +445,7 @@ fn build_case_source(
         .iter()
         .any(|flag| flag == "onlyStrict");
     let needs_async_done = case.frontmatter.flags.iter().any(|flag| flag == "async");
+    let is_module = case.frontmatter.flags.iter().any(|flag| flag == "module");
     if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict && !needs_async_done {
         return Ok(case.body.to_string());
     }
@@ -418,7 +455,7 @@ fn build_case_source(
     if needs_only_strict {
         source.push_str("\"use strict\";\n");
     }
-    if needs_harness_262 {
+    if needs_harness_262 && !is_module {
         source.push_str(HARNESS_262_PRELUDE);
         source.push('\n');
     }
@@ -553,6 +590,30 @@ fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcSt
         JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
     );
     let outcome = if request.is_module {
+        if requires_unsupported_harness_globals(source) {
+            let prelude = match parse_script(HARNESS_262_PRELUDE) {
+                Ok(script) => script,
+                Err(err) => {
+                    return (
+                        ExecutionOutcome::RuntimeFail(format!(
+                            "failed to parse harness 262 prelude: {}",
+                            err.message
+                        )),
+                        GcStats::default(),
+                    );
+                }
+            };
+            let prelude_chunk = compile_script(&prelude);
+            if let Err(err) = vm.execute_in_realm_persistent(&prelude_chunk, &realm) {
+                return (
+                    ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+                    vm.gc_stats(),
+                );
+            }
+            if let Some(harness_262) = vm.global_property("$262") {
+                realm.define_global("$262", harness_262);
+            }
+        }
         let Some(entry_key) = request.module_entry_key.as_deref() else {
             return (
                 ExecutionOutcome::RuntimeFail("missing module entry key".to_string()),
@@ -573,7 +634,7 @@ fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcSt
             entry_key: entry_key.to_string(),
             entry_source: source.to_string(),
         };
-        match vm.evaluate_module_entry(entry_key, &mut host) {
+        match vm.evaluate_module_entry_in_realm(entry_key, &mut host, &realm) {
             Ok(_) => {
                 if request.is_async {
                     if let Err(err) = drain_async_jobs_and_assert_done(&mut vm, &realm) {
@@ -1381,6 +1442,31 @@ import "x";
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_abstract_module_source_harness_stub() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("abstract-module-source-pass.js"),
+            "if (typeof $262.AbstractModuleSource !== 'function') { throw new Error('missing constructor'); }\n\
+             var descriptor = Object.getOwnPropertyDescriptor($262.AbstractModuleSource.prototype, Symbol.toStringTag);\n\
+             if (typeof descriptor.get !== 'function' || descriptor.set !== undefined) { throw new Error('bad toStringTag descriptor'); }\n\
+             var threw = false;\n\
+             try { new $262.AbstractModuleSource(); } catch (e) { threw = e instanceof TypeError; }\n\
+             if (!threw) { throw new Error('constructor should throw TypeError'); }\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }
