@@ -152,17 +152,26 @@ def draw_svg(report: dict, output_path: Path) -> None:
         'stroke="#111827" stroke-width="1.2"/>'
     )
 
-    # legend
-    lx = width - 300
+    # legend (right aligned, dynamic width to avoid clipping)
     ly = 22
-    for i, engine in enumerate(ENGINE_ORDER):
-        x = lx + i * 95
+    legend_items: list[tuple[str, float]] = []
+    for engine in ENGINE_ORDER:
+        # 12px legend font: rough width estimate keeps layout deterministic for plain ASCII labels.
+        text_w = max(36.0, len(engine) * 7.0)
+        item_w = 12.0 + 5.0 + text_w
+        legend_items.append((engine, item_w))
+    spacing = 12.0
+    total_w = sum(width for _, width in legend_items) + spacing * (len(legend_items) - 1)
+    x = max(margin_left, width - margin_right - total_w)
+    for i, (engine, item_w) in enumerate(legend_items):
         parts.append(
-            f'<rect x="{x}" y="{ly - 10}" width="12" height="12" fill="{ENGINE_COLORS[engine]}" rx="2"/>'
+            f'<rect x="{x:.2f}" y="{ly - 10}" width="12" height="12" fill="{ENGINE_COLORS[engine]}" rx="2"/>'
         )
         parts.append(
-            f'<text x="{x + 17}" y="{ly}" font-size="12" fill="#374151">{engine}</text>'
+            f'<text x="{x + 17:.2f}" y="{ly}" font-size="12" fill="#374151">{engine}</text>'
         )
+        if i < len(legend_items) - 1:
+            x += item_w + spacing
 
     parts.append("</svg>")
     output_path.parent.mkdir(parents=True, exist_ok=True)

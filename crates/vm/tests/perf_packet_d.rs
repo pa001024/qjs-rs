@@ -9,19 +9,31 @@ use vm::{
     perf::HotspotAttribution,
 };
 
+type RunScriptResult = (
+    JsValue,
+    PacketDFastPathCounters,
+    PacketGFastPathCounters,
+    PacketHFastPathCounters,
+    Option<HotspotAttribution>,
+);
+
+type PacketIParitySample = (
+    JsValue,
+    PacketDFastPathCounters,
+    PacketGFastPathCounters,
+    PacketHFastPathCounters,
+    HotspotAttribution,
+);
+
+type PacketIParityResult = (PacketIParitySample, PacketIParitySample);
+
 fn run_script(
     source: &str,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
     packet_i_enabled: bool,
-) -> (
-    JsValue,
-    PacketDFastPathCounters,
-    PacketGFastPathCounters,
-    PacketHFastPathCounters,
-    Option<HotspotAttribution>,
-) {
+) -> RunScriptResult {
     let script = parse_script(source).expect("script should parse");
     let chunk = compile_script(&script);
     let mut realm = Realm::default();
@@ -146,22 +158,7 @@ fn assert_packet_i_toggle_parity(
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
-) -> (
-    (
-        JsValue,
-        PacketDFastPathCounters,
-        PacketGFastPathCounters,
-        PacketHFastPathCounters,
-        HotspotAttribution,
-    ),
-    (
-        JsValue,
-        PacketDFastPathCounters,
-        PacketGFastPathCounters,
-        PacketHFastPathCounters,
-        HotspotAttribution,
-    ),
-) {
+) -> PacketIParityResult {
     let (baseline_value, baseline_d, baseline_g, baseline_h, baseline_hotspot) = run_script(
         source,
         packet_d_enabled,
@@ -385,6 +382,27 @@ sum;
     assert!(
         hotspot.identifier_resolution > 0,
         "identifier hotspot attribution must remain active with packet-D enabled"
+    );
+}
+
+#[test]
+fn perf_packet_d_define_variable_primes_slot_cache_before_first_load() {
+    let source = r#"
+{
+  let local = 1;
+  local;
+}
+"#;
+
+    let (value, counters, _hotspot) = assert_packet_d_parity(source);
+    assert_eq!(value, JsValue::Number(1.0));
+    assert!(
+        counters.slot_guard_hits > 0,
+        "first lexical read after DefineVariable should hit packet-D slot cache"
+    );
+    assert_eq!(
+        counters.slot_guard_misses, 0,
+        "DefineVariable should prewarm packet-D slots and avoid first-read misses"
     );
 }
 

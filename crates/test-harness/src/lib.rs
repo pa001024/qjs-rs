@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 use vm::{ModuleHost, ModuleHostError, PromiseJobDrainReport, PromiseJobHostHooks, Vm, VmError};
 
 pub use host_callbacks::{
-    HostCallbackExecution, HostCallbackRegistration, execute_script_with_host_callbacks,
-    run_script_with_host_callbacks,
+    AsyncHostCallbackRegistration, HostCallbackExecution, HostCallbackRegistration,
+    execute_script_with_host_callbacks, execute_script_with_host_callbacks_and_async_callbacks,
+    run_script_with_host_callbacks, run_script_with_host_callbacks_and_async_callbacks,
 };
 
 pub fn run_expression(source: &str) -> Result<JsValue, String> {

@@ -2,16 +2,46 @@ use bytecode::{Chunk, Opcode};
 use runtime::JsValue;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread;
+use std::time::Duration;
 
 use crate::{HostFunction, PropertyAttributes, Realm, Vm, VmError};
 
 type ExternalHostCallback =
     dyn FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError>;
+type ExternalAsyncHostCallback = dyn FnMut(
+    &mut Vm,
+    Option<JsValue>,
+    Vec<JsValue>,
+    &Realm,
+    bool,
+) -> Result<ExternalHostCallbackFuture, VmError>;
+
+pub(super) type ExternalHostCallbackFuture =
+    Pin<Box<dyn Future<Output = Result<JsValue, VmError>> + Send + 'static>>;
+
+pub(super) enum ExternalHostCallbackEntry {
+    Sync(Box<ExternalHostCallback>),
+    Async(Box<ExternalAsyncHostCallback>),
+}
+
+impl fmt::Debug for ExternalHostCallbackEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sync(_) => f.write_str("Sync"),
+            Self::Async(_) => f.write_str("Async"),
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ExternalHostCallbacks {
     pub(super) next_id: u64,
-    pub(super) entries: BTreeMap<u64, Box<ExternalHostCallback>>,
+    pub(super) entries: BTreeMap<u64, ExternalHostCallbackEntry>,
 }
 
 impl fmt::Debug for ExternalHostCallbacks {
@@ -70,9 +100,44 @@ impl Vm {
             .next_id
             .checked_add(1)
             .expect("external host callback id overflow");
-        self.external_host_callbacks
-            .entries
-            .insert(callback_id, Box::new(callback));
+        self.external_host_callbacks.entries.insert(
+            callback_id,
+            ExternalHostCallbackEntry::Sync(Box::new(callback)),
+        );
+        let function = self.create_host_function_value(HostFunction::ExternalCallback {
+            callback_id,
+            constructable,
+        });
+        self.set_builtin_function_name(&function, name);
+        self.set_builtin_function_length(&function, length);
+        function
+    }
+
+    pub fn register_async_host_callback_function<F, Fut>(
+        &mut self,
+        name: &str,
+        length: f64,
+        constructable: bool,
+        mut callback: F,
+    ) -> JsValue
+    where
+        F: FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<Fut, VmError>
+            + 'static,
+        Fut: Future<Output = Result<JsValue, VmError>> + Send + 'static,
+    {
+        let callback_id = self.external_host_callbacks.next_id;
+        self.external_host_callbacks.next_id = self
+            .external_host_callbacks
+            .next_id
+            .checked_add(1)
+            .expect("external host callback id overflow");
+        self.external_host_callbacks.entries.insert(
+            callback_id,
+            ExternalHostCallbackEntry::Async(Box::new(move |vm, this_arg, args, realm, strict| {
+                callback(vm, this_arg, args, realm, strict)
+                    .map(|future| Box::pin(future) as ExternalHostCallbackFuture)
+            })),
+        );
         let function = self.create_host_function_value(HostFunction::ExternalCallback {
             callback_id,
             constructable,
@@ -118,6 +183,44 @@ impl Vm {
         Ok(function)
     }
 
+    pub fn define_global_async_host_callback<F, Fut>(
+        &mut self,
+        realm: &Realm,
+        name: &str,
+        length: f64,
+        constructable: bool,
+        callback: F,
+    ) -> Result<JsValue, VmError>
+    where
+        F: FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<Fut, VmError>
+            + 'static,
+        Fut: Future<Output = Result<JsValue, VmError>> + Send + 'static,
+    {
+        if self.global_object_id.is_none() || self.scopes.is_empty() {
+            let bootstrap = Chunk {
+                code: vec![Opcode::LoadUndefined, Opcode::Halt],
+                functions: Vec::new(),
+            };
+            let _ = self.execute_in_realm(&bootstrap, realm)?;
+        }
+        let global_object_id = self
+            .global_object_id
+            .ok_or(VmError::RuntimeIntegrity("missing global object"))?;
+        let function =
+            self.register_async_host_callback_function(name, length, constructable, callback);
+        self.define_global_property_with_attributes(
+            global_object_id,
+            name,
+            function.clone(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        )?;
+        Ok(function)
+    }
+
     pub(super) fn execute_external_host_callback(
         &mut self,
         callback_id: u64,
@@ -131,7 +234,15 @@ impl Vm {
             .entries
             .remove(&callback_id)
             .ok_or(VmError::TypeError("HostCallback:Missing"))?;
-        let result = callback(self, this_arg, args, realm, caller_strict);
+        let result = match &mut callback {
+            ExternalHostCallbackEntry::Sync(callback) => {
+                callback(self, this_arg, args, realm, caller_strict)
+            }
+            ExternalHostCallbackEntry::Async(callback) => {
+                let future = callback(self, this_arg, args, realm, caller_strict);
+                self.spawn_async_host_callback_promise(future)
+            }
+        };
         self.external_host_callbacks
             .entries
             .insert(callback_id, callback);
@@ -183,5 +294,34 @@ impl Vm {
             },
         );
         Ok(prototype)
+    }
+}
+
+struct ThreadWaker {
+    thread: thread::Thread,
+}
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.thread.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.thread.unpark();
+    }
+}
+
+pub(super) fn block_on_external_host_future(
+    mut future: ExternalHostCallbackFuture,
+) -> Result<JsValue, VmError> {
+    let waker = Waker::from(Arc::new(ThreadWaker {
+        thread: thread::current(),
+    }));
+    let mut context = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => thread::park_timeout(Duration::from_millis(1)),
+        }
     }
 }

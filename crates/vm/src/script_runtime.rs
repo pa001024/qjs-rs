@@ -5,18 +5,72 @@ use runtime::{JsValue, Realm};
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use crate::{Vm, VmError};
 
 type ScriptHostCallback =
     dyn FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError>;
+type ScriptAsyncHostCallback = dyn FnMut(
+    &mut Vm,
+    Option<JsValue>,
+    Vec<JsValue>,
+    &Realm,
+    bool,
+) -> Result<ScriptAsyncHostCallbackFuture, VmError>;
+type ScriptAsyncHostCallbackFuture =
+    Pin<Box<dyn Future<Output = Result<JsValue, VmError>> + Send + 'static>>;
 
 pub struct ScriptHostCallbackRegistration {
     pub name: String,
     pub length: f64,
     pub constructable: bool,
     pub callback: Box<ScriptHostCallback>,
+}
+
+pub struct ScriptAsyncHostCallbackRegistration {
+    pub name: String,
+    pub length: f64,
+    pub constructable: bool,
+    pub callback: Box<ScriptAsyncHostCallback>,
+}
+
+impl ScriptAsyncHostCallbackRegistration {
+    pub fn function<F, Fut>(name: impl Into<String>, length: f64, mut callback: F) -> Self
+    where
+        F: FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<Fut, VmError>
+            + 'static,
+        Fut: Future<Output = Result<JsValue, VmError>> + Send + 'static,
+    {
+        Self {
+            name: name.into(),
+            length,
+            constructable: false,
+            callback: Box::new(move |vm, this_arg, args, realm, strict| {
+                callback(vm, this_arg, args, realm, strict)
+                    .map(|future| Box::pin(future) as ScriptAsyncHostCallbackFuture)
+            }),
+        }
+    }
+
+    pub fn constructor<F, Fut>(name: impl Into<String>, length: f64, mut callback: F) -> Self
+    where
+        F: FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<Fut, VmError>
+            + 'static,
+        Fut: Future<Output = Result<JsValue, VmError>> + Send + 'static,
+    {
+        Self {
+            name: name.into(),
+            length,
+            constructable: true,
+            callback: Box::new(move |vm, this_arg, args, realm, strict| {
+                callback(vm, this_arg, args, realm, strict)
+                    .map(|future| Box::pin(future) as ScriptAsyncHostCallbackFuture)
+            }),
+        }
+    }
 }
 
 impl ScriptHostCallbackRegistration {
@@ -141,6 +195,31 @@ impl ScriptRuntime {
         Ok(value)
     }
 
+    pub fn register_async_host_callback(
+        &mut self,
+        registration: ScriptAsyncHostCallbackRegistration,
+    ) -> Result<JsValue, ScriptRuntimeError> {
+        let ScriptAsyncHostCallbackRegistration {
+            name,
+            length,
+            constructable,
+            mut callback,
+        } = registration;
+        let value = self
+            .vm
+            .define_global_async_host_callback(
+                &self.realm,
+                &name,
+                length,
+                constructable,
+                move |vm, this_arg, args, realm, caller_strict| {
+                    callback(vm, this_arg, args, realm, caller_strict)
+                },
+            )
+            .map_err(ScriptRuntimeError::Vm)?;
+        Ok(value)
+    }
+
     pub fn execute_source(&mut self, source: &str) -> Result<ScriptRunOutput, ScriptRuntimeError> {
         let script = parse_script(source).map_err(|err| ScriptRuntimeError::Parse(err.message))?;
         let chunk = compile_script(&script);
@@ -173,14 +252,23 @@ impl ScriptRuntime {
 
     fn drain_all_promise_jobs(&mut self) -> Result<usize, ScriptRuntimeError> {
         let mut drained = 0usize;
+        let mut idle_cycles = 0usize;
         while self.vm.has_pending_promise_jobs() {
             let report = self
                 .vm
                 .drain_promise_jobs(usize::MAX, &self.realm, false)
                 .map_err(ScriptRuntimeError::Vm)?;
-            if report.processed == 0 {
+            if report.processed == 0 && report.remaining == 0 {
                 break;
             }
+            if report.processed == 0 {
+                idle_cycles = idle_cycles.saturating_add(1);
+                if idle_cycles > 128 {
+                    break;
+                }
+                continue;
+            }
+            idle_cycles = 0;
             drained = drained.saturating_add(report.processed);
         }
         Ok(drained)
@@ -242,10 +330,15 @@ fn format_js_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScriptHostCallbackRegistration, ScriptRuntime, normalize_script_path};
+    use super::{
+        ScriptAsyncHostCallbackRegistration, ScriptHostCallbackRegistration, ScriptRuntime,
+        normalize_script_path,
+    };
     use runtime::JsValue;
     use std::env;
     use std::fs;
+    use std::thread;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -308,6 +401,46 @@ mod tests {
             .expect("script with host callback should execute");
         assert_eq!(result.value, JsValue::Number(42.0));
         assert_eq!(result.result_text, "42");
+    }
+
+    #[test]
+    fn supports_registered_async_host_callbacks() {
+        let mut runtime = ScriptRuntime::new();
+        runtime
+            .register_async_host_callback(ScriptAsyncHostCallbackRegistration::function(
+                "rustAsyncAdd",
+                2.0,
+                |_vm, _this_arg, args, _realm, _strict| {
+                    let lhs = args.first().cloned().unwrap_or(JsValue::Number(0.0));
+                    let rhs = args.get(1).cloned().unwrap_or(JsValue::Number(0.0));
+                    let lhs = match lhs {
+                        JsValue::Number(value) => value,
+                        _ => 0.0,
+                    };
+                    let rhs = match rhs {
+                        JsValue::Number(value) => value,
+                        _ => 0.0,
+                    };
+                    Ok(async move {
+                        thread::sleep(Duration::from_millis(5));
+                        Ok(JsValue::Number(lhs + rhs))
+                    })
+                },
+            ))
+            .expect("async host callback should register");
+
+        let bootstrap = runtime
+            .execute_source(
+                "globalThis.__async_result = 0; \
+                 rustAsyncAdd(20, 22).then(function(v) { globalThis.__async_result = v; });",
+            )
+            .expect("script with async host callback should execute");
+        assert!(bootstrap.drained_promise_jobs > 0);
+
+        let read_back = runtime
+            .execute_source("globalThis.__async_result;")
+            .expect("async readback should execute");
+        assert_eq!(read_back.value, JsValue::Number(42.0));
     }
 
     #[test]

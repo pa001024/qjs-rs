@@ -63,6 +63,7 @@ pub enum TokenKind {
     Dot,
     Comma,
     Colon,
+    At,
     Question,
     Semicolon,
     LParen,
@@ -1124,6 +1125,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if byte == b':' {
             tokens.push(Token {
                 kind: TokenKind::Colon,
+                span: Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            });
+            pos += 1;
+            continue;
+        }
+
+        if byte == b'@' {
+            tokens.push(Token {
+                kind: TokenKind::At,
                 span: Span {
                     start: pos,
                     end: pos + 1,
@@ -2198,6 +2211,14 @@ mod tests {
     }
 
     #[test]
+    fn lexes_decorator_at_token() {
+        let tokens = lex("@sealed").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::At);
+        assert_eq!(tokens[1].kind, TokenKind::Identifier("sealed".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn lexes_regular_expression_literal_with_escape() {
         let tokens = lex(r"/\;/u").expect("tokenization should succeed");
         assert_eq!(tokens[0].kind, TokenKind::Slash);
@@ -2337,7 +2358,7 @@ mod tests {
 
     #[test]
     fn errors_on_invalid_character() {
-        let err = lex("1 @ 2").expect_err("tokenization should fail");
+        let err = lex("1 # 2").expect_err("tokenization should fail");
         assert_eq!(err.position, 2);
     }
 }
