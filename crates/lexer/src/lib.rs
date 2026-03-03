@@ -54,7 +54,11 @@ pub enum TokenKind {
     GreaterGreaterGreaterEqual,
     GreaterEqual,
     AndAnd,
+    AndAndEqual,
     OrOr,
+    OrOrEqual,
+    QuestionQuestion,
+    QuestionQuestionEqual,
     Ellipsis,
     Dot,
     Comma,
@@ -912,6 +916,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte == b'&' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'&' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::AndAndEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
                 tokens.push(Token {
                     kind: TokenKind::AndAnd,
                     span: Span {
@@ -946,6 +961,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         if byte == b'|' {
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'|' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::OrOrEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
                 tokens.push(Token {
                     kind: TokenKind::OrOr,
                     span: Span {
@@ -1108,6 +1134,28 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'?' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'?' {
+                if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                    tokens.push(Token {
+                        kind: TokenKind::QuestionQuestionEqual,
+                        span: Span {
+                            start: pos,
+                            end: pos + 3,
+                        },
+                    });
+                    pos += 3;
+                    continue;
+                }
+                tokens.push(Token {
+                    kind: TokenKind::QuestionQuestion,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Question,
                 span: Span {
@@ -2032,6 +2080,17 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::OrOr);
         assert_eq!(tokens[4].kind, TokenKind::Identifier("c".to_string()));
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_nullish_and_logical_assignment_operators() {
+        let tokens = lex("a ?? b; x &&= y; m ||= n; p ??= q;")
+            .expect("tokenization should succeed");
+        let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
+        assert!(kinds.contains(&TokenKind::QuestionQuestion));
+        assert!(kinds.contains(&TokenKind::AndAndEqual));
+        assert!(kinds.contains(&TokenKind::OrOrEqual));
+        assert!(kinds.contains(&TokenKind::QuestionQuestionEqual));
     }
 
     #[test]

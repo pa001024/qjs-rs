@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
-use runtime::Realm;
+use runtime::{JsValue, NativeFunction, Realm};
 use vm::{GcStats, ModuleHost, ModuleHostError, PromiseJobDrainStopReason, Vm, VmError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,7 +366,11 @@ if (typeof $262.destroy !== "function") {
   $262.destroy = function () {};
 }
 if (typeof $262.IsHTMLDDA !== "function") {
-  $262.IsHTMLDDA = function () { return null; };
+  if ("__qjs_IsHTMLDDA__" in globalThis) {
+    $262.IsHTMLDDA = globalThis.__qjs_IsHTMLDDA__;
+  } else {
+    $262.IsHTMLDDA = function () { return null; };
+  }
 }
 "#;
 
@@ -544,6 +548,10 @@ fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcSt
     }
     let mut realm = Realm::default();
     install_baseline(&mut realm);
+    realm.define_global(
+        "__qjs_IsHTMLDDA__",
+        JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+    );
     let outcome = if request.is_module {
         let Some(entry_key) = request.module_entry_key.as_deref() else {
             return (
@@ -1339,6 +1347,32 @@ import "x";
         fs::write(
             test_root.join("harness-262-pass.js"),
             "$262.gc();\n$262.agent.report(1);\n1 + 1;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_is_html_dda_semantics() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("is-html-dda-pass.js"),
+            "if (typeof $262.IsHTMLDDA !== 'undefined') { throw new Error('bad typeof'); }\n\
+             if (!($262.IsHTMLDDA == undefined && undefined == $262.IsHTMLDDA)) { throw new Error('bad == undefined'); }\n\
+             if (!($262.IsHTMLDDA == null && null == $262.IsHTMLDDA)) { throw new Error('bad == null'); }\n\
+             if (($262.IsHTMLDDA ? 1 : 2) !== 2) { throw new Error('bad toBoolean'); }\n\
+             if (($262.IsHTMLDDA || 2) !== 2) { throw new Error('bad ||'); }\n\
+             if (($262.IsHTMLDDA && 2) !== $262.IsHTMLDDA) { throw new Error('bad &&'); }\n",
         )
         .expect("case file should be written");
 

@@ -110,6 +110,7 @@ pub enum NativeFunction {
     DecodeURIComponent,
     EncodeURI,
     EncodeURIComponent,
+    IsHTMLDDA,
     Escape,
     Unescape,
     Assert,

@@ -9431,6 +9431,7 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 Ok(JsValue::String(self.coerce_to_string(&value)))
             }
+            NativeFunction::IsHTMLDDA => Ok(JsValue::Null),
             NativeFunction::Escape => self.execute_escape(&args, realm, caller_strict),
             NativeFunction::Unescape => self.execute_unescape(&args, realm, caller_strict),
             NativeFunction::Assert => {
@@ -24461,6 +24462,10 @@ impl Vm {
         }
     }
 
+    fn has_is_html_dda_internal_slot(value: &JsValue) -> bool {
+        matches!(value, JsValue::NativeFunction(NativeFunction::IsHTMLDDA))
+    }
+
     fn abstract_equality_compare(
         &mut self,
         left: JsValue,
@@ -24468,6 +24473,14 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<bool, VmError> {
+        if (Self::has_is_html_dda_internal_slot(&left)
+            && matches!(right, JsValue::Null | JsValue::Undefined))
+            || (Self::has_is_html_dda_internal_slot(&right)
+                && matches!(left, JsValue::Null | JsValue::Undefined))
+        {
+            return Ok(true);
+        }
+
         if std::mem::discriminant(&left) == std::mem::discriminant(&right) {
             return Ok(self.strict_equality_compare(&left, &right));
         }
@@ -24614,8 +24627,13 @@ impl Vm {
                     "string"
                 }
             }
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                "function"
+            JsValue::Function(_) | JsValue::HostFunction(_) => "function",
+            JsValue::NativeFunction(native) => {
+                if *native == NativeFunction::IsHTMLDDA {
+                    "undefined"
+                } else {
+                    "function"
+                }
             }
             JsValue::Object(_) => "object",
         }
@@ -25627,7 +25645,8 @@ impl Vm {
             JsValue::Bool(boolean) => *boolean,
             JsValue::Number(number) => *number != 0.0 && !number.is_nan(),
             JsValue::String(value) => !value.is_empty(),
-            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => true,
+            JsValue::Function(_) | JsValue::HostFunction(_) => true,
+            JsValue::NativeFunction(native) => *native != NativeFunction::IsHTMLDDA,
             JsValue::Object(_) => true,
         }
     }
@@ -28363,6 +28382,31 @@ mod tests {
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_is_html_dda_truthiness_typeof_and_equality_semantics() {
+        let script = parse_script(
+            "var IsHTMLDDA = __qjs_IsHTMLDDA__; \
+             var ok = true; \
+             ok = ok && typeof IsHTMLDDA === 'undefined'; \
+             ok = ok && (IsHTMLDDA == undefined) && (undefined == IsHTMLDDA); \
+             ok = ok && (IsHTMLDDA == null) && (null == IsHTMLDDA); \
+             ok = ok && (IsHTMLDDA !== undefined) && (IsHTMLDDA !== null); \
+             ok = ok && ((IsHTMLDDA ? 1 : 2) === 2); \
+             ok = ok && ((IsHTMLDDA && 1) === IsHTMLDDA); \
+             ok = ok && ((IsHTMLDDA || 2) === 2); \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "__qjs_IsHTMLDDA__",
+            JsValue::NativeFunction(NativeFunction::IsHTMLDDA),
+        );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }

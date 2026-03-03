@@ -1472,6 +1472,15 @@ struct ForHeadArrayPatternElement {
     default_initializer: Option<Expr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentKind {
+    Simple,
+    Compound(BinaryOp),
+    LogicalAnd,
+    LogicalOr,
+    Nullish,
+}
+
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
@@ -1749,11 +1758,15 @@ impl Parser {
                 message: "yield is only valid in generator function".to_string(),
                 position: self.previous_position(),
             })?;
-        let omit_expression = self.check(&TokenKind::Semicolon)
+        let delegated = self.matches(&TokenKind::Star);
+        let omit_expression = !delegated
+            && (self.check(&TokenKind::Semicolon)
             || self.check(&TokenKind::RBrace)
             || self.is_eof()
-            || self.has_line_terminator_between_prev_and_current();
-        let yielded = if omit_expression {
+            || self.has_line_terminator_between_prev_and_current());
+        let yielded = if delegated {
+            self.parse_expression_with_commas()?
+        } else if omit_expression {
             Expr::Identifier(Identifier("undefined".to_string()))
         } else {
             self.parse_expression_with_commas()?
@@ -2402,7 +2415,7 @@ impl Parser {
                 let assignment = self.rewrite_assignment_target(
                     target,
                     current_key_value_expr.clone(),
-                    None,
+                    AssignmentKind::Simple,
                     self.current_position(),
                 )?;
                 iteration_statements.push(Stmt::Expression(Expr::Unary {
@@ -2583,7 +2596,7 @@ impl Parser {
                 let assignment = self.rewrite_assignment_target(
                     target,
                     current_identifier_expr.clone(),
-                    None,
+                    AssignmentKind::Simple,
                     self.current_position(),
                 )?;
                 iteration_statements.push(Stmt::Expression(Expr::Unary {
@@ -3487,7 +3500,7 @@ impl Parser {
     }
 
     fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
-        const MAX_EXPRESSION_DEPTH: usize = 80;
+        const MAX_EXPRESSION_DEPTH: usize = 40;
         self.expression_depth += 1;
         if self.expression_depth > MAX_EXPRESSION_DEPTH {
             self.expression_depth = self.expression_depth.saturating_sub(1);
@@ -3544,83 +3557,143 @@ impl Parser {
         }
 
         let left = self.parse_conditional()?;
-        let (binary_op, assignment_position) = if self.matches(&TokenKind::Equal) {
-            (None, self.previous_position())
+        let (assignment_kind, assignment_position) = if self.matches(&TokenKind::Equal) {
+            (AssignmentKind::Simple, self.previous_position())
         } else if self.matches(&TokenKind::PlusEqual) {
-            (Some(BinaryOp::Add), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::Add), self.previous_position())
         } else if self.matches(&TokenKind::MinusEqual) {
-            (Some(BinaryOp::Sub), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::Sub), self.previous_position())
         } else if self.matches(&TokenKind::StarEqual) {
-            (Some(BinaryOp::Mul), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::Mul), self.previous_position())
         } else if self.matches(&TokenKind::SlashEqual) {
-            (Some(BinaryOp::Div), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::Div), self.previous_position())
         } else if self.matches(&TokenKind::PercentEqual) {
-            (Some(BinaryOp::Mod), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::Mod), self.previous_position())
         } else if self.matches(&TokenKind::LessLessEqual) {
-            (Some(BinaryOp::ShiftLeft), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::ShiftLeft),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::GreaterGreaterEqual) {
-            (Some(BinaryOp::ShiftRight), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::ShiftRight),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::GreaterGreaterGreaterEqual) {
-            (Some(BinaryOp::UnsignedShiftRight), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::UnsignedShiftRight),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::AmpEqual) {
-            (Some(BinaryOp::BitAnd), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::BitAnd), self.previous_position())
         } else if self.matches(&TokenKind::PipeEqual) {
-            (Some(BinaryOp::BitOr), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::BitOr), self.previous_position())
         } else if self.matches(&TokenKind::CaretEqual) {
-            (Some(BinaryOp::BitXor), self.previous_position())
+            (AssignmentKind::Compound(BinaryOp::BitXor), self.previous_position())
+        } else if self.matches(&TokenKind::AndAndEqual) {
+            (AssignmentKind::LogicalAnd, self.previous_position())
+        } else if self.matches(&TokenKind::OrOrEqual) {
+            (AssignmentKind::LogicalOr, self.previous_position())
+        } else if self.matches(&TokenKind::QuestionQuestionEqual) {
+            (AssignmentKind::Nullish, self.previous_position())
         } else {
             return Ok(left);
         };
 
         let right = self.parse_assignment()?;
-        self.rewrite_assignment_target(left, right, binary_op, assignment_position)
+        self.rewrite_assignment_target(left, right, assignment_kind, assignment_position)
     }
 
     fn rewrite_assignment_target(
         &mut self,
         left: Expr,
         right: Expr,
-        binary_op: Option<BinaryOp>,
+        assignment_kind: AssignmentKind,
         assignment_position: usize,
     ) -> Result<Expr, ParseError> {
         match left {
             Expr::Identifier(target) => {
-                let value = self.wrap_compound_assignment_value(
-                    Expr::Identifier(target.clone()),
-                    right,
-                    binary_op,
-                );
-                Ok(Expr::Assign {
-                    target,
-                    value: Box::new(value),
-                })
+                let read = Expr::Identifier(target.clone());
+                let assign = Expr::Assign {
+                    target: target.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::Assign { value, .. } = value {
+                            Ok(Expr::Assign { target, value })
+                        } else {
+                            unreachable!("assignment rewrite should preserve identifier target")
+                        }
+                    }
+                }
             }
             Expr::Member { object, property } => {
                 let read = Expr::Member {
                     object: object.clone(),
                     property: property.clone(),
                 };
-                let value = self.wrap_compound_assignment_value(read, right, binary_op);
-                Ok(Expr::AssignMember {
-                    object,
-                    property,
-                    value: Box::new(value),
-                })
+                let assign = Expr::AssignMember {
+                    object: object.clone(),
+                    property: property.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::AssignMember { value, .. } = value {
+                            Ok(Expr::AssignMember {
+                                object,
+                                property,
+                                value,
+                            })
+                        } else {
+                            unreachable!(
+                                "assignment rewrite should preserve member target"
+                            )
+                        }
+                    }
+                }
             }
             Expr::MemberComputed { object, property } => {
                 let read = Expr::MemberComputed {
                     object: object.clone(),
                     property: property.clone(),
                 };
-                let value = self.wrap_compound_assignment_value(read, right, binary_op);
-                Ok(Expr::AssignMemberComputed {
-                    object,
-                    property,
-                    value: Box::new(value),
-                })
+                let assign = Expr::AssignMemberComputed {
+                    object: object.clone(),
+                    property: property.clone(),
+                    value: Box::new(right),
+                };
+                match assignment_kind {
+                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                        Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
+                    }
+                    _ => {
+                        let value = self.wrap_assignment_value(read, assign, assignment_kind);
+                        if let Expr::AssignMemberComputed { value, .. } = value {
+                            Ok(Expr::AssignMemberComputed {
+                                object,
+                                property,
+                                value,
+                            })
+                        } else {
+                            unreachable!(
+                                "assignment rewrite should preserve computed member target"
+                            )
+                        }
+                    }
+                }
             }
             Expr::ArrayLiteral(elements) => {
-                if binary_op.is_some() {
+                if assignment_kind != AssignmentKind::Simple {
                     return Err(ParseError {
                         message: "invalid assignment target".to_string(),
                         position: assignment_position,
@@ -3629,7 +3702,7 @@ impl Parser {
                 self.lower_array_assignment_pattern(elements, right, assignment_position)
             }
             Expr::ObjectLiteral(properties) => {
-                if binary_op.is_some() {
+                if assignment_kind != AssignmentKind::Simple {
                     return Err(ParseError {
                         message: "invalid assignment target".to_string(),
                         position: assignment_position,
@@ -3639,7 +3712,7 @@ impl Parser {
             }
             other if Self::is_annex_b_call_assignment_target(&other) => {
                 let _ = right;
-                let _ = binary_op;
+                let _ = assignment_kind;
                 Ok(Expr::AnnexBCallAssignmentTarget {
                     target: Box::new(other),
                 })
@@ -3651,20 +3724,91 @@ impl Parser {
         }
     }
 
-    fn wrap_compound_assignment_value(
+    fn wrap_assignment_value(
         &self,
-        left: Expr,
-        right: Expr,
-        binary_op: Option<BinaryOp>,
+        read: Expr,
+        assign_expr: Expr,
+        assignment_kind: AssignmentKind,
     ) -> Expr {
-        if let Some(binary_op) = binary_op {
-            Expr::Binary {
-                op: binary_op,
-                left: Box::new(left),
-                right: Box::new(right),
+        match assignment_kind {
+            AssignmentKind::Simple => assign_expr,
+            AssignmentKind::Compound(binary_op) => match assign_expr {
+                Expr::Assign { target, value } => Expr::Assign {
+                    target,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                Expr::AssignMember {
+                    object,
+                    property,
+                    value,
+                } => Expr::AssignMember {
+                    object,
+                    property,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                Expr::AssignMemberComputed {
+                    object,
+                    property,
+                    value,
+                } => Expr::AssignMemberComputed {
+                    object,
+                    property,
+                    value: Box::new(Expr::Binary {
+                        op: binary_op,
+                        left: Box::new(read),
+                        right: value,
+                    }),
+                },
+                _ => unreachable!("assignment rewrite should produce assignment expression"),
+            },
+            AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                unreachable!("short-circuit assignment is rewritten separately")
             }
-        } else {
-            right
+        }
+    }
+
+    fn lower_short_circuit_assignment(
+        &mut self,
+        current_value: Expr,
+        assign_expr: Expr,
+        assignment_kind: AssignmentKind,
+    ) -> Expr {
+        let current_name = self.next_for_in_temp_identifier("logical_assign_current");
+        let current_ref = Expr::Identifier(current_name.clone());
+        let condition = match assignment_kind {
+            AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr => current_ref.clone(),
+            AssignmentKind::Nullish => self.build_nullish_check_expression(current_ref.clone()),
+            AssignmentKind::Simple | AssignmentKind::Compound(_) => {
+                unreachable!("expected short-circuit assignment kind")
+            }
+        };
+        let (consequent, alternate) = match assignment_kind {
+            AssignmentKind::LogicalAnd => (assign_expr, current_ref),
+            AssignmentKind::LogicalOr => (current_ref, assign_expr),
+            AssignmentKind::Nullish => (assign_expr, current_ref),
+            AssignmentKind::Simple | AssignmentKind::Compound(_) => {
+                unreachable!("expected short-circuit assignment kind")
+            }
+        };
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![current_name],
+                body: vec![Stmt::Return(Some(Expr::Conditional {
+                    condition: Box::new(condition),
+                    consequent: Box::new(consequent),
+                    alternate: Box::new(alternate),
+                }))],
+            }),
+            arguments: vec![current_value],
         }
     }
 
@@ -3957,6 +4101,12 @@ impl Parser {
     }
 
     fn try_parse_arrow_function(&mut self) -> Result<Option<Expr>, ParseError> {
+        // Deeply nested parenthesized expressions should trip the expression-depth guard
+        // instead of recursing through arrow-function lookahead.
+        if self.expression_depth >= 64 {
+            return Ok(None);
+        }
+
         let saved_pos = self.pos;
         let mut is_async = false;
 
@@ -4085,8 +4235,57 @@ impl Parser {
         Ok(expr)
     }
 
+    fn nullish_undefined_expression() -> Expr {
+        Expr::Unary {
+            op: UnaryOp::Void,
+            expr: Box::new(Expr::Number(0.0)),
+        }
+    }
+
+    fn build_nullish_check_expression(&self, value: Expr) -> Expr {
+        Expr::Binary {
+            op: BinaryOp::LogicalOr,
+            left: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(value.clone()),
+                right: Box::new(Expr::Null),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::StrictEqual,
+                left: Box::new(value),
+                right: Box::new(Self::nullish_undefined_expression()),
+            }),
+        }
+    }
+
+    fn lower_nullish_coalesce_expression(&mut self, left: Expr, right: Expr) -> Expr {
+        let current_name = self.next_for_in_temp_identifier("coalesce_value");
+        let current_ref = Expr::Identifier(current_name.clone());
+        Expr::Call {
+            callee: Box::new(Expr::Function {
+                name: None,
+                params: vec![current_name],
+                body: vec![Stmt::Return(Some(Expr::Conditional {
+                    condition: Box::new(self.build_nullish_check_expression(current_ref.clone())),
+                    consequent: Box::new(right),
+                    alternate: Box::new(current_ref),
+                }))],
+            }),
+            arguments: vec![left],
+        }
+    }
+
+    fn parse_coalesce(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_logical_or()?;
+        while self.matches(&TokenKind::QuestionQuestion) {
+            let right = self.parse_logical_or()?;
+            expr = self.lower_nullish_coalesce_expression(expr, right);
+        }
+        Ok(expr)
+    }
+
     fn parse_conditional(&mut self) -> Result<Expr, ParseError> {
-        let condition = self.parse_logical_or()?;
+        let condition = self.parse_coalesce()?;
         if !self.matches(&TokenKind::Question) {
             return Ok(condition);
         }
@@ -6016,7 +6215,11 @@ impl Parser {
             | TokenKind::GreaterGreaterGreaterEqual
             | TokenKind::GreaterEqual
             | TokenKind::AndAnd
+            | TokenKind::AndAndEqual
             | TokenKind::OrOr
+            | TokenKind::OrOrEqual
+            | TokenKind::QuestionQuestion
+            | TokenKind::QuestionQuestionEqual
             | TokenKind::Ellipsis
             | TokenKind::Dot
             | TokenKind::Comma
@@ -6332,7 +6535,16 @@ impl Parser {
                                 position: self.previous_position(),
                             });
                         }
-                        Expr::Identifier(Identifier(name.clone()))
+                        let identifier = Identifier(name.clone());
+                        if self.matches(&TokenKind::Equal) {
+                            let initializer = self.parse_assignment()?;
+                            Expr::Assign {
+                                target: identifier,
+                                value: Box::new(initializer),
+                            }
+                        } else {
+                            Expr::Identifier(identifier)
+                        }
                     }
                     ObjectPropertyKey::Computed(_) => {
                         return Err(self.error_current(
@@ -7634,6 +7846,24 @@ export default value;\n";
     }
 
     #[test]
+    fn parses_nullish_coalesce_expression_baseline() {
+        let parsed = parse_expression("a ?? b").expect("parser should succeed");
+        assert!(matches!(parsed, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn parses_logical_assignment_operators_baseline() {
+        parse_script("var x = 1; x &&= 2; x ||= 3; x ??= 4;")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_object_assignment_pattern_with_default_initializer() {
+        parse_script("var x, count = 0; ({x = (count = count + 1)} = {x: 1});")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
     fn parses_function_declaration_and_return() {
         let parsed = parse_script("function add(a, b) { return a + b; } add(1, 2);")
             .expect("script parsing should succeed");
@@ -7750,6 +7980,12 @@ export default value;\n";
     #[test]
     fn parses_generator_yield_statements_baseline() {
         parse_script("function* g() { yield 1; if (true) { yield; } yield ''; }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_generator_yield_star_baseline() {
+        parse_script("function* g(iter) { yield* iter; }")
             .expect("script parsing should succeed");
     }
 
