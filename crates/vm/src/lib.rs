@@ -378,6 +378,7 @@ enum HostFunction {
     RegExpExecThis,
     RegExpCompileThis,
     RegExpToStringThis,
+    RegExpSymbolSplitThis,
     RegExpLegacyStaticGetter(RegExpLegacyStaticProperty),
     RegExpLegacyInputSetter,
     ReflectDefineProperty,
@@ -2406,6 +2407,7 @@ impl Vm {
             | HostFunction::RegExpExecThis
             | HostFunction::RegExpCompileThis
             | HostFunction::RegExpToStringThis
+            | HostFunction::RegExpSymbolSplitThis
             | HostFunction::RegExpLegacyStaticGetter(_)
             | HostFunction::RegExpLegacyInputSetter
             | HostFunction::AssertSameValue
@@ -8716,6 +8718,10 @@ impl Vm {
                 self.execute_regexp_to_string(receiver_id)
                     .map(JsValue::String)
             }
+            HostFunction::RegExpSymbolSplitThis => {
+                let receiver_id = self.strict_this_regexp_object(this_arg)?;
+                self.execute_regexp_symbol_split_this(receiver_id, &args, realm, caller_strict)
+            }
             HostFunction::RegExpLegacyStaticGetter(property) => {
                 Self::ensure_regexp_legacy_accessor_receiver(this_arg)?;
                 Ok(JsValue::String(self.regexp_legacy_property_value(property)))
@@ -9811,6 +9817,16 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
+        let receiver_is_direct_regexp = self
+            .objects
+            .get(&receiver_id)
+            .is_some_and(|object| object.prototype == self.regexp_prototype_id);
+        if !receiver_is_direct_regexp {
+            return Err(VmError::TypeError(
+                "RegExp.prototype.compile receiver must be direct RegExp instance",
+            ));
+        }
+
         let pattern_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
         let flags_arg = args.get(1).cloned().unwrap_or(JsValue::Undefined);
 
@@ -9863,6 +9879,76 @@ impl Vm {
     fn execute_regexp_to_string(&self, object_id: ObjectId) -> Result<String, VmError> {
         let (source, flags) = self.regexp_slot_strings(object_id)?;
         Ok(format!("/{source}/{flags}"))
+    }
+
+    fn execute_regexp_symbol_split_this(
+        &mut self,
+        receiver_id: ObjectId,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = self.coerce_to_string_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+
+        // IsRegExp/SpeciesConstructor observable reads can mutate the source regexp.
+        let _ = self.get_property_from_receiver(
+            JsValue::Object(receiver_id),
+            "Symbol.match",
+            realm,
+        )?;
+
+        let (pattern, flags) = self.regexp_slot_strings(receiver_id)?;
+        let unicode = flags.contains('u');
+        let normalized_pattern = Self::normalize_regexp_pattern(&pattern, unicode).map_err(|_| {
+            VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            ))
+        })?;
+        let splitter = Self::build_regexp_matcher(&normalized_pattern, &flags).map_err(|_| {
+            VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            ))
+        })?;
+
+        let limit = match args.get(1) {
+            None | Some(JsValue::Undefined) => u32::MAX as usize,
+            Some(value) => {
+                let number = self.coerce_number_runtime(value.clone(), realm, caller_strict)?;
+                Self::to_uint32_number(number) as usize
+            }
+        };
+        if limit == 0 {
+            return self.create_array_from_values(Vec::new());
+        }
+
+        let mut output: Vec<JsValue> = Vec::new();
+        let mut last_end = 0usize;
+        for candidate in splitter.find_iter(&input) {
+            let Ok(matched) = candidate else {
+                break;
+            };
+            if matched.start() < last_end {
+                continue;
+            }
+            output.push(JsValue::String(input[last_end..matched.start()].to_string()));
+            if output.len() >= limit {
+                return self.create_array_from_values(output);
+            }
+            last_end = matched.end();
+        }
+        output.push(JsValue::String(input[last_end..].to_string()));
+        if output.len() > limit {
+            output.truncate(limit);
+        }
+        self.create_array_from_values(output)
     }
 
     fn regexp_legacy_property_from_name(property: &str) -> Option<RegExpLegacyStaticProperty> {
@@ -19457,8 +19543,11 @@ impl Vm {
             let test = self.create_host_function_value(HostFunction::RegExpTestThis);
             let exec = self.create_host_function_value(HostFunction::RegExpExecThis);
             let compile = self.create_host_function_value(HostFunction::RegExpCompileThis);
+            let symbol_split = self.create_host_function_value(HostFunction::RegExpSymbolSplitThis);
             self.set_builtin_function_length(&compile, 2.0);
             self.set_builtin_function_name(&compile, "compile");
+            self.set_builtin_function_length(&symbol_split, 2.0);
+            self.set_builtin_function_name(&symbol_split, "[Symbol.split]");
             let to_string = self.create_host_function_value(HostFunction::RegExpToStringThis);
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
@@ -19503,6 +19592,17 @@ impl Vm {
                 object.properties.insert("toString".to_string(), to_string);
                 object.property_attributes.insert(
                     "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("Symbol.split".to_string(), symbol_split);
+                object.property_attributes.insert(
+                    "Symbol.split".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
