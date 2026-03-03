@@ -69,4 +69,4 @@
 
 ---
 *Requirements defined: 2026-02-27 for milestone v1.1*
-*Roadmap alignment updated: 2026-02-28*
+*Roadmap alignment updated: 2026-03-03*
