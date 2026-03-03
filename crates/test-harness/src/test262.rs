@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -9,7 +9,7 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::Realm;
-use vm::{GcStats, Vm};
+use vm::{GcStats, ModuleHost, ModuleHostError, PromiseJobDrainStopReason, Vm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativePhase {
@@ -185,14 +185,6 @@ pub fn should_skip(frontmatter: &Test262Frontmatter) -> bool {
 }
 
 fn classify_frontmatter_skip(frontmatter: &Test262Frontmatter) -> Option<SkipCategory> {
-    // Current engine is script-only, non-strict baseline without harness includes.
-    if frontmatter.flags.iter().any(|flag| flag == "module") {
-        return Some(SkipCategory::FlagModule);
-    }
-    if frontmatter.flags.iter().any(|flag| flag == "async") {
-        return Some(SkipCategory::FlagAsync);
-    }
-
     // Feature-gated tests are skipped until corresponding features land.
     if has_unsupported_features(frontmatter) {
         return Some(SkipCategory::RequiresFeature);
@@ -346,6 +338,28 @@ if (typeof $262.destroy !== "function") {
 }
 "#;
 
+const ASYNC_DONE_PRELUDE: &str = r#"
+var __qjs_test262_done_state__ = 0;
+var __qjs_test262_prev_done__ = (typeof $DONE === "function") ? $DONE : null;
+$DONE = function (error) {
+  if (__qjs_test262_done_state__ !== 0) {
+    throw new Error("$DONE called multiple times");
+  }
+  if (error === undefined) {
+    __qjs_test262_done_state__ = 1;
+    if (__qjs_test262_prev_done__ !== null) {
+      return __qjs_test262_prev_done__();
+    }
+    return;
+  }
+  __qjs_test262_done_state__ = 2;
+  if (__qjs_test262_prev_done__ !== null) {
+    __qjs_test262_prev_done__(error);
+  }
+  throw error;
+};
+"#;
+
 fn build_case_source(
     case: &Test262Case<'_>,
     harness_root: Option<&Path>,
@@ -358,7 +372,8 @@ fn build_case_source(
         .flags
         .iter()
         .any(|flag| flag == "onlyStrict");
-    if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict {
+    let needs_async_done = case.frontmatter.flags.iter().any(|flag| flag == "async");
+    if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict && !needs_async_done {
         return Ok(case.body.to_string());
     }
 
@@ -369,6 +384,10 @@ fn build_case_source(
     }
     if needs_harness_262 {
         source.push_str(HARNESS_262_PRELUDE);
+        source.push('\n');
+    }
+    if needs_async_done {
+        source.push_str(ASYNC_DONE_PRELUDE);
         source.push('\n');
     }
     if !includes_source.is_empty() {
@@ -449,17 +468,19 @@ fn execute_case_with_options_and_stats(
     runtime_gc: bool,
     runtime_gc_check_interval: Option<usize>,
 ) -> (ExecutionOutcome, GcStats) {
-    let source_owned = source.to_string();
+    let request = CaseExecutionRequest {
+        source: source.to_string(),
+        is_module: false,
+        is_async: false,
+        module_entry_key: None,
+        suite_root: None,
+        auto_gc,
+        auto_gc_threshold,
+        runtime_gc,
+        runtime_gc_check_interval,
+    };
     let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
-    match builder.spawn(move || {
-        execute_case_inner(
-            &source_owned,
-            auto_gc,
-            auto_gc_threshold,
-            runtime_gc,
-            runtime_gc_check_interval,
-        )
-    }) {
+    match builder.spawn(move || execute_case_inner(&request)) {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
             Err(_) => (
@@ -474,52 +495,102 @@ fn execute_case_with_options_and_stats(
     }
 }
 
-fn execute_case_inner(
-    source: &str,
-    auto_gc: bool,
-    auto_gc_threshold: Option<usize>,
-    runtime_gc: bool,
-    runtime_gc_check_interval: Option<usize>,
-) -> (ExecutionOutcome, GcStats) {
+fn execute_case_inner(request: &CaseExecutionRequest) -> (ExecutionOutcome, GcStats) {
+    let source = request.source.as_str();
     let trace_stages = std::env::var("QJS_TRACE_STAGES")
         .ok()
         .map(|value| !value.is_empty() && value != "0")
         .unwrap_or(false);
-    if trace_stages {
-        println!("  stage: parse");
-    }
-    let parsed = match parse_script(source) {
-        Ok(script) => script,
-        Err(err) => return (ExecutionOutcome::ParseFail(err.message), GcStats::default()),
-    };
-
-    if trace_stages {
-        println!("  stage: compile");
-    }
-    let chunk = compile_script(&parsed);
-    if trace_stages {
-        println!("  stage: execute");
-    }
     let mut vm = Vm::default();
-    if auto_gc {
+    if request.auto_gc {
         vm.enable_auto_gc(true);
-        vm.set_auto_gc_object_threshold(auto_gc_threshold.unwrap_or(1));
-        vm.enable_runtime_gc(runtime_gc);
-        if let Some(interval) = runtime_gc_check_interval {
+        vm.set_auto_gc_object_threshold(request.auto_gc_threshold.unwrap_or(1));
+        vm.enable_runtime_gc(request.runtime_gc);
+        if let Some(interval) = request.runtime_gc_check_interval {
             vm.set_runtime_gc_check_interval(interval);
         }
     }
     let mut realm = Realm::default();
     install_baseline(&mut realm);
-    let outcome = match vm.execute_in_realm(&chunk, &realm) {
-        Ok(_) => ExecutionOutcome::Pass,
-        Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+    let outcome = if request.is_module {
+        let Some(entry_key) = request.module_entry_key.as_deref() else {
+            return (
+                ExecutionOutcome::RuntimeFail("missing module entry key".to_string()),
+                GcStats::default(),
+            );
+        };
+        let Some(suite_root) = request.suite_root.as_deref() else {
+            return (
+                ExecutionOutcome::RuntimeFail("missing module suite root".to_string()),
+                GcStats::default(),
+            );
+        };
+        if trace_stages {
+            println!("  stage: execute(module)");
+        }
+        let mut host = FileSystemModuleHost {
+            suite_root: suite_root.to_path_buf(),
+            entry_key: entry_key.to_string(),
+            entry_source: source.to_string(),
+        };
+        match vm.evaluate_module_entry(entry_key, &mut host) {
+            Ok(_) => {
+                if request.is_async {
+                    if let Err(err) = drain_async_jobs_and_assert_done(&mut vm, &realm) {
+                        ExecutionOutcome::RuntimeFail(err)
+                    } else {
+                        ExecutionOutcome::Pass
+                    }
+                } else {
+                    ExecutionOutcome::Pass
+                }
+            }
+            Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+        }
+    } else {
+        if trace_stages {
+            println!("  stage: parse");
+        }
+        let parsed = match parse_script(source) {
+            Ok(script) => script,
+            Err(err) => return (ExecutionOutcome::ParseFail(err.message), GcStats::default()),
+        };
+        if trace_stages {
+            println!("  stage: compile");
+        }
+        let chunk = compile_script(&parsed);
+        if trace_stages {
+            println!("  stage: execute");
+        }
+        let execute_result = if request.is_async {
+            vm.execute_in_realm_persistent(&chunk, &realm)
+        } else {
+            vm.execute_in_realm(&chunk, &realm)
+        };
+        match execute_result {
+            Ok(_) => {
+                if request.is_async {
+                    if let Err(err) = drain_async_jobs_and_assert_done(&mut vm, &realm) {
+                        ExecutionOutcome::RuntimeFail(err)
+                    } else {
+                        ExecutionOutcome::Pass
+                    }
+                } else {
+                    ExecutionOutcome::Pass
+                }
+            }
+            Err(err) => ExecutionOutcome::RuntimeFail(format!("{err:?}")),
+        }
     };
     (outcome, vm.gc_stats())
 }
 
 struct CaseExecutionRequest {
     source: String,
+    is_module: bool,
+    is_async: bool,
+    module_entry_key: Option<String>,
+    suite_root: Option<PathBuf>,
     auto_gc: bool,
     auto_gc_threshold: Option<usize>,
     runtime_gc: bool,
@@ -537,6 +608,100 @@ struct SuiteCaseExecutor {
     worker_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone)]
+struct FileSystemModuleHost {
+    suite_root: PathBuf,
+    entry_key: String,
+    entry_source: String,
+}
+
+impl FileSystemModuleHost {
+    fn normalize_key(raw: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        for component in Path::new(raw).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    parts.pop()?;
+                }
+                Component::Normal(name) => parts.push(name.to_string_lossy().to_string()),
+                Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join("/"))
+    }
+}
+
+impl ModuleHost for FileSystemModuleHost {
+    fn resolve(
+        &mut self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<String, ModuleHostError> {
+        if specifier.starts_with("./") || specifier.starts_with("../") {
+            let referrer = referrer.ok_or(ModuleHostError::ResolveFailed)?;
+            let base = Path::new(referrer)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            let joined = base.join(specifier);
+            let raw = joined.to_string_lossy().replace('\\', "/");
+            return Self::normalize_key(&raw).ok_or(ModuleHostError::ResolveFailed);
+        }
+
+        let normalized = specifier.replace('\\', "/");
+        Self::normalize_key(&normalized).ok_or(ModuleHostError::ResolveFailed)
+    }
+
+    fn load(&mut self, canonical_key: &str) -> Result<String, ModuleHostError> {
+        let canonical_key =
+            Self::normalize_key(canonical_key).ok_or(ModuleHostError::LoadFailed)?;
+        if canonical_key == self.entry_key {
+            return Ok(self.entry_source.clone());
+        }
+        let source_path = self.suite_root.join(&canonical_key);
+        fs::read_to_string(source_path).map_err(|_| ModuleHostError::LoadFailed)
+    }
+}
+
+fn drain_async_jobs_and_assert_done(vm: &mut Vm, realm: &Realm) -> Result<(), String> {
+    let report = vm
+        .drain_promise_jobs(10_000, realm, false)
+        .map_err(|err| format!("{err:?}"))?;
+    if report.remaining > 0 || report.stop_reason == PromiseJobDrainStopReason::BudgetExhausted {
+        return Err(format!(
+            "async drain budget exhausted (processed={}, remaining={})",
+            report.processed, report.remaining
+        ));
+    }
+    let done_check_script = parse_script("__qjs_test262_done_state__ === 1;")
+        .map_err(|err| format!("failed to parse async done check: {}", err.message))?;
+    let done_check_chunk = compile_script(&done_check_script);
+    let done_check = vm
+        .execute_in_realm_persistent(&done_check_chunk, realm)
+        .map_err(|err| format!("{err:?}"))?;
+    if matches!(done_check, runtime::JsValue::Bool(true)) {
+        Ok(())
+    } else {
+        Err("$DONE was not called".to_string())
+    }
+}
+
+fn file_to_module_entry_key(file: &Path, suite_root: &Path) -> Result<String, String> {
+    let relative = file
+        .strip_prefix(suite_root)
+        .map_err(|_| format!("failed to resolve module entry key for {}", file.display()))?;
+    let raw = relative.to_string_lossy().replace('\\', "/");
+    FileSystemModuleHost::normalize_key(&raw).ok_or_else(|| {
+        format!(
+            "failed to normalize module entry key for {}",
+            file.display()
+        )
+    })
+}
+
 impl SuiteCaseExecutor {
     fn new() -> Result<Self, String> {
         let (command_tx, command_rx) = mpsc::channel::<CaseWorkerCommand>();
@@ -547,13 +712,7 @@ impl SuiteCaseExecutor {
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         CaseWorkerCommand::Execute(request) => {
-                            let result = execute_case_inner(
-                                &request.source,
-                                request.auto_gc,
-                                request.auto_gc_threshold,
-                                request.runtime_gc,
-                                request.runtime_gc_check_interval,
-                            );
+                            let result = execute_case_inner(&request);
                             if result_tx.send(result).is_err() {
                                 break;
                             }
@@ -573,20 +732,10 @@ impl SuiteCaseExecutor {
 
     fn execute(
         &self,
-        source: String,
-        auto_gc: bool,
-        auto_gc_threshold: Option<usize>,
-        runtime_gc: bool,
-        runtime_gc_check_interval: Option<usize>,
+        request: CaseExecutionRequest,
     ) -> Result<(ExecutionOutcome, GcStats), String> {
         self.command_tx
-            .send(CaseWorkerCommand::Execute(CaseExecutionRequest {
-                source,
-                auto_gc,
-                auto_gc_threshold,
-                runtime_gc,
-                runtime_gc_check_interval,
-            }))
+            .send(CaseWorkerCommand::Execute(request))
             .map_err(|_| "suite case worker disconnected before request".to_string())?;
         self.result_rx
             .recv()
@@ -651,18 +800,33 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         }
         let source_to_execute = build_case_source(&case, harness_root.as_deref())
             .map_err(|err| format!("include setup failed for {}: {err}", file.display()))?;
+        let is_module = case.frontmatter.flags.iter().any(|flag| flag == "module");
+        let is_async = case.frontmatter.flags.iter().any(|flag| flag == "async");
+        let module_entry_key = if is_module {
+            Some(file_to_module_entry_key(&file, &suite_root)?)
+        } else {
+            None
+        };
         let parse_tripwire = expected == ExpectedOutcome::ParseFail
             && (source_to_execute.contains("$DONOTEVALUATE")
                 || source_to_execute.contains("This statement should not be evaluated."));
         summary.executed += 1;
         let (actual, gc_stats) = suite_case_executor
-            .execute(
-                source_to_execute,
-                options.auto_gc,
-                options.auto_gc_threshold,
-                options.runtime_gc,
-                options.runtime_gc_check_interval,
-            )
+            .execute(CaseExecutionRequest {
+                source: source_to_execute,
+                is_module,
+                is_async,
+                module_entry_key,
+                suite_root: if is_module {
+                    Some(suite_root.clone())
+                } else {
+                    None
+                },
+                auto_gc: options.auto_gc,
+                auto_gc_threshold: options.auto_gc_threshold,
+                runtime_gc: options.runtime_gc,
+                runtime_gc_check_interval: options.runtime_gc_check_interval,
+            })
             .map_err(|err| format!("failed to execute {}: {err}", file.display()))?;
         summary.gc.collections_total += gc_stats.collections_total;
         summary.gc.boundary_collections += gc_stats.boundary_collections;
@@ -923,7 +1087,7 @@ import "x";
     fn skips_flags_includes_and_features_not_supported_yet() {
         let module_case = parse_test262_case("/*---\nflags: [module]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&module_case.frontmatter));
+        assert!(!should_skip(&module_case.frontmatter));
 
         let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
@@ -931,7 +1095,7 @@ import "x";
 
         let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&async_case.frontmatter));
+        assert!(!should_skip(&async_case.frontmatter));
 
         let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
@@ -957,7 +1121,7 @@ import "x";
                 .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&module_case.frontmatter),
-            Some(SkipCategory::FlagModule),
+            None,
         );
 
         let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
@@ -971,7 +1135,7 @@ import "x";
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&async_case.frontmatter),
-            Some(SkipCategory::FlagAsync),
+            None,
         );
 
         let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
@@ -998,9 +1162,14 @@ import "x";
             .expect("fixture file should be written");
         fs::write(
             root.join("cases").join("flag-module.js"),
-            "/*---\nflags: [module]\n---*/\nimport 'x';\n",
+            "/*---\nflags: [module]\n---*/\nimport './dep_FIXTURE.js';\n",
         )
         .expect("module file should be written");
+        fs::write(
+            root.join("cases").join("dep_FIXTURE.js"),
+            "export default 1;\n",
+        )
+            .expect("module dependency file should be written");
         fs::write(
             root.join("cases").join("flag-only-strict.js"),
             "/*---\nflags: [onlyStrict]\n---*/\n1;\n",
@@ -1008,7 +1177,7 @@ import "x";
         .expect("strict file should be written");
         fs::write(
             root.join("cases").join("flag-async.js"),
-            "/*---\nflags: [async]\n---*/\n1;\n",
+            "/*---\nflags: [async]\n---*/\n$DONE();\n",
         )
         .expect("async file should be written");
         fs::write(
@@ -1032,16 +1201,16 @@ import "x";
         let summary =
             run_suite(&root, SuiteOptions::default()).expect("suite execution should succeed");
 
-        assert_eq!(summary.skipped, 5);
-        assert_eq!(summary.skipped_categories.fixture_file, 1);
-        assert_eq!(summary.skipped_categories.flag_module, 1);
+        assert_eq!(summary.skipped, 4);
+        assert_eq!(summary.skipped_categories.fixture_file, 2);
+        assert_eq!(summary.skipped_categories.flag_module, 0);
         assert_eq!(summary.skipped_categories.flag_only_strict, 0);
-        assert_eq!(summary.skipped_categories.flag_async, 1);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
         assert_eq!(summary.skipped_categories.requires_includes, 1);
         assert_eq!(summary.skipped_categories.requires_feature, 1);
         assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
-        assert_eq!(summary.executed, 3);
-        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.executed, 5);
+        assert_eq!(summary.passed, 5);
         assert!(summary.has_balanced_skip_totals());
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
@@ -1140,6 +1309,47 @@ import "x";
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_async_case_with_done_callback() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("async-pass.js"),
+            "/*---\nflags: [async]\n---*/\nPromise.resolve(1).then(function () { $DONE(); });\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.flag_async, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn async_case_requires_done_callback_invocation() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("async-missing-done.js"),
+            "/*---\nflags: [async]\n---*/\nPromise.resolve(1).then(function () { 1 + 1; });\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 1);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }
