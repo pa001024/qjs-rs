@@ -567,4 +567,15 @@ Verdict:
 - PERF-03 quickjs-ratio gate: ❌ FAIL (`6.260034x > 1.25x`)
 - Closure status: **OPEN** (packet-h bundle is authoritative + machine-checkable, but target remains unmet)
 
+### 15.4 PERF-05 runtime-core boundary refresh (same packet-h cycle)
+
+- Command:
+  - `rg --line-number 'extern\\s+\"C\"|\\bunsafe\\b' crates/vm crates/runtime crates/bytecode crates/builtins`
+- Log artifact:
+  - `target/benchmarks/perf05-boundary-scan.packet-h.log`
+- Result:
+  - no matches (`rg` return code `1`, interpreted as clean scan)
+- Boundary conclusion:
+  - runtime-core C FFI/unsafe boundary remains clean in the authoritative packet-h closure cycle.
+
 

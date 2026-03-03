@@ -82,9 +82,9 @@ Checker verdict/log capture (same candidate path):
 | 11-11 | 3 | 2/3 ⚠️ | Final guarded optimization + packet-final evidence landed with green governance, but PERF-03 quickjs-ratio checker remains red (`5.755257x`). |
 | 11-12 | 3 | 3/3 ✅ | Packet-g guarded identifier fallback path, contract-valid packet-g artifact, and synchronized closure wording are present; ratio gate remains red and is explicitly documented. |
 | 11-13 | 3 | 3/3 ✅ | Packet-h lexical-slot guard path, parity/hotspot coverage, and packet-h contract wiring landed with strict-comparator smoke evidence. |
-| 11-14 | 3 | 2/3 ⚠️ | Authoritative packet-h candidate and machine-checkable closure bundle are present, but PERF-03 remains red and PERF-05 boundary refresh is tracked as remaining work in this plan cycle. |
+| 11-14 | 3 | 3/3 ✅ | Authoritative packet-h candidate + machine-checkable closure bundle are present, and PERF-05 boundary refresh is recorded in the same packet-h cycle. PERF-03 remains red. |
 
-Net: **33/42 truths verified**.
+Net: **34/42 truths verified**.
 
 ## Requirement Cross-Reference (Plan Frontmatter ↔ Traceability)
 
@@ -104,7 +104,7 @@ Verification conclusion per requirement:
 |---|---|---|
 | PERF-03 | ❌ Unsatisfied | Latest authoritative 11-14 packet-h checker run failed: `qjs-rs/quickjs-c 6.260034 > 1.25` (`qjs-rs=81.827593`, `quickjs-c=13.071429`). |
 | PERF-04 | ⚠️ Implemented evidence exists, closure-state open | Multiple hot-path packets (A/B/C/D/E/F/final/g/h) and before/after evidence exist, but phase closure remains gated by unresolved PERF-03. |
-| PERF-05 | ⚠️ Boundary evidence positive, closure-state open | No runtime-core C FFI introduction is recorded in Phase 11 evidence; packet-h cycle keeps boundary verification explicit in the closure packet and remains blocked only by PERF-03. |
+| PERF-05 | ⚠️ Boundary evidence positive, closure-state open | `target/benchmarks/perf05-boundary-scan.packet-h.log` records a clean runtime-core scan (`extern "C"`/`unsafe` not found); phase closure remains blocked only by PERF-03. |
 
 ## Governance/Boundary Checks
 
@@ -114,7 +114,7 @@ Verification conclusion per requirement:
   - `test (targeted packet suites)`: ✅
 - Pure-Rust runtime-core boundary scan:
   - `rg --line-number 'extern\\s+"C"|\\bunsafe\\b' crates/vm crates/runtime crates/bytecode crates/builtins`
-  - Result: no matches (clean boundary signal).
+  - Result: no matches (`target/benchmarks/perf05-boundary-scan.packet-h.log`, clean boundary signal).
 
 ## Final Status
 
