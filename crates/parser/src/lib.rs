@@ -93,6 +93,15 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
             transformed_lines.push(raw_line.to_string());
             continue;
         }
+        if trimmed.starts_with("import type ") {
+            continue;
+        }
+        if trimmed.starts_with("export type ")
+            || trimmed.starts_with("export interface ")
+            || trimmed.starts_with("export declare ")
+        {
+            continue;
+        }
         if trimmed.starts_with("import ") {
             imports.push(parse_module_import_declaration(trimmed)?);
             continue;
@@ -1481,6 +1490,14 @@ enum AssignmentKind {
     Nullish,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TsTypeAnnotationTerminator {
+    Parameter,
+    Variable,
+    Return,
+    AsAssertion,
+}
+
 #[derive(Debug)]
 struct Parser {
     tokens: Vec<Token>,
@@ -1585,6 +1602,22 @@ impl Parser {
         if self.matches(&TokenKind::Semicolon) {
             return Ok(Stmt::Empty);
         }
+        if self.check_keyword("type") && self.statement_starts_with_ts_type_alias() {
+            self.advance();
+            self.consume_ts_declaration_statement()?;
+            return Ok(Stmt::Empty);
+        }
+        if self.check_keyword("interface") && self.statement_starts_with_ts_interface_declaration()
+        {
+            self.advance();
+            self.consume_ts_declaration_statement()?;
+            return Ok(Stmt::Empty);
+        }
+        if self.check_keyword("declare") && self.statement_starts_with_ts_declare_declaration() {
+            self.advance();
+            self.consume_ts_declaration_statement()?;
+            return Ok(Stmt::Empty);
+        }
         if self.check(&TokenKind::LBrace) {
             return self.parse_block_statement();
         }
@@ -1656,6 +1689,288 @@ impl Parser {
         }
         let expr = self.parse_expression_with_commas()?;
         Ok(Stmt::Expression(expr))
+    }
+
+    fn statement_starts_with_ts_type_alias(&self) -> bool {
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+            Some(TokenKind::Identifier(_))
+        ) {
+            return false;
+        }
+        let mut index = self.pos + 2;
+        let mut angle_depth = 0usize;
+        while let Some(token) = self.tokens.get(index) {
+            match token.kind {
+                TokenKind::Less => angle_depth += 1,
+                TokenKind::Greater => {
+                    angle_depth = angle_depth.saturating_sub(1);
+                }
+                TokenKind::GreaterGreater => {
+                    angle_depth = angle_depth.saturating_sub(2);
+                }
+                TokenKind::GreaterGreaterGreater => {
+                    angle_depth = angle_depth.saturating_sub(3);
+                }
+                TokenKind::Equal if angle_depth == 0 => return true,
+                TokenKind::Semicolon | TokenKind::Eof if angle_depth == 0 => return false,
+                TokenKind::Colon | TokenKind::LParen if angle_depth == 0 => return false,
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn statement_starts_with_ts_interface_declaration(&self) -> bool {
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+            Some(TokenKind::Identifier(_))
+        ) {
+            return false;
+        }
+        let mut index = self.pos + 2;
+        let mut angle_depth = 0usize;
+        while let Some(token) = self.tokens.get(index) {
+            match token.kind {
+                TokenKind::Less => angle_depth += 1,
+                TokenKind::Greater => {
+                    angle_depth = angle_depth.saturating_sub(1);
+                }
+                TokenKind::GreaterGreater => {
+                    angle_depth = angle_depth.saturating_sub(2);
+                }
+                TokenKind::GreaterGreaterGreater => {
+                    angle_depth = angle_depth.saturating_sub(3);
+                }
+                TokenKind::LBrace if angle_depth == 0 => return true,
+                TokenKind::Semicolon | TokenKind::Eof if angle_depth == 0 => return false,
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn statement_starts_with_ts_declare_declaration(&self) -> bool {
+        self.check_nth_keyword(1, "var")
+            || self.check_nth_keyword(1, "let")
+            || self.check_nth_keyword(1, "const")
+            || self.check_nth_keyword(1, "function")
+            || self.check_nth_keyword(1, "class")
+            || self.check_nth_keyword(1, "type")
+            || self.check_nth_keyword(1, "interface")
+            || self.check_nth_keyword(1, "namespace")
+            || self.check_nth_keyword(1, "module")
+            || self.check_nth_keyword(1, "global")
+    }
+
+    fn consume_ts_declaration_statement(&mut self) -> Result<(), ParseError> {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut angle_depth = 0usize;
+        let mut consumed_any = false;
+        while !self.is_eof() {
+            if consumed_any
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0
+            {
+                if self.check(&TokenKind::Semicolon) {
+                    self.advance();
+                    break;
+                }
+                if self.check(&TokenKind::RBrace)
+                    || self.has_line_terminator_between_prev_and_current()
+                {
+                    break;
+                }
+            }
+            let Some(token) = self.current().cloned() else {
+                break;
+            };
+            match token.kind {
+                TokenKind::Eof => break,
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less => angle_depth += 1,
+                TokenKind::Greater => angle_depth = angle_depth.saturating_sub(1),
+                TokenKind::GreaterGreater => angle_depth = angle_depth.saturating_sub(2),
+                TokenKind::GreaterGreaterGreater => angle_depth = angle_depth.saturating_sub(3),
+                _ => {}
+            }
+            self.advance();
+            consumed_any = true;
+        }
+        if !consumed_any {
+            return Err(self.error_current("expected declaration"));
+        }
+        Ok(())
+    }
+
+    fn consume_optional_ts_type_annotation(
+        &mut self,
+        terminator: TsTypeAnnotationTerminator,
+    ) -> Result<bool, ParseError> {
+        if !self.matches(&TokenKind::Colon) {
+            return Ok(false);
+        }
+        self.consume_ts_type_annotation(terminator)?;
+        Ok(true)
+    }
+
+    fn consume_optional_ts_return_type_annotation(&mut self) -> Result<bool, ParseError> {
+        self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Return)
+    }
+
+    fn consume_ts_type_annotation(
+        &mut self,
+        terminator: TsTypeAnnotationTerminator,
+    ) -> Result<(), ParseError> {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut angle_depth = 0usize;
+        let mut consumed_any = false;
+        while !self.is_eof() {
+            if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0
+                && self.ts_type_annotation_terminates(terminator)
+            {
+                break;
+            }
+            let Some(token) = self.current().cloned() else {
+                break;
+            };
+            match token.kind {
+                TokenKind::Eof => break,
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Less => angle_depth += 1,
+                TokenKind::Greater => angle_depth = angle_depth.saturating_sub(1),
+                TokenKind::GreaterGreater => angle_depth = angle_depth.saturating_sub(2),
+                TokenKind::GreaterGreaterGreater => angle_depth = angle_depth.saturating_sub(3),
+                _ => {}
+            }
+            self.advance();
+            consumed_any = true;
+        }
+        if !consumed_any {
+            return Err(self.error_current("expected TypeScript type"));
+        }
+        Ok(())
+    }
+
+    fn ts_type_annotation_terminates(&self, terminator: TsTypeAnnotationTerminator) -> bool {
+        match terminator {
+            TsTypeAnnotationTerminator::Parameter => {
+                self.check(&TokenKind::Comma)
+                    || self.check(&TokenKind::RParen)
+                    || self.check(&TokenKind::Equal)
+            }
+            TsTypeAnnotationTerminator::Variable => {
+                self.check(&TokenKind::Comma)
+                    || self.check(&TokenKind::Equal)
+                    || self.check(&TokenKind::Semicolon)
+                    || self.check(&TokenKind::RParen)
+                    || self.check_keyword("in")
+                    || self.check_keyword("of")
+            }
+            TsTypeAnnotationTerminator::Return => {
+                self.check(&TokenKind::LBrace)
+                    || self.check(&TokenKind::Equal)
+                    || self.check(&TokenKind::Semicolon)
+            }
+            TsTypeAnnotationTerminator::AsAssertion => {
+                self.check_keyword("as")
+                    || self.check_keyword("in")
+                    || self.check_keyword("instanceof")
+                    || self.check_keyword("of")
+                    || matches!(
+                        self.current().map(|token| &token.kind),
+                        Some(
+                            TokenKind::Comma
+                                | TokenKind::Semicolon
+                                | TokenKind::RParen
+                                | TokenKind::RBracket
+                                | TokenKind::RBrace
+                                | TokenKind::Colon
+                                | TokenKind::Question
+                                | TokenKind::Dot
+                                | TokenKind::LParen
+                                | TokenKind::LBracket
+                                | TokenKind::Equal
+                                | TokenKind::EqualEqual
+                                | TokenKind::EqualEqualEqual
+                                | TokenKind::BangEqual
+                                | TokenKind::BangEqualEqual
+                                | TokenKind::Less
+                                | TokenKind::LessEqual
+                                | TokenKind::LessLess
+                                | TokenKind::Greater
+                                | TokenKind::GreaterEqual
+                                | TokenKind::GreaterGreater
+                                | TokenKind::GreaterGreaterGreater
+                                | TokenKind::Plus
+                                | TokenKind::PlusEqual
+                                | TokenKind::PlusPlus
+                                | TokenKind::Minus
+                                | TokenKind::MinusEqual
+                                | TokenKind::MinusMinus
+                                | TokenKind::Star
+                                | TokenKind::StarEqual
+                                | TokenKind::Slash
+                                | TokenKind::SlashEqual
+                                | TokenKind::Percent
+                                | TokenKind::PercentEqual
+                                | TokenKind::Amp
+                                | TokenKind::AmpEqual
+                                | TokenKind::AndAnd
+                                | TokenKind::AndAndEqual
+                                | TokenKind::Pipe
+                                | TokenKind::PipeEqual
+                                | TokenKind::OrOr
+                                | TokenKind::OrOrEqual
+                                | TokenKind::Caret
+                                | TokenKind::CaretEqual
+                                | TokenKind::QuestionQuestion
+                                | TokenKind::QuestionQuestionEqual
+                                | TokenKind::Eof
+                        )
+                    )
+            }
+        }
+    }
+
+    fn consume_optional_ts_definite_assignment_assertion(&mut self) -> bool {
+        if !self.check(&TokenKind::Bang) {
+            return false;
+        }
+        let followed_by_terminator = self.check_next(&TokenKind::Colon)
+            || self.check_next(&TokenKind::Equal)
+            || self.check_next(&TokenKind::Comma)
+            || self.check_next(&TokenKind::Semicolon)
+            || self.check_next(&TokenKind::RParen)
+            || self.check_nth_keyword(1, "in")
+            || self.check_nth_keyword(1, "of");
+        if followed_by_terminator {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     fn parse_block_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -1936,6 +2251,7 @@ impl Parser {
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+        let _ = self.consume_optional_ts_return_type_annotation()?;
 
         let mut body = self.parse_function_body_with_context(
             "expected '{' before function body",
@@ -2043,6 +2359,8 @@ impl Parser {
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Let)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self
                         .parse_for_in_of_array_pattern_statement(BindingKind::Let, elements);
@@ -2053,6 +2371,8 @@ impl Parser {
             } else if self.check(&TokenKind::LBrace) {
                 let binding_name = self.next_for_in_temp_identifier("for_object");
                 let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self.parse_for_in_of_object_pattern_statement(
                         BindingKind::Let,
@@ -2073,6 +2393,8 @@ impl Parser {
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Const)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self
                         .parse_for_in_of_array_pattern_statement(BindingKind::Const, elements);
@@ -2083,6 +2405,8 @@ impl Parser {
             } else if self.check(&TokenKind::LBrace) {
                 let binding_name = self.next_for_in_temp_identifier("for_object");
                 let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self.parse_for_in_of_object_pattern_statement(
                         BindingKind::Const,
@@ -2103,6 +2427,8 @@ impl Parser {
             if self.matches(&TokenKind::LBracket) {
                 let elements =
                     self.parse_for_head_array_pattern_after_lbracket(BindingKind::Var)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self
                         .parse_for_in_of_array_pattern_statement(BindingKind::Var, elements);
@@ -2113,6 +2439,8 @@ impl Parser {
             } else if self.check(&TokenKind::LBrace) {
                 let binding_name = self.next_for_in_temp_identifier("for_object");
                 let effects = self.parse_object_parameter_pattern_effects(&binding_name)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 if self.check_keyword("in") || self.check_keyword("of") {
                     return self.parse_for_in_of_object_pattern_statement(
                         BindingKind::Var,
@@ -4054,6 +4382,8 @@ impl Parser {
                 let source_name = self.next_for_in_temp_identifier("decl_array");
                 let source_expr = Expr::Identifier(source_name.clone());
                 let elements = self.parse_for_head_array_pattern_after_lbracket(kind)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 self.expect(TokenKind::Equal, "expected '=' after array binding pattern")?;
                 let initializer = self.parse_expression_inner()?;
                 declarations.push(VariableDeclaration {
@@ -4072,6 +4402,8 @@ impl Parser {
             } else if self.check(&TokenKind::LBrace) {
                 let source_name = self.next_for_in_temp_identifier("decl_object");
                 let effects = self.parse_object_parameter_pattern_effects(&source_name)?;
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 self.expect(
                     TokenKind::Equal,
                     "expected '=' after object binding pattern",
@@ -4090,6 +4422,9 @@ impl Parser {
                 } else {
                     self.expect_binding_identifier("expected binding name")?
                 };
+                self.consume_optional_ts_definite_assignment_assertion();
+                let _ =
+                    self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Variable)?;
                 let initializer = if self.matches(&TokenKind::Equal) {
                     Some(self.parse_expression_inner()?)
                 } else {
@@ -4798,73 +5133,109 @@ impl Parser {
         let saved_pos = self.pos;
         let mut is_async = false;
 
-        let (params, simple_parameters, default_initializers, pattern_effects) =
-            if self.matches(&TokenKind::LParen) {
-                let params = match self.parse_parameter_list() {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        self.pos = saved_pos;
-                        return Ok(None);
-                    }
-                };
-                if !self.matches(&TokenKind::RParen) {
+        let (params, simple_parameters, default_initializers, pattern_effects) = if self
+            .matches(&TokenKind::LParen)
+        {
+            let params = match self.parse_parameter_list() {
+                Ok(parsed) => parsed,
+                Err(_) => {
                     self.pos = saved_pos;
                     return Ok(None);
                 }
-                params
-            } else if self.check_identifier()
-                && self.check_next(&TokenKind::Equal)
-                && self.check_nth(2, &TokenKind::Greater)
-            {
-                (
-                    vec![Identifier(
-                        self.expect_binding_identifier("expected parameter name")?,
-                    )],
-                    true,
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else if self.check_keyword("async")
-                && self.check_next(&TokenKind::LParen)
-                && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
-            {
-                self.matches_keyword("async");
-                self.expect(TokenKind::LParen, "expected '(' after async")?;
-                let params = match self.parse_parameter_list() {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        self.pos = saved_pos;
-                        return Ok(None);
-                    }
-                };
-                if !self.matches(&TokenKind::RParen) {
-                    self.pos = saved_pos;
-                    return Ok(None);
-                }
-                is_async = true;
-                params
-            } else if self.check_keyword("async")
-                && self.check_nth(2, &TokenKind::Equal)
-                && self.check_nth(3, &TokenKind::Greater)
-                && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
-                && matches!(
-                    self.tokens.get(self.pos + 1).map(|token| &token.kind),
-                    Some(TokenKind::Identifier(_))
-                )
-            {
-                self.matches_keyword("async");
-                is_async = true;
-                (
-                    vec![Identifier(
-                        self.expect_binding_identifier("expected parameter name")?,
-                    )],
-                    true,
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else {
+            };
+            if !self.matches(&TokenKind::RParen) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            let _ = self.consume_optional_ts_return_type_annotation()?;
+            params
+        } else if self.check_identifier()
+            && !(self.check_keyword("async")
+                && (self.check_next(&TokenKind::LParen)
+                    || matches!(
+                        self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                        Some(TokenKind::Identifier(_))
+                    )))
+        {
+            let Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) = self.current()
+            else {
                 return Ok(None);
             };
+            if !self.identifier_text_can_be_binding_name(name) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            let param = Identifier(self.expect_binding_identifier("expected parameter name")?);
+            let mut simple_parameters = true;
+            if self.matches(&TokenKind::Question) {
+                simple_parameters = false;
+            }
+            if self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Parameter)? {
+                simple_parameters = false;
+            }
+            if !(self.check(&TokenKind::Equal) && self.check_next(&TokenKind::Greater)) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            (vec![param], simple_parameters, Vec::new(), Vec::new())
+        } else if self.check_keyword("async")
+            && self.check_next(&TokenKind::LParen)
+            && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+        {
+            self.matches_keyword("async");
+            self.expect(TokenKind::LParen, "expected '(' after async")?;
+            let params = match self.parse_parameter_list() {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    self.pos = saved_pos;
+                    return Ok(None);
+                }
+            };
+            if !self.matches(&TokenKind::RParen) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            is_async = true;
+            let _ = self.consume_optional_ts_return_type_annotation()?;
+            params
+        } else if self.check_keyword("async")
+            && !self.has_line_terminator_between_tokens(self.pos, self.pos + 1)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier(_))
+            )
+        {
+            if let Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) = self.tokens.get(self.pos + 1)
+            {
+                if !self.identifier_text_can_be_binding_name(name) {
+                    self.pos = saved_pos;
+                    return Ok(None);
+                }
+            }
+            self.matches_keyword("async");
+            is_async = true;
+            let param = Identifier(self.expect_binding_identifier("expected parameter name")?);
+            let mut simple_parameters = true;
+            if self.matches(&TokenKind::Question) {
+                simple_parameters = false;
+            }
+            if self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Parameter)? {
+                simple_parameters = false;
+            }
+            if !(self.check(&TokenKind::Equal) && self.check_next(&TokenKind::Greater)) {
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+            (vec![param], simple_parameters, Vec::new(), Vec::new())
+        } else {
+            return Ok(None);
+        };
 
         if !self.matches(&TokenKind::Equal) || !self.matches(&TokenKind::Greater) {
             self.pos = saved_pos;
@@ -5070,6 +5441,10 @@ impl Parser {
     fn parse_relational(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_shift()?;
         loop {
+            if self.matches_keyword("as") {
+                self.consume_ts_type_annotation(TsTypeAnnotationTerminator::AsAssertion)?;
+                continue;
+            }
             let op = if self.matches(&TokenKind::Less) {
                 BinaryOp::Less
             } else if self.matches(&TokenKind::LessEqual) {
@@ -5460,6 +5835,12 @@ impl Parser {
                 pattern_effects.extend(effects);
                 generated_identifier
             };
+            if self.matches(&TokenKind::Question) {
+                simple_parameters = false;
+            }
+            if self.consume_optional_ts_type_annotation(TsTypeAnnotationTerminator::Parameter)? {
+                simple_parameters = false;
+            }
             if is_rest {
                 pattern_effects.push(Stmt::Expression(Expr::String(StringLiteral {
                     value: format!("{REST_PARAM_MARKER_PREFIX}{param_index}"),
@@ -5767,6 +6148,7 @@ impl Parser {
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+        let _ = self.consume_optional_ts_return_type_annotation()?;
 
         let mut body = self.parse_function_body_with_context(
             "expected '{' before function body",
@@ -5857,6 +6239,7 @@ impl Parser {
             let (params, simple_parameters, default_initializers, pattern_effects) =
                 self.parse_parameter_list()?;
             self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+            let _ = self.consume_optional_ts_return_type_annotation()?;
             let body = self.parse_function_body_with_super_policy(
                 "expected '{' before method body",
                 "expected '}' after method body",
@@ -7357,6 +7740,7 @@ impl Parser {
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+        let _ = self.consume_optional_ts_return_type_annotation()?;
 
         let mut body = self.parse_function_body_with_super_policy(
             "expected '{' before function body",
@@ -7424,6 +7808,7 @@ impl Parser {
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
+        let _ = self.consume_optional_ts_return_type_annotation()?;
 
         let mut body = if is_async {
             self.parse_function_body_with_context(
@@ -7592,13 +7977,6 @@ impl Parser {
         self.tokens
             .get(self.pos + 1)
             .is_some_and(|token| self.identifier_token_matches_keyword(token, keyword))
-    }
-
-    fn check_nth(&self, offset: usize, expected: &TokenKind) -> bool {
-        matches!(
-            self.tokens.get(self.pos + offset),
-            Some(token) if &token.kind == expected
-        )
     }
 
     fn check_nth_keyword(&self, offset: usize, keyword: &str) -> bool {
@@ -9691,5 +10069,62 @@ for ( [let][0]; ; )
         }
         let err = parse_expression(&source).expect_err("parser should fail");
         assert_eq!(err.message, "expression nesting too deep");
+    }
+
+    #[test]
+    fn parses_function_with_typescript_annotations() {
+        parse_script("function add(a: number, b?: number): number { return a + b; } add(1, 2);")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_typed_arrow_functions() {
+        parse_expression("(x: number): number => x + 1")
+            .expect("expression parsing should succeed");
+        parse_expression("x: number => x + 1").expect("expression parsing should succeed");
+        parse_expression("async value: number => value")
+            .expect("expression parsing should succeed");
+    }
+
+    #[test]
+    fn erases_as_assertions() {
+        let parsed =
+            parse_expression("foo.bar as number").expect("expression parsing should succeed");
+        assert!(matches!(
+            parsed,
+            Expr::Member {
+                object,
+                property
+            } if matches!(
+                object.as_ref(),
+                Expr::Identifier(Identifier(name)) if name == "foo"
+            ) && property == "bar"
+        ));
+    }
+
+    #[test]
+    fn ignores_type_only_declarations() {
+        let parsed = parse_script(
+            "type Box<T> = { value: T }; interface Item { id: number; } declare const foo: number; let value: number = 1; value;",
+        )
+        .expect("script parsing should succeed");
+        assert!(matches!(
+            parsed.statements.last(),
+            Some(Stmt::Expression(Expr::Identifier(Identifier(name)))) if name == "value"
+        ));
+    }
+
+    #[test]
+    fn module_parser_skips_import_type_lines() {
+        let parsed =
+            parse_module("import type { Foo } from './types.js';\nexport const value = 1;\nvalue;")
+                .expect("module parsing should succeed");
+        assert!(parsed.imports.is_empty());
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|export| export.exported == "value" && export.local == "value")
+        );
     }
 }
