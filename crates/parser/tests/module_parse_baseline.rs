@@ -92,3 +92,23 @@ fn module_parse_export_star_baseline() {
     );
     assert!(parsed.exports.is_empty());
 }
+
+#[test]
+fn module_parse_export_star_namespace_baseline() {
+    let source = "export * as ns from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+    assert!(
+        parsed.imports[0].bindings[0]
+            .local
+            .starts_with("$__qjs_module_export_star_namespace_"),
+        "export * as ns should synthesize hidden namespace capture binding",
+    );
+    assert_eq!(parsed.exports.len(), 1);
+    assert_eq!(parsed.exports[0].exported, "ns");
+    assert_eq!(parsed.exports[0].local, parsed.imports[0].bindings[0].local);
+}

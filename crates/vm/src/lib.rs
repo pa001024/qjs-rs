@@ -119,6 +119,7 @@ const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
 const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
 const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
 const MODULE_EXPORT_STAR_BINDING_PREFIX: &str = "$__qjs_module_export_star_";
+const MODULE_EXPORT_STAR_NAMESPACE_BINDING_PREFIX: &str = "$__qjs_module_export_star_namespace_";
 const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
@@ -1969,6 +1970,9 @@ impl Vm {
                     realm.define_global(&binding.local, namespace);
                     if Self::is_module_export_star_binding(&binding.local) {
                         star_reexports.push(dependency_exports.clone());
+                    } else if Self::is_module_export_star_namespace_binding(&binding.local) {
+                        // Namespace re-export (`export * as ns from ...`) is surfaced
+                        // through synthetic local export bindings in the module snapshot.
                     }
                 } else {
                     let imported_value = dependency_exports
@@ -2087,14 +2091,7 @@ impl Vm {
     }
 
     fn sanitize_module_value_for_exchange(value: JsValue) -> JsValue {
-        match value {
-            JsValue::Number(_)
-            | JsValue::Bool(_)
-            | JsValue::Null
-            | JsValue::String(_)
-            | JsValue::Undefined => value,
-            _ => JsValue::Undefined,
-        }
+        value
     }
 
     fn create_module_namespace_value(&mut self, exports: &BTreeMap<String, JsValue>) -> JsValue {
@@ -2116,6 +2113,11 @@ impl Vm {
 
     fn is_module_export_star_binding(local_name: &str) -> bool {
         local_name.starts_with(MODULE_EXPORT_STAR_BINDING_PREFIX) && local_name.ends_with("__$")
+    }
+
+    fn is_module_export_star_namespace_binding(local_name: &str) -> bool {
+        local_name.starts_with(MODULE_EXPORT_STAR_NAMESPACE_BINDING_PREFIX)
+            && local_name.ends_with("__$")
     }
 
     fn module_cached_error(&self, canonical_key: &str, fallback: &'static str) -> VmError {
@@ -2473,6 +2475,9 @@ impl Vm {
             roots.push(getter.clone());
         }
         roots.extend(realm.globals_values().cloned());
+        for module_record in self.module_records.values() {
+            roots.extend(module_record.exports.values().cloned());
+        }
         roots.extend(self.module_cache_root_candidates.values().cloned());
         roots.extend(self.pending_job_root_candidates.values().cloned());
         self.collect_pending_promise_record_roots(&mut roots);

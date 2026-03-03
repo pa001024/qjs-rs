@@ -88,6 +88,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut default_export_index = 0usize;
     let mut reexport_binding_index = 0usize;
     let mut export_star_binding_index = 0usize;
+    let mut export_star_namespace_binding_index = 0usize;
 
     for raw_line in source.lines() {
         let trimmed = raw_line.trim();
@@ -132,16 +133,42 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 continue;
             }
             if export_body.starts_with('*') {
-                if let Some(specifier) = parse_export_star_clause(export_body)? {
-                    let local = format!("$__qjs_module_export_star_{export_star_binding_index}__$");
-                    export_star_binding_index += 1;
-                    imports.push(ModuleImport {
-                        specifier,
-                        bindings: vec![ModuleImportBinding {
-                            imported: "*".to_string(),
-                            local,
-                        }],
-                    });
+                if let Some(clause) = parse_export_star_clause(export_body)? {
+                    match clause {
+                        ExportStarClause::All { specifier } => {
+                            let local =
+                                format!("$__qjs_module_export_star_{export_star_binding_index}__$");
+                            export_star_binding_index += 1;
+                            imports.push(ModuleImport {
+                                specifier,
+                                bindings: vec![ModuleImportBinding {
+                                    imported: "*".to_string(),
+                                    local,
+                                }],
+                            });
+                        }
+                        ExportStarClause::Namespace {
+                            specifier,
+                            exported,
+                        } => {
+                            let local = format!(
+                                "$__qjs_module_export_star_namespace_{export_star_namespace_binding_index}__$"
+                            );
+                            export_star_namespace_binding_index += 1;
+                            imports.push(ModuleImport {
+                                specifier,
+                                bindings: vec![ModuleImportBinding {
+                                    imported: "*".to_string(),
+                                    local: local.clone(),
+                                }],
+                            });
+                            register_module_export(
+                                &mut exports,
+                                &mut exported_names,
+                                ModuleExport { exported, local },
+                            )?;
+                        }
+                    }
                     continue;
                 }
                 return Err(ParseError {
@@ -405,7 +432,12 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
     Ok(bindings)
 }
 
-fn parse_export_star_clause(clause: &str) -> Result<Option<String>, ParseError> {
+enum ExportStarClause {
+    All { specifier: String },
+    Namespace { specifier: String, exported: String },
+}
+
+fn parse_export_star_clause(clause: &str) -> Result<Option<ExportStarClause>, ParseError> {
     if !clause.ends_with(';') {
         return Err(ParseError {
             message: "module declaration must end with ';'".to_string(),
@@ -414,10 +446,24 @@ fn parse_export_star_clause(clause: &str) -> Result<Option<String>, ParseError> 
     }
     let body = clause[..clause.len() - 1].trim();
     let Some(raw_specifier) = body.strip_prefix("* from ") else {
+        if let Some(rest) = body.strip_prefix("* as ") {
+            let Some((raw_exported, raw_specifier)) = rest.split_once(" from ") else {
+                return Err(ParseError {
+                    message: "unsupported export form".to_string(),
+                    position: 0,
+                });
+            };
+            let exported = parse_module_export_name(raw_exported.trim())?;
+            let specifier = parse_module_string_literal(raw_specifier.trim())?;
+            return Ok(Some(ExportStarClause::Namespace {
+                specifier,
+                exported,
+            }));
+        }
         return Ok(None);
     };
     let specifier = parse_module_string_literal(raw_specifier.trim())?;
-    Ok(Some(specifier))
+    Ok(Some(ExportStarClause::All { specifier }))
 }
 
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
@@ -7958,6 +8004,25 @@ export default value;\n";
             "export * should synthesize hidden namespace capture binding"
         );
         assert!(parsed.exports.is_empty());
+    }
+
+    #[test]
+    fn module_parse_export_star_namespace_baseline() {
+        let source = "export * as ns from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert!(
+            parsed.imports[0].bindings[0]
+                .local
+                .starts_with("$__qjs_module_export_star_namespace_"),
+            "export * as ns should synthesize hidden namespace capture binding"
+        );
+        assert_eq!(parsed.exports.len(), 1);
+        assert_eq!(parsed.exports[0].exported, "ns");
+        assert_eq!(parsed.exports[0].local, parsed.imports[0].bindings[0].local);
     }
 
     #[test]
