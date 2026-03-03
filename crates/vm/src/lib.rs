@@ -24870,6 +24870,7 @@ impl Vm {
         Ok(true)
     }
 
+    #[inline(always)]
     fn is_truthy(&self, value: &JsValue) -> bool {
         match value {
             JsValue::Undefined => false,
