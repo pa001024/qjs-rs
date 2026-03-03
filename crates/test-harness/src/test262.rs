@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
 
 use builtins::install_baseline;
 use bytecode::compile_script;
@@ -187,19 +189,12 @@ fn classify_frontmatter_skip(frontmatter: &Test262Frontmatter) -> Option<SkipCat
     if frontmatter.flags.iter().any(|flag| flag == "module") {
         return Some(SkipCategory::FlagModule);
     }
-    if frontmatter.flags.iter().any(|flag| flag == "onlyStrict") {
-        return Some(SkipCategory::FlagOnlyStrict);
-    }
     if frontmatter.flags.iter().any(|flag| flag == "async") {
         return Some(SkipCategory::FlagAsync);
     }
 
-    if !frontmatter.includes.is_empty() {
-        return Some(SkipCategory::RequiresIncludes);
-    }
-
     // Feature-gated tests are skipped until corresponding features land.
-    if !frontmatter.features.is_empty() {
+    if has_unsupported_features(frontmatter) {
         return Some(SkipCategory::RequiresFeature);
     }
 
@@ -210,10 +205,164 @@ fn requires_unsupported_harness_globals(source: &str) -> bool {
     source.contains("$262")
 }
 
+const SUPPORTED_TEST262_FEATURES: &[&str] = &[
+    "arrow-function",
+    "Map",
+    "Promise",
+    "Reflect.construct",
+    "Set",
+    "Symbol",
+    "Symbol.iterator",
+    "Symbol.species",
+    "Symbol.toPrimitive",
+    "Symbol.toStringTag",
+    "WeakMap",
+    "WeakSet",
+];
+
+fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
+    frontmatter.features.iter().any(|feature| {
+        !SUPPORTED_TEST262_FEATURES
+            .iter()
+            .any(|supported| supported == feature)
+    })
+}
+
+fn infer_harness_root(root: &Path) -> Option<PathBuf> {
+    let candidate = root.parent().map(|parent| parent.join("harness"))?;
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn has_unavailable_includes(frontmatter: &Test262Frontmatter, harness_root: Option<&Path>) -> bool {
+    if frontmatter.includes.is_empty() {
+        return false;
+    }
+    let Some(harness_root) = harness_root else {
+        return true;
+    };
+    frontmatter
+        .includes
+        .iter()
+        .any(|include| !harness_root.join(include).is_file())
+}
+
+fn load_includes_source(
+    frontmatter: &Test262Frontmatter,
+    harness_root: Option<&Path>,
+) -> Result<String, String> {
+    if frontmatter.includes.is_empty() {
+        return Ok(String::new());
+    }
+    let harness_root = harness_root.ok_or_else(|| {
+        "test262 harness root was not found for includes-enabled case".to_string()
+    })?;
+    let mut combined = String::new();
+    for include in &frontmatter.includes {
+        let include_path = harness_root.join(include);
+        let source = fs::read_to_string(&include_path)
+            .map_err(|err| format!("failed to read include {}: {err}", include_path.display()))?;
+        combined.push_str(&source);
+        combined.push('\n');
+    }
+    Ok(combined)
+}
+
+const HARNESS_262_PRELUDE: &str = r#"
+if (typeof $262 === "undefined") {
+  var $262 = {};
+}
+if (typeof $262.global !== "object") {
+  $262.global = this;
+}
+if (typeof $262.evalScript !== "function") {
+  $262.evalScript = function (source) {
+    return (0, eval)(source);
+  };
+}
+if (typeof $262.gc !== "function") {
+  $262.gc = function () {};
+}
+if (typeof $262.detachArrayBuffer !== "function") {
+  $262.detachArrayBuffer = function () {};
+}
+if (typeof $262.createRealm !== "function") {
+  $262.createRealm = function () {
+    return {
+      global: this.global,
+      evalScript: this.evalScript,
+      gc: this.gc,
+      detachArrayBuffer: this.detachArrayBuffer
+    };
+  };
+}
+if (typeof $262.agent !== "object" || $262.agent === null) {
+  $262.agent = {};
+}
+if (typeof $262.agent.start !== "function") {
+  $262.agent.start = function () {};
+}
+if (typeof $262.agent.broadcast !== "function") {
+  $262.agent.broadcast = function () {};
+}
+if (typeof $262.agent.getReport !== "function") {
+  $262.agent.getReport = function () { return null; };
+}
+if (typeof $262.agent.report !== "function") {
+  $262.agent.report = function () {};
+}
+if (typeof $262.agent.sleep !== "function") {
+  $262.agent.sleep = function () {};
+}
+if (typeof $262.agent.monotonicNow !== "function") {
+  $262.agent.monotonicNow = function () { return 0; };
+}
+if (typeof $262.destroy !== "function") {
+  $262.destroy = function () {};
+}
+"#;
+
+fn build_case_source(
+    case: &Test262Case<'_>,
+    harness_root: Option<&Path>,
+) -> Result<String, String> {
+    let includes_source = load_includes_source(&case.frontmatter, harness_root)?;
+    let needs_harness_262 = requires_unsupported_harness_globals(case.body)
+        || requires_unsupported_harness_globals(&includes_source);
+    let needs_only_strict = case
+        .frontmatter
+        .flags
+        .iter()
+        .any(|flag| flag == "onlyStrict");
+    if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict {
+        return Ok(case.body.to_string());
+    }
+
+    let mut source = String::new();
+    // Keep strict directive first so the whole script (helpers + body) runs in strict mode.
+    if needs_only_strict {
+        source.push_str("\"use strict\";\n");
+    }
+    if needs_harness_262 {
+        source.push_str(HARNESS_262_PRELUDE);
+        source.push('\n');
+    }
+    if !includes_source.is_empty() {
+        source.push_str(&includes_source);
+        source.push('\n');
+    }
+    source.push_str(case.body);
+    Ok(source)
+}
+
 fn classify_skip(
     path: &Path,
     frontmatter: &Test262Frontmatter,
-    source: &str,
+    _source: &str,
+    harness_root: Option<&Path>,
 ) -> Option<SkipCategory> {
     if is_fixture_file(path) {
         return Some(SkipCategory::FixtureFile);
@@ -223,8 +372,8 @@ fn classify_skip(
         return Some(category);
     }
 
-    if requires_unsupported_harness_globals(source) {
-        return Some(SkipCategory::RequiresHarnessGlobal262);
+    if has_unavailable_includes(frontmatter, harness_root) {
+        return Some(SkipCategory::RequiresIncludes);
     }
 
     None
@@ -347,8 +496,94 @@ fn execute_case_inner(
     (outcome, vm.gc_stats())
 }
 
+struct CaseExecutionRequest {
+    source: String,
+    auto_gc: bool,
+    auto_gc_threshold: Option<usize>,
+    runtime_gc: bool,
+    runtime_gc_check_interval: Option<usize>,
+}
+
+enum CaseWorkerCommand {
+    Execute(CaseExecutionRequest),
+    Shutdown,
+}
+
+struct SuiteCaseExecutor {
+    command_tx: Sender<CaseWorkerCommand>,
+    result_rx: Receiver<(ExecutionOutcome, GcStats)>,
+    worker_handle: Option<JoinHandle<()>>,
+}
+
+impl SuiteCaseExecutor {
+    fn new() -> Result<Self, String> {
+        let (command_tx, command_rx) = mpsc::channel::<CaseWorkerCommand>();
+        let (result_tx, result_rx) = mpsc::channel::<(ExecutionOutcome, GcStats)>();
+        let worker_handle = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                while let Ok(command) = command_rx.recv() {
+                    match command {
+                        CaseWorkerCommand::Execute(request) => {
+                            let result = execute_case_inner(
+                                &request.source,
+                                request.auto_gc,
+                                request.auto_gc_threshold,
+                                request.runtime_gc,
+                                request.runtime_gc_check_interval,
+                            );
+                            if result_tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                        CaseWorkerCommand::Shutdown => break,
+                    }
+                }
+            })
+            .map_err(|err| format!("failed to spawn suite case worker thread: {err}"))?;
+
+        Ok(Self {
+            command_tx,
+            result_rx,
+            worker_handle: Some(worker_handle),
+        })
+    }
+
+    fn execute(
+        &self,
+        source: &str,
+        auto_gc: bool,
+        auto_gc_threshold: Option<usize>,
+        runtime_gc: bool,
+        runtime_gc_check_interval: Option<usize>,
+    ) -> Result<(ExecutionOutcome, GcStats), String> {
+        self.command_tx
+            .send(CaseWorkerCommand::Execute(CaseExecutionRequest {
+                source: source.to_string(),
+                auto_gc,
+                auto_gc_threshold,
+                runtime_gc,
+                runtime_gc_check_interval,
+            }))
+            .map_err(|_| "suite case worker disconnected before request".to_string())?;
+        self.result_rx
+            .recv()
+            .map_err(|_| "suite case worker disconnected before response".to_string())
+    }
+}
+
+impl Drop for SuiteCaseExecutor {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(CaseWorkerCommand::Shutdown);
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
     let files = collect_js_files(root)?;
+    let suite_case_executor = SuiteCaseExecutor::new()?;
     let mut summary = SuiteSummary {
         discovered: files.len(),
         ..SuiteSummary::default()
@@ -357,6 +592,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         .ok()
         .map(|value| !value.is_empty() && value != "0")
         .unwrap_or(false);
+    let harness_root = infer_harness_root(root);
 
     for file in files {
         if let Some(max_cases) = options.max_cases {
@@ -376,7 +612,9 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             .map_err(|err| format!("frontmatter parse failed for {}: {err}", file.display()))?;
 
         let expected = expected_outcome(&case.frontmatter);
-        if let Some(skip_category) = classify_skip(&file, &case.frontmatter, case.body) {
+        if let Some(skip_category) =
+            classify_skip(&file, &case.frontmatter, case.body, harness_root.as_deref())
+        {
             summary.record_skip(skip_category);
             continue;
         }
@@ -388,14 +626,18 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                 file.display()
             );
         }
+        let source_to_execute = build_case_source(&case, harness_root.as_deref())
+            .map_err(|err| format!("include setup failed for {}: {err}", file.display()))?;
         summary.executed += 1;
-        let (actual, gc_stats) = execute_case_with_options_and_stats(
-            case.body,
-            options.auto_gc,
-            options.auto_gc_threshold,
-            options.runtime_gc,
-            options.runtime_gc_check_interval,
-        );
+        let (actual, gc_stats) = suite_case_executor
+            .execute(
+                &source_to_execute,
+                options.auto_gc,
+                options.auto_gc_threshold,
+                options.runtime_gc,
+                options.runtime_gc_check_interval,
+            )
+            .map_err(|err| format!("failed to execute {}: {err}", file.display()))?;
         summary.gc.collections_total += gc_stats.collections_total;
         summary.gc.boundary_collections += gc_stats.boundary_collections;
         summary.gc.runtime_collections += gc_stats.runtime_collections;
@@ -412,7 +654,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                     ExecutionOutcome::RuntimeFail(_)
                 )
         ) || (expected == ExpectedOutcome::ParseFail
-            && is_parse_tripwire_runtime_failure(case.body, &actual));
+            && is_parse_tripwire_runtime_failure(&source_to_execute, &actual));
 
         if matched {
             summary.passed += 1;
@@ -654,7 +896,7 @@ import "x";
 
         let strict_case = parse_test262_case("/*---\nflags: [onlyStrict]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&strict_case.frontmatter));
+        assert!(!should_skip(&strict_case.frontmatter));
 
         let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
@@ -662,11 +904,19 @@ import "x";
 
         let includes_case = parse_test262_case("/*---\nincludes: [sta.js]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
-        assert!(should_skip(&includes_case.frontmatter));
+        assert!(!should_skip(&includes_case.frontmatter));
 
         let feature_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
             .expect("frontmatter parse should succeed");
         assert!(should_skip(&feature_case.frontmatter));
+
+        let whitelisted_feature_case = parse_test262_case("/*---\nfeatures: [Promise]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(!should_skip(&whitelisted_feature_case.frontmatter));
+
+        let arrow_feature_case = parse_test262_case("/*---\nfeatures: [arrow-function]\n---*/\n1;")
+            .expect("frontmatter parse should succeed");
+        assert!(!should_skip(&arrow_feature_case.frontmatter));
     }
 
     #[test]
@@ -683,7 +933,7 @@ import "x";
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&strict_case.frontmatter),
-            Some(SkipCategory::FlagOnlyStrict),
+            None,
         );
 
         let async_case = parse_test262_case("/*---\nflags: [async]\n---*/\n1;")
@@ -697,7 +947,7 @@ import "x";
             .expect("frontmatter parse should succeed");
         assert_eq!(
             super::classify_frontmatter_skip(&includes_case.frontmatter),
-            Some(SkipCategory::RequiresIncludes),
+            None,
         );
 
         let features_case = parse_test262_case("/*---\nfeatures: [BigInt]\n---*/\n1;")
@@ -751,17 +1001,114 @@ import "x";
         let summary =
             run_suite(&root, SuiteOptions::default()).expect("suite execution should succeed");
 
-        assert_eq!(summary.skipped, 7);
+        assert_eq!(summary.skipped, 5);
         assert_eq!(summary.skipped_categories.fixture_file, 1);
         assert_eq!(summary.skipped_categories.flag_module, 1);
-        assert_eq!(summary.skipped_categories.flag_only_strict, 1);
+        assert_eq!(summary.skipped_categories.flag_only_strict, 0);
         assert_eq!(summary.skipped_categories.flag_async, 1);
         assert_eq!(summary.skipped_categories.requires_includes, 1);
         assert_eq!(summary.skipped_categories.requires_feature, 1);
-        assert_eq!(summary.skipped_categories.requires_harness_global_262, 1);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+        assert_eq!(summary.executed, 3);
+        assert_eq!(summary.passed, 3);
+        assert!(summary.has_balanced_skip_totals());
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_harness_include_when_available() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("sta.js"),
+            "function helper() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("includes-pass.js"),
+            "/*---\nincludes: [sta.js]\n---*/\nhelper() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
         assert_eq!(summary.executed, 1);
         assert_eq!(summary.passed, 1);
-        assert!(summary.has_balanced_skip_totals());
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_includes, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_only_strict_case_in_strict_mode() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("only-strict-pass.js"),
+            "/*---\nflags: [onlyStrict]\n---*/\nif ((function () { return this === undefined; })() !== true) { throw new Error('not strict'); }\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_include_that_uses_harness_262_global() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("uses-262.js"),
+            "$262.gc();\nfunction helperWith262() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("include-uses-262-pass.js"),
+            "/*---\nincludes: [uses-262.js]\n---*/\nhelperWith262() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn executes_case_with_harness_262_global_support() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+
+        fs::write(
+            test_root.join("harness-262-pass.js"),
+            "$262.gc();\n$262.agent.report(1);\n1 + 1;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }
