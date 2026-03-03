@@ -3240,7 +3240,13 @@ impl Vm {
                         _ => Err(VmError::TypeError("property write expects object")),
                     };
                     match result {
-                        Ok(result) => self.stack.push(result),
+                        Ok(result) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(result);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -3286,7 +3292,13 @@ impl Vm {
                         self.set_property_on_receiver(receiver, key, value, realm)
                     })();
                     match result {
-                        Ok(result) => self.stack.push(result),
+                        Ok(result) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(result);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -3305,7 +3317,13 @@ impl Vm {
                         this_value,
                         realm,
                     ) {
-                        Ok(result) => self.stack.push(result),
+                        Ok(result) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(result);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -3323,7 +3341,13 @@ impl Vm {
                         self.set_property_on_base_with_receiver(base, key, value, this_value, realm)
                     })();
                     match result {
-                        Ok(result) => self.stack.push(result),
+                        Ok(result) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(result);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
@@ -3463,7 +3487,13 @@ impl Vm {
                         .pop()
                         .ok_or(VmError::StackUnderflow)?;
                     match self.store_identifier_reference_value(reference, value, realm, strict) {
-                        Ok(result) => self.stack.push(result),
+                        Ok(result) => {
+                            if Self::next_opcode_is_pop(code, pc) {
+                                pc += 1;
+                            } else {
+                                self.stack.push(result);
+                            }
+                        }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
                             pc = target;
