@@ -527,10 +527,15 @@ fn contains_module_from_keyword(source: &str) -> bool {
 fn strip_module_from_keyword(source: &str) -> Option<&str> {
     let source = source.trim_start();
     let after_from = source.strip_prefix("from")?;
-    if !after_from.chars().next().is_some_and(char::is_whitespace) {
+    let first = after_from.chars().next()?;
+    if !(first.is_whitespace() || first == '\'' || first == '"') {
         return None;
     }
-    let specifier = after_from.trim_start();
+    let specifier = if first.is_whitespace() {
+        after_from.trim_start()
+    } else {
+        after_from
+    };
     (!specifier.is_empty()).then_some(specifier)
 }
 
@@ -8855,6 +8860,25 @@ export default value;\n";
             exported: "answer".to_string(),
             local: "answer".to_string(),
         }));
+    }
+
+    #[test]
+    fn module_parse_compact_reexport_from_baseline() {
+        let source = "export*from'./dep.js'\nexport{value as answer}from'./dep.js'\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 2);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert_eq!(parsed.imports[1].specifier, "./dep.js");
+        assert_eq!(parsed.imports[1].bindings.len(), 1);
+        assert_eq!(parsed.imports[1].bindings[0].imported, "value");
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "answer")
+        );
     }
 
     #[test]
