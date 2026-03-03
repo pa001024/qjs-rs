@@ -86,7 +86,7 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 Last session: 2026-03-03T18:06:00+08:00  
 Stopped at: Completed 11-16 authoritative packet-i closure rerun and traceability sync  
 Resume file: none
-Last activity: 2026-03-04 - Completed quick task 3: ts类型抹除覆盖扩展
+Last activity: 2026-03-03 - Completed quick task 4: qjs-rs 对接 dna-builder 宿主能力增强（host class/async method/interrupt/console/adapter）
 
 ### Quick Tasks Completed
 
@@ -95,9 +95,11 @@ Last activity: 2026-03-04 - Completed quick task 3: ts类型抹除覆盖扩展
 | 1 | ts类型抹除 | 2026-03-03 | af12670 | [1-ts](./quick/1-ts/) |
 | 2 | ts类型抹除回归收口 | 2026-03-04 | 7c71944 | [2-ts-regression](./quick/2-ts-regression/) |
 | 3 | ts类型抹除覆盖扩展 | 2026-03-04 | 9e9b31a | [3-ts-erasure-coverage](./quick/3-ts-erasure-coverage/) |
+| 4 | qjs-rs 对接 dna-builder 宿主能力增强（host class/async method/interrupt/console/adapter） | 2026-03-03 | dae7963 | [4-qjs-rs-dna-builder-async-host-callback-h](./quick/4-qjs-rs-dna-builder-async-host-callback-h/) |
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 13 added: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
+
