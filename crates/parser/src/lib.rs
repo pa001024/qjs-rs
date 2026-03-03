@@ -10424,6 +10424,18 @@ for ( [let][0]; ; )
     }
 
     #[test]
+    fn parses_declare_module_and_global_declarations() {
+        let parsed = parse_script(
+            "declare module 'pkg' { export interface A { id: number; } }\ndeclare global { interface Window { marker: number; } }\nlet value = 1;\nvalue;",
+        )
+        .expect("script parsing should succeed");
+        assert!(matches!(
+            parsed.statements.last(),
+            Some(Stmt::Expression(Expr::Identifier(Identifier(name)))) if name == "value"
+        ));
+    }
+
+    #[test]
     fn parses_generic_function_and_class_declarations() {
         parse_script(
             "function id<T>(value: T): T { return value; }\nclass Box<T> { value(input: T): T { return input; } }\nid(1);",
