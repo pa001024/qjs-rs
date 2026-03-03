@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (on-disk plans: 11-01..11-07, 11-10..11-14 complete; latest authoritative ratio `6.260034x` from `target/benchmarks/phase11-closure-bundle.packet-h.json`, PERF-03 still open)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (on-disk plans: 11-01..11-07, 11-10..11-15 complete; packet-i smoke artifact `target/benchmarks/engine-comparison.local-dev.packet-i.smoke.json` is contract-valid; PERF-03 still open pending authoritative rerun)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -31,7 +31,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 **Goal**: Achieve >=80% of `quickjs-c` performance on the tracked suite through evidence-backed VM/runtime/bytecode optimizations.
 **Depends on**: Phase 10
 **Requirements**: PERF-03, PERF-04, PERF-05
-**Plans:** 12/12 plans complete
+**Plans:** 13/14 plans complete
 Plans:
 - [x] 11-01-PLAN.md — Lock closure policy, add hotspot attribution, and produce Phase 11 baseline artifact. (completed 2026-02-28)
 - [x] 11-02-PLAN.md — Land packet-A numeric/binding optimizations with guarded fallback and before/after evidence. (completed 2026-02-28)
@@ -45,6 +45,7 @@ Plans:
 - [x] 11-12-PLAN.md — Execute packet-g identifier-resolution fallback-reduction optimization loop and publish authoritative quickjs-ratio closure verdict. (completed 2026-03-03; governance green, PERF-03 still open)
 - [x] 11-13-PLAN.md — Land packet-h lexical-binding hot-path optimization and packet-h benchmark contract wiring. (completed 2026-03-03; packet-h smoke artifact generated, PERF-03 still open pending 11-14 authoritative rerun)
 - [x] 11-14-PLAN.md — Run authoritative packet-h closure verdict workflow and synchronize Phase 11 traceability docs. (completed 2026-03-03; authoritative packet-h bundle generated at `target/benchmarks/phase11-closure-bundle.packet-h.json`, ratio `6.260034x`, gate still red)
+- [x] 11-15-PLAN.md — Land packet-i shadow-aware revalidation optimization, hotspot/parity coverage, and packet-i smoke artifact wiring. (completed 2026-03-03; `target/benchmarks/engine-comparison.local-dev.packet-i.smoke.json` contract check passed, PERF-03 still open)
   1. Aggregate mean latency on the tracked suite is at most `1.25x quickjs-c` under the same host and run configuration (equivalent to >=80% of `quickjs-c` performance).
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
   3. Each optimization includes guard/fallback behavior and does not alter externally observable semantics.
@@ -72,7 +73,7 @@ Plans:
 | Milestone | Status | Phases | Plans |
 |-----------|--------|--------|-------|
 | v1.0 | Complete | 9/9 | 26/26 |
-| v1.1 | In Progress | 1/3 | 15/15 |
+| v1.1 | In Progress | 1/3 | 16/17 |
 
 ### Phase 13: 实现对齐 Boa 的 host class / prototype 体系（使用案例: D:\dev\dna-builder\src-tauri\src\submodules\jsmat.rs）
 
