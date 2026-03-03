@@ -462,7 +462,10 @@ impl PacketHFastPathState {
     }
 
     pub fn slot_cache_entry(&self, slot: u32) -> Option<PacketHSlotCacheEntry> {
-        self.lexical_slot_cache.get(slot as usize).copied().flatten()
+        self.lexical_slot_cache
+            .get(slot as usize)
+            .copied()
+            .flatten()
     }
 
     pub fn remember_slot_cache_entry(

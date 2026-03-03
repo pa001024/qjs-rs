@@ -114,7 +114,12 @@ fn assert_packet_h_toggle_parity(
     source: &str,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
-) -> (JsValue, PacketHFastPathCounters, HotspotAttribution, HotspotAttribution) {
+) -> (
+    JsValue,
+    PacketHFastPathCounters,
+    HotspotAttribution,
+    HotspotAttribution,
+) {
     let (baseline_value, _baseline_d, _baseline_g, baseline_h, baseline_hotspot) =
         run_script(source, packet_d_enabled, packet_g_enabled, false);
     let (packet_h_value, _packet_h_d, _packet_h_g, packet_h_counters, packet_h_hotspot) =

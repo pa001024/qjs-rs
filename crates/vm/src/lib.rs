@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod array_builtins;
 mod external_host;
 mod fast_path;
+mod object_builtins;
 mod opaque_bindings;
 pub mod perf;
-mod array_builtins;
-mod object_builtins;
 mod promise_builtins;
 mod runtime_limits;
 mod script_runtime;
@@ -2524,14 +2524,12 @@ impl Vm {
                         } else {
                             self.resolve_unbound_identifier_value(name, realm)
                         }
-                    } else if let Some(reference) =
-                        self.resolve_binding_or_with_reference(
-                            name,
-                            realm,
-                            identifier_slot,
-                            packet_h_slot,
-                        )?
-                    {
+                    } else if let Some(reference) = self.resolve_binding_or_with_reference(
+                        name,
+                        realm,
+                        identifier_slot,
+                        packet_h_slot,
+                    )? {
                         self.load_identifier_reference_value(&reference, realm, strict)
                     } else {
                         self.resolve_unbound_identifier_value(name, realm)
@@ -2684,11 +2682,7 @@ impl Vm {
                             self.resolve_binding_id_with_fast_path(name, None, packet_h_slot)
                         }
                     } else {
-                        self.resolve_binding_id_with_fast_path(
-                            name,
-                            identifier_slot,
-                            packet_h_slot,
-                        )
+                        self.resolve_binding_id_with_fast_path(name, identifier_slot, packet_h_slot)
                     };
                     if let Some(binding_id) = binding_id {
                         let mut wrote_binding = false;
@@ -2792,11 +2786,7 @@ impl Vm {
                             self.resolve_binding_id_with_fast_path(name, None, packet_h_slot)
                         }
                     } else {
-                        self.resolve_binding_id_with_fast_path(
-                            name,
-                            identifier_slot,
-                            packet_h_slot,
-                        )
+                        self.resolve_binding_id_with_fast_path(name, identifier_slot, packet_h_slot)
                     };
 
                     if let Some(binding_id) = binding_id {
@@ -3334,14 +3324,12 @@ impl Vm {
                         } else {
                             None
                         };
-                    let deleted = if let Some(reference) =
-                        self.resolve_binding_or_with_reference(
-                            name,
-                            realm,
-                            identifier_slot,
-                            packet_h_slot,
-                        )?
-                    {
+                    let deleted = if let Some(reference) = self.resolve_binding_or_with_reference(
+                        name,
+                        realm,
+                        identifier_slot,
+                        packet_h_slot,
+                    )? {
                         match reference {
                             IdentifierReference::Binding { binding_id, .. } => {
                                 self.delete_binding_reference(binding_id)
@@ -16136,8 +16124,9 @@ impl Vm {
             return None;
         }
 
-        if packet_h_enabled && let Some((_, binding_id)) =
-            self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
+        if packet_h_enabled
+            && let Some((_, binding_id)) =
+                self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
         {
             if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_hit();
@@ -16217,7 +16206,11 @@ impl Vm {
         packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
         if self.with_objects.is_empty() {
-            return self.resolve_binding_id_with_fast_path_no_with(name, identifier_slot, packet_h_slot);
+            return self.resolve_binding_id_with_fast_path_no_with(
+                name,
+                identifier_slot,
+                packet_h_slot,
+            );
         }
 
         let packet_a_metrics_enabled =
@@ -20570,7 +20563,10 @@ impl Vm {
         }
         if let Some(host_function) = Self::array_like_method_host_function(property) {
             let is_array_prototype = self.array_prototype_id == Some(object_id);
-            if !is_array_prototype && self.is_array_length_tracking_object(object_id).unwrap_or(false)
+            if !is_array_prototype
+                && self
+                    .is_array_length_tracking_object(object_id)
+                    .unwrap_or(false)
             {
                 return Ok(self.create_host_function_value(host_function));
             }
