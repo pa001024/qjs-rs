@@ -127,27 +127,32 @@ struct SampleMeasurement {
     hotspot_attribution: Option<HotspotAttribution>,
 }
 
-fn run_qjs_rs_eval_per_iteration(
-    script: &str,
-    iterations: usize,
+#[derive(Debug, Clone, Copy)]
+struct QjsRsEvalConfig {
     hotspot_attribution_enabled: bool,
     packet_c_enabled: bool,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
     packet_i_enabled: bool,
+}
+
+fn run_qjs_rs_eval_per_iteration(
+    script: &str,
+    iterations: usize,
+    config: QjsRsEvalConfig,
 ) -> Result<SampleMeasurement> {
     let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
     vm.set_hotspot_attribution_enabled(false);
-    vm.set_packet_c_fast_path_enabled(packet_c_enabled);
-    vm.set_packet_d_fast_path_enabled(packet_d_enabled);
+    vm.set_packet_c_fast_path_enabled(config.packet_c_enabled);
+    vm.set_packet_d_fast_path_enabled(config.packet_d_enabled);
     vm.set_packet_d_fast_path_metrics_enabled(false);
-    vm.set_packet_g_fast_path_enabled(packet_g_enabled);
+    vm.set_packet_g_fast_path_enabled(config.packet_g_enabled);
     vm.set_packet_g_fast_path_metrics_enabled(false);
-    vm.set_packet_h_fast_path_enabled(packet_h_enabled);
+    vm.set_packet_h_fast_path_enabled(config.packet_h_enabled);
     vm.set_packet_h_fast_path_metrics_enabled(false);
-    vm.set_packet_i_revalidate_enabled(packet_i_enabled);
+    vm.set_packet_i_revalidate_enabled(config.packet_i_enabled);
 
     let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
     let chunk = compile_script(&parsed);
@@ -159,10 +164,10 @@ fn run_qjs_rs_eval_per_iteration(
             .map_err(|e| anyhow!("qjs-rs execute error: {e:?}"))?;
         checksum += extract_number(&value);
     }
-    let hotspot_attribution = if hotspot_attribution_enabled {
-        vm.set_packet_d_fast_path_metrics_enabled(packet_d_enabled);
-        vm.set_packet_g_fast_path_metrics_enabled(packet_g_enabled);
-        vm.set_packet_h_fast_path_metrics_enabled(packet_h_enabled);
+    let hotspot_attribution = if config.hotspot_attribution_enabled {
+        vm.set_packet_d_fast_path_metrics_enabled(config.packet_d_enabled);
+        vm.set_packet_g_fast_path_metrics_enabled(config.packet_g_enabled);
+        vm.set_packet_h_fast_path_metrics_enabled(config.packet_h_enabled);
         vm.set_hotspot_attribution_enabled(true);
         vm.reset_hotspot_attribution();
         let _ = vm
@@ -351,12 +356,14 @@ fn run_engine_case(
             EngineKind::QjsRs => run_qjs_rs_eval_per_iteration(
                 context.script,
                 context.iterations,
-                context.hotspot_attribution_enabled,
-                context.packet_c_enabled,
-                context.packet_d_enabled,
-                context.packet_g_enabled,
-                context.packet_h_enabled,
-                context.packet_i_enabled,
+                QjsRsEvalConfig {
+                    hotspot_attribution_enabled: context.hotspot_attribution_enabled,
+                    packet_c_enabled: context.packet_c_enabled,
+                    packet_d_enabled: context.packet_d_enabled,
+                    packet_g_enabled: context.packet_g_enabled,
+                    packet_h_enabled: context.packet_h_enabled,
+                    packet_i_enabled: context.packet_i_enabled,
+                },
             ),
             EngineKind::BoaEngine => {
                 run_boa_engine_eval_per_iteration(context.script, context.iterations)
@@ -715,12 +722,9 @@ pub(crate) fn infer_packet_g_enabled(cli: &contract::CliArgs) -> bool {
 
 pub(crate) fn infer_packet_h_enabled(cli: &contract::CliArgs) -> bool {
     let descriptor = contract::infer_optimization_descriptor(&cli.output);
-    descriptor
-        .packet_id
-        .as_deref()
-        .is_some_and(|packet_id| {
-            packet_id.starts_with("packet-h") || packet_id.starts_with("packet-i")
-        })
+    descriptor.packet_id.as_deref().is_some_and(|packet_id| {
+        packet_id.starts_with("packet-h") || packet_id.starts_with("packet-i")
+    })
 }
 
 pub(crate) fn infer_packet_i_enabled(cli: &contract::CliArgs) -> bool {

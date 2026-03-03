@@ -58,7 +58,10 @@ pub(super) fn execute_promise_resolve(
     }
 
     let value = static_value_arg(args);
-    if matches!(constructor, JsValue::NativeFunction(NativeFunction::PromiseConstructor)) {
+    if matches!(
+        constructor,
+        JsValue::NativeFunction(NativeFunction::PromiseConstructor)
+    ) {
         if is_promise_object_value(vm, &value) {
             return Ok(value);
         }
@@ -90,7 +93,10 @@ pub(super) fn execute_promise_reject(
     }
 
     let reason = static_value_arg(args);
-    if matches!(constructor, JsValue::NativeFunction(NativeFunction::PromiseConstructor)) {
+    if matches!(
+        constructor,
+        JsValue::NativeFunction(NativeFunction::PromiseConstructor)
+    ) {
         return vm.create_async_settled_promise(false, reason);
     }
 
@@ -113,7 +119,9 @@ pub(super) fn execute_promise_all(
 ) -> Result<JsValue, VmError> {
     let constructor = static_constructor_arg(args);
     if !is_constructor_value(vm, &constructor)? {
-        return Err(VmError::TypeError("Promise.all requires constructor receiver"));
+        return Err(VmError::TypeError(
+            "Promise.all requires constructor receiver",
+        ));
     }
     let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
     let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;
@@ -234,7 +242,9 @@ pub(super) fn execute_promise_any(
 ) -> Result<JsValue, VmError> {
     let constructor = static_constructor_arg(args);
     if !is_constructor_value(vm, &constructor)? {
-        return Err(VmError::TypeError("Promise.any requires constructor receiver"));
+        return Err(VmError::TypeError(
+            "Promise.any requires constructor receiver",
+        ));
     }
     let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
     let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;

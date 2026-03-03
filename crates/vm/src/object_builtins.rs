@@ -62,10 +62,8 @@ pub(super) fn execute_object_assign(
         if matches!(source, JsValue::Null | JsValue::Undefined) {
             continue;
         }
-        let source_object = vm.coerce_object_for_object_builtins(
-            source,
-            "Object.assign source must be coercible",
-        )?;
+        let source_object =
+            vm.coerce_object_for_object_builtins(source, "Object.assign source must be coercible")?;
         let keys = vm.collect_own_property_keys(&source_object, true)?;
 
         for key in keys {
@@ -175,7 +173,8 @@ pub(super) fn execute_object_define_properties(
     let descriptor_keys = vm.collect_own_property_keys(&descriptors, true)?;
     let mut normalized_descriptors = Vec::with_capacity(descriptor_keys.len());
     for property_name in descriptor_keys {
-        let descriptor = vm.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
+        let descriptor =
+            vm.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
         let parsed = vm.parse_property_descriptor(descriptor, realm)?;
         let normalized = vm.materialize_property_descriptor(&parsed);
         normalized_descriptors.push((property_name, normalized));

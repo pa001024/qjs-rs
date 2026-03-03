@@ -248,6 +248,38 @@ python .github/scripts/check_perf_target.py \
   --require-qjs-lte-quickjs-ratio 1.25
 ```
 
+### Phase 11 authoritative packet-I closure verdict workflow
+
+Use this when publishing authoritative Phase 11 packet-i closure evidence. The sequence is intentionally locked so governance/test/benchmark/checker outcomes are captured in one cycle.
+
+```bash
+cargo fmt --check
+cargo clippy -p vm -p benchmarks -- -D warnings
+cargo test -p vm perf_packet_d -- --nocapture
+cargo test -p vm perf_hotspot_attribution -- --nocapture
+
+cargo run -p benchmarks --bin benchmarks --release -- \
+  --profile local-dev \
+  --output target/benchmarks/engine-comparison.local-dev.packet-i.json \
+  --quickjs-path scripts/quickjs-wsl.cmd \
+  --strict-comparators
+
+python .github/scripts/check_engine_benchmark_contract.py \
+  --input target/benchmarks/engine-comparison.local-dev.packet-i.json
+
+python .github/scripts/check_perf_target.py \
+  --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json \
+  --candidate target/benchmarks/engine-comparison.local-dev.packet-i.json \
+  --require-qjs-lte-quickjs-ratio 1.25
+```
+
+Authoritative packet-i publication also requires:
+
+- command transcripts in `target/benchmarks/*packet-i.stdout.log` and `target/benchmarks/*packet-i.stderr.log`
+- checker verdict metadata in `target/benchmarks/perf-target.packet-i.verdict.json`
+- closure bundle with candidate hash + aggregate means + `qjs-rs/quickjs-c` ratio in `target/benchmarks/phase11-closure-bundle.packet-i.json`
+- runtime-core boundary scan transcript in `target/benchmarks/perf05-boundary-scan.packet-i.log`
+
 ## CI Baseline Workflow (`ci-linux`)
 
 `ci-linux` defaults: `iterations=400`, `samples=9`, `warmup_iterations=5`, strict comparators.

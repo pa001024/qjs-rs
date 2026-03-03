@@ -242,7 +242,7 @@ fn format_js_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_script_path, ScriptHostCallbackRegistration, ScriptRuntime};
+    use super::{ScriptHostCallbackRegistration, ScriptRuntime, normalize_script_path};
     use runtime::JsValue;
     use std::env;
     use std::fs;
