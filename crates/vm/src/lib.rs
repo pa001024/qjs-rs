@@ -11125,7 +11125,7 @@ impl Vm {
         let result = (|| {
             if !annex_b_eval_var_function_names.is_empty() {
                 for name in &annex_b_eval_var_function_names {
-                    self.ensure_annex_b_eval_var_binding(name)?;
+                    self.ensure_annex_b_eval_var_binding(name, true)?;
                 }
                 let var_scope = self.current_var_scope_ref()?;
                 let pending_syncs = annex_b_eval_var_function_names
@@ -16136,12 +16136,16 @@ impl Vm {
             .ok_or(VmError::ScopeUnderflow)
     }
 
-    fn ensure_annex_b_eval_var_binding(&mut self, name: &str) -> Result<(), VmError> {
+    fn ensure_annex_b_eval_var_binding(
+        &mut self,
+        name: &str,
+        default_deletable: bool,
+    ) -> Result<(), VmError> {
         let var_scope = self.current_var_scope_ref()?;
         let existing_binding_id = var_scope.borrow().get(name).copied();
         if existing_binding_id.is_none() {
             let mut initial_value = JsValue::Undefined;
-            let mut deletable = self.eval_deletable_binding_depth > 0;
+            let mut deletable = default_deletable;
             if self.var_scope_stack.last().copied() == Some(0)
                 && let Some(global_object_id) = self.global_object_id
                 && let Some(object) = self.objects.get(&global_object_id)
@@ -16177,7 +16181,7 @@ impl Vm {
             return Ok(false);
         }
         for name in pending_syncs.keys() {
-            self.ensure_annex_b_eval_var_binding(name)?;
+            self.ensure_annex_b_eval_var_binding(name, false)?;
         }
         let var_scope = self.current_var_scope_ref()?;
         self.annex_b_eval_var_function_contexts
@@ -18675,7 +18679,13 @@ impl Vm {
     }
 
     fn define_annex_b_eval_var_property(&mut self, name: &str) -> Result<(), VmError> {
-        self.define_global_var_property_with_configurable(name, true)
+        let configurable = self
+            .scopes
+            .first()
+            .and_then(|scope| scope.borrow().get(name).copied())
+            .and_then(|binding_id| self.binding(binding_id).map(|binding| binding.deletable))
+            .unwrap_or(self.eval_deletable_binding_depth > 0);
+        self.define_global_var_property_with_configurable(name, configurable)
     }
 
     fn sync_global_property_from_binding(
@@ -28625,6 +28635,48 @@ mod tests {
         let chunk = compile_script(&script);
         let mut realm = Realm::default();
         realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_global_block_function_binding_is_non_configurable() {
+        let script = parse_script(
+            "var global = globalThis; \
+             var ok = f === undefined; \
+             var desc = Object.getOwnPropertyDescriptor(global, 'f'); \
+             ok = ok && desc && desc.enumerable === true && desc.writable === true && desc.configurable === false; \
+             { function f() {} } \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_global_eval_block_function_binding_is_configurable() {
+        let script = parse_script(
+            "eval(\"var ok = f === undefined; \
+                  var desc = Object.getOwnPropertyDescriptor(globalThis, 'f'); \
+                  ok = ok && desc && desc.enumerable === true && desc.writable === true && desc.configurable === true; \
+                  { function f() {} } \
+                  ok;\");",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global("eval", JsValue::NativeFunction(NativeFunction::Eval));
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
