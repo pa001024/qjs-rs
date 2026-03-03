@@ -8,6 +8,8 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{Vm, VmError};
 
@@ -136,6 +138,7 @@ impl From<VmError> for ScriptRuntimeError {
 pub struct ScriptRuntime {
     vm: Vm,
     realm: Realm,
+    stop_token: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ScriptRuntime {
@@ -151,6 +154,7 @@ impl ScriptRuntime {
         Self {
             vm: Vm::default(),
             realm,
+            stop_token: None,
         }
     }
 
@@ -168,6 +172,31 @@ impl ScriptRuntime {
 
     pub fn realm_mut(&mut self) -> &mut Realm {
         &mut self.realm
+    }
+
+    /// 绑定脚本停止令牌（stop token）。
+    ///
+    /// 令牌值为 `true` 时，VM 会触发中断并返回 `VmError::Interrupted`。
+    /// 该接口用于对齐宿主侧的 `stop_script` 语义。
+    pub fn set_stop_token(&mut self, token: Arc<AtomicBool>) {
+        let token_for_handler = Arc::clone(&token);
+        self.vm.set_interrupt_poll_interval(1);
+        self.vm
+            .set_interrupt_handler(move || token_for_handler.load(Ordering::SeqCst));
+        self.stop_token = Some(token);
+    }
+
+    /// 清除已绑定的 stop token，并移除 VM interrupt handler。
+    pub fn clear_stop_token(&mut self) {
+        self.vm.clear_interrupt_handler();
+        self.stop_token = None;
+    }
+
+    /// 主动请求停止脚本执行（将 stop token 置为 true）。
+    pub fn request_stop(&self) {
+        if let Some(token) = &self.stop_token {
+            token.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn register_host_callback(
@@ -248,6 +277,15 @@ impl ScriptRuntime {
             ))
         })?;
         self.execute_source(&source)
+    }
+
+    /// 按预算 drain Promise jobs，返回本次处理的 job 数量。
+    pub fn drain_jobs(&mut self, budget: usize) -> Result<usize, ScriptRuntimeError> {
+        let report = self
+            .vm
+            .drain_promise_jobs(budget, &self.realm, false)
+            .map_err(ScriptRuntimeError::Vm)?;
+        Ok(report.processed)
     }
 
     fn drain_all_promise_jobs(&mut self) -> Result<usize, ScriptRuntimeError> {
@@ -337,6 +375,8 @@ mod tests {
     use runtime::JsValue;
     use std::env;
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -528,5 +568,27 @@ mod tests {
         let error = normalize_script_path(&missing).expect_err("missing file should fail");
         let message = error.to_string();
         assert!(message.contains("脚本文件不存在"));
+    }
+
+    #[test]
+    fn stop_token_interrupts_script_execution() {
+        let mut runtime = ScriptRuntime::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+        stop.store(true, Ordering::SeqCst);
+
+        let err = runtime
+            .execute_source("1 + 2;")
+            .expect_err("execution should be interrupted");
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+
+        stop.store(false, Ordering::SeqCst);
+        let resumed = runtime
+            .execute_source("40 + 2;")
+            .expect("execution should resume after clearing stop flag");
+        assert_eq!(resumed.value, JsValue::Number(42.0));
     }
 }

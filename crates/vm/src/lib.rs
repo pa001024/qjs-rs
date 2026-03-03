@@ -3,6 +3,7 @@
 mod array_builtins;
 mod external_host;
 mod fast_path;
+mod host_adapter;
 mod object_builtins;
 mod opaque_bindings;
 pub mod perf;
@@ -16,6 +17,11 @@ pub use fast_path::PacketCFastPathCounters;
 pub use fast_path::PacketDFastPathCounters;
 pub use fast_path::PacketGFastPathCounters;
 pub use fast_path::PacketHFastPathCounters;
+pub use host_adapter::{
+    BoaLikeHostAdapter, ConsoleLevel, ConsoleLogger, HostClassAsyncMethodRegistration,
+    HostClassAsyncStaticMethodRegistration, HostClassMethodRegistration, HostClassRegistration,
+    HostClassStaticMethodRegistration,
+};
 pub use script_runtime::{
     ScriptAsyncHostCallbackRegistration, ScriptHostCallbackRegistration, ScriptRunOutput,
     ScriptRuntime, ScriptRuntimeError, normalize_script_path, script_result_text,
