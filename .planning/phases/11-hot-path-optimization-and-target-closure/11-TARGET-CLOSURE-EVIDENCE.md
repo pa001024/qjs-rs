@@ -576,6 +576,65 @@ Verdict:
 - Result:
   - no matches (`rg` return code `1`, interpreted as clean scan)
 - Boundary conclusion:
-  - runtime-core C FFI/unsafe boundary remains clean in the authoritative packet-h closure cycle.
+- runtime-core C FFI/unsafe boundary remains clean in the authoritative packet-h closure cycle.
+
+## 16) Plan 11-16 authoritative packet-i closure rerun (2026-03-03)
+
+### 16.1 Machine-checkable closure bundle
+
+- Bundle path: `target/benchmarks/phase11-closure-bundle.packet-i.json`
+- `timestamp_utc`: `2026-03-03T09:53:57.357584Z`
+- Authoritative run timestamp: `2026-03-03T09:53:57.185Z`
+- Baseline path: `target/benchmarks/engine-comparison.local-dev.phase11-baseline.json`
+- Candidate path: `target/benchmarks/engine-comparison.local-dev.packet-i.json`
+- Candidate hash/sha256: `0762b6f772f44d073beca3128b26308acab9baf43a23c8dc2a54eaf494e6c523`
+
+### 16.2 Ordered governance + checker outcomes (from bundle)
+
+1. `cargo fmt --check` (`exit_code=0`, `status=passed`) ✅
+2. `cargo clippy -p vm -p benchmarks -- -D warnings` (`exit_code=0`, `status=passed`) ✅
+3. `cargo test -p vm perf_packet_d -- --nocapture` (`exit_code=0`, `status=passed`) ✅
+4. `cargo test -p vm perf_hotspot_attribution -- --nocapture` (`exit_code=0`, `status=passed`) ✅
+5. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-i.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators` (`exit_code=0`, `status=passed`) ✅
+6. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-i.json` (`exit_code=0`, `status=passed`) ✅
+7. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-i.json --require-qjs-lte-quickjs-ratio 1.25` (`exit_code=1`, `status=threshold_fail_expected`) ❌
+
+Checker log paths (same packet-i provenance):
+
+- `target/benchmarks/perf-target.packet-i.stdout.log`
+- `target/benchmarks/perf-target.packet-i.stderr.log`
+- `target/benchmarks/perf-target.packet-i.verdict.json`
+
+### 16.3 Aggregate means and PERF-03 verdict
+
+Aggregate means (`target/benchmarks/phase11-closure-bundle.packet-i.json`):
+
+- `qjs-rs`: `97.675639`
+- `quickjs-c`: `15.392857`
+- `qjs-rs/quickjs-c`: `6.345517x`
+
+Exact checker failure output (`target/benchmarks/perf-target.packet-i.stderr.log`):
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-quickjs-ratio failed: candidate qjs-rs/quickjs-c 6.345517 > 1.250000 (qjs-rs=97.675639, quickjs-c=15.392857)
+```
+
+Verdict:
+
+- PERF-03 quickjs-ratio gate: ❌ FAIL (`6.345517x > 1.25x`)
+- PERF-04 evidence packet remains valid and synchronized to one machine-checkable packet-i source.
+- Closure status: **OPEN** (authoritative packet-i governance bundle is green, but PERF-03 target remains unmet).
+
+### 16.4 PERF-05 runtime-core boundary refresh (same packet-i cycle)
+
+- Command:
+  - `rg --line-number -g '*.rs' 'extern\\s+\"C\"|\\bunsafe\\b' crates/vm crates/runtime crates/bytecode crates/builtins`
+- Log artifact:
+  - `target/benchmarks/perf05-boundary-scan.packet-i.log`
+- Result:
+  - no matches (`rg` return code `1`, interpreted as clean source-only scan)
+- Boundary conclusion:
+  - runtime-core C FFI/unsafe boundary remains clean in the authoritative packet-i closure cycle.
 
 
