@@ -2084,8 +2084,8 @@ mod tests {
 
     #[test]
     fn lexes_nullish_and_logical_assignment_operators() {
-        let tokens = lex("a ?? b; x &&= y; m ||= n; p ??= q;")
-            .expect("tokenization should succeed");
+        let tokens =
+            lex("a ?? b; x &&= y; m ||= n; p ??= q;").expect("tokenization should succeed");
         let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
         assert!(kinds.contains(&TokenKind::QuestionQuestion));
         assert!(kinds.contains(&TokenKind::AndAndEqual));

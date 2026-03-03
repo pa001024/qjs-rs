@@ -1761,9 +1761,9 @@ impl Parser {
         let delegated = self.matches(&TokenKind::Star);
         let omit_expression = !delegated
             && (self.check(&TokenKind::Semicolon)
-            || self.check(&TokenKind::RBrace)
-            || self.is_eof()
-            || self.has_line_terminator_between_prev_and_current());
+                || self.check(&TokenKind::RBrace)
+                || self.is_eof()
+                || self.has_line_terminator_between_prev_and_current());
         let yielded = if delegated {
             self.parse_expression_with_commas()?
         } else if omit_expression {
@@ -3560,15 +3560,30 @@ impl Parser {
         let (assignment_kind, assignment_position) = if self.matches(&TokenKind::Equal) {
             (AssignmentKind::Simple, self.previous_position())
         } else if self.matches(&TokenKind::PlusEqual) {
-            (AssignmentKind::Compound(BinaryOp::Add), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Add),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::MinusEqual) {
-            (AssignmentKind::Compound(BinaryOp::Sub), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Sub),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::StarEqual) {
-            (AssignmentKind::Compound(BinaryOp::Mul), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Mul),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::SlashEqual) {
-            (AssignmentKind::Compound(BinaryOp::Div), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Div),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::PercentEqual) {
-            (AssignmentKind::Compound(BinaryOp::Mod), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::Mod),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::LessLessEqual) {
             (
                 AssignmentKind::Compound(BinaryOp::ShiftLeft),
@@ -3585,11 +3600,20 @@ impl Parser {
                 self.previous_position(),
             )
         } else if self.matches(&TokenKind::AmpEqual) {
-            (AssignmentKind::Compound(BinaryOp::BitAnd), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitAnd),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::PipeEqual) {
-            (AssignmentKind::Compound(BinaryOp::BitOr), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitOr),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::CaretEqual) {
-            (AssignmentKind::Compound(BinaryOp::BitXor), self.previous_position())
+            (
+                AssignmentKind::Compound(BinaryOp::BitXor),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::AndAndEqual) {
             (AssignmentKind::LogicalAnd, self.previous_position())
         } else if self.matches(&TokenKind::OrOrEqual) {
@@ -3619,7 +3643,9 @@ impl Parser {
                     value: Box::new(right),
                 };
                 match assignment_kind {
-                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
                         Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
                     }
                     _ => {
@@ -3643,7 +3669,9 @@ impl Parser {
                     value: Box::new(right),
                 };
                 match assignment_kind {
-                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
                         Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
                     }
                     _ => {
@@ -3655,9 +3683,7 @@ impl Parser {
                                 value,
                             })
                         } else {
-                            unreachable!(
-                                "assignment rewrite should preserve member target"
-                            )
+                            unreachable!("assignment rewrite should preserve member target")
                         }
                     }
                 }
@@ -3673,7 +3699,9 @@ impl Parser {
                     value: Box::new(right),
                 };
                 match assignment_kind {
-                    AssignmentKind::LogicalAnd | AssignmentKind::LogicalOr | AssignmentKind::Nullish => {
+                    AssignmentKind::LogicalAnd
+                    | AssignmentKind::LogicalOr
+                    | AssignmentKind::Nullish => {
                         Ok(self.lower_short_circuit_assignment(read, assign, assignment_kind))
                     }
                     _ => {
@@ -7985,8 +8013,22 @@ export default value;\n";
 
     #[test]
     fn parses_generator_yield_star_baseline() {
-        parse_script("function* g(iter) { yield* iter; }")
+        parse_script("function* g(iter) { yield* iter; }").expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn lowers_generator_yield_star_in_function_expression() {
+        let parsed = parse_script("var g = function* (iter) { yield* iter; };")
             .expect("script parsing should succeed");
+        let debug = format!("{parsed:?}");
+        assert!(
+            debug.contains("$__qjs_generator_values_"),
+            "lowered generator should introduce an internal yield buffer"
+        );
+        assert!(
+            debug.contains("property: \"push\""),
+            "lowered generator yield* should push delegated value into the internal buffer"
+        );
     }
 
     #[test]
