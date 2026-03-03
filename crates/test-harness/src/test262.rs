@@ -228,13 +228,34 @@ fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
     })
 }
 
-fn infer_harness_root(root: &Path) -> Option<PathBuf> {
-    let candidate = root.parent().map(|parent| parent.join("harness"))?;
-    if candidate.is_dir() {
-        Some(candidate)
+fn resolve_suite_root(root: &Path) -> PathBuf {
+    let test_dir = root.join("test");
+    if test_dir.is_dir() {
+        test_dir
     } else {
-        None
+        root.to_path_buf()
     }
+}
+
+fn infer_harness_root(root: &Path, suite_root: &Path) -> Option<PathBuf> {
+    let direct_candidate = root.join("harness");
+    if direct_candidate.is_dir() {
+        return Some(direct_candidate);
+    }
+
+    if let Some(candidate) = suite_root.parent().map(|parent| parent.join("harness"))
+        && candidate.is_dir()
+    {
+        return Some(candidate);
+    }
+
+    if let Some(candidate) = root.parent().map(|parent| parent.join("harness"))
+        && candidate.is_dir()
+    {
+        return Some(candidate);
+    }
+
+    None
 }
 
 fn has_unavailable_includes(frontmatter: &Test262Frontmatter, harness_root: Option<&Path>) -> bool {
@@ -583,7 +604,8 @@ impl Drop for SuiteCaseExecutor {
 }
 
 pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
-    let files = collect_js_files(root)?;
+    let suite_root = resolve_suite_root(root);
+    let files = collect_js_files(&suite_root)?;
     let suite_case_executor = SuiteCaseExecutor::new()?;
     let mut summary = SuiteSummary {
         discovered: files.len(),
@@ -593,7 +615,7 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         .ok()
         .map(|value| !value.is_empty() && value != "0")
         .unwrap_or(false);
-    let harness_root = infer_harness_root(root);
+    let harness_root = infer_harness_root(root, &suite_root);
 
     for file in files {
         if let Some(max_cases) = options.max_cases {
@@ -1118,6 +1140,35 @@ import "x";
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped_categories.requires_harness_global_262, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn resolves_full_test262_layout_root_with_test_and_harness_dirs() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("sta.js"),
+            "function helperFromHarness() { return 40; }\n",
+        )
+        .expect("include file should be written");
+        fs::write(
+            test_root.join("layout-pass.js"),
+            "/*---\nincludes: [sta.js]\n---*/\nhelperFromHarness() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.discovered, 1);
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_includes, 0);
 
         fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
     }
