@@ -147,6 +147,8 @@ pub struct HotspotAttributionCounters {
     pub packet_g_name_guard_misses: u64,
     pub packet_g_name_guard_revalidate_hits: u64,
     pub packet_g_name_guard_revalidate_misses: u64,
+    pub packet_h_lexical_slot_guard_hits: u64,
+    pub packet_h_lexical_slot_guard_misses: u64,
     pub array_indexed_property_get: u64,
     pub array_indexed_property_set: u64,
 }

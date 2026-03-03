@@ -61,6 +61,8 @@ fn minimal_report() -> contract::BenchmarkReport {
                 packet_g_name_guard_misses: 0,
                 packet_g_name_guard_revalidate_hits: 0,
                 packet_g_name_guard_revalidate_misses: 0,
+                packet_h_lexical_slot_guard_hits: 0,
+                packet_h_lexical_slot_guard_misses: 0,
                 array_indexed_property_get: 2,
                 array_indexed_property_set: 2,
             },
@@ -78,6 +80,8 @@ fn minimal_report() -> contract::BenchmarkReport {
                     packet_g_name_guard_misses: 0,
                     packet_g_name_guard_revalidate_hits: 0,
                     packet_g_name_guard_revalidate_misses: 0,
+                    packet_h_lexical_slot_guard_hits: 0,
+                    packet_h_lexical_slot_guard_misses: 0,
                     array_indexed_property_get: 2,
                     array_indexed_property_set: 2,
                 },
@@ -130,4 +134,11 @@ fn hot_path_contract_infers_optimization_descriptor_from_output_path() {
     assert_eq!(packet.mode, contract::OptimizationMode::Packet);
     assert_eq!(packet.tag, "packet-a");
     assert_eq!(packet.packet_id.as_deref(), Some("packet-a"));
+
+    let packet_h_smoke = contract::infer_optimization_descriptor(Path::new(
+        "target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json",
+    ));
+    assert_eq!(packet_h_smoke.mode, contract::OptimizationMode::Packet);
+    assert_eq!(packet_h_smoke.tag, "packet-h.smoke");
+    assert_eq!(packet_h_smoke.packet_id.as_deref(), Some("packet-h.smoke"));
 }
