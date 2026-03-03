@@ -211,3 +211,49 @@ fn module_parse_compact_reexport_from_baseline() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_multiline_import_export_baseline() {
+    let source = "import {\n  value,\n  extra as bonus,\n}\nfrom\n  './dep.js'\nexport const answer =\n  value + bonus\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![
+            ModuleImportBinding {
+                imported: "value".to_string(),
+                local: "value".to_string(),
+            },
+            ModuleImportBinding {
+                imported: "extra".to_string(),
+                local: "bonus".to_string(),
+            },
+        ]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_multiline_named_reexport_baseline() {
+    let source = "export {\n  value as answer,\n  default as fallback,\n}\nfrom\n  './dep.js'\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 2);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[1].imported, "default");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "fallback".to_string(),
+        local: "$__qjs_module_reexport_1__$".to_string(),
+    }));
+}

@@ -91,10 +91,10 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut export_star_binding_index = 0usize;
     let mut export_star_namespace_binding_index = 0usize;
 
-    for raw_line in source.lines() {
+    for raw_line in collect_module_logical_lines(source) {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
-            transformed_lines.push(raw_line.to_string());
+            transformed_lines.push(raw_line.clone());
             continue;
         }
         type_only_bindings.extend(collect_ts_type_only_declared_bindings(trimmed));
@@ -242,7 +242,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
             continue;
         }
 
-        transformed_lines.push(raw_line.to_string());
+        transformed_lines.push(raw_line);
     }
 
     if !exports.is_empty() {
@@ -255,6 +255,203 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
         exports,
         body,
     })
+}
+
+fn collect_module_logical_lines(source: &str) -> Vec<String> {
+    let mut logical_lines = Vec::new();
+    let mut physical_lines = source.lines().peekable();
+    while let Some(raw_line) = physical_lines.next() {
+        let mut logical_line = raw_line.to_string();
+        let trimmed = raw_line.trim();
+        let is_module_declaration =
+            normalize_module_declaration_keyword(trimmed, "import", &['{', '*', '\'', '"'])
+                .is_some()
+                || normalize_module_declaration_keyword(trimmed, "export", &['{', '*']).is_some();
+        if !is_module_declaration {
+            logical_lines.push(logical_line);
+            continue;
+        }
+
+        while module_grouping_depth(&logical_line) > 0
+            || module_declaration_needs_followup(&logical_line)
+            || module_reexport_from_clause_on_next_line(&logical_line, physical_lines.peek())
+        {
+            let Some(next_line) = physical_lines.next() else {
+                break;
+            };
+            logical_line.push('\n');
+            logical_line.push_str(next_line);
+        }
+
+        logical_lines.push(logical_line);
+    }
+    logical_lines
+}
+
+fn module_reexport_from_clause_on_next_line(
+    declaration: &str,
+    next_line: Option<&&str>,
+) -> bool {
+    let Some(next_line) = next_line else {
+        return false;
+    };
+    if !line_starts_with_module_from_keyword(next_line.trim_start()) {
+        return false;
+    }
+    let Some(export_line) =
+        normalize_module_declaration_keyword(declaration.trim(), "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    let export_body = trim_module_declaration_terminator(export_body);
+    if !export_body.starts_with('{') {
+        return false;
+    }
+    let Some(closing_brace) = export_body.rfind('}') else {
+        return false;
+    };
+    export_body[closing_brace + 1..].trim().is_empty()
+}
+
+fn line_starts_with_module_from_keyword(source: &str) -> bool {
+    let source = source.trim_start();
+    let Some(after_from) = source.strip_prefix("from") else {
+        return false;
+    };
+    match after_from.chars().next() {
+        None => true,
+        Some(ch) => ch.is_whitespace() || ch == '\'' || ch == '"',
+    }
+}
+
+fn module_grouping_depth(source: &str) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+fn module_declaration_needs_followup(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+
+    if let Some(import_line) =
+        normalize_module_declaration_keyword(source, "import", &['{', '*', '\'', '"'])
+    {
+        let rest = import_line
+            .strip_prefix("import ")
+            .expect("prefix checked")
+            .trim();
+        let rest = trim_module_declaration_terminator(rest);
+        if rest.is_empty() || rest.starts_with('\'') || rest.starts_with('"') {
+            return false;
+        }
+        return split_module_from_clause(rest).is_none();
+    }
+
+    let Some(export_line) = normalize_module_declaration_keyword(source, "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    let export_body = trim_module_declaration_terminator(export_body);
+    if export_body.is_empty() {
+        return false;
+    }
+
+    if export_body.starts_with('{') {
+        let Some(closing_brace) = export_body.rfind('}') else {
+            return true;
+        };
+        let suffix = export_body[closing_brace + 1..].trim();
+        return !suffix.is_empty() && strip_module_from_keyword(suffix).is_none();
+    }
+
+    if export_body.starts_with('*') {
+        let after_star = export_body
+            .strip_prefix('*')
+            .expect("prefix checked")
+            .trim_start();
+        if strip_module_from_keyword(after_star).is_some() {
+            return false;
+        }
+        if let Some(after_as) = after_star.strip_prefix("as") {
+            if !after_as.chars().next().is_some_and(char::is_whitespace) {
+                return false;
+            }
+            return split_module_from_clause(after_as.trim_start()).is_none();
+        }
+        return true;
+    }
+
+    if let Some(default_expr) = export_body.strip_prefix("default ") {
+        return trim_module_declaration_terminator(default_expr).is_empty();
+    }
+
+    let body = export_body.trim_end();
+    body.ends_with('=') || body.ends_with(',')
 }
 
 struct ParsedModuleImportDeclaration {
