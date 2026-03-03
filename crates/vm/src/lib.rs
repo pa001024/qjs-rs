@@ -122,6 +122,267 @@ const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
+const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
+const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
+  var C = this;
+
+  function makeResult(lengthHint) {
+    if (useConstructor) {
+      if (lengthHint === undefined) {
+        return new C();
+      }
+      return new C(lengthHint);
+    }
+    return [];
+  }
+
+  function ensureObject(step, message) {
+    if (typeof step !== "object" || step === null) {
+      throw new TypeError(message);
+    }
+    return step;
+  }
+
+  function toLength(lengthValue) {
+    var numericLength = Number(lengthValue);
+    if (!(numericLength > 0)) {
+      return 0;
+    }
+    if (numericLength > 4294967295) {
+      numericLength = 4294967295;
+    }
+    return numericLength - (numericLength % 1);
+  }
+
+  return new Promise(function(resolve, reject) {
+    function closeIterator(iterator, onClosed) {
+      if (iterator === null || iterator === undefined) {
+        onClosed();
+        return;
+      }
+      var returnMethod;
+      try {
+        returnMethod = iterator["return"];
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      if (typeof returnMethod !== "function") {
+        onClosed();
+        return;
+      }
+      var returnResult;
+      try {
+        returnResult = returnMethod.call(iterator);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      Promise.resolve(returnResult).then(function() { onClosed(); }, reject);
+    }
+
+    function rejectWithIteratorClose(iterator, reason) {
+      closeIterator(iterator, function() { reject(reason); });
+    }
+
+    function resolveArrayResult(result, index, iteratorForClose) {
+      try {
+        result.length = index;
+      } catch (err) {
+        if (iteratorForClose === undefined) {
+          reject(err);
+        } else {
+          rejectWithIteratorClose(iteratorForClose, err);
+        }
+        return;
+      }
+      resolve(result);
+    }
+
+    try {
+      if (items === null || items === undefined) {
+        throw new TypeError("Array.fromAsync items must be coercible");
+      }
+      if (hasMapFn && typeof mapfn !== "function") {
+        throw new TypeError("Array.fromAsync mapfn must be callable");
+      }
+
+      var usingAsyncIterator = items[Symbol.asyncIterator];
+      if (usingAsyncIterator !== null && usingAsyncIterator !== undefined) {
+        if (typeof usingAsyncIterator !== "function") {
+          throw new TypeError("Array.fromAsync async iterator must be callable");
+        }
+        var asyncIterator = usingAsyncIterator.call(items);
+        var asyncResult = makeResult();
+        var asyncIndex = 0;
+
+        function nextAsync() {
+          var nextResult;
+          try {
+            nextResult = asyncIterator.next();
+          } catch (err) {
+            rejectWithIteratorClose(asyncIterator, err);
+            return;
+          }
+          Promise.resolve(nextResult).then(function(stepValue) {
+            var step;
+            try {
+              step = ensureObject(
+                stepValue,
+                "Array.fromAsync iterator next must return object"
+              );
+            } catch (err) {
+              rejectWithIteratorClose(asyncIterator, err);
+              return;
+            }
+            if (step.done) {
+              resolveArrayResult(asyncResult, asyncIndex, asyncIterator);
+              return;
+            }
+            var nextValue = step.value;
+            if (hasMapFn) {
+              var mappedValue;
+              try {
+                mappedValue = mapfn.call(thisArg, nextValue, asyncIndex);
+              } catch (err) {
+                rejectWithIteratorClose(asyncIterator, err);
+                return;
+              }
+              Promise.resolve(mappedValue).then(function(mapped) {
+                try {
+                  asyncResult[asyncIndex] = mapped;
+                  asyncIndex++;
+                } catch (err) {
+                  rejectWithIteratorClose(asyncIterator, err);
+                  return;
+                }
+                nextAsync();
+              }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+              return;
+            }
+            try {
+              asyncResult[asyncIndex] = nextValue;
+              asyncIndex++;
+            } catch (err) {
+              rejectWithIteratorClose(asyncIterator, err);
+              return;
+            }
+            nextAsync();
+          }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+        }
+
+        nextAsync();
+        return;
+      }
+
+      var usingSyncIterator = items[Symbol.iterator];
+      if (usingSyncIterator !== null && usingSyncIterator !== undefined) {
+        if (typeof usingSyncIterator !== "function") {
+          throw new TypeError("Array.fromAsync iterator must be callable");
+        }
+        var syncIterator = usingSyncIterator.call(items);
+        var syncResult = makeResult();
+        var syncIndex = 0;
+
+        function nextSync() {
+          var step;
+          try {
+            step = ensureObject(
+              syncIterator.next(),
+              "Array.fromAsync iterator next must return object"
+            );
+          } catch (err) {
+            rejectWithIteratorClose(syncIterator, err);
+            return;
+          }
+          if (step.done) {
+            resolveArrayResult(syncResult, syncIndex, syncIterator);
+            return;
+          }
+          Promise.resolve(step.value).then(function(awaitedValue) {
+            if (hasMapFn) {
+              var mappedValue;
+              try {
+                mappedValue = mapfn.call(thisArg, awaitedValue, syncIndex);
+              } catch (err) {
+                rejectWithIteratorClose(syncIterator, err);
+                return;
+              }
+              Promise.resolve(mappedValue).then(function(mapped) {
+                try {
+                  syncResult[syncIndex] = mapped;
+                  syncIndex++;
+                } catch (err) {
+                  rejectWithIteratorClose(syncIterator, err);
+                  return;
+                }
+                nextSync();
+              }, function(reason) { rejectWithIteratorClose(syncIterator, reason); });
+              return;
+            }
+            try {
+              syncResult[syncIndex] = awaitedValue;
+              syncIndex++;
+            } catch (err) {
+              rejectWithIteratorClose(syncIterator, err);
+              return;
+            }
+            nextSync();
+          }, function(reason) { rejectWithIteratorClose(syncIterator, reason); });
+        }
+
+        nextSync();
+        return;
+      }
+
+      var source = Object(items);
+      var length = toLength(source.length);
+      var arrayLikeResult = makeResult(length);
+      var index = 0;
+
+      function nextArrayLike() {
+        if (index >= length) {
+          resolveArrayResult(arrayLikeResult, index);
+          return;
+        }
+        Promise.resolve(source[index]).then(function(awaitedValue) {
+          if (hasMapFn) {
+            var mappedValue;
+            try {
+              mappedValue = mapfn.call(thisArg, awaitedValue, index);
+            } catch (err) {
+              reject(err);
+              return;
+            }
+            Promise.resolve(mappedValue).then(function(mapped) {
+              try {
+                arrayLikeResult[index] = mapped;
+                index++;
+              } catch (err) {
+                reject(err);
+                return;
+              }
+              nextArrayLike();
+            }, reject);
+            return;
+          }
+          try {
+            arrayLikeResult[index] = awaitedValue;
+            index++;
+          } catch (err) {
+            reject(err);
+            return;
+          }
+          nextArrayLike();
+        }, reject);
+      }
+
+      nextArrayLike();
+    } catch (err) {
+      reject(err);
+    }
+  });
+})"#;
 
 type BindingId = usize;
 type ObjectId = u64;
@@ -6432,6 +6693,74 @@ impl Vm {
             realm,
         )?;
         Ok(result)
+    }
+
+    fn ensure_array_from_async_impl(
+        &mut self,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        if let Some(existing) = self.global_property(ARRAY_FROM_ASYNC_IMPL_GLOBAL)
+            && Self::is_callable_value(&existing)
+        {
+            return Ok(existing);
+        }
+
+        let helper = self.execute_eval(
+            ARRAY_FROM_ASYNC_IMPL_SOURCE,
+            realm,
+            caller_strict,
+            EvalCallKind::Indirect,
+        )?;
+        if !Self::is_callable_value(&helper) {
+            return Err(VmError::TypeError(
+                "Array.fromAsync helper must be callable",
+            ));
+        }
+        let global_object_id = self
+            .global_object_id
+            .ok_or(VmError::RuntimeIntegrity("missing global object"))?;
+        self.define_global_property_with_attributes(
+            global_object_id,
+            ARRAY_FROM_ASYNC_IMPL_GLOBAL,
+            helper.clone(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        )?;
+        Ok(helper)
+    }
+
+    fn execute_array_from_async_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let items = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let map_fn = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let this_for_map = args.get(2).cloned().unwrap_or(JsValue::Undefined);
+        let mapping = !matches!(map_fn, JsValue::Undefined);
+        let constructor = this_arg.unwrap_or(JsValue::Undefined);
+        let use_constructor = self.is_constructor_value(&constructor)?;
+
+        let helper = self.ensure_array_from_async_impl(realm, caller_strict)?;
+        self.execute_callable(
+            helper,
+            Some(constructor),
+            vec![
+                items,
+                map_fn,
+                this_for_map,
+                JsValue::Bool(mapping),
+                JsValue::Bool(use_constructor),
+            ],
+            realm,
+            caller_strict,
+        )
     }
 
     fn execute_array_of_this(
@@ -13758,6 +14087,7 @@ impl Vm {
                     "valueOf",
                     "isArray",
                     "from",
+                    "fromAsync",
                     "of",
                     "parse",
                     "UTC",
@@ -22944,6 +23274,7 @@ impl Vm {
                 )
                 | (NativeFunction::ArrayConstructor, "isArray")
                 | (NativeFunction::ArrayConstructor, "from")
+                | (NativeFunction::ArrayConstructor, "fromAsync")
                 | (NativeFunction::ArrayConstructor, "of")
                 | (NativeFunction::ArrayConstructor, "Symbol.species")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
@@ -24656,6 +24987,15 @@ impl Vm {
                 self.set_builtin_function_name(&from, "from");
                 from
             }
+            (NativeFunction::ArrayConstructor, "fromAsync") => self
+                .register_host_callback_function(
+                    "fromAsync",
+                    1.0,
+                    false,
+                    |vm, this_arg, args, realm, caller_strict| {
+                        vm.execute_array_from_async_this(this_arg, &args, realm, caller_strict)
+                    },
+                ),
             (NativeFunction::ArrayConstructor, "of") => {
                 let of = self.create_host_function_value(HostFunction::ArrayOf);
                 self.set_builtin_function_length(&of, 0.0);
@@ -29080,6 +29420,94 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_async_descriptor_surface_baseline() {
+        let script = parse_script(
+            "var method = Array.fromAsync;\
+             var desc = Object.getOwnPropertyDescriptor(Array, 'fromAsync');\
+             var nameDesc = Object.getOwnPropertyDescriptor(method, 'name');\
+             var lengthDesc = Object.getOwnPropertyDescriptor(method, 'length');\
+             typeof method === 'function' &&\
+             desc.configurable === true && desc.writable === true && desc.enumerable === false &&\
+             nameDesc.value === 'fromAsync' && nameDesc.writable === false && nameDesc.enumerable === false && nameDesc.configurable === true &&\
+             lengthDesc.value === 1 && lengthDesc.writable === false && lengthDesc.enumerable === false && lengthDesc.configurable === true;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_from_async_resolves_array_like_values_with_mapfn() {
+        let setup = parse_script(
+            "var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync({ length: 2, 0: Promise.resolve(2), 1: Promise.resolve(4) }, function (value) { return value / 2; })\
+               .then(function (result) { output = result; state = 'fulfilled'; }, function () { state = 'rejected'; });",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 2 && output[0] === 1 && output[1] === 2;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Object(_)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_from_async_resolves_sync_iterable_baseline() {
+        let setup = parse_script(
+            "var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync([1, 2, 3]).then(\
+               function (result) { output = result; state = 'fulfilled'; },\
+               function () { state = 'rejected'; }\
+             );",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 3 && output[0] === 1 && output[1] === 2 && output[2] === 3;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Object(_)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
     }
 
     #[test]
