@@ -569,6 +569,15 @@ struct EvalStateSnapshot {
     with_objects: Vec<WithFrame>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IdentifierFastPathFlags {
+    packet_a_metrics_enabled: bool,
+    packet_c_enabled: bool,
+    packet_d_enabled: bool,
+    packet_g_enabled: bool,
+    packet_h_enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GcStats {
     pub roots: usize,
@@ -2720,11 +2729,11 @@ impl Vm {
                             store_error = Some(err);
                         }
                     } else {
-                        self.packet_a_fast_path.remove_binding_cache_entry(name);
-                        self.packet_c_fast_path.remove_binding_cache_entry(name);
-                        self.packet_g_fast_path.remove_name_cache_entry(name);
-                        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-                        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+                        self.invalidate_identifier_resolution_fast_path_entries(
+                            name,
+                            identifier_slot,
+                            packet_h_slot,
+                        );
                         if strict {
                             store_error = Some(VmError::UnknownIdentifier(name.clone()));
                         } else if let Some(global_object_id) = self.global_object_id {
@@ -15441,6 +15450,61 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn identifier_fast_path_flags(&self) -> IdentifierFastPathFlags {
+        IdentifierFastPathFlags {
+            packet_a_metrics_enabled: self.packet_a_fast_path_enabled()
+                && self.packet_a_fast_path_metrics_enabled(),
+            packet_c_enabled: self.packet_c_fast_path_enabled(),
+            packet_d_enabled: self.packet_d_fast_path_enabled(),
+            packet_g_enabled: self.packet_g_fast_path_enabled(),
+            packet_h_enabled: self.packet_h_fast_path_enabled(),
+        }
+    }
+
+    #[inline(always)]
+    fn record_identifier_fast_path_guard_misses(
+        &mut self,
+        flags: IdentifierFastPathFlags,
+        identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
+    ) {
+        if flags.packet_a_metrics_enabled {
+            self.record_packet_a_binding_guard_miss();
+        }
+        if flags.packet_c_enabled {
+            self.record_packet_c_identifier_guard_miss();
+        }
+        if flags.packet_d_enabled && identifier_slot.is_some() {
+            self.record_packet_d_slot_guard_miss();
+        }
+        if flags.packet_g_enabled {
+            self.record_packet_g_name_guard_miss();
+        }
+        if flags.packet_h_enabled && packet_h_slot.is_some() {
+            self.record_packet_h_lexical_slot_guard_miss();
+        }
+    }
+
+    #[inline(always)]
+    fn clear_identifier_name_fast_path_entries(&mut self, name: &str) {
+        self.packet_a_fast_path.remove_binding_cache_entry(name);
+        self.packet_c_fast_path.remove_binding_cache_entry(name);
+        self.packet_g_fast_path.remove_name_cache_entry(name);
+    }
+
+    #[inline(always)]
+    fn invalidate_identifier_resolution_fast_path_entries(
+        &mut self,
+        name: &str,
+        identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
+    ) {
+        self.clear_identifier_name_fast_path_entries(name);
+        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+    }
+
+    #[inline(always)]
     fn packet_d_slot_for_opcode(
         metadata: &[Option<IdentifierSlotMetadata>],
         pc: usize,
@@ -15480,9 +15544,7 @@ impl Vm {
 
     #[inline(always)]
     fn invalidate_binding_fast_path_cache_for_name(&mut self, name: &str) {
-        self.packet_a_fast_path.remove_binding_cache_entry(name);
-        self.packet_c_fast_path.remove_binding_cache_entry(name);
-        self.packet_g_fast_path.remove_name_cache_entry(name);
+        self.clear_identifier_name_fast_path_entries(name);
         self.packet_d_scope_generation = self.packet_d_scope_generation.wrapping_add(1);
     }
 
@@ -16039,7 +16101,9 @@ impl Vm {
         identifier_slot: Option<u32>,
         packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
-        if self.packet_d_fast_path_enabled()
+        let flags = self.identifier_fast_path_flags();
+
+        if flags.packet_d_enabled
             && !self.packet_d_fast_path_metrics_enabled()
             && !self.packet_a_fast_path_metrics_enabled()
             && let Some(slot) = identifier_slot
@@ -16067,9 +16131,9 @@ impl Vm {
                     return Some(binding_id);
                 }
             }
-            let fallback = if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            let fallback = if flags.packet_h_enabled && packet_h_slot.is_some() {
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
-            } else if self.packet_g_fast_path_enabled() {
+            } else if flags.packet_g_enabled {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -16087,14 +16151,9 @@ impl Vm {
             return None;
         }
 
-        let packet_a_metrics_enabled =
-            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
-        let packet_c_enabled = self.packet_c_fast_path_enabled();
-        let packet_d_enabled = self.packet_d_fast_path_enabled();
-        let packet_g_enabled = self.packet_g_fast_path_enabled();
-        let packet_h_enabled = self.packet_h_fast_path_enabled();
-
-        if packet_d_enabled && let Some(slot) = identifier_slot {
+        if flags.packet_d_enabled
+            && let Some(slot) = identifier_slot
+        {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
                 let guard_matches_generation =
                     entry.scope_generation == self.packet_d_scope_generation;
@@ -16107,7 +16166,7 @@ impl Vm {
                             entry.binding_id,
                         ) {
                             self.record_packet_d_slot_guard_hit();
-                            if packet_a_metrics_enabled {
+                            if flags.packet_a_metrics_enabled {
                                 self.record_packet_a_binding_guard_hit();
                             }
                             return Some(entry.binding_id);
@@ -16116,7 +16175,7 @@ impl Vm {
                     #[cfg(not(debug_assertions))]
                     {
                         self.record_packet_d_slot_guard_hit();
-                        if packet_a_metrics_enabled {
+                        if flags.packet_a_metrics_enabled {
                             self.record_packet_a_binding_guard_hit();
                         }
                         return Some(entry.binding_id);
@@ -16125,7 +16184,7 @@ impl Vm {
                 if let Some(binding_id) =
                     self.try_revalidate_packet_d_slot_cache_entry(name, slot, entry)
                 {
-                    if packet_a_metrics_enabled {
+                    if flags.packet_a_metrics_enabled {
                         self.record_packet_a_binding_guard_hit();
                     }
                     return Some(binding_id);
@@ -16133,12 +16192,12 @@ impl Vm {
                 self.packet_d_fast_path.remove_slot_cache_entry(slot);
             }
             self.record_packet_d_slot_guard_miss();
-            if packet_a_metrics_enabled {
+            if flags.packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
-            let fallback = if packet_h_enabled && packet_h_slot.is_some() {
+            let fallback = if flags.packet_h_enabled && packet_h_slot.is_some() {
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
-            } else if packet_g_enabled {
+            } else if flags.packet_g_enabled {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -16157,35 +16216,35 @@ impl Vm {
             return None;
         }
 
-        if packet_h_enabled
+        if flags.packet_h_enabled
             && let Some((_, binding_id)) =
                 self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
         {
-            if packet_a_metrics_enabled {
+            if flags.packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_hit();
             }
             return Some(binding_id);
         }
 
-        if packet_g_enabled {
+        if flags.packet_g_enabled {
             if let Some((_, binding_id)) = self.resolve_binding_entry_with_packet_g_name_cache(name)
             {
-                if packet_a_metrics_enabled {
+                if flags.packet_a_metrics_enabled {
                     self.record_packet_a_binding_guard_hit();
                 }
                 return Some(binding_id);
             }
-            if packet_a_metrics_enabled {
+            if flags.packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
             return None;
         }
 
-        if packet_c_enabled {
+        if flags.packet_c_enabled {
             if let Some(entry) = self.packet_c_fast_path.binding_cache_entry(name) {
                 if self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id) {
                     self.record_packet_c_identifier_guard_hit();
-                    if packet_a_metrics_enabled {
+                    if flags.packet_a_metrics_enabled {
                         self.record_packet_a_binding_guard_hit();
                     }
                     return Some(entry.binding_id);
@@ -16194,7 +16253,7 @@ impl Vm {
             }
 
             self.record_packet_c_identifier_guard_miss();
-            if packet_a_metrics_enabled {
+            if flags.packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
 
@@ -16208,7 +16267,7 @@ impl Vm {
             return None;
         }
 
-        if !packet_a_metrics_enabled {
+        if !flags.packet_a_metrics_enabled {
             self.resolve_binding_id(name)
         } else {
             if let Some(entry) = self.packet_a_fast_path.binding_cache_entry(name) {
@@ -16246,27 +16305,8 @@ impl Vm {
             );
         }
 
-        let packet_a_metrics_enabled =
-            self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled();
-        let packet_c_enabled = self.packet_c_fast_path_enabled();
-        let packet_d_enabled = self.packet_d_fast_path_enabled();
-        let packet_g_enabled = self.packet_g_fast_path_enabled();
-
-        if packet_a_metrics_enabled {
-            self.record_packet_a_binding_guard_miss();
-        }
-        if packet_c_enabled {
-            self.record_packet_c_identifier_guard_miss();
-        }
-        if packet_d_enabled && identifier_slot.is_some() {
-            self.record_packet_d_slot_guard_miss();
-        }
-        if packet_g_enabled {
-            self.record_packet_g_name_guard_miss();
-        }
-        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
-            self.record_packet_h_lexical_slot_guard_miss();
-        }
+        let flags = self.identifier_fast_path_flags();
+        self.record_identifier_fast_path_guard_misses(flags, identifier_slot, packet_h_slot);
         self.resolve_binding_id(name)
     }
 
@@ -17454,21 +17494,8 @@ impl Vm {
             }
             return Ok(None);
         }
-        if self.packet_a_fast_path_enabled() && self.packet_a_fast_path_metrics_enabled() {
-            self.record_packet_a_binding_guard_miss();
-        }
-        if self.packet_c_fast_path_enabled() {
-            self.record_packet_c_identifier_guard_miss();
-        }
-        if self.packet_d_fast_path_enabled() && identifier_slot.is_some() {
-            self.record_packet_d_slot_guard_miss();
-        }
-        if self.packet_g_fast_path_enabled() {
-            self.record_packet_g_name_guard_miss();
-        }
-        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
-            self.record_packet_h_lexical_slot_guard_miss();
-        }
+        let flags = self.identifier_fast_path_flags();
+        self.record_identifier_fast_path_guard_misses(flags, identifier_slot, packet_h_slot);
         self.invalidate_binding_fast_path_cache();
         self.record_identifier_resolution_fallback_scan();
 
@@ -17479,11 +17506,11 @@ impl Vm {
                 self.resolve_with_property_base_for_scope_depth(name, realm, scope_depth_marker)?
             {
                 let property = self.intern_identifier_name(name);
-                self.packet_a_fast_path.remove_binding_cache_entry(name);
-                self.packet_c_fast_path.remove_binding_cache_entry(name);
-                self.packet_g_fast_path.remove_name_cache_entry(name);
-                self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+                self.invalidate_identifier_resolution_fast_path_entries(
+                    name,
+                    identifier_slot,
+                    packet_h_slot,
+                );
                 return Ok(Some(IdentifierReference::Property {
                     base,
                     property,
@@ -17503,11 +17530,11 @@ impl Vm {
         }
         if let Some(base) = self.resolve_with_property_base_for_scope_depth(name, realm, 0)? {
             let property = self.intern_identifier_name(name);
-            self.packet_a_fast_path.remove_binding_cache_entry(name);
-            self.packet_c_fast_path.remove_binding_cache_entry(name);
-            self.packet_g_fast_path.remove_name_cache_entry(name);
-            self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+            self.invalidate_identifier_resolution_fast_path_entries(
+                name,
+                identifier_slot,
+                packet_h_slot,
+            );
             return Ok(Some(IdentifierReference::Property {
                 base,
                 property,
@@ -17533,11 +17560,11 @@ impl Vm {
         }
         if let Some(global_object_id) = self.resolve_global_own_data_property_for_identifier(name) {
             let property = self.intern_identifier_name(name);
-            self.packet_a_fast_path.remove_binding_cache_entry(name);
-            self.packet_c_fast_path.remove_binding_cache_entry(name);
-            self.packet_g_fast_path.remove_name_cache_entry(name);
-            self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+            self.invalidate_identifier_resolution_fast_path_entries(
+                name,
+                identifier_slot,
+                packet_h_slot,
+            );
             return Ok(IdentifierReference::Property {
                 base: JsValue::Object(global_object_id),
                 property,
@@ -17549,11 +17576,11 @@ impl Vm {
             let base = JsValue::Object(global_object_id);
             if self.has_property_on_receiver(&base, name, realm)? {
                 let property = self.intern_identifier_name(name);
-                self.packet_a_fast_path.remove_binding_cache_entry(name);
-                self.packet_c_fast_path.remove_binding_cache_entry(name);
-                self.packet_g_fast_path.remove_name_cache_entry(name);
-                self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+                self.invalidate_identifier_resolution_fast_path_entries(
+                    name,
+                    identifier_slot,
+                    packet_h_slot,
+                );
                 return Ok(IdentifierReference::Property {
                     base,
                     property,
@@ -17562,11 +17589,11 @@ impl Vm {
                 });
             }
         }
-        self.packet_a_fast_path.remove_binding_cache_entry(name);
-        self.packet_c_fast_path.remove_binding_cache_entry(name);
-        self.packet_g_fast_path.remove_name_cache_entry(name);
-        self.invalidate_packet_d_slot_cache_entry(identifier_slot);
-        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
+        self.invalidate_identifier_resolution_fast_path_entries(
+            name,
+            identifier_slot,
+            packet_h_slot,
+        );
         let name = self.intern_identifier_name(name);
         Ok(IdentifierReference::Unresolvable { name })
     }
