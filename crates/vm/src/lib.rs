@@ -2763,11 +2763,7 @@ impl Vm {
                         pc = target;
                         continue;
                     }
-                    if Self::next_opcode_is_pop(code, pc) {
-                        pc += 1;
-                    } else {
-                        self.stack.push(value);
-                    }
+                    self.push_value_or_consume_pop(code, &mut pc, value);
                 }
                 Opcode::IncrementVariable(name) => {
                     if hotspot_enabled {
@@ -2893,11 +2889,7 @@ impl Vm {
 
                     match result {
                         Ok(value) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(value);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, value);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3241,11 +3233,7 @@ impl Vm {
                     };
                     match result {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3293,11 +3281,7 @@ impl Vm {
                     })();
                     match result {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3318,11 +3302,7 @@ impl Vm {
                         realm,
                     ) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3342,11 +3322,7 @@ impl Vm {
                     })();
                     match result {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -3488,11 +3464,7 @@ impl Vm {
                         .ok_or(VmError::StackUnderflow)?;
                     match self.store_identifier_reference_value(reference, value, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4152,11 +4124,7 @@ impl Vm {
                 }
                 Opcode::Call(arg_count) => match self.execute_call(*arg_count, realm, strict) {
                     Ok(result) => {
-                        if Self::next_opcode_is_pop(code, pc) {
-                            pc += 1;
-                        } else {
-                            self.stack.push(result);
-                        }
+                        self.push_value_or_consume_pop(code, &mut pc, result);
                     }
                     Err(err) => {
                         let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4167,11 +4135,7 @@ impl Vm {
                 Opcode::CallWithSpread(spread_flags) => {
                     match self.execute_call_with_spread(spread_flags, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4210,11 +4174,7 @@ impl Vm {
                         packet_h_slot,
                     ) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4253,11 +4213,7 @@ impl Vm {
                         packet_h_slot,
                     ) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4269,11 +4225,7 @@ impl Vm {
                 Opcode::CallMethod(arg_count) => {
                     match self.execute_method_call(*arg_count, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4285,11 +4237,7 @@ impl Vm {
                 Opcode::CallMethodWithSpread(spread_flags) => {
                     match self.execute_method_call_with_spread(spread_flags, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4301,11 +4249,7 @@ impl Vm {
                 Opcode::Construct(arg_count) => {
                     match self.execute_construct(*arg_count, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -4317,11 +4261,7 @@ impl Vm {
                 Opcode::ConstructWithSpread(spread_flags) => {
                     match self.execute_construct_with_spread(spread_flags, realm, strict) {
                         Ok(result) => {
-                            if Self::next_opcode_is_pop(code, pc) {
-                                pc += 1;
-                            } else {
-                                self.stack.push(result);
-                            }
+                            self.push_value_or_consume_pop(code, &mut pc, result);
                         }
                         Err(err) => {
                             let target = self.route_runtime_error_to_handler(err, code.len())?;
@@ -15632,6 +15572,15 @@ impl Vm {
     #[inline(always)]
     fn next_opcode_is_pop(code: &[Opcode], pc: usize) -> bool {
         matches!(code.get(pc + 1), Some(Opcode::Pop))
+    }
+
+    #[inline(always)]
+    fn push_value_or_consume_pop(&mut self, code: &[Opcode], pc: &mut usize, value: JsValue) {
+        if Self::next_opcode_is_pop(code, *pc) {
+            *pc += 1;
+        } else {
+            self.stack.push(value);
+        }
     }
 
     fn invalidate_binding_fast_path_cache(&mut self) {
