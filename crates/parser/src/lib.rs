@@ -776,12 +776,7 @@ fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, Pa
     if let Some(rest) = declaration.strip_prefix("var ") {
         return parse_variable_export_bindings("var", rest);
     }
-    if let Some(rest) = declaration.strip_prefix("function ") {
-        let name = parse_leading_identifier(rest)?;
-        return Ok(vec![name]);
-    }
-    if let Some(rest) = declaration.strip_prefix("async function ") {
-        let name = parse_leading_identifier(rest)?;
+    if let Some(name) = parse_module_export_function_name(declaration)? {
         return Ok(vec![name]);
     }
     if let Some(rest) = declaration.strip_prefix("class ") {
@@ -845,6 +840,29 @@ fn is_synthetic_pattern_binding_name(name: &str) -> bool {
     name.starts_with("$__for_in_decl_array_")
         || name.starts_with("$__for_in_decl_object_")
         || name.starts_with("$__for_in_decl_object_effect_")
+}
+
+fn parse_module_export_function_name(declaration: &str) -> Result<Option<String>, ParseError> {
+    let rest = if let Some(rest) = declaration.strip_prefix("function") {
+        rest
+    } else if let Some(rest) = declaration.strip_prefix("async function") {
+        rest
+    } else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    let rest = if let Some(after_star) = rest.strip_prefix('*') {
+        after_star.trim_start()
+    } else {
+        rest
+    };
+    if rest.is_empty() {
+        return Err(ParseError {
+            message: "unsupported export declaration form".to_string(),
+            position: 0,
+        });
+    }
+    Ok(Some(parse_leading_identifier(rest)?))
 }
 
 fn trim_module_declaration_terminator(source: &str) -> &str {

@@ -457,3 +457,19 @@ fn keyword_identifier_names_in_clauses_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn generator_export_declaration_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export function* values() { yield 40; yield 2; }\n\
+         const iter = values();\n\
+         export const total = iter.next().value + iter.next().value;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("generator export declaration should evaluate");
+    assert_eq!(expect_number(&exports, "total"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}

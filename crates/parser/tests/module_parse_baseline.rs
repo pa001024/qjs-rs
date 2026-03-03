@@ -326,3 +326,14 @@ fn module_parse_keyword_identifier_names_in_clauses() {
         local: "condition".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_generator_export_declaration_baseline() {
+    let source = "export function* values() { yield 40; yield 2; }\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "values".to_string(),
+        local: "values".to_string(),
+    }));
+}
