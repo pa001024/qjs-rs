@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
 
 use builtins::install_baseline;
 use bytecode::compile_script;
@@ -347,8 +349,94 @@ fn execute_case_inner(
     (outcome, vm.gc_stats())
 }
 
+struct CaseExecutionRequest {
+    source: String,
+    auto_gc: bool,
+    auto_gc_threshold: Option<usize>,
+    runtime_gc: bool,
+    runtime_gc_check_interval: Option<usize>,
+}
+
+enum CaseWorkerCommand {
+    Execute(CaseExecutionRequest),
+    Shutdown,
+}
+
+struct SuiteCaseExecutor {
+    command_tx: Sender<CaseWorkerCommand>,
+    result_rx: Receiver<(ExecutionOutcome, GcStats)>,
+    worker_handle: Option<JoinHandle<()>>,
+}
+
+impl SuiteCaseExecutor {
+    fn new() -> Result<Self, String> {
+        let (command_tx, command_rx) = mpsc::channel::<CaseWorkerCommand>();
+        let (result_tx, result_rx) = mpsc::channel::<(ExecutionOutcome, GcStats)>();
+        let worker_handle = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                while let Ok(command) = command_rx.recv() {
+                    match command {
+                        CaseWorkerCommand::Execute(request) => {
+                            let result = execute_case_inner(
+                                &request.source,
+                                request.auto_gc,
+                                request.auto_gc_threshold,
+                                request.runtime_gc,
+                                request.runtime_gc_check_interval,
+                            );
+                            if result_tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                        CaseWorkerCommand::Shutdown => break,
+                    }
+                }
+            })
+            .map_err(|err| format!("failed to spawn suite case worker thread: {err}"))?;
+
+        Ok(Self {
+            command_tx,
+            result_rx,
+            worker_handle: Some(worker_handle),
+        })
+    }
+
+    fn execute(
+        &self,
+        source: &str,
+        auto_gc: bool,
+        auto_gc_threshold: Option<usize>,
+        runtime_gc: bool,
+        runtime_gc_check_interval: Option<usize>,
+    ) -> Result<(ExecutionOutcome, GcStats), String> {
+        self.command_tx
+            .send(CaseWorkerCommand::Execute(CaseExecutionRequest {
+                source: source.to_string(),
+                auto_gc,
+                auto_gc_threshold,
+                runtime_gc,
+                runtime_gc_check_interval,
+            }))
+            .map_err(|_| "suite case worker disconnected before request".to_string())?;
+        self.result_rx
+            .recv()
+            .map_err(|_| "suite case worker disconnected before response".to_string())
+    }
+}
+
+impl Drop for SuiteCaseExecutor {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(CaseWorkerCommand::Shutdown);
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, String> {
     let files = collect_js_files(root)?;
+    let suite_case_executor = SuiteCaseExecutor::new()?;
     let mut summary = SuiteSummary {
         discovered: files.len(),
         ..SuiteSummary::default()
@@ -389,13 +477,15 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
             );
         }
         summary.executed += 1;
-        let (actual, gc_stats) = execute_case_with_options_and_stats(
-            case.body,
-            options.auto_gc,
-            options.auto_gc_threshold,
-            options.runtime_gc,
-            options.runtime_gc_check_interval,
-        );
+        let (actual, gc_stats) = suite_case_executor
+            .execute(
+                case.body,
+                options.auto_gc,
+                options.auto_gc_threshold,
+                options.runtime_gc,
+                options.runtime_gc_check_interval,
+            )
+            .map_err(|err| format!("failed to execute {}: {err}", file.display()))?;
         summary.gc.collections_total += gc_stats.collections_total;
         summary.gc.boundary_collections += gc_stats.boundary_collections;
         summary.gc.runtime_collections += gc_stats.runtime_collections;
