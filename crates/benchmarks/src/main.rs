@@ -135,6 +135,7 @@ fn run_qjs_rs_eval_per_iteration(
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
+    packet_i_enabled: bool,
 ) -> Result<SampleMeasurement> {
     let realm = runtime::Realm::default();
     let mut vm = Vm::with_perf_from_env();
@@ -146,6 +147,7 @@ fn run_qjs_rs_eval_per_iteration(
     vm.set_packet_g_fast_path_metrics_enabled(false);
     vm.set_packet_h_fast_path_enabled(packet_h_enabled);
     vm.set_packet_h_fast_path_metrics_enabled(false);
+    vm.set_packet_i_revalidate_enabled(packet_i_enabled);
 
     let parsed = parse_script(script).map_err(|e| anyhow!("qjs-rs parse error: {}", e.message))?;
     let chunk = compile_script(&parsed);
@@ -336,6 +338,7 @@ struct RunEngineCaseContext<'a> {
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
+    packet_i_enabled: bool,
 }
 
 fn run_engine_case(
@@ -353,6 +356,7 @@ fn run_engine_case(
                 context.packet_d_enabled,
                 context.packet_g_enabled,
                 context.packet_h_enabled,
+                context.packet_i_enabled,
             ),
             EngineKind::BoaEngine => {
                 run_boa_engine_eval_per_iteration(context.script, context.iterations)
@@ -682,6 +686,7 @@ pub(crate) fn infer_packet_c_enabled(cli: &contract::CliArgs) -> bool {
             || packet_id.starts_with("packet-f")
             || packet_id.starts_with("packet-g")
             || packet_id.starts_with("packet-h")
+            || packet_id.starts_with("packet-i")
             || packet_id.starts_with("packet-final")
     }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
@@ -694,6 +699,7 @@ pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
             || packet_id.starts_with("packet-f")
             || packet_id.starts_with("packet-g")
             || packet_id.starts_with("packet-h")
+            || packet_id.starts_with("packet-i")
             || packet_id.starts_with("packet-final")
     }) || matches!(cli.run_profile, contract::RunProfile::LocalDev)
 }
@@ -701,7 +707,9 @@ pub(crate) fn infer_packet_d_enabled(cli: &contract::CliArgs) -> bool {
 pub(crate) fn infer_packet_g_enabled(cli: &contract::CliArgs) -> bool {
     let descriptor = contract::infer_optimization_descriptor(&cli.output);
     descriptor.packet_id.as_deref().is_some_and(|packet_id| {
-        packet_id.starts_with("packet-g") || packet_id.starts_with("packet-h")
+        packet_id.starts_with("packet-g")
+            || packet_id.starts_with("packet-h")
+            || packet_id.starts_with("packet-i")
     })
 }
 
@@ -710,7 +718,17 @@ pub(crate) fn infer_packet_h_enabled(cli: &contract::CliArgs) -> bool {
     descriptor
         .packet_id
         .as_deref()
-        .is_some_and(|packet_id| packet_id.starts_with("packet-h"))
+        .is_some_and(|packet_id| {
+            packet_id.starts_with("packet-h") || packet_id.starts_with("packet-i")
+        })
+}
+
+pub(crate) fn infer_packet_i_enabled(cli: &contract::CliArgs) -> bool {
+    let descriptor = contract::infer_optimization_descriptor(&cli.output);
+    descriptor
+        .packet_id
+        .as_deref()
+        .is_some_and(|packet_id| packet_id.starts_with("packet-i"))
 }
 
 fn to_hotspot_counters(value: HotspotAttribution) -> HotspotAttributionCounters {
@@ -1109,6 +1127,10 @@ fn packet_h_output_path_enables_packet_h_runtime_toggle() {
         "packet-h output artifacts must enable packet-h runtime fast path"
     );
     assert!(
+        !infer_packet_i_enabled(&cli),
+        "packet-h output artifacts must not implicitly enable packet-i revalidation"
+    );
+    assert!(
         infer_packet_g_enabled(&cli),
         "packet-h output artifacts must keep packet-g runtime fast path enabled"
     );
@@ -1119,6 +1141,47 @@ fn packet_h_output_path_enables_packet_h_runtime_toggle() {
     assert!(
         infer_packet_c_enabled(&cli),
         "packet-h output artifacts must keep packet-c runtime fast path enabled"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn packet_i_output_path_enables_packet_i_runtime_toggle() {
+    let cli = match contract::parse_cli_args_with_env(
+        vec![
+            "--profile".to_string(),
+            "local-dev".to_string(),
+            "--output".to_string(),
+            "target/benchmarks/engine-comparison.local-dev.packet-i.smoke.json".to_string(),
+            "--strict-comparators".to_string(),
+        ],
+        &[],
+    )
+    .expect("cli args should parse")
+    {
+        contract::CliParseResult::Run(cli) => *cli,
+        contract::CliParseResult::Help => panic!("expected parsed run config"),
+    };
+
+    assert!(
+        infer_packet_i_enabled(&cli),
+        "packet-i output artifacts must enable packet-i revalidation runtime behavior"
+    );
+    assert!(
+        infer_packet_h_enabled(&cli),
+        "packet-i output artifacts must keep packet-h runtime fast path enabled"
+    );
+    assert!(
+        infer_packet_g_enabled(&cli),
+        "packet-i output artifacts must keep packet-g runtime fast path enabled"
+    );
+    assert!(
+        infer_packet_d_enabled(&cli),
+        "packet-i output artifacts must keep packet-d runtime fast path enabled"
+    );
+    assert!(
+        infer_packet_c_enabled(&cli),
+        "packet-i output artifacts must keep packet-c runtime fast path enabled"
     );
 }
 
@@ -1168,11 +1231,12 @@ fn main() -> Result<()> {
     let packet_d_enabled = infer_packet_d_enabled(&cli);
     let packet_g_enabled = infer_packet_g_enabled(&cli);
     let packet_h_enabled = infer_packet_h_enabled(&cli);
+    let packet_i_enabled = infer_packet_i_enabled(&cli);
     let hotspot_attribution_enabled = infer_hotspot_attribution_default(&cli);
     let perf_target = build_perf_target_metadata(&cli.output, &environment);
 
     println!(
-        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} packet_d_enabled={} packet_g_enabled={} packet_h_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
+        "Running benchmark suite ({}) with profile={} timing_mode=eval-per-iteration strict_comparators={} hotspot_attribution={} packet_c_enabled={} packet_d_enabled={} packet_g_enabled={} packet_h_enabled={} packet_i_enabled={} optimization_mode={:?} optimization_tag={} packet_id={}: {} cases x {} engines x {} samples ({} iterations/sample)",
         SCHEMA_VERSION,
         cli.run_profile.as_str(),
         cli.comparators.strict_external,
@@ -1181,6 +1245,7 @@ fn main() -> Result<()> {
         packet_d_enabled,
         packet_g_enabled,
         packet_h_enabled,
+        packet_i_enabled,
         optimization_descriptor.mode,
         perf_target.optimization_tag,
         perf_target.packet_id.as_deref().unwrap_or("none"),
@@ -1227,6 +1292,7 @@ fn main() -> Result<()> {
                     packet_d_enabled,
                     packet_g_enabled,
                     packet_h_enabled,
+                    packet_i_enabled,
                 },
             )?;
 
@@ -1244,6 +1310,7 @@ fn main() -> Result<()> {
                         packet_d_enabled,
                         packet_g_enabled,
                         packet_h_enabled,
+                        packet_i_enabled,
                     },
                 )?;
                 samples.push(sample);
