@@ -233,6 +233,16 @@ enum FunctionMethod {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegExpLegacyStaticProperty {
+    Input,
+    LastMatch,
+    LastParen,
+    LeftContext,
+    RightContext,
+    Capture(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CollectionAddMode {
     Map,
     Set,
@@ -363,6 +373,8 @@ enum HostFunction {
     RegExpExecThis,
     RegExpCompileThis,
     RegExpToStringThis,
+    RegExpLegacyStaticGetter(RegExpLegacyStaticProperty),
+    RegExpLegacyInputSetter,
     ReflectDefineProperty,
     ReflectGetOwnPropertyDescriptor,
     HasOwnProperty {
@@ -725,6 +737,12 @@ pub struct Vm {
     uri_error_prototype_id: Option<ObjectId>,
     date_prototype_id: Option<ObjectId>,
     regexp_prototype_id: Option<ObjectId>,
+    regexp_legacy_input: String,
+    regexp_legacy_last_match: String,
+    regexp_legacy_last_paren: String,
+    regexp_legacy_left_context: String,
+    regexp_legacy_right_context: String,
+    regexp_legacy_captures: [String; 9],
     array_buffer_prototype_id: Option<ObjectId>,
     data_view_prototype_id: Option<ObjectId>,
     map_prototype_id: Option<ObjectId>,
@@ -847,6 +865,12 @@ impl Vm {
         self.uri_error_prototype_id = None;
         self.date_prototype_id = None;
         self.regexp_prototype_id = None;
+        self.regexp_legacy_input.clear();
+        self.regexp_legacy_last_match.clear();
+        self.regexp_legacy_last_paren.clear();
+        self.regexp_legacy_left_context.clear();
+        self.regexp_legacy_right_context.clear();
+        self.regexp_legacy_captures.fill(String::new());
         self.array_buffer_prototype_id = None;
         self.data_view_prototype_id = None;
         self.map_prototype_id = None;
@@ -905,6 +929,7 @@ impl Vm {
         let _ = self.math_object_value()?;
         let _ = self.json_object_value()?;
         let _ = self.reflect_object_value()?;
+        self.ensure_regexp_legacy_static_accessors();
         if let Some(object_prototype_id) = self.object_prototype_id {
             let to_string = self.shared_object_to_string_function();
             let to_locale_string =
@@ -1659,6 +1684,7 @@ impl Vm {
             let binding_id = self.create_binding(value.clone(), true);
             module_scope.insert(name.to_string(), binding_id);
         }
+        self.ensure_regexp_legacy_static_accessors();
         let saved_scopes =
             std::mem::replace(&mut self.scopes, vec![Rc::new(RefCell::new(module_scope))]);
         let saved_with_objects = std::mem::take(&mut self.with_objects);
@@ -2371,6 +2397,8 @@ impl Vm {
             | HostFunction::RegExpExecThis
             | HostFunction::RegExpCompileThis
             | HostFunction::RegExpToStringThis
+            | HostFunction::RegExpLegacyStaticGetter(_)
+            | HostFunction::RegExpLegacyInputSetter
             | HostFunction::AssertSameValue
             | HostFunction::AssertNotSameValue
             | HostFunction::AssertThrows
@@ -8549,6 +8577,20 @@ impl Vm {
                 self.execute_regexp_to_string(receiver_id)
                     .map(JsValue::String)
             }
+            HostFunction::RegExpLegacyStaticGetter(property) => {
+                Self::ensure_regexp_legacy_accessor_receiver(this_arg)?;
+                Ok(JsValue::String(self.regexp_legacy_property_value(property)))
+            }
+            HostFunction::RegExpLegacyInputSetter => {
+                Self::ensure_regexp_legacy_accessor_receiver(this_arg)?;
+                let input = self.coerce_to_string_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                self.regexp_legacy_input = input;
+                Ok(JsValue::Undefined)
+            }
             HostFunction::ReflectDefineProperty => {
                 let target = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let property = args.get(1).cloned().unwrap_or(JsValue::Undefined);
@@ -9688,6 +9730,143 @@ impl Vm {
         Ok(format!("/{source}/{flags}"))
     }
 
+    fn regexp_legacy_property_from_name(property: &str) -> Option<RegExpLegacyStaticProperty> {
+        match property {
+            "input" | "$_" => Some(RegExpLegacyStaticProperty::Input),
+            "lastMatch" | "$&" => Some(RegExpLegacyStaticProperty::LastMatch),
+            "lastParen" | "$+" => Some(RegExpLegacyStaticProperty::LastParen),
+            "leftContext" | "$`" => Some(RegExpLegacyStaticProperty::LeftContext),
+            "rightContext" | "$'" => Some(RegExpLegacyStaticProperty::RightContext),
+            "$1" => Some(RegExpLegacyStaticProperty::Capture(0)),
+            "$2" => Some(RegExpLegacyStaticProperty::Capture(1)),
+            "$3" => Some(RegExpLegacyStaticProperty::Capture(2)),
+            "$4" => Some(RegExpLegacyStaticProperty::Capture(3)),
+            "$5" => Some(RegExpLegacyStaticProperty::Capture(4)),
+            "$6" => Some(RegExpLegacyStaticProperty::Capture(5)),
+            "$7" => Some(RegExpLegacyStaticProperty::Capture(6)),
+            "$8" => Some(RegExpLegacyStaticProperty::Capture(7)),
+            "$9" => Some(RegExpLegacyStaticProperty::Capture(8)),
+            _ => None,
+        }
+    }
+
+    fn regexp_legacy_property_value(&self, property: RegExpLegacyStaticProperty) -> String {
+        match property {
+            RegExpLegacyStaticProperty::Input => self.regexp_legacy_input.clone(),
+            RegExpLegacyStaticProperty::LastMatch => self.regexp_legacy_last_match.clone(),
+            RegExpLegacyStaticProperty::LastParen => self.regexp_legacy_last_paren.clone(),
+            RegExpLegacyStaticProperty::LeftContext => self.regexp_legacy_left_context.clone(),
+            RegExpLegacyStaticProperty::RightContext => self.regexp_legacy_right_context.clone(),
+            RegExpLegacyStaticProperty::Capture(index) => self
+                .regexp_legacy_captures
+                .get(index)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    fn ensure_regexp_legacy_accessor_receiver(this_arg: Option<JsValue>) -> Result<(), VmError> {
+        if matches!(
+            this_arg,
+            Some(JsValue::NativeFunction(NativeFunction::RegExpConstructor))
+        ) {
+            Ok(())
+        } else {
+            Err(VmError::TypeError(
+                "RegExp legacy accessor receiver must be RegExp constructor",
+            ))
+        }
+    }
+
+    fn ensure_regexp_legacy_static_accessors(&mut self) {
+        if self
+            .native_function_objects
+            .get(&NativeFunction::RegExpConstructor)
+            .is_some_and(|object| object.getters.contains_key("input"))
+        {
+            return;
+        }
+        let input_getter = self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+            RegExpLegacyStaticProperty::Input,
+        ));
+        let input_setter = self.create_host_function_value(HostFunction::RegExpLegacyInputSetter);
+        let last_match_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LastMatch),
+        );
+        let last_paren_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LastParen),
+        );
+        let left_context_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::LeftContext),
+        );
+        let right_context_getter = self.create_host_function_value(
+            HostFunction::RegExpLegacyStaticGetter(RegExpLegacyStaticProperty::RightContext),
+        );
+        let capture_getters = [
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(0),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(1),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(2),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(3),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(4),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(5),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(6),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(7),
+            )),
+            self.create_host_function_value(HostFunction::RegExpLegacyStaticGetter(
+                RegExpLegacyStaticProperty::Capture(8),
+            )),
+        ];
+
+        let object = self
+            .native_function_objects
+            .entry(NativeFunction::RegExpConstructor)
+            .or_default();
+        let mut define_accessor = |name: &str, getter: &JsValue, setter: Option<&JsValue>| {
+            object.getters.insert(name.to_string(), getter.clone());
+            if let Some(setter) = setter {
+                object.setters.insert(name.to_string(), setter.clone());
+            }
+            object.property_attributes.insert(
+                name.to_string(),
+                PropertyAttributes {
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        };
+
+        define_accessor("input", &input_getter, Some(&input_setter));
+        define_accessor("$_", &input_getter, Some(&input_setter));
+        define_accessor("lastMatch", &last_match_getter, None);
+        define_accessor("$&", &last_match_getter, None);
+        define_accessor("lastParen", &last_paren_getter, None);
+        define_accessor("$+", &last_paren_getter, None);
+        define_accessor("leftContext", &left_context_getter, None);
+        define_accessor("$`", &left_context_getter, None);
+        define_accessor("rightContext", &right_context_getter, None);
+        define_accessor("$'", &right_context_getter, None);
+        for (index, getter) in capture_getters.iter().enumerate() {
+            let name = format!("${}", index + 1);
+            define_accessor(&name, getter, None);
+        }
+    }
+
     fn set_regexp_last_index(
         &mut self,
         object_id: ObjectId,
@@ -9794,6 +9973,24 @@ impl Vm {
         for index in 1..captures.len() {
             capture_groups.push(captures.get(index).map(|value| value.as_str().to_string()));
         }
+
+        self.regexp_legacy_input = input.to_string();
+        self.regexp_legacy_last_match = full_match.as_str().to_string();
+        self.regexp_legacy_left_context = normalized_input[..full_match.start()].to_string();
+        self.regexp_legacy_right_context = normalized_input[full_match.end()..].to_string();
+        self.regexp_legacy_captures.fill(String::new());
+        for (slot, capture) in capture_groups.iter().take(9).enumerate() {
+            if let Some(value) = capture {
+                self.regexp_legacy_captures[slot] = value.clone();
+            }
+        }
+        self.regexp_legacy_last_paren = self
+            .regexp_legacy_captures
+            .iter()
+            .rev()
+            .find(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_default();
 
         Ok(Some(RegExpMatchResult {
             index: full_match.start(),
@@ -14477,6 +14674,11 @@ impl Vm {
         native: NativeFunction,
         property: &str,
     ) -> Result<JsValue, VmError> {
+        if native == NativeFunction::RegExpConstructor
+            && Self::regexp_legacy_property_from_name(property).is_some()
+        {
+            self.ensure_regexp_legacy_static_accessors();
+        }
         if let Some(object) = self.native_function_objects.get(&native).cloned() {
             let data_value = object.properties.get(property).cloned();
             let getter_value = object.getters.get(property).cloned();
@@ -16805,6 +17007,19 @@ impl Vm {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
                 }
+                if native == NativeFunction::RegExpConstructor
+                    && Self::regexp_legacy_property_from_name(property).is_some()
+                {
+                    self.ensure_regexp_legacy_static_accessors();
+                }
+                if let Some(value) = self.get_native_function_own_property_with_receiver(
+                    native,
+                    property,
+                    JsValue::NativeFunction(native),
+                    realm,
+                )? {
+                    return Ok(value);
+                }
                 if self.native_function_has_own_property_runtime(native, property) {
                     return Ok(self.get_native_function_property(native, property));
                 }
@@ -16956,6 +17171,19 @@ impl Vm {
             JsValue::NativeFunction(native) => {
                 if Self::is_restricted_function_property(property) {
                     return Err(VmError::TypeError("restricted function property access"));
+                }
+                if native == NativeFunction::RegExpConstructor
+                    && Self::regexp_legacy_property_from_name(property).is_some()
+                {
+                    self.ensure_regexp_legacy_static_accessors();
+                }
+                if let Some(value) = self.get_native_function_own_property_with_receiver(
+                    native,
+                    property,
+                    receiver.clone(),
+                    realm,
+                )? {
+                    return Ok(value);
                 }
                 if self.native_function_has_own_property_runtime(native, property) {
                     return Ok(self.get_native_function_property(native, property));
@@ -23051,6 +23279,27 @@ impl Vm {
         }
     }
 
+    fn get_native_function_own_property_with_receiver(
+        &mut self,
+        native: NativeFunction,
+        property: &str,
+        receiver: JsValue,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        let Some(object) = self.native_function_objects.get(&native).cloned() else {
+            return Ok(None);
+        };
+        if let Some(getter) = object.getters.get(property).cloned() {
+            return self
+                .execute_callable(getter, Some(receiver), Vec::new(), realm, false)
+                .map(Some);
+        }
+        if object.setters.contains_key(property) {
+            return Ok(Some(JsValue::Undefined));
+        }
+        Ok(object.properties.get(property).cloned())
+    }
+
     fn get_native_function_property(&mut self, native: NativeFunction, property: &str) -> JsValue {
         if self
             .native_function_deleted
@@ -27599,6 +27848,73 @@ mod tests {
         realm.define_global(
             "TypeError",
             JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_legacy_accessors_expose_descriptor_and_receiver_guards() {
+        let script = parse_script(
+            "var descCapture = Object.getOwnPropertyDescriptor(RegExp, '$1'); \
+             var descInput = Object.getOwnPropertyDescriptor(RegExp, 'input'); \
+             var ok = typeof descCapture.get === 'function' \
+               && descCapture.set === undefined \
+               && descCapture.enumerable === false \
+               && descCapture.configurable === true \
+               && typeof descInput.get === 'function' \
+               && typeof descInput.set === 'function' \
+               && descInput.enumerable === false \
+               && descInput.configurable === true; \
+             var throwNotCtor = false; \
+             try { descCapture.get.call(/ /); } catch (e) { throwNotCtor = e instanceof TypeError; } \
+             class MyRegExp extends RegExp {} \
+             var throwSubclass = false; \
+             try { MyRegExp['$1']; } catch (e) { throwSubclass = e instanceof TypeError; } \
+             ok && throwNotCtor && throwSubclass;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "TypeError",
+            JsValue::NativeFunction(NativeFunction::TypeErrorConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_legacy_accessors_track_last_successful_match() {
+        let script = parse_script(
+            "var re = /(a)(b)/; \
+             re.exec('zabq'); \
+             var ok = RegExp['$1'] === 'a' \
+               && RegExp['$2'] === 'b' \
+               && RegExp.lastMatch === 'ab' \
+               && RegExp['$&'] === 'ab' \
+               && RegExp.leftContext === 'z' \
+               && RegExp['$`'] === 'z' \
+               && RegExp.rightContext === 'q' \
+               && RegExp[\"$'\"] === 'q' \
+               && RegExp.input === 'zabq'; \
+             RegExp.input = 'changed'; \
+             ok && RegExp['$_'] === 'changed';",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
