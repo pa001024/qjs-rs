@@ -13,9 +13,9 @@
 
 ### Runtime Optimization
 
-- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative packet-g artifact `target/benchmarks/engine-comparison.local-dev.packet-g.json` (`2026-03-02T21:00:07.571Z`) is still above threshold (`qjs-rs/quickjs-c = 6.236987x`); active closure checker mode is `--require-qjs-lte-quickjs-ratio 1.25`.)_
-- [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Implemented with packets A/B/C/D/E/F/final/g plus parity/hotspot evidence, but milestone closure remains open until PERF-03 passes.)_
-- [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Boundary evidence remains positive in the latest packet-g run (`extern "C"`/`unsafe` scan has no matches) and governance checks are green; requirement stays open only because PERF-03 closure is still unmet.)_
+- [ ] **PERF-03**: `qjs-rs` aggregate mean latency on the tracked benchmark suite is **at most `1.25x quickjs-c`** on the same host and run configuration (equivalent to **>=80% of `quickjs-c` performance**). _(Open gap: latest authoritative packet-h artifact `target/benchmarks/engine-comparison.local-dev.packet-h.json` (`2026-03-03T06:51:55.493Z`) is still above threshold (`qjs-rs/quickjs-c = 6.260034x`); machine-checkable verdict bundle: `target/benchmarks/phase11-closure-bundle.packet-h.json`; active closure checker mode is `--require-qjs-lte-quickjs-ratio 1.25`.)_
+- [ ] **PERF-04**: At least two identified runtime hot paths receive targeted optimization backed by before/after benchmark evidence. _(Implemented with packets A/B/C/D/E/F/final/g/h plus parity/hotspot evidence; packet-h authoritative bundle is contract-valid, but milestone closure remains open until PERF-03 passes.)_
+- [ ] **PERF-05**: Optimization changes avoid large architectural regressions and preserve maintainability boundaries (no runtime-core C FFI). _(Boundary evidence remains positive in historical packet runs and stays explicitly tracked in the packet-h closure cycle; requirement remains open while PERF-03 is unresolved.)_
 
 ### Correctness and Governance
 
@@ -50,9 +50,9 @@
 |-------------|-------|--------|
 | PERF-01 | Phase 10 | Completed |
 | PERF-02 | Phase 10 | Completed |
-| PERF-03 | Phase 11 | Open (gap: latest authoritative packet-g quickjs-ratio remains above 1.25x) |
-| PERF-04 | Phase 11 | Open (packet evidence landed through packet-g; phase closure still blocked by PERF-03) |
-| PERF-05 | Phase 11 | Open (maintainability evidence and governance are green; phase closure still blocked by PERF-03) |
+| PERF-03 | Phase 11 | Open (gap: latest authoritative packet-h quickjs-ratio is `6.260034x`, above `1.25x`) |
+| PERF-04 | Phase 11 | Open (packet evidence landed through packet-h; phase closure still blocked by PERF-03) |
+| PERF-05 | Phase 11 | Open (maintainability boundary evidence is retained in packet-h closure bundle; phase closure still blocked by PERF-03) |
 | TST-05 | Phase 12 | Planned |
 | TST-06 | Phase 12 | Planned |
 | HOST-13-NEW | Phase 13 | Completed |

@@ -4,10 +4,10 @@ milestone: v1.1
 milestone_name: performance acceleration
 current_phase: 11
 current_phase_name: hot-path optimization and target closure
-current_plan: None (11-13 executed; 11-14 authoritative rerun pending)
-status: phase 11 packet-h candidate landed with green packet/parity/contract checks; latest authoritative closure ratio remains packet-g 6.236987x > 1.25x until 11-14 rerun
-stopped_at: Completed 11-13 packet-h implementation, benchmark smoke artifact generation, and traceability sync prep
-last_updated: "2026-03-03T14:45:01+08:00"
+current_plan: 11-14 authoritative closure sync in progress
+status: latest authoritative packet-h closure bundle is recorded (`qjs-rs/quickjs-c=6.260034x > 1.25x`); PERF-03 remains open and governance transcript is red on `cargo fmt --check` (clippy + targeted tests + contract are green)
+stopped_at: Executing 11-14 authoritative packet-h traceability synchronization
+last_updated: "2026-03-03T14:55:30+08:00"
 last_activity: 2026-03-03
 progress:
   total_phases: 3
@@ -24,20 +24,20 @@ progress:
 See: .planning/PROJECT.md (milestone v1.1 active)
 
 **Core value:** Deliver QuickJS-aligned JavaScript semantics in a pure Rust runtime without introducing C FFI into the runtime core.  
-**Current focus:** Execute the remaining 11-14 authoritative rerun to evaluate the new packet-h candidate against PERF-03 (`qjs-rs <= 1.25x quickjs-c`) and keep Phase 12 blocked until that gate passes.
+**Current focus:** Finish 11-14 by synchronizing packet-h authoritative bundle values across verification/roadmap/requirements/state docs and refreshing PERF-05 boundary evidence in the same closure cycle.
 
 ## Current Position
 
 **Current Milestone:** v1.1 Performance Acceleration  
 **Current Phase:** 11 — Hot-Path Optimization and Target Closure  
-**Current Plan:** None (11-13 executed; 11-14 pending)  
-**Status:** Phase 11 packet-h optimization is implemented and smoke-validated, but PERF-03 closure is still open until 11-14 authoritative rerun completes  
+**Current Plan:** 11-14 authoritative closure sync (in progress)  
+**Status:** Packet-h authoritative rerun is complete and machine-checkable, but PERF-03 remains open (`6.260034x > 1.25x`) and `cargo fmt --check` is red in the recorded governance transcript  
 **Progress:** [█████████░] 93%
 
 ## Active Roadmap (v1.1)
 
 - [x] Phase 10: Baseline Contract and Benchmark Normalization (PERF-01, PERF-02) — completed 2026-02-28
-- [ ] Phase 11: Hot-Path Optimization and Target Closure (PERF-03, PERF-04, PERF-05) — 11-01..11-13 executed (packet-h landed), 11-14 pending authoritative rerun; latest authoritative gate remains red (`qjs-rs/quickjs-c=6.236987x > 1.25x`)
+- [ ] Phase 11: Hot-Path Optimization and Target Closure (PERF-03, PERF-04, PERF-05) — 11-01..11-13 executed; 11-14 in progress with authoritative packet-h bundle (`target/benchmarks/phase11-closure-bundle.packet-h.json`), latest gate remains red (`qjs-rs/quickjs-c=6.260034x > 1.25x`)
 - [ ] Phase 12: Performance Governance and Non-Regression Gates (TST-05, TST-06) — blocked until Phase 11 queue closes
 
 ## Requirement Coverage Snapshot
@@ -69,7 +69,8 @@ See: .planning/PROJECT.md (milestone v1.1 active)
 - Plan 11-10 completed: governance gates green, packet-f artifact generated (`qjs-rs/quickjs-c=6.085281x`), PERF-03 remained open.
 - Plan 11-11 completed: final packet-final artifact generated (`qjs-rs/quickjs-c=5.755257x`), PERF-03 remained open.
 - Plan 11-12 completed: packet-g artifact generated (`qjs-rs/quickjs-c=6.236987x`), governance stayed green, PERF-03 remained open.
-- Plan 11-13 completed: packet-h lexical-slot fast path + parity/hotspot coverage landed, packet-h smoke artifact generated (`target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json`) with strict comparators and contract check pass; authoritative PERF-03 verdict remains pending 11-14.
+- Plan 11-13 completed: packet-h lexical-slot fast path + parity/hotspot coverage landed, packet-h smoke artifact generated (`target/benchmarks/engine-comparison.local-dev.packet-h.smoke.json`) with strict comparators and contract check pass.
+- Plan 11-14 authoritative rerun started: generated `target/benchmarks/engine-comparison.local-dev.packet-h.json` and machine-checkable bundle `target/benchmarks/phase11-closure-bundle.packet-h.json`; checker remains red (`qjs-rs/quickjs-c=6.260034x > 1.25x`), and governance transcript records `cargo fmt --check` failure with other targeted gates green.
 - Active gate status is unchanged: no authoritative `--require-qjs-lte-quickjs-ratio 1.25` pass has been recorded yet.
 - Phase 13 host class/prototype alignment plans 13-01 and 13-02 executed with `13-VERIFICATION.md` status `passed`; this closure is tracked as host-integration side work and does not change the Phase 11 PERF-03 blocker state.
 

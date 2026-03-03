@@ -12,7 +12,7 @@ v1.1 (`Performance Acceleration`) is focused on measurable runtime speed improve
 ## Phases
 
 - [x] **Phase 10: Baseline Contract and Benchmark Normalization** - Establish reproducible cross-engine performance evidence and hot-path benchmark coverage. (`PERF-01`, `PERF-02`) (completed 2026-02-28)
-- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (on-disk plans: 11-01..11-07, 11-10..11-14; 11-14 pending, latest authoritative ratio `6.236987x`, packet-h smoke artifact ready, PERF-03 still open)
+- [ ] **Phase 11: Hot-Path Optimization and Target Closure** - Land targeted runtime optimizations to reach **>=80% of `quickjs-c` performance** on the tracked suite (latency-equivalent gate: `qjs-rs <= 1.25x quickjs-c`) while preserving architecture boundaries. (`PERF-03`, `PERF-04`, `PERF-05`) (on-disk plans: 11-01..11-07, 11-10..11-14; 11-14 in progress, latest authoritative ratio `6.260034x` from `target/benchmarks/phase11-closure-bundle.packet-h.json`, PERF-03 still open)
 - [ ] **Phase 12: Performance Governance and Non-Regression Gates** - Enforce correctness + performance regression guardrails in CI/nightly with deterministic artifacts. (`TST-05`, `TST-06`) (blocked until Phase 11 gap queue closes)
 
 ## Phase Details
@@ -44,7 +44,7 @@ Plans:
 - [x] 11-11-PLAN.md — Final optimization push for Phase 11 closure with packet-final candidate. (completed 2026-03-03; governance green, PERF-03 still open)
 - [x] 11-12-PLAN.md — Execute packet-g identifier-resolution fallback-reduction optimization loop and publish authoritative quickjs-ratio closure verdict. (completed 2026-03-03; governance green, PERF-03 still open)
 - [x] 11-13-PLAN.md — Land packet-h lexical-binding hot-path optimization and packet-h benchmark contract wiring. (completed 2026-03-03; packet-h smoke artifact generated, PERF-03 still open pending 11-14 authoritative rerun)
-- [ ] 11-14-PLAN.md — Run authoritative packet-h closure verdict workflow and synchronize Phase 11 traceability docs. (pending)
+- [ ] 11-14-PLAN.md — Run authoritative packet-h closure verdict workflow and synchronize Phase 11 traceability docs. (in progress; authoritative packet-h bundle generated at `target/benchmarks/phase11-closure-bundle.packet-h.json`, ratio `6.260034x`, gate still red)
   1. Aggregate mean latency on the tracked suite is at most `1.25x quickjs-c` under the same host and run configuration (equivalent to >=80% of `quickjs-c` performance).
   2. At least two hot paths (from arithmetic/array/call-heavy families) receive targeted optimizations with before/after evidence.
   3. Each optimization includes guard/fallback behavior and does not alter externally observable semantics.

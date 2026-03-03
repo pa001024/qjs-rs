@@ -520,4 +520,51 @@ Aggregate means (packet-g candidate):
 
 Phase 11 closure remains **open**.
 
+## 15) Plan 11-14 authoritative packet-h closure rerun (2026-03-03)
+
+### 15.1 Machine-checkable closure bundle
+
+- Bundle path: `target/benchmarks/phase11-closure-bundle.packet-h.json`
+- `timestamp_utc`: `2026-03-03T06:53:53.161609Z`
+- Authoritative run timestamp: `2026-03-03T06:51:55.625857Z`
+- Baseline path: `target/benchmarks/engine-comparison.local-dev.phase11-baseline.json`
+- Candidate path: `target/benchmarks/engine-comparison.local-dev.packet-h.json`
+- Candidate hash/sha256: `91a2559fdf1264f7bb1fb29f8cabde4733a277a8ca4ab848c9a96257bf251e94`
+
+### 15.2 Ordered governance + checker outcomes (from bundle)
+
+1. `cargo fmt --check` (`exit_code=1`) ❌
+2. `cargo clippy -p vm -p benchmarks -- -D warnings` (`exit_code=0`) ✅
+3. `cargo test -p vm perf_packet_d -- --nocapture` (`exit_code=0`) ✅
+4. `cargo test -p vm perf_hotspot_attribution -- --nocapture` (`exit_code=0`) ✅
+5. `cargo run -p benchmarks --bin benchmarks --release -- --profile local-dev --output target/benchmarks/engine-comparison.local-dev.packet-h.json --quickjs-path scripts/quickjs-wsl.cmd --strict-comparators` (`exit_code=0`) ✅
+6. `python .github/scripts/check_engine_benchmark_contract.py --input target/benchmarks/engine-comparison.local-dev.packet-h.json` (`exit_code=0`) ✅
+7. `python .github/scripts/check_perf_target.py --baseline target/benchmarks/engine-comparison.local-dev.phase11-baseline.json --candidate target/benchmarks/engine-comparison.local-dev.packet-h.json --require-qjs-lte-quickjs-ratio 1.25` (`exit_code=1`, `status=threshold_fail_expected`) ❌
+
+Checker log paths (same run provenance):
+
+- `target/benchmarks/perf-target.packet-h.stdout.log`
+- `target/benchmarks/perf-target.packet-h.stderr.log`
+- `target/benchmarks/perf-target.packet-h.verdict.json`
+
+### 15.3 Aggregate means and PERF-03 verdict
+
+Aggregate means (`target/benchmarks/phase11-closure-bundle.packet-h.json`):
+
+- `qjs-rs`: `81.827593`
+- `quickjs-c`: `13.071429`
+- `qjs-rs/quickjs-c`: `6.260034x`
+
+Exact checker failure output (`target/benchmarks/perf-target.packet-h.stderr.log`):
+
+```text
+perf target check failed
+- aggregate.mean_ms_per_engine: require-qjs-lte-quickjs-ratio failed: candidate qjs-rs/quickjs-c 6.260034 > 1.250000 (qjs-rs=81.827593, quickjs-c=13.071429)
+```
+
+Verdict:
+
+- PERF-03 quickjs-ratio gate: ❌ FAIL (`6.260034x > 1.25x`)
+- Closure status: **OPEN** (packet-h bundle is authoritative + machine-checkable, but target remains unmet)
+
 
