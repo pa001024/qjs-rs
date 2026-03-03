@@ -331,6 +331,9 @@ if (typeof $262.agent.monotonicNow !== "function") {
 if (typeof $262.destroy !== "function") {
   $262.destroy = function () {};
 }
+if (typeof $262.IsHTMLDDA !== "function") {
+  $262.IsHTMLDDA = function () { return null; };
+}
 "#;
 
 const ASYNC_DONE_PRELUDE: &str = r#"
