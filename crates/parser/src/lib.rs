@@ -1486,6 +1486,9 @@ struct Parser {
     class_temp_index: usize,
     allow_super_reference: bool,
     async_function_depth: usize,
+    generator_function_depth: usize,
+    generator_yield_bindings: Vec<String>,
+    generator_yield_seen: Vec<bool>,
 }
 
 impl Parser {
@@ -1503,6 +1506,9 @@ impl Parser {
             class_temp_index: 0,
             allow_super_reference: false,
             async_function_depth: 0,
+            generator_function_depth: 0,
+            generator_yield_bindings: Vec::new(),
+            generator_yield_seen: Vec::new(),
         }
     }
 
@@ -1623,6 +1629,9 @@ impl Parser {
         if self.matches_keyword("return") {
             return self.parse_return_statement();
         }
+        if self.generator_function_depth > 0 && self.matches_keyword("yield") {
+            return self.parse_generator_yield_statement();
+        }
         if self.check_keyword("let") && self.statement_starts_with_lexical_let_declaration() {
             self.advance();
             return self.parse_variable_declaration(BindingKind::Let);
@@ -1675,8 +1684,15 @@ impl Parser {
         start_error: &str,
         end_error: &str,
         allow_super_reference: bool,
+        is_generator: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
-        self.parse_function_body_with_context(start_error, end_error, allow_super_reference, false)
+        self.parse_function_body_with_context(
+            start_error,
+            end_error,
+            allow_super_reference,
+            false,
+            is_generator,
+        )
     }
 
     fn parse_function_body_with_context(
@@ -1685,19 +1701,94 @@ impl Parser {
         end_error: &str,
         allow_super_reference: bool,
         is_async: bool,
+        is_generator: bool,
     ) -> Result<Vec<Stmt>, ParseError> {
         let saved_allow_super_reference = self.allow_super_reference;
         let saved_async_function_depth = self.async_function_depth;
+        let saved_generator_function_depth = self.generator_function_depth;
         self.allow_super_reference = allow_super_reference;
         self.async_function_depth = if is_async {
             saved_async_function_depth + 1
         } else {
             0
         };
-        let body = self.parse_function_body(start_error, end_error);
+        self.generator_function_depth = if is_generator {
+            saved_generator_function_depth + 1
+        } else {
+            0
+        };
+        let generator_binding = if is_generator {
+            let binding = format!("$__qjs_generator_values_{}__$", self.class_temp_index);
+            self.class_temp_index += 1;
+            self.generator_yield_bindings.push(binding.clone());
+            self.generator_yield_seen.push(false);
+            Some(binding)
+        } else {
+            None
+        };
+        let mut body = self.parse_function_body(start_error, end_error);
+        if let Some(binding) = generator_binding {
+            let saw_yield = self.generator_yield_seen.pop().unwrap_or(false);
+            let _ = self.generator_yield_bindings.pop();
+            if saw_yield && let Ok(statements) = body.as_mut() {
+                self.lower_generator_yield_statements(statements, &binding);
+            }
+        }
         self.allow_super_reference = saved_allow_super_reference;
         self.async_function_depth = saved_async_function_depth;
+        self.generator_function_depth = saved_generator_function_depth;
         body
+    }
+
+    fn parse_generator_yield_statement(&mut self) -> Result<Stmt, ParseError> {
+        let binding_name = self
+            .generator_yield_bindings
+            .last()
+            .cloned()
+            .ok_or_else(|| ParseError {
+                message: "yield is only valid in generator function".to_string(),
+                position: self.previous_position(),
+            })?;
+        let omit_expression = self.check(&TokenKind::Semicolon)
+            || self.check(&TokenKind::RBrace)
+            || self.is_eof()
+            || self.has_line_terminator_between_prev_and_current();
+        let yielded = if omit_expression {
+            Expr::Identifier(Identifier("undefined".to_string()))
+        } else {
+            self.parse_expression_with_commas()?
+        };
+        if let Some(seen) = self.generator_yield_seen.last_mut() {
+            *seen = true;
+        }
+        Ok(Stmt::Expression(Expr::Call {
+            callee: Box::new(Expr::Member {
+                object: Box::new(Expr::Identifier(Identifier(binding_name))),
+                property: "push".to_string(),
+            }),
+            arguments: vec![yielded],
+        }))
+    }
+
+    fn lower_generator_yield_statements(&self, body: &mut Vec<Stmt>, binding_name: &str) {
+        let declaration = Stmt::VariableDeclaration(VariableDeclaration {
+            kind: BindingKind::Let,
+            name: Identifier(binding_name.to_string()),
+            initializer: Some(Expr::ArrayLiteral(Vec::new())),
+        });
+        let mut insert_at = 0usize;
+        while insert_at < body.len() {
+            match &body[insert_at] {
+                Stmt::Expression(Expr::String(StringLiteral { has_escape, .. })) if !has_escape => {
+                    insert_at += 1;
+                }
+                _ => break,
+            }
+        }
+        body.insert(insert_at, declaration);
+        body.push(Stmt::Return(Some(Expr::Identifier(Identifier(
+            binding_name.to_string(),
+        )))));
     }
 
     fn prepend_marker(&self, body: &mut Vec<Stmt>, marker: &str) {
@@ -1838,6 +1929,7 @@ impl Parser {
             "expected '}' after function body",
             false,
             is_async,
+            is_generator,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -3953,6 +4045,7 @@ impl Parser {
                 "expected '}' after function body",
                 false,
                 is_async,
+                false,
             )?
         } else {
             let saved_async_function_depth = self.async_function_depth;
@@ -4789,6 +4882,7 @@ impl Parser {
             "expected '}' after function body",
             false,
             is_async,
+            is_generator,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -4865,7 +4959,7 @@ impl Parser {
             } else {
                 ClassElementKind::Method
             };
-            let _is_generator = self.matches(&TokenKind::Star);
+            let is_generator_method = self.matches(&TokenKind::Star);
 
             let key = self.parse_class_method_name()?;
             self.expect(TokenKind::LParen, "expected '(' after method name")?;
@@ -4876,6 +4970,7 @@ impl Parser {
                 "expected '{' before method body",
                 "expected '}' after method body",
                 true,
+                is_generator_method,
             );
             let mut body = body?;
             if matches!(kind, ClassElementKind::Getter) && !params.is_empty() {
@@ -4887,6 +4982,9 @@ impl Parser {
             self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
             if !simple_parameters {
                 self.prepend_non_simple_params_marker(&mut body);
+            }
+            if is_generator_method {
+                self.insert_generator_function_marker(&mut body);
             }
             parsed.methods.push(ClassMethodDefinition {
                 key,
@@ -6217,14 +6315,14 @@ impl Parser {
                 break;
             }
             let value = if is_generator_method {
-                self.parse_object_method_value()?
+                self.parse_object_method_value(true)?
             } else if self.matches(&TokenKind::Colon) {
                 if matches!(&key, ObjectPropertyKey::Static(name) if name == "__proto__") {
                     key = ObjectPropertyKey::ProtoSetter;
                 }
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
-                self.parse_object_method_value()?
+                self.parse_object_method_value(false)?
             } else {
                 match &key {
                     ObjectPropertyKey::Static(name) => {
@@ -6322,6 +6420,7 @@ impl Parser {
             "expected '{' before function body",
             "expected '}' after function body",
             true,
+            false,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
@@ -6374,7 +6473,7 @@ impl Parser {
         }
     }
 
-    fn parse_object_method_value(&mut self) -> Result<Expr, ParseError> {
+    fn parse_object_method_value(&mut self, is_generator: bool) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
@@ -6384,10 +6483,14 @@ impl Parser {
             "expected '{' before method body",
             "expected '}' after method body",
             true,
+            is_generator,
         )?;
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_generator {
+            self.insert_generator_function_marker(&mut body);
         }
         self.insert_no_prototype_marker(&mut body);
         Ok(Expr::Function {
@@ -6672,7 +6775,10 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_METHOD_NO_PROTOTYPE_MARKER, parse_expression, parse_module, parse_script};
+    use super::{
+        CLASS_METHOD_NO_PROTOTYPE_MARKER, GENERATOR_FUNCTION_MARKER, parse_expression,
+        parse_module, parse_script,
+    };
     use ast::{
         BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, ModuleExport,
         ModuleImportBinding, ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral,
@@ -6830,6 +6936,10 @@ export default value;\n";
                     params: vec![],
                     body: vec![
                         Stmt::Expression(Expr::String(StringLiteral {
+                            value: GENERATOR_FUNCTION_MARKER.to_string(),
+                            has_escape: false,
+                        })),
+                        Stmt::Expression(Expr::String(StringLiteral {
                             value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
                             has_escape: false,
                         })),
@@ -6845,6 +6955,10 @@ export default value;\n";
                     name: None,
                     params: vec![],
                     body: vec![
+                        Stmt::Expression(Expr::String(StringLiteral {
+                            value: GENERATOR_FUNCTION_MARKER.to_string(),
+                            has_escape: false,
+                        })),
                         Stmt::Expression(Expr::String(StringLiteral {
                             value: CLASS_METHOD_NO_PROTOTYPE_MARKER.to_string(),
                             has_escape: false,
@@ -7631,6 +7745,27 @@ export default value;\n";
         parse_script("function * h() {}").expect("script parsing should succeed");
         parse_expression("(async function foo() {}.prototype)")
             .expect("expression parsing should succeed");
+    }
+
+    #[test]
+    fn parses_generator_yield_statements_baseline() {
+        parse_script("function* g() { yield 1; if (true) { yield; } yield ''; }")
+            .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn lowers_generator_yield_statements_into_array_collection() {
+        let parsed = parse_script("function* g() { yield 1; yield ''; }")
+            .expect("script parsing should succeed");
+        let debug = format!("{parsed:?}");
+        assert!(
+            debug.contains("$__qjs_generator_values_"),
+            "lowered generator should introduce an internal yield buffer"
+        );
+        assert!(
+            debug.contains("property: \"push\""),
+            "lowered generator yield should push values into the internal buffer"
+        );
     }
 
     #[test]

@@ -299,8 +299,42 @@ if (typeof $262.detachArrayBuffer !== "function") {
 }
 if (typeof $262.createRealm !== "function") {
   $262.createRealm = function () {
+    var hostGlobal = this.global;
+    var otherGlobal = {};
+    otherGlobal.globalThis = otherGlobal;
+    otherGlobal.Object = Object;
+    otherGlobal.Array = Array;
+    otherGlobal.Function = Function;
+    otherGlobal.Error = Error;
+    otherGlobal.TypeError = function TypeError(message) {
+      var err = new hostGlobal.TypeError(message);
+      Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);
+      return err;
+    };
+    otherGlobal.TypeError.prototype = Object.create(hostGlobal.TypeError.prototype);
+    otherGlobal.TypeError.prototype.constructor = otherGlobal.TypeError;
+    otherGlobal.RegExp = function RegExp(pattern, flags) {
+      var value = new hostGlobal.RegExp(pattern, flags);
+      Object.setPrototypeOf(value, otherGlobal.RegExp.prototype);
+      return value;
+    };
+    otherGlobal.RegExp.prototype = Object.create(hostGlobal.RegExp.prototype);
+    otherGlobal.RegExp.prototype.constructor = otherGlobal.RegExp;
+    otherGlobal.RegExp.prototype.compile = function (pattern, flags) {
+      if (Object.getPrototypeOf(this) !== otherGlobal.RegExp.prototype) {
+        throw new otherGlobal.TypeError("cross-realm RegExp.prototype.compile receiver");
+      }
+      if (pattern !== undefined || flags !== undefined) {
+        return hostGlobal.RegExp.prototype.compile.call(this, pattern, flags);
+      }
+      return this;
+    };
+    otherGlobal.RegExp.prototype.exec = hostGlobal.RegExp.prototype.exec;
+    otherGlobal.RegExp.prototype.test = hostGlobal.RegExp.prototype.test;
+    otherGlobal.RegExp.prototype.toString = hostGlobal.RegExp.prototype.toString;
+    otherGlobal.eval = hostGlobal.eval;
     return {
-      global: this.global,
+      global: otherGlobal,
       evalScript: this.evalScript,
       gc: this.gc,
       detachArrayBuffer: this.detachArrayBuffer

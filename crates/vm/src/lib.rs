@@ -37,7 +37,7 @@ use rustc_hash::FxHashMap as HashMap;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -7680,8 +7680,11 @@ impl Vm {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if !matches!(search_value, JsValue::Undefined | JsValue::Null) {
-                    let replacer =
-                        self.get_property_from_receiver(search_value.clone(), "Symbol.replace", realm)?;
+                    let replacer = self.get_property_from_receiver(
+                        search_value.clone(),
+                        "Symbol.replace",
+                        realm,
+                    )?;
                     if !matches!(replacer, JsValue::Undefined | JsValue::Null) {
                         if !Self::is_callable_value(&replacer) {
                             return Err(VmError::NotCallable);
@@ -7801,8 +7804,11 @@ impl Vm {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if !matches!(search_value, JsValue::Undefined | JsValue::Null) {
-                    let replacer =
-                        self.get_property_from_receiver(search_value.clone(), "Symbol.replace", realm)?;
+                    let replacer = self.get_property_from_receiver(
+                        search_value.clone(),
+                        "Symbol.replace",
+                        realm,
+                    )?;
                     if !matches!(replacer, JsValue::Undefined | JsValue::Null) {
                         if !Self::is_callable_value(&replacer) {
                             return Err(VmError::NotCallable);
@@ -9791,6 +9797,13 @@ impl Vm {
         flags: &str,
     ) -> Result<(), VmError> {
         self.validate_regexp_flags(flags)?;
+        if Self::has_duplicate_named_groups_in_same_alternative(pattern) {
+            return Err(VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::SyntaxErrorConstructor,
+                "SyntaxError",
+                "invalid regular expression pattern".to_string(),
+            )));
+        }
         let unicode = flags.contains('u');
         let normalized_pattern =
             Self::normalize_regexp_pattern(pattern, unicode).map_err(|_| {
@@ -9895,21 +9908,19 @@ impl Vm {
         )?;
 
         // IsRegExp/SpeciesConstructor observable reads can mutate the source regexp.
-        let _ = self.get_property_from_receiver(
-            JsValue::Object(receiver_id),
-            "Symbol.match",
-            realm,
-        )?;
+        let _ =
+            self.get_property_from_receiver(JsValue::Object(receiver_id), "Symbol.match", realm)?;
 
         let (pattern, flags) = self.regexp_slot_strings(receiver_id)?;
         let unicode = flags.contains('u');
-        let normalized_pattern = Self::normalize_regexp_pattern(&pattern, unicode).map_err(|_| {
-            VmError::UncaughtException(self.create_error_exception(
-                NativeFunction::SyntaxErrorConstructor,
-                "SyntaxError",
-                "invalid regular expression pattern".to_string(),
-            ))
-        })?;
+        let normalized_pattern =
+            Self::normalize_regexp_pattern(&pattern, unicode).map_err(|_| {
+                VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::SyntaxErrorConstructor,
+                    "SyntaxError",
+                    "invalid regular expression pattern".to_string(),
+                ))
+            })?;
         let splitter = Self::build_regexp_matcher(&normalized_pattern, &flags).map_err(|_| {
             VmError::UncaughtException(self.create_error_exception(
                 NativeFunction::SyntaxErrorConstructor,
@@ -9938,7 +9949,9 @@ impl Vm {
             if matched.start() < last_end {
                 continue;
             }
-            output.push(JsValue::String(input[last_end..matched.start()].to_string()));
+            output.push(JsValue::String(
+                input[last_end..matched.start()].to_string(),
+            ));
             if output.len() >= limit {
                 return self.create_array_from_values(output);
             }
@@ -10249,7 +10262,8 @@ impl Vm {
         let mut normalized = String::with_capacity(pattern.len());
         let mut index = 0usize;
         let mut in_character_class = false;
-        let capture_group_count = Self::count_regexp_capturing_groups(&chars);
+        let total_capture_group_count = Self::count_regexp_capturing_groups(&chars);
+        let mut seen_capturing_groups = 0usize;
         while index < chars.len() {
             let ch = chars[index];
             if !unicode
@@ -10269,6 +10283,21 @@ impl Vm {
                 index = assertion_end + 1 + quantifier_len;
                 continue;
             }
+            if ch == '('
+                && !in_character_class
+                && chars.get(index + 1) == Some(&'?')
+                && chars.get(index + 2) == Some(&'<')
+                && !matches!(chars.get(index + 3), Some('=' | '!'))
+            {
+                // Rust regex expects named groups as (?P<name>...), while JS uses (?<name>...).
+                normalized.push('(');
+                normalized.push('?');
+                normalized.push('P');
+                normalized.push('<');
+                seen_capturing_groups += 1;
+                index += 3;
+                continue;
+            }
             if ch == '\\' && index + 1 < chars.len() {
                 let next = chars[index + 1];
                 if next == '0' {
@@ -10281,21 +10310,30 @@ impl Vm {
                         continue;
                     }
                 }
-                if next == 'c'
-                    && !unicode
-                    && in_character_class
-                    && let Some(control_char) = chars.get(index + 2)
-                    && (control_char.is_ascii_alphabetic()
-                        || control_char.is_ascii_digit()
-                        || *control_char == '_')
-                {
-                    let control_value = (*control_char as u32) % 32;
-                    Self::push_regex_literal_code_unit(
-                        &mut normalized,
-                        control_value,
-                        in_character_class,
-                    );
-                    index += 3;
+                if next == 'c' && !unicode {
+                    if let Some(control_char) = chars.get(index + 2).copied() {
+                        let valid_control = if in_character_class {
+                            control_char.is_ascii_alphabetic()
+                                || control_char.is_ascii_digit()
+                                || control_char == '_'
+                        } else {
+                            control_char.is_ascii_alphabetic()
+                        };
+                        if valid_control {
+                            let control_value = (control_char as u32) % 32;
+                            Self::push_regex_literal_code_unit(
+                                &mut normalized,
+                                control_value,
+                                in_character_class,
+                            );
+                            index += 3;
+                            continue;
+                        }
+                    }
+                    // Annex B fallback: invalid control escapes treat `\c` as a literal sequence.
+                    Self::push_regex_literal_char(&mut normalized, '\\', in_character_class);
+                    Self::push_regex_literal_char(&mut normalized, 'c', in_character_class);
+                    index += 2;
                     continue;
                 }
                 if next == 'u' {
@@ -10387,14 +10425,18 @@ impl Vm {
                         decimal_end += 1;
                     }
                     let decimal_digits: String = chars[index + 1..decimal_end].iter().collect();
-                    if let Ok(decimal_value) = decimal_digits.parse::<usize>()
-                        && decimal_value > 0
-                        && decimal_value <= capture_group_count
-                    {
-                        normalized.push('\\');
-                        normalized.push_str(&decimal_digits);
-                        index = decimal_end;
-                        continue;
+                    if let Ok(decimal_value) = decimal_digits.parse::<usize>() {
+                        if decimal_value > 0 && decimal_value <= seen_capturing_groups {
+                            normalized.push('\\');
+                            normalized.push_str(&decimal_digits);
+                            index = decimal_end;
+                            continue;
+                        }
+                        if decimal_value > 0 && decimal_value <= total_capture_group_count {
+                            // Annex B forward-backreference compatibility: preserve the empty match.
+                            index = decimal_end;
+                            continue;
+                        }
                     }
                     if let Some((code_point, consumed_digits)) =
                         Self::parse_regex_legacy_octal_escape(&chars, index + 1)
@@ -10479,6 +10521,15 @@ impl Vm {
                     continue;
                 }
             }
+            if !in_character_class
+                && ch == '('
+                && (chars.get(index + 1) != Some(&'?')
+                    || (chars.get(index + 1) == Some(&'?')
+                        && chars.get(index + 2) == Some(&'<')
+                        && !matches!(chars.get(index + 3), Some('=' | '!'))))
+            {
+                seen_capturing_groups += 1;
+            }
             normalized.push(ch);
             index += 1;
         }
@@ -10487,7 +10538,7 @@ impl Vm {
 
     fn push_regex_literal_char(target: &mut String, ch: char, in_character_class: bool) {
         let needs_escape = if in_character_class {
-            matches!(ch, '\\' | ']' | '-' | '^')
+            matches!(ch, '\\' | '[' | ']' | '-' | '^')
         } else {
             matches!(
                 ch,
@@ -10563,12 +10614,119 @@ impl Vm {
                 index += 1;
                 continue;
             }
-            if ch == '(' && chars.get(index + 1) != Some(&'?') {
+            if ch == '('
+                && (chars.get(index + 1) != Some(&'?')
+                    || (chars.get(index + 1) == Some(&'?')
+                        && chars.get(index + 2) == Some(&'<')
+                        && !matches!(chars.get(index + 3), Some('=' | '!'))))
+            {
                 count += 1;
             }
             index += 1;
         }
         count
+    }
+
+    fn has_duplicate_named_groups_in_same_alternative(pattern: &str) -> bool {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut start = 0usize;
+        let mut index = 0usize;
+        let mut depth = 0usize;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '(' {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if ch == ')' {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            if ch == '|' && depth == 0 {
+                if Self::alternative_has_duplicate_named_groups(&chars[start..index]) {
+                    return true;
+                }
+                start = index + 1;
+            }
+            index += 1;
+        }
+        Self::alternative_has_duplicate_named_groups(&chars[start..])
+    }
+
+    fn alternative_has_duplicate_named_groups(chars: &[char]) -> bool {
+        let mut seen = HashSet::new();
+        let mut index = 0usize;
+        let mut in_character_class = false;
+        let mut escaped = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if in_character_class {
+                if ch == ']' {
+                    in_character_class = false;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '[' {
+                in_character_class = true;
+                index += 1;
+                continue;
+            }
+            if ch == '('
+                && chars.get(index + 1) == Some(&'?')
+                && chars.get(index + 2) == Some(&'<')
+                && !matches!(chars.get(index + 3), Some('=' | '!'))
+            {
+                let mut name_end = index + 3;
+                while name_end < chars.len() && chars[name_end] != '>' {
+                    name_end += 1;
+                }
+                if name_end < chars.len() && name_end > index + 3 {
+                    let name: String = chars[index + 3..name_end].iter().collect();
+                    if !seen.insert(name) {
+                        return true;
+                    }
+                }
+            }
+            index += 1;
+        }
+        false
     }
 
     fn find_group_end(chars: &[char], start: usize) -> Option<usize> {
@@ -15776,11 +15934,7 @@ impl Vm {
                     deletable = attributes.configurable;
                 }
             }
-            let binding_id = self.create_binding_with_flags(
-                initial_value,
-                true,
-                deletable,
-            );
+            let binding_id = self.create_binding_with_flags(initial_value, true, deletable);
             var_scope.borrow_mut().insert(name.to_string(), binding_id);
         }
         self.define_annex_b_eval_var_property(name)?;
@@ -17241,7 +17395,7 @@ impl Vm {
                 self.get_object_property(object_id, property, realm)
             }
             JsValue::Function(closure_id) => {
-                self.get_function_property(closure_id, property, realm)
+                self.get_function_property_with_receiver(closure_id, property, receiver, realm)
             }
             JsValue::NativeFunction(native) => {
                 if Self::is_restricted_function_property(property) {
@@ -20153,11 +20307,9 @@ impl Vm {
                 }
                 Ok(self.coerce_to_string(&primitive))
             }
-            JsValue::String(text) if Self::is_symbol_primitive_string(&text) => {
-                Err(VmError::TypeError(
-                    "Cannot convert a Symbol value to a string",
-                ))
-            }
+            JsValue::String(text) if Self::is_symbol_primitive_string(&text) => Err(
+                VmError::TypeError("Cannot convert a Symbol value to a string"),
+            ),
             other => Ok(self.coerce_to_string(&other)),
         }
     }
@@ -21594,7 +21746,32 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                        if *proto_native == NativeFunction::RegExpConstructor
+                            && Self::regexp_legacy_property_from_name(&property).is_some()
+                        {
+                            self.ensure_regexp_legacy_static_accessors();
+                        }
+                        let (setter, getter_exists, data_writable) = self
+                            .native_function_objects
+                            .get(proto_native)
+                            .map(|object| {
+                                (
+                                    object.setters.get(&property).cloned(),
+                                    object.getters.contains_key(&property),
+                                    object.properties.get(&property).map(|_| {
+                                        object
+                                            .property_attributes
+                                            .get(&property)
+                                            .is_none_or(|attributes| attributes.writable)
+                                    }),
+                                )
+                            })
+                            .unwrap_or((None, false, None));
+                        if setter.is_some() || getter_exists || data_writable.is_some() {
+                            (setter, getter_exists, data_writable)
+                        } else if self
+                            .native_function_has_own_property_runtime(*proto_native, &property)
+                        {
                             (
                                 None,
                                 false,
@@ -21741,7 +21918,32 @@ impl Vm {
                         )
                     }
                     JsValue::NativeFunction(proto_native) => {
-                        if self.native_function_has_own_property_runtime(*proto_native, &property) {
+                        if *proto_native == NativeFunction::RegExpConstructor
+                            && Self::regexp_legacy_property_from_name(&property).is_some()
+                        {
+                            self.ensure_regexp_legacy_static_accessors();
+                        }
+                        let (setter, getter_exists, data_writable) = self
+                            .native_function_objects
+                            .get(proto_native)
+                            .map(|object| {
+                                (
+                                    object.setters.get(&property).cloned(),
+                                    object.getters.contains_key(&property),
+                                    object.properties.get(&property).map(|_| {
+                                        object
+                                            .property_attributes
+                                            .get(&property)
+                                            .is_none_or(|attributes| attributes.writable)
+                                    }),
+                                )
+                            })
+                            .unwrap_or((None, false, None));
+                        if setter.is_some() || getter_exists || data_writable.is_some() {
+                            (setter, getter_exists, data_writable)
+                        } else if self
+                            .native_function_has_own_property_runtime(*proto_native, &property)
+                        {
                             (
                                 None,
                                 false,
@@ -23388,9 +23590,7 @@ impl Vm {
             "trimStart" | "trimLeft" => {
                 self.create_host_function_value(HostFunction::StringTrimStart)
             }
-            "trimEnd" | "trimRight" => {
-                self.create_host_function_value(HostFunction::StringTrimEnd)
-            }
+            "trimEnd" | "trimRight" => self.create_host_function_value(HostFunction::StringTrimEnd),
             "anchor" => self.create_host_function_value(HostFunction::StringAnchor),
             "big" => self.create_host_function_value(HostFunction::StringBig),
             "blink" => self.create_host_function_value(HostFunction::StringBlink),
@@ -24925,9 +25125,8 @@ impl Vm {
         let start = int_start as usize;
         let end = int_end as usize;
         Ok(JsValue::String(
-            Self::string_from_js_code_units_preserving_surrogates(
-            &code_units[start..end],
-        )))
+            Self::string_from_js_code_units_preserving_surrogates(&code_units[start..end]),
+        ))
     }
 
     fn execute_string_create_html(
@@ -26183,8 +26382,13 @@ mod tests {
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -26281,8 +26485,13 @@ mod tests {
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
         let mut vm = Vm::default();
-        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
     }
 
     #[test]
@@ -28275,7 +28484,17 @@ mod tests {
              class MyRegExp extends RegExp {} \
              var throwSubclass = false; \
              try { MyRegExp['$1']; } catch (e) { throwSubclass = e instanceof TypeError; } \
-             ok && throwNotCtor && throwSubclass;",
+             var throwSubclassInputGet = false; \
+             try { MyRegExp.input; } catch (e) { throwSubclassInputGet = e instanceof TypeError; } \
+             var throwSubclassInputSet = false; \
+             try { MyRegExp.input = ''; } catch (e) { throwSubclassInputSet = e instanceof TypeError; } \
+             var throwSubclassInputAliasGet = false; \
+             try { MyRegExp.$_; } catch (e) { throwSubclassInputAliasGet = e instanceof TypeError; } \
+             var throwSubclassInputAliasSet = false; \
+             try { MyRegExp.$_ = ''; } catch (e) { throwSubclassInputAliasSet = e instanceof TypeError; } \
+             ok && throwNotCtor && throwSubclass \
+               && throwSubclassInputGet && throwSubclassInputSet \
+               && throwSubclassInputAliasGet && throwSubclassInputAliasSet;",
         )
         .expect("script should parse");
         let chunk = compile_script(&script);
@@ -28319,6 +28538,140 @@ mod tests {
         realm.define_global(
             "RegExp",
             JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_invalid_control_escape_falls_back_to_literal_backslash_c() {
+        let script = parse_script(
+            "var letter = '\\u0410'; \
+             var source = '\\\\c' + letter; \
+             var re = new RegExp(source); \
+             var wrapped = String.fromCharCode(letter.charCodeAt(0) % 32); \
+             re.exec(source) !== null && re.exec(source.substring(1)) === null && re.exec(wrapped) === null;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_control_escape_matrix_without_generator_matches_literal_fallback() {
+        let script = parse_script(
+            "var letters = []; \
+             for (var alpha = 0x0410; alpha <= 0x042F; alpha++) { letters.push(String.fromCharCode(alpha)); } \
+             for (alpha = 0x0430; alpha <= 0x044F; alpha++) { letters.push(String.fromCharCode(alpha)); } \
+             for (alpha = 0x00; alpha <= 0x7F; alpha++) { \
+               var letter = String.fromCharCode(alpha); \
+               if (!letter.match(/[0-9A-Za-z_\\$(|)\\[\\]\\/\\\\^]/)) { letters.push(letter); } \
+             } \
+             letters.push(''); \
+             var ok = true; \
+             for (var i = 0; i < letters.length; i++) { \
+               var letter = letters[i]; \
+               var source = '\\\\c' + letter; \
+               var re; \
+               try { re = new RegExp(source); } catch (e) { ok = false; break; } \
+               if (letter.length > 0) { \
+                 var wrapped = String.fromCharCode(letter.charCodeAt(0) % 32); \
+                 if (re.exec(wrapped) !== null) { ok = false; break; } \
+               } \
+               if (re.exec(source.substring(1)) !== null) { ok = false; break; } \
+               if (re.exec(source) === null) { ok = false; break; } \
+             } \
+             ok;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "String",
+            JsValue::NativeFunction(NativeFunction::StringConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_invalid_control_escape_in_class_preserves_literal_backslash_c() {
+        let script = parse_script(
+            "var letter = '\\u0410'; \
+             var source = '[\\\\c' + letter + ']'; \
+             var re = new RegExp(source); \
+             re.exec('\\\\') !== null && re.exec('c') !== null && re.exec(letter) !== null;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn annex_b_regexp_non_unicode_named_group_malformed_fallback_semantics() {
+        let script = parse_script(
+            "/\\k<a>/.test('k<a>') \
+             && /\\k<4>/.test('k<4>') \
+             && /\\k<a/.test('k<a') \
+             && /\\k/.test('k') \
+             && /(?<a>\\a)/.test('a') \
+             && /\\k<a>(<a>x)/.test('k<a><a>x') \
+             && /\\k<a>\\1/.test('k<a>\\x01') \
+             && /\\1(b)\\k<a>/.test('bk<a>');",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn regexp_compile_duplicate_named_groups_match_annex_b_expectations() {
+        let script = parse_script(
+            "let r = /[ab]/; \
+             let sameAlternativeThrows = false; \
+             try { r.compile('(?<x>a)(?<x>b)'); } catch (e) { sameAlternativeThrows = e instanceof SyntaxError; } \
+             let source = '(?<x>a)|(?<x>b)'; \
+             let separateAlternativesParse = true; \
+             try { r.compile(source); separateAlternativesParse = separateAlternativesParse && r.source === source; } \
+             catch (e) { separateAlternativesParse = false; } \
+             sameAlternativeThrows && separateAlternativesParse;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "RegExp",
+            JsValue::NativeFunction(NativeFunction::RegExpConstructor),
+        );
+        realm.define_global(
+            "SyntaxError",
+            JsValue::NativeFunction(NativeFunction::SyntaxErrorConstructor),
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
