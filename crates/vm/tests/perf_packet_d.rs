@@ -9,19 +9,31 @@ use vm::{
     perf::HotspotAttribution,
 };
 
+type RunScriptResult = (
+    JsValue,
+    PacketDFastPathCounters,
+    PacketGFastPathCounters,
+    PacketHFastPathCounters,
+    Option<HotspotAttribution>,
+);
+
+type PacketIParitySample = (
+    JsValue,
+    PacketDFastPathCounters,
+    PacketGFastPathCounters,
+    PacketHFastPathCounters,
+    HotspotAttribution,
+);
+
+type PacketIParityResult = (PacketIParitySample, PacketIParitySample);
+
 fn run_script(
     source: &str,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
     packet_i_enabled: bool,
-) -> (
-    JsValue,
-    PacketDFastPathCounters,
-    PacketGFastPathCounters,
-    PacketHFastPathCounters,
-    Option<HotspotAttribution>,
-) {
+) -> RunScriptResult {
     let script = parse_script(source).expect("script should parse");
     let chunk = compile_script(&script);
     let mut realm = Realm::default();
@@ -146,22 +158,7 @@ fn assert_packet_i_toggle_parity(
     packet_d_enabled: bool,
     packet_g_enabled: bool,
     packet_h_enabled: bool,
-) -> (
-    (
-        JsValue,
-        PacketDFastPathCounters,
-        PacketGFastPathCounters,
-        PacketHFastPathCounters,
-        HotspotAttribution,
-    ),
-    (
-        JsValue,
-        PacketDFastPathCounters,
-        PacketGFastPathCounters,
-        PacketHFastPathCounters,
-        HotspotAttribution,
-    ),
-) {
+) -> PacketIParityResult {
     let (baseline_value, baseline_d, baseline_g, baseline_h, baseline_hotspot) = run_script(
         source,
         packet_d_enabled,

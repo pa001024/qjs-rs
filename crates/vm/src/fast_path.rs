@@ -298,14 +298,6 @@ impl PacketDFastPathState {
         }
     }
 
-    pub fn remove_slot_cache_entries_for_scope(&mut self, scope_index: usize) {
-        for entry in &mut self.slot_cache {
-            if entry.is_some_and(|cached| cached.scope_index == scope_index) {
-                *entry = None;
-            }
-        }
-    }
-
     pub fn slot_cache_entry(&self, slot: u32) -> Option<PacketDSlotCacheEntry> {
         self.slot_cache.get(slot as usize).copied().flatten()
     }
@@ -466,14 +458,6 @@ impl PacketHFastPathState {
         let index = slot as usize;
         if let Some(entry) = self.lexical_slot_cache.get_mut(index) {
             *entry = None;
-        }
-    }
-
-    pub fn remove_slot_cache_entries_for_scope(&mut self, scope_index: usize) {
-        for entry in &mut self.lexical_slot_cache {
-            if entry.is_some_and(|cached| cached.scope_index == scope_index) {
-                *entry = None;
-            }
         }
     }
 
