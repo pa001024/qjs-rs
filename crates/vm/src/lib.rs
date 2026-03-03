@@ -17,8 +17,8 @@ pub use fast_path::PacketDFastPathCounters;
 pub use fast_path::PacketGFastPathCounters;
 pub use fast_path::PacketHFastPathCounters;
 pub use script_runtime::{
-    ScriptHostCallbackRegistration, ScriptRunOutput, ScriptRuntime, ScriptRuntimeError,
-    normalize_script_path, script_result_text,
+    ScriptAsyncHostCallbackRegistration, ScriptHostCallbackRegistration, ScriptRunOutput,
+    ScriptRuntime, ScriptRuntimeError, normalize_script_path, script_result_text,
 };
 
 use ast::{
@@ -40,9 +40,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::external_host::ExternalHostCallbacks;
+use crate::external_host::{
+    ExternalHostCallbackFuture, ExternalHostCallbacks, block_on_external_host_future,
+};
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
     PacketCFastPathState, PacketDFastPathState, PacketDSlotCacheEntry, PacketGFastPathState,
@@ -124,6 +128,7 @@ const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
 const AWAIT_DRAIN_STEP_BUDGET: usize = 10_000;
 const AWAIT_DRAIN_MAX_CYCLES: usize = 64;
+const ASYNC_HOST_CALLBACK_RECV_TIMEOUT: Duration = Duration::from_millis(5);
 const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
 const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
   var C = this;
@@ -797,6 +802,7 @@ pub enum VmError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromiseJobDrainStopReason {
     QueueEmpty,
+    PendingAsyncHostCallbacks,
     BudgetExhausted,
     InfrastructureFailure,
 }
@@ -984,6 +990,31 @@ struct PromiseJobQueue {
     callback_in_progress: bool,
 }
 
+#[derive(Debug)]
+struct AsyncHostCallbackCompletion {
+    task_id: u64,
+    result: Result<JsValue, VmError>,
+}
+
+#[derive(Default)]
+struct AsyncHostCallbackState {
+    sender: Option<Sender<AsyncHostCallbackCompletion>>,
+    receiver: Option<Receiver<AsyncHostCallbackCompletion>>,
+    pending_promises: BTreeMap<u64, ObjectId>,
+    next_task_id: u64,
+}
+
+impl fmt::Debug for AsyncHostCallbackState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncHostCallbackState")
+            .field("has_sender", &self.sender.is_some())
+            .field("has_receiver", &self.receiver.is_some())
+            .field("pending_promises", &self.pending_promises.len())
+            .field("next_task_id", &self.next_task_id)
+            .finish()
+    }
+}
+
 enum PromiseHook<'a> {
     Enqueue(usize),
     DrainStart(usize),
@@ -1048,6 +1079,7 @@ pub struct Vm {
     next_pending_job_root_candidate_id: u64,
     pending_promise_records: BTreeMap<ObjectId, PendingPromiseRecord>,
     promise_job_queue: PromiseJobQueue,
+    async_host_callbacks: AsyncHostCallbackState,
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
     object_prototype_id: Option<ObjectId>,
@@ -1178,6 +1210,7 @@ impl Vm {
         self.next_pending_job_root_candidate_id = 0;
         self.pending_promise_records.clear();
         self.promise_job_queue.jobs.clear();
+        self.async_host_callbacks = AsyncHostCallbackState::default();
         self.promise_job_queue.draining = false;
         self.promise_job_queue.callback_in_progress = false;
         self.object_to_string_host_id = None;
@@ -1382,10 +1415,18 @@ impl Vm {
             self.annex_b_eval_var_function_contexts.pop();
         }
         let _ = self.var_scope_stack.pop();
-        if signal.is_ok() {
-            self.collect_garbage_if_needed(realm, false);
-        }
-        match signal? {
+        let signal = match signal {
+            Ok(signal) => signal,
+            Err(err) => {
+                if matches!(err, VmError::Interrupted) {
+                    let mut hooks = NoopPromiseJobHostHooks;
+                    self.reject_pending_async_host_promises_due_to_interrupt(&mut hooks)?;
+                }
+                return Err(err);
+            }
+        };
+        self.collect_garbage_if_needed(realm, false);
+        match signal {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
@@ -1443,10 +1484,18 @@ impl Vm {
             self.annex_b_eval_var_function_contexts.pop();
         }
         let _ = self.var_scope_stack.pop();
-        if signal.is_ok() {
-            self.collect_garbage_if_needed(realm, false);
-        }
-        match signal? {
+        let signal = match signal {
+            Ok(signal) => signal,
+            Err(err) => {
+                if matches!(err, VmError::Interrupted) {
+                    let mut hooks = NoopPromiseJobHostHooks;
+                    self.reject_pending_async_host_promises_due_to_interrupt(&mut hooks)?;
+                }
+                return Err(err);
+            }
+        };
+        self.collect_garbage_if_needed(realm, false);
+        match signal {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
@@ -2177,10 +2226,22 @@ impl Vm {
 
     pub fn has_pending_promise_jobs(&self) -> bool {
         !self.promise_job_queue.jobs.is_empty()
+            || !self.async_host_callbacks.pending_promises.is_empty()
     }
 
     pub fn pending_promise_job_count(&self) -> usize {
-        self.promise_job_queue.jobs.len()
+        self.promise_job_queue
+            .jobs
+            .len()
+            .saturating_add(self.async_host_callbacks.pending_promises.len())
+    }
+
+    pub fn has_pending_async_host_callbacks(&self) -> bool {
+        !self.async_host_callbacks.pending_promises.is_empty()
+    }
+
+    pub fn pending_async_host_callback_count(&self) -> usize {
+        self.async_host_callbacks.pending_promises.len()
     }
 
     pub fn global_property(&self, name: &str) -> Option<JsValue> {
@@ -2237,8 +2298,25 @@ impl Vm {
         };
 
         while processed < budget {
+            let async_budget = budget.saturating_sub(processed);
+            let wait_for_async_completion = self.promise_job_queue.jobs.is_empty();
+            let async_processed = self.drain_async_host_callback_completions_with_budget(
+                async_budget,
+                wait_for_async_completion,
+                hooks,
+            )?;
+            processed = processed.saturating_add(async_processed);
+            if processed == budget {
+                stop_reason = PromiseJobDrainStopReason::BudgetExhausted;
+                break;
+            }
+
             let Some(job) = self.promise_job_queue.jobs.pop_front() else {
-                stop_reason = PromiseJobDrainStopReason::QueueEmpty;
+                stop_reason = if self.has_pending_async_host_callbacks() {
+                    PromiseJobDrainStopReason::PendingAsyncHostCallbacks
+                } else {
+                    PromiseJobDrainStopReason::QueueEmpty
+                };
                 break;
             };
             match self.execute_promise_job(job, realm, caller_strict, hooks) {
@@ -2246,10 +2324,13 @@ impl Vm {
                     processed = processed.saturating_add(1);
                 }
                 Err(err) => {
+                    if matches!(err, VmError::Interrupted) {
+                        self.reject_pending_async_host_promises_due_to_interrupt(hooks)?;
+                    }
                     self.promise_job_queue.draining = false;
                     let report = PromiseJobDrainReport {
                         processed,
-                        remaining: self.promise_job_queue.jobs.len(),
+                        remaining: self.pending_promise_work_count(),
                         stop_reason: PromiseJobDrainStopReason::InfrastructureFailure,
                     };
                     let _ = self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report));
@@ -2264,7 +2345,7 @@ impl Vm {
         self.promise_job_queue.draining = false;
         let report = PromiseJobDrainReport {
             processed,
-            remaining: self.promise_job_queue.jobs.len(),
+            remaining: self.pending_promise_work_count(),
             stop_reason,
         };
         self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report))?;
@@ -13746,6 +13827,175 @@ impl Vm {
         let object_id = self.create_promise_object()?;
         self.pending_promise_records.entry(object_id).or_default();
         Ok(object_id)
+    }
+
+    fn spawn_async_host_callback_promise(
+        &mut self,
+        callback_result: Result<ExternalHostCallbackFuture, VmError>,
+    ) -> Result<JsValue, VmError> {
+        let promise_id = self.create_pending_promise()?;
+        let mut hooks = NoopPromiseJobHostHooks;
+        let future = match callback_result {
+            Ok(future) => future,
+            Err(err) => {
+                let rejection = self
+                    .promise_rejection_from_runtime_error_or_type_error(err, "AsyncHostCallback");
+                self.settle_promise_with_hooks(
+                    promise_id,
+                    PromiseSettlement::Rejected(rejection),
+                    &mut hooks,
+                )?;
+                return Ok(JsValue::Object(promise_id));
+            }
+        };
+        let task_id = self.async_host_callbacks.next_task_id;
+        self.async_host_callbacks.next_task_id = self
+            .async_host_callbacks
+            .next_task_id
+            .checked_add(1)
+            .expect("async host callback task id overflow");
+        self.async_host_callbacks
+            .pending_promises
+            .insert(task_id, promise_id);
+        let sender = self.ensure_async_host_callback_sender();
+        let spawn_result = thread::Builder::new()
+            .name(format!("qjs-rs-host-async-{task_id}"))
+            .spawn(move || {
+                let result = block_on_external_host_future(future);
+                let _ = sender.send(AsyncHostCallbackCompletion { task_id, result });
+            });
+        if spawn_result.is_err() {
+            self.async_host_callbacks.pending_promises.remove(&task_id);
+            let rejection = self.create_error_exception(
+                NativeFunction::TypeErrorConstructor,
+                "TypeError",
+                "AsyncHostCallback:SpawnFailed".to_string(),
+            );
+            self.settle_promise_with_hooks(
+                promise_id,
+                PromiseSettlement::Rejected(rejection),
+                &mut hooks,
+            )?;
+        }
+        Ok(JsValue::Object(promise_id))
+    }
+
+    fn ensure_async_host_callback_sender(&mut self) -> Sender<AsyncHostCallbackCompletion> {
+        if let Some(sender) = self.async_host_callbacks.sender.as_ref() {
+            return sender.clone();
+        }
+        let (sender, receiver) = mpsc::channel::<AsyncHostCallbackCompletion>();
+        self.async_host_callbacks.sender = Some(sender.clone());
+        self.async_host_callbacks.receiver = Some(receiver);
+        sender
+    }
+
+    fn recv_async_host_callback_completion(
+        &self,
+        wait_for_completion: bool,
+    ) -> Option<AsyncHostCallbackCompletion> {
+        let receiver = self.async_host_callbacks.receiver.as_ref()?;
+        if wait_for_completion {
+            return receiver.recv_timeout(ASYNC_HOST_CALLBACK_RECV_TIMEOUT).ok();
+        }
+        match receiver.try_recv() {
+            Ok(completion) => Some(completion),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+
+    fn drain_async_host_callback_completions_with_budget(
+        &mut self,
+        budget: usize,
+        wait_for_completion: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<usize, VmError> {
+        if budget == 0 || self.async_host_callbacks.pending_promises.is_empty() {
+            return Ok(0);
+        }
+        let mut drained = 0usize;
+        let mut wait_once = wait_for_completion;
+        while drained < budget {
+            let Some(completion) = self.recv_async_host_callback_completion(wait_once) else {
+                break;
+            };
+            wait_once = false;
+            self.apply_async_host_callback_completion(completion, hooks)?;
+            drained = drained.saturating_add(1);
+        }
+        Ok(drained)
+    }
+
+    fn apply_async_host_callback_completion(
+        &mut self,
+        completion: AsyncHostCallbackCompletion,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let Some(promise_id) = self
+            .async_host_callbacks
+            .pending_promises
+            .remove(&completion.task_id)
+        else {
+            return Ok(());
+        };
+        let settlement = match completion.result {
+            Ok(value) => PromiseSettlement::Fulfilled(value),
+            Err(err) => PromiseSettlement::Rejected(
+                self.promise_rejection_from_runtime_error_or_type_error(err, "AsyncHostCallback"),
+            ),
+        };
+        self.settle_promise_with_hooks(promise_id, settlement, hooks)
+    }
+
+    fn reject_pending_async_host_promises_due_to_interrupt(
+        &mut self,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        if self.async_host_callbacks.pending_promises.is_empty() {
+            return Ok(());
+        }
+        let pending_promises: Vec<ObjectId> = self
+            .async_host_callbacks
+            .pending_promises
+            .values()
+            .copied()
+            .collect();
+        self.async_host_callbacks.pending_promises.clear();
+        let reason = self.create_error_exception(
+            NativeFunction::TypeErrorConstructor,
+            "TypeError",
+            "AsyncHostCallback:Interrupted".to_string(),
+        );
+        for promise_id in pending_promises {
+            self.settle_promise_with_hooks(
+                promise_id,
+                PromiseSettlement::Rejected(reason.clone()),
+                hooks,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn promise_rejection_from_runtime_error_or_type_error(
+        &mut self,
+        err: VmError,
+        context: &str,
+    ) -> JsValue {
+        if let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone()) {
+            return rejection;
+        }
+        self.create_error_exception(
+            NativeFunction::TypeErrorConstructor,
+            "TypeError",
+            format!("{context}:{err:?}"),
+        )
+    }
+
+    fn pending_promise_work_count(&self) -> usize {
+        self.promise_job_queue
+            .jobs
+            .len()
+            .saturating_add(self.async_host_callbacks.pending_promises.len())
     }
 
     fn promise_settlement_from_object(
@@ -27181,6 +27431,8 @@ mod tests {
     use runtime::{JsValue, NativeFunction, Realm};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
         Chunk {
@@ -32112,6 +32364,155 @@ slots[1][2].value + slots[2][0].value;
         assert_eq!(
             err,
             VmError::TypeError(TYPE_ERROR_PROMISE_JOB_REENTRANT_DRAIN)
+        );
+    }
+
+    #[test]
+    fn async_host_callback_completion_integrates_with_promise_hooks() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let rust_async = vm.register_async_host_callback_function(
+            "rustAsync",
+            0.0,
+            false,
+            |_vm, _this_arg, _args, _realm, _strict| Ok(async move { Ok(JsValue::Number(9.0)) }),
+        );
+        let source_promise = vm
+            .call_function_value(rust_async, None, Vec::new(), &realm, false)
+            .expect("async host callback should return promise");
+        let tail = vm
+            .execute_promise_then(
+                &[source_promise, JsValue::Undefined, JsValue::Undefined],
+                &realm,
+                false,
+            )
+            .expect("then should register on pending promise");
+
+        let mut hooks = RecordingPromiseHooks::default();
+        let first = vm
+            .drain_promise_jobs_with_host_hooks(1, &realm, false, &mut hooks)
+            .expect("first drain should settle async source");
+        assert_eq!(
+            first,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 1,
+                stop_reason: PromiseJobDrainStopReason::BudgetExhausted,
+            }
+        );
+        let second = vm
+            .drain_promise_jobs_with_host_hooks(8, &realm, false, &mut hooks)
+            .expect("second drain should process reaction");
+        assert_eq!(
+            second,
+            PromiseJobDrainReport {
+                processed: 1,
+                remaining: 0,
+                stop_reason: PromiseJobDrainStopReason::QueueEmpty,
+            }
+        );
+        assert_eq!(
+            promise_state(&vm, tail),
+            ("fulfilled".to_string(), JsValue::Number(9.0))
+        );
+        assert_eq!(
+            hooks.events,
+            vec![
+                "drain_start:0".to_string(),
+                "enqueue:1".to_string(),
+                "drain_end:1:1:BudgetExhausted".to_string(),
+                "drain_start:1".to_string(),
+                "drain_end:1:0:QueueEmpty".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn async_host_callback_drain_is_budgetized_while_completion_pending() {
+        let mut vm = Vm::default();
+        let realm = Realm::default();
+        let rust_async = vm.register_async_host_callback_function(
+            "rustAsyncSlow",
+            0.0,
+            false,
+            |_vm, _this_arg, _args, _realm, _strict| {
+                Ok(async move {
+                    thread::sleep(Duration::from_millis(25));
+                    Ok(JsValue::Number(1.0))
+                })
+            },
+        );
+        let _promise = vm
+            .call_function_value(rust_async, None, Vec::new(), &realm, false)
+            .expect("async host callback should return promise");
+
+        let report = vm
+            .drain_promise_jobs_with_host_hooks(
+                1,
+                &realm,
+                false,
+                &mut RecordingPromiseHooks::default(),
+            )
+            .expect("drain should return without spinning");
+        assert_eq!(
+            report,
+            PromiseJobDrainReport {
+                processed: 0,
+                remaining: 1,
+                stop_reason: PromiseJobDrainStopReason::PendingAsyncHostCallbacks,
+            }
+        );
+        assert!(vm.has_pending_async_host_callbacks());
+    }
+
+    #[test]
+    fn interrupt_rejects_pending_async_host_callback_promises() {
+        let script = parse_script("1 + 2;").expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        vm.define_global_async_host_callback(
+            &realm,
+            "rustAsync",
+            0.0,
+            false,
+            |_vm, _this_arg, _args, _realm, _strict| {
+                Ok(async move {
+                    thread::sleep(Duration::from_millis(25));
+                    Ok(JsValue::Number(7.0))
+                })
+            },
+        )
+        .expect("async callback should register");
+        let rust_async = vm
+            .global_property("rustAsync")
+            .expect("async callback should be available globally");
+        let promise = vm
+            .call_function_value(rust_async, None, Vec::new(), &realm, false)
+            .expect("async callback invocation should return promise");
+
+        vm.set_interrupt_poll_interval(1);
+        vm.set_interrupt_handler(|| true);
+        let err = vm
+            .execute_in_realm_persistent(&chunk, &realm)
+            .expect_err("interrupt should abort execution");
+        assert_eq!(err, VmError::Interrupted);
+        vm.clear_interrupt_handler();
+
+        assert_eq!(vm.pending_async_host_callback_count(), 0);
+        let (state, reason) = promise_state(&vm, promise);
+        assert_eq!(state, "rejected".to_string());
+        let JsValue::Object(reason_id) = reason else {
+            panic!("interrupted async promise should reject with error object");
+        };
+        let reason_object = vm
+            .objects
+            .get(&reason_id)
+            .expect("error object should exist");
+        assert_eq!(
+            reason_object.properties.get("name"),
+            Some(&JsValue::String("TypeError".to_string()))
         );
     }
 
