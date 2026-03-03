@@ -741,6 +741,23 @@ fn module_string_named_import_export_clauses_parses_and_evaluates() {
 }
 
 #[test]
+fn module_multiline_default_export_expression_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export default\n  42\n")
+        .with_module(
+            "entry.js",
+            "import value from './dep.js';\nexport const answer = value;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("multiline default export expression should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

@@ -361,3 +361,14 @@ fn module_parse_string_named_import_export_clauses() {
         local: "kebabName".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_multiline_default_export_expression() {
+    let source = "export default\n  42\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "$__qjs_module_default_export_0__$".to_string(),
+    }));
+}

@@ -199,7 +199,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                     position: 0,
                 });
             }
-            if let Some(default_expr) = export_body.strip_prefix("default ") {
+            if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
                 let default_expr = default_expr.trim();
                 let expr = trim_module_declaration_terminator(default_expr);
                 if expr.is_empty() {
@@ -443,8 +443,11 @@ fn module_declaration_needs_followup(source: &str) -> bool {
         return true;
     }
 
-    if let Some(default_expr) = export_body.strip_prefix("default ") {
+    if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
         return trim_module_declaration_terminator(default_expr).is_empty();
+    }
+    if export_body == "default" {
+        return true;
     }
 
     let body = export_body.trim_end();
@@ -759,6 +762,16 @@ fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
         split_result = Some((clause, specifier));
     }
     split_result
+}
+
+fn strip_module_export_default_prefix(source: &str) -> Option<&str> {
+    let source = source.trim_start();
+    let after_default = source.strip_prefix("default")?;
+    let first = after_default.chars().next()?;
+    if !first.is_whitespace() {
+        return None;
+    }
+    Some(after_default.trim_start())
 }
 
 fn is_module_identifier_part(ch: char) -> bool {
