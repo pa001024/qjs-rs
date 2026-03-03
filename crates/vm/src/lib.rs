@@ -578,6 +578,15 @@ struct IdentifierFastPathFlags {
     packet_h_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct IdentifierFamilySlots {
+    load: Option<u32>,
+    store: Option<u32>,
+    resolve_reference: Option<u32>,
+    call: Option<u32>,
+    call_with_spread: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GcStats {
     pub roots: usize,
@@ -797,6 +806,8 @@ pub struct Vm {
     packet_i_revalidate_enabled: bool,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
+    identifier_family_slots_cache:
+        BTreeMap<(usize, usize), Rc<HashMap<String, IdentifierFamilySlots>>>,
     annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
     last_persistent_chunk_key: Option<(usize, usize)>,
 }
@@ -898,6 +909,7 @@ impl Vm {
         self.packet_g_fast_path.reset();
         self.packet_h_fast_path.reset();
         self.identifier_slot_metadata_cache.clear();
+        self.identifier_family_slots_cache.clear();
         self.annex_b_sync_counts_cache.clear();
         self.last_persistent_chunk_key = None;
         let object_prototype = self.create_object_value();
@@ -1049,6 +1061,7 @@ impl Vm {
         let chunk_changed = self.last_persistent_chunk_key != Some(chunk_key);
         if self.last_persistent_chunk_key != Some(chunk_key) {
             self.identifier_slot_metadata_cache.clear();
+            self.identifier_family_slots_cache.clear();
             self.last_persistent_chunk_key = Some(chunk_key);
         }
         if self.global_object_id.is_none() || self.scopes.is_empty() {
@@ -2418,6 +2431,101 @@ impl Vm {
         metadata
     }
 
+    fn identifier_family_slots_for_code(
+        &mut self,
+        code: &[Opcode],
+        metadata: &[Option<IdentifierSlotMetadata>],
+    ) -> Rc<HashMap<String, IdentifierFamilySlots>> {
+        let key = (code.as_ptr() as usize, code.len());
+        if let Some(slots) = self.identifier_family_slots_cache.get(&key) {
+            return Rc::clone(slots);
+        }
+
+        let mut slots_by_name: HashMap<String, IdentifierFamilySlots> = HashMap::default();
+        for (pc, opcode) in code.iter().enumerate() {
+            let Some(name) = Self::identifier_name_for_slot_family(opcode) else {
+                continue;
+            };
+            let Some(entry) = metadata.get(pc).and_then(|entry| *entry) else {
+                continue;
+            };
+            let name_slots = slots_by_name.entry(name.to_string()).or_default();
+            match entry.family {
+                IdentifierOpcodeFamily::Load => name_slots.load = Some(entry.slot),
+                IdentifierOpcodeFamily::Store => name_slots.store = Some(entry.slot),
+                IdentifierOpcodeFamily::ResolveReference => {
+                    name_slots.resolve_reference = Some(entry.slot);
+                }
+                IdentifierOpcodeFamily::Delete | IdentifierOpcodeFamily::Typeof => {}
+                IdentifierOpcodeFamily::Call => name_slots.call = Some(entry.slot),
+                IdentifierOpcodeFamily::CallWithSpread => {
+                    name_slots.call_with_spread = Some(entry.slot);
+                }
+            }
+        }
+
+        let slots_by_name = Rc::new(slots_by_name);
+        self.identifier_family_slots_cache
+            .insert(key, Rc::clone(&slots_by_name));
+        slots_by_name
+    }
+
+    #[inline(always)]
+    fn identifier_name_for_slot_family(opcode: &Opcode) -> Option<&str> {
+        match opcode {
+            Opcode::LoadIdentifier(name)
+            | Opcode::StoreVariable(name)
+            | Opcode::IncrementVariable(name)
+            | Opcode::ResolveIdentifierReference(name)
+            | Opcode::DeleteIdentifier(name)
+            | Opcode::TypeofIdentifier(name) => Some(name.as_str()),
+            Opcode::CallIdentifier { name, .. } | Opcode::CallIdentifierWithSpread { name, .. } => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    fn seed_identifier_slot_caches_for_binding(
+        &mut self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+        identifier_family_slots: Option<&HashMap<String, IdentifierFamilySlots>>,
+    ) {
+        let Some(identifier_family_slots) = identifier_family_slots else {
+            return;
+        };
+        let Some(slots) = identifier_family_slots.get(name) else {
+            return;
+        };
+        if self.packet_h_fast_path_enabled() && self.packet_h_fast_path_metrics_enabled() {
+            return;
+        }
+
+        let scope_generation = self.packet_d_scope_generation;
+        if self.packet_d_fast_path_enabled() {
+            for slot in [
+                slots.load,
+                slots.store,
+                slots.resolve_reference,
+                slots.call,
+                slots.call_with_spread,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.packet_d_fast_path.remember_slot_cache_entry(
+                    slot,
+                    scope_index,
+                    binding_id,
+                    scope_generation,
+                );
+            }
+        }
+    }
+
     fn annex_b_sync_counts_for_code(&mut self, code: &[Opcode]) -> Rc<BTreeMap<String, usize>> {
         let key = (code.as_ptr() as usize, code.len());
         if let Some(counts) = self.annex_b_sync_counts_cache.get(&key) {
@@ -2446,11 +2554,15 @@ impl Vm {
         }
         let packet_d_slot_enabled = self.packet_d_fast_path_enabled();
         let packet_h_enabled = self.packet_h_fast_path_enabled();
-        let identifier_slot_metadata = if packet_d_slot_enabled || packet_h_enabled {
-            Some(self.identifier_slot_metadata_for_code(code))
-        } else {
-            None
-        };
+        let (identifier_slot_metadata, identifier_family_slots) =
+            if packet_d_slot_enabled || packet_h_enabled {
+                let metadata = self.identifier_slot_metadata_for_code(code);
+                let slots_by_name = self.identifier_family_slots_for_code(code, metadata.as_ref());
+                (Some(metadata), Some(slots_by_name))
+            } else {
+                (None, None)
+            };
+        let identifier_family_slots = identifier_family_slots.as_deref();
         let packet_d_slot_direct_mode = packet_d_slot_enabled
             && !self.packet_d_fast_path_metrics_enabled()
             && !self.packet_a_fast_path_metrics_enabled();
@@ -2562,17 +2674,23 @@ impl Vm {
                     }
                 }
                 Opcode::DefineVar(name) => {
+                    let var_scope_index = self
+                        .var_scope_stack
+                        .last()
+                        .copied()
+                        .unwrap_or_else(|| self.scopes.len().saturating_sub(1));
                     let existing_binding_id = {
                         let scope_ref = self.current_var_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
                     };
-                    if let Some(existing_binding_id) = existing_binding_id {
+                    let binding_id = if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
                             .binding(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
                         if !existing_binding.mutable {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
+                        existing_binding_id
                     } else {
                         let binding_id = self.create_binding_with_flags(
                             JsValue::Undefined,
@@ -2588,17 +2706,25 @@ impl Vm {
                         {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                    }
+                        binding_id
+                    };
+                    self.seed_identifier_slot_caches_for_binding(
+                        name,
+                        var_scope_index,
+                        binding_id,
+                        identifier_family_slots,
+                    );
                     self.define_global_var_property(name)?;
                 }
                 Opcode::DefineVariable { name, mutable } => {
+                    let scope_index = self.scopes.len().saturating_sub(1);
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
                     };
-                    if let Some(existing_binding_id) = existing_binding_id {
+                    let binding_id = if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
                             .binding_mut(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
@@ -2614,6 +2740,7 @@ impl Vm {
                         {
                             existing_binding.value = value;
                         }
+                        existing_binding_id
                     } else {
                         let binding_id = self.create_binding(value, *mutable);
                         let scope_ref = self.current_scope_ref()?;
@@ -2625,9 +2752,17 @@ impl Vm {
                         {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                    }
+                        binding_id
+                    };
+                    self.seed_identifier_slot_caches_for_binding(
+                        name,
+                        scope_index,
+                        binding_id,
+                        identifier_family_slots,
+                    );
                 }
                 Opcode::DefineFunction { name, function_id } => {
+                    let scope_index = self.scopes.len().saturating_sub(1);
                     let function_value =
                         self.instantiate_function(*function_id, functions, strict)?;
                     let function_value_for_annex_b = function_value.clone();
@@ -2635,7 +2770,7 @@ impl Vm {
                         let scope_ref = self.current_scope_ref()?;
                         scope_ref.borrow().get(name).copied()
                     };
-                    if let Some(existing_binding_id) = existing_binding_id {
+                    let binding_id = if let Some(existing_binding_id) = existing_binding_id {
                         let existing_binding = self
                             .binding_mut(existing_binding_id)
                             .ok_or(VmError::ScopeUnderflow)?;
@@ -2643,6 +2778,7 @@ impl Vm {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
                         existing_binding.value = function_value;
+                        existing_binding_id
                     } else {
                         let function_binding = self.create_binding_with_flags(
                             function_value,
@@ -2658,7 +2794,14 @@ impl Vm {
                         {
                             return Err(VmError::VariableAlreadyDefined(name.clone()));
                         }
-                    }
+                        function_binding
+                    };
+                    self.seed_identifier_slot_caches_for_binding(
+                        name,
+                        scope_index,
+                        binding_id,
+                        identifier_family_slots,
+                    );
                     self.sync_annex_b_eval_var_function_binding(name, function_value_for_annex_b)?;
                 }
                 Opcode::StoreVariable(name) => {

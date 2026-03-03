@@ -389,6 +389,27 @@ sum;
 }
 
 #[test]
+fn perf_packet_d_define_variable_primes_slot_cache_before_first_load() {
+    let source = r#"
+{
+  let local = 1;
+  local;
+}
+"#;
+
+    let (value, counters, _hotspot) = assert_packet_d_parity(source);
+    assert_eq!(value, JsValue::Number(1.0));
+    assert!(
+        counters.slot_guard_hits > 0,
+        "first lexical read after DefineVariable should hit packet-D slot cache"
+    );
+    assert_eq!(
+        counters.slot_guard_misses, 0,
+        "DefineVariable should prewarm packet-D slots and avoid first-read misses"
+    );
+}
+
+#[test]
 fn perf_packet_d_slot_revalidation_fallback_parity() {
     let source = r#"
 let marker = 1;
