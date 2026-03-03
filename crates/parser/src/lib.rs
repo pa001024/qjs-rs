@@ -108,16 +108,20 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
         {
             continue;
         }
-        if trimmed.starts_with("import ") {
-            let parsed_import = parse_module_import_declaration(trimmed)?;
+        if let Some(import_line) =
+            normalize_module_declaration_keyword(trimmed, "import", &['{', '*', '\'', '"'])
+        {
+            let parsed_import = parse_module_import_declaration(&import_line)?;
             type_only_bindings.extend(parsed_import.type_only_locals);
             if let Some(import) = parsed_import.import {
                 imports.push(import);
             }
             continue;
         }
-        if trimmed.starts_with("export ") {
-            let export_body = trimmed
+        if let Some(export_line) =
+            normalize_module_declaration_keyword(trimmed, "export", &['{', '*'])
+        {
+            let export_body = export_line
                 .strip_prefix("export ")
                 .expect("prefix checked")
                 .trim();
@@ -531,26 +535,35 @@ fn strip_module_from_keyword(source: &str) -> Option<&str> {
 }
 
 fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
-    let mut split_index = None;
+    let mut split_result = None;
     for (index, _) in source.match_indices("from") {
         let left = &source[..index];
         let right = &source[index + "from".len()..];
-        if !left.chars().next_back().is_some_and(char::is_whitespace) {
+        if left
+            .chars()
+            .next_back()
+            .is_some_and(is_module_identifier_part)
+        {
             continue;
         }
-        if !right.chars().next().is_some_and(char::is_whitespace) {
+        if right.chars().next().is_some_and(is_module_identifier_part) {
             continue;
         }
-        split_index = Some(index);
+        let clause = source[..index].trim_end();
+        let specifier = source[index + "from".len()..].trim_start();
+        if clause.is_empty()
+            || specifier.is_empty()
+            || !(specifier.starts_with('\'') || specifier.starts_with('"'))
+        {
+            continue;
+        }
+        split_result = Some((clause, specifier));
     }
+    split_result
+}
 
-    let index = split_index?;
-    let clause = source[..index].trim_end();
-    let specifier = source[index + "from".len()..].trim_start();
-    if clause.is_empty() || specifier.is_empty() {
-        return None;
-    }
-    Some((clause, specifier))
+fn is_module_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
@@ -625,6 +638,23 @@ fn trim_module_declaration_terminator(source: &str) -> &str {
     } else {
         source
     }
+}
+
+fn normalize_module_declaration_keyword(
+    line: &str,
+    keyword: &str,
+    no_space_starts: &[char],
+) -> Option<String> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix(keyword)?;
+    let first = rest.chars().next()?;
+    if first.is_whitespace() {
+        return Some(format!("{keyword} {}", rest.trim_start()));
+    }
+    if no_space_starts.contains(&first) {
+        return Some(format!("{keyword} {rest}"));
+    }
+    None
 }
 
 fn collect_ts_type_only_declared_bindings(line: &str) -> Vec<String> {
@@ -761,7 +791,9 @@ fn register_module_export(
 }
 
 fn render_module_export_snapshot_statement(exports: &[ModuleExport]) -> String {
-    let mut rendered = String::from("({");
+    // Prefix with an explicit statement separator so semicolonless preceding
+    // statements don't merge with the synthetic snapshot expression.
+    let mut rendered = String::from(";({");
     for (index, export) in exports.iter().enumerate() {
         if index > 0 {
             rendered.push_str(", ");
@@ -8750,6 +8782,21 @@ export default value;\n";
     #[test]
     fn module_parse_semicolonless_import_export_baseline() {
         let source = "import { value } from './dep.js'\nexport const answer = value\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_compact_keyword_spacing_baseline() {
+        let source = "import{ value }from'./dep.js'\nconst answer = value\nexport{answer}\n";
         let parsed = parse_module(source).expect("module parsing should succeed");
         assert_eq!(parsed.imports.len(), 1);
         assert_eq!(parsed.imports[0].specifier, "./dep.js");

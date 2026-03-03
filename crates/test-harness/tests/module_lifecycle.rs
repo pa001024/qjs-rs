@@ -323,3 +323,20 @@ fn semicolonless_import_export_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn compact_keyword_spacing_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 41;\n")
+        .with_module(
+            "entry.js",
+            "import{ value }from'./dep.js'\nconst answer = value + 1\nexport{answer}\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("compact module keyword spacing should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
