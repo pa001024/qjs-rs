@@ -118,6 +118,7 @@ const TYPE_ERROR_MODULE_LOAD_FAILED: &str = "ModuleLifecycle:LoadFailed";
 const TYPE_ERROR_MODULE_PARSE_FAILED: &str = "ModuleLifecycle:ParseFailed";
 const TYPE_ERROR_MODULE_EVALUATE_FAILED: &str = "ModuleLifecycle:EvaluateFailed";
 const TYPE_ERROR_MODULE_HOST_CONTRACT: &str = "ModuleLifecycle:HostContractViolation";
+const MODULE_EXPORT_STAR_BINDING_PREFIX: &str = "$__qjs_module_export_star_";
 const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
@@ -1951,6 +1952,7 @@ impl Vm {
             install_baseline(&mut realm);
             realm
         };
+        let mut star_reexports = Vec::new();
         for (index, import) in compiled.imports.iter().enumerate() {
             let dependency_key = resolved_dependencies
                 .get(index)
@@ -1965,6 +1967,9 @@ impl Vm {
                 if binding.imported == "*" {
                     let namespace = self.create_module_namespace_value(&dependency_exports);
                     realm.define_global(&binding.local, namespace);
+                    if Self::is_module_export_star_binding(&binding.local) {
+                        star_reexports.push(dependency_exports.clone());
+                    }
                 } else {
                     let imported_value = dependency_exports
                         .get(&binding.imported)
@@ -1981,22 +1986,32 @@ impl Vm {
         let result = self
             .execute_module_chunk_inline(&compiled.chunk, &realm)
             .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
-        if compiled.exports.is_empty() {
+        if compiled.exports.is_empty() && star_reexports.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let snapshot = self
-            .snapshot_object_properties(&result)
-            .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
         let mut exports = BTreeMap::new();
-        for export in &compiled.exports {
-            let value = snapshot
-                .get(&export.exported)
-                .cloned()
-                .unwrap_or(JsValue::Undefined);
-            exports.insert(
-                export.exported.clone(),
-                Self::sanitize_module_value_for_exchange(value),
-            );
+        if !compiled.exports.is_empty() {
+            let snapshot = self
+                .snapshot_object_properties(&result)
+                .map_err(|_| VmError::TypeError(TYPE_ERROR_MODULE_EVALUATE_FAILED))?;
+            for export in &compiled.exports {
+                let value = snapshot
+                    .get(&export.exported)
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined);
+                exports.insert(
+                    export.exported.clone(),
+                    Self::sanitize_module_value_for_exchange(value),
+                );
+            }
+        }
+        for reexported in star_reexports {
+            for (name, value) in reexported {
+                if name == "default" || exports.contains_key(&name) {
+                    continue;
+                }
+                exports.insert(name, Self::sanitize_module_value_for_exchange(value));
+            }
         }
         Ok(exports)
     }
@@ -2097,6 +2112,10 @@ impl Vm {
             );
         }
         namespace
+    }
+
+    fn is_module_export_star_binding(local_name: &str) -> bool {
+        local_name.starts_with(MODULE_EXPORT_STAR_BINDING_PREFIX) && local_name.ends_with("__$")
     }
 
     fn module_cached_error(&self, canonical_key: &str, fallback: &'static str) -> VmError {

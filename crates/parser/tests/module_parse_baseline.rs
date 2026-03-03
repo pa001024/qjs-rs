@@ -74,3 +74,21 @@ fn module_parse_named_reexport_baseline() {
         local: "$__qjs_module_reexport_1__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_export_star_baseline() {
+    let source = "export * from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+    assert!(
+        parsed.imports[0].bindings[0]
+            .local
+            .starts_with("$__qjs_module_export_star_"),
+        "export * should synthesize hidden namespace capture binding",
+    );
+    assert!(parsed.exports.is_empty());
+}

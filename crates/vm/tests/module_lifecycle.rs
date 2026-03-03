@@ -461,6 +461,36 @@ fn module_named_reexport_replay_determinism() {
 }
 
 #[test]
+fn module_export_star_replay_determinism() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\nexport default 7;\n")
+        .with_module(
+            "bridge.js",
+            "export * from './dep.js';\nexport const bridge = 1;\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { value, bridge, default as fallback } from './bridge.js';\n\
+             export const answer = value + bridge;\n\
+             export const fallbackType = typeof fallback;\n",
+        );
+    let mut vm = Vm::default();
+    let first = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("export-star re-export should evaluate");
+    let second = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("cached export-star re-export should replay deterministically");
+    assert_eq!(load_number_export(&first, "answer"), 43.0);
+    assert_eq!(load_number_export(&second, "answer"), 43.0);
+    assert_eq!(load_string_export(&first, "fallbackType"), "undefined");
+    assert_eq!(load_string_export(&second, "fallbackType"), "undefined");
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

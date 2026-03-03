@@ -213,3 +213,33 @@ fn named_reexport_paths_are_deterministic() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn export_star_paths_are_deterministic() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\nexport default 7;\n")
+        .with_module(
+            "bridge.js",
+            "export * from './dep.js';\nexport const bridge = 1;\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { value, bridge, default as fallback } from './bridge.js';\n\
+             export const answer = value + bridge;\n\
+             export const fallbackType = typeof fallback;\n",
+        );
+    let mut vm = Vm::default();
+    let first = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("export-star re-export should evaluate");
+    let second = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("cached export-star re-export should replay deterministically");
+    assert_eq!(expect_number(&first, "answer"), 43.0);
+    assert_eq!(expect_number(&second, "answer"), 43.0);
+    assert_eq!(expect_string(&first, "fallbackType"), "undefined");
+    assert_eq!(expect_string(&second, "fallbackType"), "undefined");
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}

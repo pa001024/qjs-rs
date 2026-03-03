@@ -87,6 +87,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut transformed_lines = Vec::new();
     let mut default_export_index = 0usize;
     let mut reexport_binding_index = 0usize;
+    let mut export_star_binding_index = 0usize;
 
     for raw_line in source.lines() {
         let trimmed = raw_line.trim();
@@ -131,6 +132,18 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 continue;
             }
             if export_body.starts_with('*') {
+                if let Some(specifier) = parse_export_star_clause(export_body)? {
+                    let local = format!("$__qjs_module_export_star_{export_star_binding_index}__$");
+                    export_star_binding_index += 1;
+                    imports.push(ModuleImport {
+                        specifier,
+                        bindings: vec![ModuleImportBinding {
+                            imported: "*".to_string(),
+                            local,
+                        }],
+                    });
+                    continue;
+                }
                 return Err(ParseError {
                     message: "unsupported export form".to_string(),
                     position: 0,
@@ -390,6 +403,21 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
         bindings.push((imported, exported));
     }
     Ok(bindings)
+}
+
+fn parse_export_star_clause(clause: &str) -> Result<Option<String>, ParseError> {
+    if !clause.ends_with(';') {
+        return Err(ParseError {
+            message: "module declaration must end with ';'".to_string(),
+            position: 0,
+        });
+    }
+    let body = clause[..clause.len() - 1].trim();
+    let Some(raw_specifier) = body.strip_prefix("* from ") else {
+        return Ok(None);
+    };
+    let specifier = parse_module_string_literal(raw_specifier.trim())?;
+    Ok(Some(specifier))
 }
 
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
@@ -7913,6 +7941,23 @@ export default value;\n";
                 .iter()
                 .any(|entry| entry.exported == "fallback")
         );
+    }
+
+    #[test]
+    fn module_parse_export_star_baseline() {
+        let source = "export * from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert!(
+            parsed.imports[0].bindings[0]
+                .local
+                .starts_with("$__qjs_module_export_star_"),
+            "export * should synthesize hidden namespace capture binding"
+        );
+        assert!(parsed.exports.is_empty());
     }
 
     #[test]
