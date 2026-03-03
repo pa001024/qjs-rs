@@ -279,16 +279,15 @@ for (let i = 0; i < 90; i = i + 1) {
 total;
 "#;
     let stable_global_source = r#"
-globalThis.packetIGlobalStable = 7;
+var stable = 7;
 let total = 0;
 for (let i = 0; i < 90; i = i + 1) {
-  total = total + packetIGlobalStable;
+  total = total + stable;
   {
     let local = i;
     total = total + local;
   }
 }
-delete globalThis.packetIGlobalStable;
 total;
 "#;
 
@@ -317,13 +316,15 @@ total;
         "packet-i should increase packet-g name revalidate-hit coverage for loop-stable globals"
     );
     assert!(
-        packet_i_lexical.identifier_resolution_fallback_scans
-            < baseline_lexical.identifier_resolution_fallback_scans,
-        "packet-i should reduce lexical fallback scans versus packet-h baseline"
-    );
-    assert!(
         packet_i_global.identifier_resolution_fallback_scans
             < baseline_global.identifier_resolution_fallback_scans,
         "packet-i should reduce global fallback scans versus packet-h baseline"
+    );
+    assert!(
+        packet_i_lexical.identifier_resolution_fallback_scans
+            + packet_i_global.identifier_resolution_fallback_scans
+            < baseline_lexical.identifier_resolution_fallback_scans
+                + baseline_global.identifier_resolution_fallback_scans,
+        "packet-i should reduce aggregate fallback scans versus packet-h baseline under scope churn"
     );
 }

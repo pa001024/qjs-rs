@@ -785,6 +785,7 @@ pub struct Vm {
     packet_h_fast_path_enabled: bool,
     packet_h_fast_path_metrics_enabled: bool,
     packet_h_fast_path: PacketHFastPathState,
+    packet_i_revalidate_enabled: bool,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
     annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
@@ -1254,6 +1255,14 @@ impl Vm {
 
     pub fn packet_h_fast_path_counters(&self) -> PacketHFastPathCounters {
         self.packet_h_fast_path.counters()
+    }
+
+    pub fn set_packet_i_revalidate_enabled(&mut self, enabled: bool) {
+        self.packet_i_revalidate_enabled = enabled;
+    }
+
+    pub fn packet_i_revalidate_enabled(&self) -> bool {
+        self.packet_i_revalidate_enabled
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -15779,9 +15788,17 @@ impl Vm {
         slot: u32,
         entry: PacketDSlotCacheEntry,
     ) -> Option<BindingId> {
-        if entry.scope_index + 1 == self.scopes.len()
-            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
-        {
+        let revalidate_allowed = if self.packet_i_revalidate_enabled() {
+            self.cached_binding_entry_is_visible_without_shadowing(
+                name,
+                entry.scope_index,
+                entry.binding_id,
+            )
+        } else {
+            entry.scope_index + 1 == self.scopes.len()
+                && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        };
+        if revalidate_allowed {
             self.packet_d_fast_path.remember_slot_cache_entry(
                 slot,
                 entry.scope_index,
@@ -15802,9 +15819,17 @@ impl Vm {
         name: &str,
         entry: PacketGNameCacheEntry,
     ) -> Option<(usize, BindingId)> {
-        if entry.scope_index + 1 == self.scopes.len()
-            && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
-        {
+        let revalidate_allowed = if self.packet_i_revalidate_enabled() {
+            self.cached_binding_entry_is_visible_without_shadowing(
+                name,
+                entry.scope_index,
+                entry.binding_id,
+            )
+        } else {
+            entry.scope_index + 1 == self.scopes.len()
+                && self.cached_binding_entry_is_valid(name, entry.scope_index, entry.binding_id)
+        };
+        if revalidate_allowed {
             self.packet_g_fast_path.remember_name_cache_entry(
                 name,
                 entry.scope_index,
@@ -16108,6 +16133,14 @@ impl Vm {
                         }
                         return Some(entry.binding_id);
                     }
+                }
+                if let Some(binding_id) =
+                    self.try_revalidate_packet_d_slot_cache_entry(name, slot, entry)
+                {
+                    if packet_a_metrics_enabled {
+                        self.record_packet_a_binding_guard_hit();
+                    }
+                    return Some(binding_id);
                 }
                 self.packet_d_fast_path.remove_slot_cache_entry(slot);
             }
@@ -21571,6 +21604,9 @@ impl Vm {
                 | (NativeFunction::Uint8ArrayConstructor, "prototype")
                 | (NativeFunction::RegExpConstructor, "prototype")
                 | (NativeFunction::SymbolConstructor, "prototype")
+                | (_, "call")
+                | (_, "apply")
+                | (_, "bind")
                 | (_, "name")
                 | (_, "length")
                 | (_, "constructor")
