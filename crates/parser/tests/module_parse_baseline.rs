@@ -302,3 +302,27 @@ fn module_parse_export_with_object_literal_initializer_baseline() {
         local: "right".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_keyword_identifier_names_in_clauses() {
+    let source = "const value = 42;\nexport { value as if };\nimport { if as condition } from './dep.js';\nexport { condition as while };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "if".to_string(),
+            local: "condition".to_string(),
+        }]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "if".to_string(),
+        local: "value".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "while".to_string(),
+        local: "condition".to_string(),
+    }));
+}

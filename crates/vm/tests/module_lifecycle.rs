@@ -688,6 +688,23 @@ fn module_destructuring_export_parses_and_evaluates() {
 }
 
 #[test]
+fn module_keyword_identifier_names_in_clauses_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "const value = 42;\nexport { value as if };\n")
+        .with_module(
+            "entry.js",
+            "import { if as condition } from './dep.js';\nexport { condition as while };\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("keyword identifier names in module clauses should evaluate");
+    assert_eq!(load_number_export(&exports, "while"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

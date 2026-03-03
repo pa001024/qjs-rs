@@ -992,14 +992,25 @@ fn parse_module_import_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
     }
-    parse_module_binding_identifier(name)
+    parse_module_identifier_name(name)
 }
 
 fn parse_module_export_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
     }
-    parse_module_binding_identifier(name)
+    parse_module_identifier_name(name)
+}
+
+fn parse_module_identifier_name(name: &str) -> Result<String, ParseError> {
+    let name = name.trim();
+    if !is_valid_module_identifier(name) {
+        return Err(ParseError {
+            message: "invalid module identifier name".to_string(),
+            position: 0,
+        });
+    }
+    Ok(name.to_string())
 }
 
 fn parse_module_binding_identifier(name: &str) -> Result<String, ParseError> {
