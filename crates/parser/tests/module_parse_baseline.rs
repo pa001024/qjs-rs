@@ -46,3 +46,31 @@ export default value;\n";
         "module parse should append synthetic export snapshot expression",
     );
 }
+
+#[test]
+fn module_parse_named_reexport_baseline() {
+    let source = "export { value as answer, default as fallback } from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 2);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[1].imported, "default");
+    assert!(
+        parsed
+            .imports
+            .iter()
+            .flat_map(|entry| entry.bindings.iter())
+            .all(|binding| binding.local.starts_with("$__qjs_module_reexport_")),
+        "re-export should synthesize hidden locals"
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "fallback".to_string(),
+        local: "$__qjs_module_reexport_1__$".to_string(),
+    }));
+}

@@ -190,3 +190,26 @@ fn cycle_and_failure_paths_are_deterministic() {
     assert_eq!(namespace_host.load_count("entry.js"), 1);
     assert_eq!(namespace_host.load_count("ns.js"), 1);
 }
+
+#[test]
+fn named_reexport_paths_are_deterministic() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\nexport default 7;\n")
+        .with_module(
+            "entry.js",
+            "export { value as answer, default as fallback } from './dep.js';\n",
+        );
+    let mut vm = Vm::default();
+    let first = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("named re-export should evaluate");
+    let second = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("cached named re-export should replay deterministically");
+    assert_eq!(expect_number(&first, "answer"), 42.0);
+    assert_eq!(expect_number(&first, "fallback"), 7.0);
+    assert_eq!(expect_number(&second, "answer"), 42.0);
+    assert_eq!(expect_number(&second, "fallback"), 7.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}

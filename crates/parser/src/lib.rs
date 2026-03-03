@@ -86,6 +86,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut exported_names = BTreeSet::new();
     let mut transformed_lines = Vec::new();
     let mut default_export_index = 0usize;
+    let mut reexport_binding_index = 0usize;
 
     for raw_line in source.lines() {
         let trimmed = raw_line.trim();
@@ -103,6 +104,27 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 .expect("prefix checked")
                 .trim();
             if export_body.starts_with('{') {
+                if let Some((specifier, bindings)) = parse_named_reexport_clause(export_body)? {
+                    let mut import_bindings = Vec::new();
+                    for (imported, exported) in bindings {
+                        let local = format!("$__qjs_module_reexport_{reexport_binding_index}__$");
+                        reexport_binding_index += 1;
+                        import_bindings.push(ModuleImportBinding {
+                            imported,
+                            local: local.clone(),
+                        });
+                        register_module_export(
+                            &mut exports,
+                            &mut exported_names,
+                            ModuleExport { exported, local },
+                        )?;
+                    }
+                    imports.push(ModuleImport {
+                        specifier,
+                        bindings: import_bindings,
+                    });
+                    continue;
+                }
                 for export in parse_named_export_clause(export_body)? {
                     register_module_export(&mut exports, &mut exported_names, export)?;
                 }
@@ -311,6 +333,63 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
         exports.push(export);
     }
     Ok(exports)
+}
+
+fn parse_named_reexport_clause(
+    clause: &str,
+) -> Result<Option<(String, Vec<(String, String)>)>, ParseError> {
+    if !clause.ends_with(';') {
+        return Err(ParseError {
+            message: "module declaration must end with ';'".to_string(),
+            position: 0,
+        });
+    }
+    let body = clause[..clause.len() - 1].trim();
+    let Some(closing_brace) = body.rfind('}') else {
+        return Err(ParseError {
+            message: "unsupported export re-export form".to_string(),
+            position: 0,
+        });
+    };
+    let named_clause = body[..=closing_brace].trim();
+    let suffix = body[closing_brace + 1..].trim();
+    if suffix.is_empty() {
+        return Ok(None);
+    }
+    let Some(raw_specifier) = suffix.strip_prefix("from ") else {
+        return Err(ParseError {
+            message: "unsupported export re-export form".to_string(),
+            position: 0,
+        });
+    };
+    let specifier = parse_module_string_literal(raw_specifier.trim())?;
+    let bindings = parse_named_reexport_bindings(named_clause)?;
+    Ok(Some((specifier, bindings)))
+}
+
+fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, ParseError> {
+    let inner = parse_braced_clause_inner(clause)?;
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bindings = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (imported, exported) = if let Some((imported, exported)) = part.split_once(" as ") {
+            (
+                parse_module_import_name(imported.trim())?,
+                parse_module_export_name(exported.trim())?,
+            )
+        } else {
+            let imported = parse_module_import_name(part)?;
+            (imported.clone(), parse_module_export_name(part)?)
+        };
+        bindings.push((imported, exported));
+    }
+    Ok(bindings)
 }
 
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
@@ -7802,6 +7881,37 @@ export default value;\n";
                 Some(Stmt::Expression(Expr::ObjectLiteral(_)))
             ),
             "module parse should append synthetic export snapshot expression"
+        );
+    }
+
+    #[test]
+    fn module_parse_named_reexport_baseline() {
+        let source = "export { value as answer, default as fallback } from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 2);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[1].imported, "default");
+        assert!(
+            parsed
+                .imports
+                .iter()
+                .flat_map(|entry| entry.bindings.iter())
+                .all(|binding| binding.local.starts_with("$__qjs_module_reexport_")),
+            "re-export should synthesize hidden locals to avoid source-level collisions"
+        );
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "answer")
+        );
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "fallback")
         );
     }
 
