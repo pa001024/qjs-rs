@@ -176,7 +176,15 @@ fn json_subset() {
 #[test]
 fn core_builtins_subset() {
     for family in [
-        "Object", "Array", "Boolean", "Function", "String", "Number", "Math", "Date",
+        "Object",
+        "Array",
+        "Boolean",
+        "Function",
+        "String",
+        "Number",
+        "Math",
+        "Date",
+        "Promise",
     ] {
         let summary = run_suite(&core_builtin_family_root(family), SuiteOptions::default())
             .unwrap_or_else(|err| panic!("{family} subset should run: {err}"));
