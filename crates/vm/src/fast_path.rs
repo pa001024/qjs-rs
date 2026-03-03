@@ -428,3 +428,72 @@ impl PacketGFastPathState {
         self.counters
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketHSlotCacheEntry {
+    pub scope_index: usize,
+    pub binding_id: BindingId,
+    pub scope_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketHFastPathCounters {
+    pub lexical_slot_guard_hits: u64,
+    pub lexical_slot_guard_misses: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PacketHFastPathState {
+    lexical_slot_cache: Vec<Option<PacketHSlotCacheEntry>>,
+    counters: PacketHFastPathCounters,
+}
+
+impl PacketHFastPathState {
+    pub fn reset(&mut self) {
+        self.lexical_slot_cache.clear();
+        self.counters = PacketHFastPathCounters::default();
+    }
+
+    pub fn remove_slot_cache_entry(&mut self, slot: u32) {
+        let index = slot as usize;
+        if let Some(entry) = self.lexical_slot_cache.get_mut(index) {
+            *entry = None;
+        }
+    }
+
+    pub fn slot_cache_entry(&self, slot: u32) -> Option<PacketHSlotCacheEntry> {
+        self.lexical_slot_cache.get(slot as usize).copied().flatten()
+    }
+
+    pub fn remember_slot_cache_entry(
+        &mut self,
+        slot: u32,
+        scope_index: usize,
+        binding_id: BindingId,
+        scope_generation: u64,
+    ) {
+        let index = slot as usize;
+        if index >= self.lexical_slot_cache.len() {
+            self.lexical_slot_cache.resize(index + 1, None);
+        }
+        self.lexical_slot_cache[index] = Some(PacketHSlotCacheEntry {
+            scope_index,
+            binding_id,
+            scope_generation,
+        });
+    }
+
+    pub fn record_lexical_slot_guard_hit(&mut self) {
+        self.counters.lexical_slot_guard_hits =
+            self.counters.lexical_slot_guard_hits.wrapping_add(1);
+    }
+
+    pub fn record_lexical_slot_guard_miss(&mut self) {
+        self.counters.lexical_slot_guard_misses =
+            self.counters.lexical_slot_guard_misses.wrapping_add(1);
+    }
+
+    pub fn counters(&self) -> PacketHFastPathCounters {
+        self.counters
+    }
+}

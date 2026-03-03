@@ -15,6 +15,8 @@ pub struct HotspotAttribution {
     pub packet_g_name_guard_misses: u64,
     pub packet_g_name_guard_revalidate_hits: u64,
     pub packet_g_name_guard_revalidate_misses: u64,
+    pub packet_h_lexical_slot_guard_hits: u64,
+    pub packet_h_lexical_slot_guard_misses: u64,
     pub array_indexed_property_get: u64,
     pub array_indexed_property_set: u64,
 }
@@ -52,6 +54,12 @@ impl HotspotAttribution {
         self.packet_g_name_guard_revalidate_misses = self
             .packet_g_name_guard_revalidate_misses
             .saturating_add(other.packet_g_name_guard_revalidate_misses);
+        self.packet_h_lexical_slot_guard_hits = self
+            .packet_h_lexical_slot_guard_hits
+            .saturating_add(other.packet_h_lexical_slot_guard_hits);
+        self.packet_h_lexical_slot_guard_misses = self
+            .packet_h_lexical_slot_guard_misses
+            .saturating_add(other.packet_h_lexical_slot_guard_misses);
         self.array_indexed_property_get = self
             .array_indexed_property_get
             .saturating_add(other.array_indexed_property_get);
@@ -166,6 +174,22 @@ impl HotspotAttributionState {
         self.counters.packet_g_name_guard_revalidate_misses = self
             .counters
             .packet_g_name_guard_revalidate_misses
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_h_lexical_slot_guard_hit_unchecked(&mut self) {
+        self.counters.packet_h_lexical_slot_guard_hits = self
+            .counters
+            .packet_h_lexical_slot_guard_hits
+            .wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub fn record_packet_h_lexical_slot_guard_miss_unchecked(&mut self) {
+        self.counters.packet_h_lexical_slot_guard_misses = self
+            .counters
+            .packet_h_lexical_slot_guard_misses
             .wrapping_add(1);
     }
 

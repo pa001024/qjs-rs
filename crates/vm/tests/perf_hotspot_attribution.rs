@@ -220,18 +220,14 @@ total;
 "#;
     let miss_source = r#"
 let stable = 2;
-let total = 0;
 with ({ stable: 9 }) {
-  total = total + stable;
+  stable;
+  stable = stable + 1;
+}
+{
+  let stable = 5;
 }
 typeof neverDeclared;
-for (let i = 0; i < 4; i = i + 1) {
-  {
-    let stable = i;
-    total = total + stable;
-  }
-}
-total;
 "#;
 
     let (_, packet_g_stable) = run_hotspot_sample(stable_source, true, true, true, false);

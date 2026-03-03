@@ -10,6 +10,7 @@ pub use fast_path::PacketBFastPathCounters;
 pub use fast_path::PacketCFastPathCounters;
 pub use fast_path::PacketDFastPathCounters;
 pub use fast_path::PacketGFastPathCounters;
+pub use fast_path::PacketHFastPathCounters;
 
 use ast::{
     BindingKind, ForInitializer, Identifier, ModuleExport, ModuleImport, Script, Stmt,
@@ -36,7 +37,7 @@ use crate::external_host::ExternalHostCallbacks;
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
     PacketCFastPathState, PacketDFastPathState, PacketDSlotCacheEntry, PacketGFastPathState,
-    PacketGNameCacheEntry,
+    PacketGNameCacheEntry, PacketHFastPathState,
 };
 use crate::opaque_bindings::OpaqueBindings;
 
@@ -772,6 +773,9 @@ pub struct Vm {
     packet_g_fast_path_enabled: bool,
     packet_g_fast_path_metrics_enabled: bool,
     packet_g_fast_path: PacketGFastPathState,
+    packet_h_fast_path_enabled: bool,
+    packet_h_fast_path_metrics_enabled: bool,
+    packet_h_fast_path: PacketHFastPathState,
     identifier_slot_metadata_cache:
         BTreeMap<(usize, usize), Rc<Vec<Option<IdentifierSlotMetadata>>>>,
     annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
@@ -873,6 +877,7 @@ impl Vm {
         self.packet_d_scope_generation = 0;
         self.packet_d_fast_path.reset();
         self.packet_g_fast_path.reset();
+        self.packet_h_fast_path.reset();
         self.identifier_slot_metadata_cache.clear();
         self.annex_b_sync_counts_cache.clear();
         self.last_persistent_chunk_key = None;
@@ -1216,6 +1221,30 @@ impl Vm {
 
     pub fn packet_g_fast_path_counters(&self) -> PacketGFastPathCounters {
         self.packet_g_fast_path.counters()
+    }
+
+    pub fn set_packet_h_fast_path_enabled(&mut self, enabled: bool) {
+        self.packet_h_fast_path_enabled = enabled;
+    }
+
+    pub fn packet_h_fast_path_enabled(&self) -> bool {
+        self.packet_h_fast_path_enabled
+    }
+
+    pub fn set_packet_h_fast_path_metrics_enabled(&mut self, enabled: bool) {
+        self.packet_h_fast_path_metrics_enabled = enabled;
+    }
+
+    pub fn packet_h_fast_path_metrics_enabled(&self) -> bool {
+        self.packet_h_fast_path_metrics_enabled
+    }
+
+    pub fn reset_packet_h_fast_path_counters(&mut self) {
+        self.packet_h_fast_path.reset();
+    }
+
+    pub fn packet_h_fast_path_counters(&self) -> PacketHFastPathCounters {
+        self.packet_h_fast_path.counters()
     }
 
     pub fn enable_auto_gc(&mut self, enabled: bool) {
@@ -2389,7 +2418,8 @@ impl Vm {
             self.invalidate_binding_fast_path_cache();
         }
         let packet_d_slot_enabled = self.packet_d_fast_path_enabled();
-        let identifier_slot_metadata = if packet_d_slot_enabled {
+        let packet_h_enabled = self.packet_h_fast_path_enabled();
+        let identifier_slot_metadata = if packet_d_slot_enabled || packet_h_enabled {
             Some(self.identifier_slot_metadata_for_code(code))
         } else {
             None
@@ -2446,15 +2476,33 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Load,
+                            )
+                        } else {
+                            None
+                        };
                     let resolved = if with_objects_empty {
                         let binding_id = if packet_d_slot_direct_mode {
                             if let Some(slot) = identifier_slot {
-                                self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                                self.resolve_binding_id_with_packet_d_known_slot(
+                                    name,
+                                    slot,
+                                    packet_h_slot,
+                                )
                             } else {
-                                self.resolve_binding_id_with_fast_path(name, None)
+                                self.resolve_binding_id_with_fast_path(name, None, packet_h_slot)
                             }
                         } else {
-                            self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                            self.resolve_binding_id_with_fast_path(
+                                name,
+                                identifier_slot,
+                                packet_h_slot,
+                            )
                         };
                         if let Some(binding_id) = binding_id {
                             let binding =
@@ -2468,7 +2516,12 @@ impl Vm {
                             self.resolve_unbound_identifier_value(name, realm)
                         }
                     } else if let Some(reference) =
-                        self.resolve_binding_or_with_reference(name, realm, identifier_slot)?
+                        self.resolve_binding_or_with_reference(
+                            name,
+                            realm,
+                            identifier_slot,
+                            packet_h_slot,
+                        )?
                     {
                         self.load_identifier_reference_value(&reference, realm, strict)
                     } else {
@@ -2598,17 +2651,35 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Store,
+                            )
+                        } else {
+                            None
+                        };
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.maybe_set_inferred_function_name(&value, name);
                     let mut store_error = None;
                     let binding_id = if with_objects_empty && packet_d_slot_direct_mode {
                         if let Some(slot) = identifier_slot {
-                            self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                            self.resolve_binding_id_with_packet_d_known_slot(
+                                name,
+                                slot,
+                                packet_h_slot,
+                            )
                         } else {
-                            self.resolve_binding_id_with_fast_path(name, None)
+                            self.resolve_binding_id_with_fast_path(name, None, packet_h_slot)
                         }
                     } else {
-                        self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                        self.resolve_binding_id_with_fast_path(
+                            name,
+                            identifier_slot,
+                            packet_h_slot,
+                        )
                     };
                     if let Some(binding_id) = binding_id {
                         let mut wrote_binding = false;
@@ -2641,6 +2712,7 @@ impl Vm {
                         self.packet_c_fast_path.remove_binding_cache_entry(name);
                         self.packet_g_fast_path.remove_name_cache_entry(name);
                         self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                         if strict {
                             store_error = Some(VmError::UnknownIdentifier(name.clone()));
                         } else if let Some(global_object_id) = self.global_object_id {
@@ -2688,16 +2760,34 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Store,
+                            )
+                        } else {
+                            None
+                        };
 
                     let mut result: Result<JsValue, VmError> = Err(VmError::ScopeUnderflow);
                     let binding_id = if with_objects_empty && packet_d_slot_direct_mode {
                         if let Some(slot) = identifier_slot {
-                            self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                            self.resolve_binding_id_with_packet_d_known_slot(
+                                name,
+                                slot,
+                                packet_h_slot,
+                            )
                         } else {
-                            self.resolve_binding_id_with_fast_path(name, None)
+                            self.resolve_binding_id_with_fast_path(name, None, packet_h_slot)
                         }
                     } else {
-                        self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                        self.resolve_binding_id_with_fast_path(
+                            name,
+                            identifier_slot,
+                            packet_h_slot,
+                        )
                     };
 
                     if let Some(binding_id) = binding_id {
@@ -3225,8 +3315,23 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Delete,
+                            )
+                        } else {
+                            None
+                        };
                     let deleted = if let Some(reference) =
-                        self.resolve_binding_or_with_reference(name, realm, identifier_slot)?
+                        self.resolve_binding_or_with_reference(
+                            name,
+                            realm,
+                            identifier_slot,
+                            packet_h_slot,
+                        )?
                     {
                         match reference {
                             IdentifierReference::Binding { binding_id, .. } => {
@@ -3290,8 +3395,23 @@ impl Vm {
                         } else {
                             None
                         };
-                    let reference =
-                        self.resolve_identifier_reference(name, realm, strict, identifier_slot)?;
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::ResolveReference,
+                            )
+                        } else {
+                            None
+                        };
+                    let reference = self.resolve_identifier_reference(
+                        name,
+                        realm,
+                        strict,
+                        identifier_slot,
+                        packet_h_slot,
+                    )?;
                     self.identifier_references.push(reference);
                 }
                 Opcode::LoadReferenceValue => {
@@ -3725,8 +3845,18 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Typeof,
+                            )
+                        } else {
+                            None
+                        };
                     let value = if let Some(binding_id) =
-                        self.resolve_binding_id_with_fast_path(name, identifier_slot)
+                        self.resolve_binding_id_with_fast_path(name, identifier_slot, packet_h_slot)
                     {
                         let binding = self.binding(binding_id).ok_or(VmError::ScopeUnderflow)?;
                         binding.value.clone()
@@ -3989,12 +4119,23 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::Call,
+                            )
+                        } else {
+                            None
+                        };
                     match self.execute_identifier_call(
                         name,
                         *arg_count,
                         realm,
                         strict,
                         identifier_slot,
+                        packet_h_slot,
                     ) {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
@@ -4015,12 +4156,23 @@ impl Vm {
                         } else {
                             None
                         };
+                    let packet_h_slot =
+                        if let Some(identifier_slot_metadata) = &identifier_slot_metadata {
+                            Self::packet_h_lexical_slot_for_opcode(
+                                identifier_slot_metadata,
+                                pc,
+                                IdentifierOpcodeFamily::CallWithSpread,
+                            )
+                        } else {
+                            None
+                        };
                     match self.execute_identifier_call_with_spread(
                         name,
                         spread_flags,
                         realm,
                         strict,
                         identifier_slot,
+                        packet_h_slot,
                     ) {
                         Ok(result) => self.stack.push(result),
                         Err(err) => {
@@ -4175,10 +4327,11 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Result<JsValue, VmError> {
         let args = self.pop_call_arguments(arg_count)?;
         if let Some(callee) =
-            self.try_resolve_identifier_call_direct_binding(name, identifier_slot)?
+            self.try_resolve_identifier_call_direct_binding(name, identifier_slot, packet_h_slot)?
         {
             if name == "super" {
                 return self.execute_super_constructor_call(callee, args, realm, caller_strict);
@@ -4193,8 +4346,13 @@ impl Vm {
             }
             return self.execute_callable(callee, None, args, realm, caller_strict);
         }
-        let reference =
-            self.resolve_identifier_reference(name, realm, caller_strict, identifier_slot)?;
+        let reference = self.resolve_identifier_reference(
+            name,
+            realm,
+            caller_strict,
+            identifier_slot,
+            packet_h_slot,
+        )?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
         if name == "super" {
             return self.execute_super_constructor_call(callee, args, realm, caller_strict);
@@ -4225,11 +4383,12 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Result<JsValue, VmError> {
         let raw_args = self.pop_call_arguments(spread_flags.len())?;
         let args = self.expand_spread_arguments(raw_args, spread_flags)?;
         if let Some(callee) =
-            self.try_resolve_identifier_call_direct_binding(name, identifier_slot)?
+            self.try_resolve_identifier_call_direct_binding(name, identifier_slot, packet_h_slot)?
         {
             if name == "super" {
                 return self.execute_super_constructor_call(callee, args, realm, caller_strict);
@@ -4244,8 +4403,13 @@ impl Vm {
             }
             return self.execute_callable(callee, None, args, realm, caller_strict);
         }
-        let reference =
-            self.resolve_identifier_reference(name, realm, caller_strict, identifier_slot)?;
+        let reference = self.resolve_identifier_reference(
+            name,
+            realm,
+            caller_strict,
+            identifier_slot,
+            packet_h_slot,
+        )?;
         let callee = self.load_identifier_reference_value(&reference, realm, caller_strict)?;
         if name == "super" {
             return self.execute_super_constructor_call(callee, args, realm, caller_strict);
@@ -15311,6 +15475,22 @@ impl Vm {
         entry.map(|entry| entry.slot)
     }
 
+    #[inline(always)]
+    fn packet_h_lexical_slot_for_opcode(
+        metadata: &[Option<IdentifierSlotMetadata>],
+        pc: usize,
+        family: IdentifierOpcodeFamily,
+    ) -> Option<u32> {
+        let entry = metadata.get(pc).and_then(|entry| *entry);
+        #[cfg(not(debug_assertions))]
+        let _ = family;
+        #[cfg(debug_assertions)]
+        if let Some(entry) = entry {
+            debug_assert_eq!(entry.family, family);
+        }
+        entry.and_then(|entry| entry.lexical_binding.then_some(entry.slot))
+    }
+
     fn invalidate_binding_fast_path_cache(&mut self) {
         self.packet_a_fast_path.clear_binding_cache();
         self.packet_c_fast_path.clear_binding_cache();
@@ -15328,6 +15508,12 @@ impl Vm {
     fn invalidate_packet_d_slot_cache_entry(&mut self, slot: Option<u32>) {
         if let Some(slot) = slot {
             self.packet_d_fast_path.remove_slot_cache_entry(slot);
+        }
+    }
+
+    fn invalidate_packet_h_slot_cache_entry(&mut self, slot: Option<u32>) {
+        if let Some(slot) = slot {
+            self.packet_h_fast_path.remove_slot_cache_entry(slot);
         }
     }
 
@@ -15530,10 +15716,33 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn record_packet_h_lexical_slot_guard_hit(&mut self) {
+        if self.packet_h_fast_path_metrics_enabled() {
+            self.packet_h_fast_path.record_lexical_slot_guard_hit();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_h_lexical_slot_guard_hit_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn record_packet_h_lexical_slot_guard_miss(&mut self) {
+        if self.packet_h_fast_path_metrics_enabled() {
+            self.packet_h_fast_path.record_lexical_slot_guard_miss();
+            if self.hotspot_attribution_enabled() {
+                self.hotspot_attribution
+                    .record_packet_h_lexical_slot_guard_miss_unchecked();
+            }
+        }
+    }
+
+    #[inline(always)]
     fn try_resolve_identifier_call_direct_binding(
         &mut self,
         name: &str,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Result<Option<JsValue>, VmError> {
         if self.with_objects.is_empty()
             && self.packet_d_fast_path_enabled()
@@ -15542,9 +15751,9 @@ impl Vm {
             let binding_id = if !self.packet_d_fast_path_metrics_enabled()
                 && !self.packet_a_fast_path_metrics_enabled()
             {
-                self.resolve_binding_id_with_packet_d_known_slot(name, slot)
+                self.resolve_binding_id_with_packet_d_known_slot(name, slot, packet_h_slot)
             } else {
-                self.resolve_binding_id_with_fast_path(name, Some(slot))
+                self.resolve_binding_id_with_fast_path(name, Some(slot), packet_h_slot)
             };
 
             if let Some(binding_id) = binding_id {
@@ -15669,6 +15878,80 @@ impl Vm {
     }
 
     #[inline(always)]
+    fn cached_binding_entry_is_visible_without_shadowing(
+        &self,
+        name: &str,
+        scope_index: usize,
+        binding_id: BindingId,
+    ) -> bool {
+        if !self.cached_binding_entry_is_valid(name, scope_index, binding_id) {
+            return false;
+        }
+        for depth in (scope_index + 1)..self.scopes.len() {
+            if self.scopes[depth].borrow().contains_key(name) {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline(always)]
+    fn resolve_binding_entry_with_packet_h_lexical_slot(
+        &mut self,
+        name: &str,
+        packet_h_slot: Option<u32>,
+    ) -> Option<(usize, BindingId)> {
+        let slot = packet_h_slot?;
+        if let Some(entry) = self.packet_h_fast_path.slot_cache_entry(slot) {
+            if entry.scope_generation == self.packet_d_scope_generation {
+                if self.cached_binding_entry_is_visible_without_shadowing(
+                    name,
+                    entry.scope_index,
+                    entry.binding_id,
+                ) {
+                    self.record_packet_h_lexical_slot_guard_hit();
+                    return Some((entry.scope_index, entry.binding_id));
+                }
+                self.packet_h_fast_path.remove_slot_cache_entry(slot);
+            } else if self.cached_binding_entry_is_visible_without_shadowing(
+                name,
+                entry.scope_index,
+                entry.binding_id,
+            ) {
+                self.packet_h_fast_path.remember_slot_cache_entry(
+                    slot,
+                    entry.scope_index,
+                    entry.binding_id,
+                    self.packet_d_scope_generation,
+                );
+                self.record_packet_h_lexical_slot_guard_hit();
+                return Some((entry.scope_index, entry.binding_id));
+            } else {
+                self.packet_h_fast_path.remove_slot_cache_entry(slot);
+            }
+        }
+
+        self.record_packet_h_lexical_slot_guard_miss();
+        let fallback = if self.packet_g_fast_path_enabled() {
+            self.resolve_binding_entry_with_packet_g_name_cache(name)
+        } else {
+            self.record_identifier_resolution_fallback_scan();
+            self.resolve_binding_id_slow(name)
+        };
+        if let Some((scope_index, binding_id)) = fallback {
+            self.packet_h_fast_path.remember_slot_cache_entry(
+                slot,
+                scope_index,
+                binding_id,
+                self.packet_d_scope_generation,
+            );
+            return Some((scope_index, binding_id));
+        }
+        self.packet_h_fast_path.remove_slot_cache_entry(slot);
+        None
+    }
+
+    #[inline(always)]
     fn resolve_binding_id_slow(&self, name: &str) -> Option<(usize, BindingId)> {
         let scope_count = self.scopes.len();
         match scope_count {
@@ -15710,6 +15993,7 @@ impl Vm {
         &mut self,
         name: &str,
         slot: u32,
+        packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
         if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
             if entry.scope_generation == self.packet_d_scope_generation {
@@ -15731,7 +16015,9 @@ impl Vm {
                 return Some(binding_id);
             }
         }
-        let fallback = if self.packet_g_fast_path_enabled() {
+        let fallback = if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
+        } else if self.packet_g_fast_path_enabled() {
             self.resolve_binding_entry_with_packet_g_name_cache(name)
         } else {
             self.record_identifier_resolution_fallback_scan();
@@ -15754,6 +16040,7 @@ impl Vm {
         &mut self,
         name: &str,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
         if self.packet_d_fast_path_enabled()
             && !self.packet_d_fast_path_metrics_enabled()
@@ -15783,7 +16070,9 @@ impl Vm {
                     return Some(binding_id);
                 }
             }
-            let fallback = if self.packet_g_fast_path_enabled() {
+            let fallback = if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+                self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
+            } else if self.packet_g_fast_path_enabled() {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -15806,6 +16095,7 @@ impl Vm {
         let packet_c_enabled = self.packet_c_fast_path_enabled();
         let packet_d_enabled = self.packet_d_fast_path_enabled();
         let packet_g_enabled = self.packet_g_fast_path_enabled();
+        let packet_h_enabled = self.packet_h_fast_path_enabled();
 
         if packet_d_enabled && let Some(slot) = identifier_slot {
             if let Some(entry) = self.packet_d_fast_path.slot_cache_entry(slot) {
@@ -15841,7 +16131,9 @@ impl Vm {
             if packet_a_metrics_enabled {
                 self.record_packet_a_binding_guard_miss();
             }
-            let fallback = if packet_g_enabled {
+            let fallback = if packet_h_enabled && packet_h_slot.is_some() {
+                self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
+            } else if packet_g_enabled {
                 self.resolve_binding_entry_with_packet_g_name_cache(name)
             } else {
                 self.record_identifier_resolution_fallback_scan();
@@ -15858,6 +16150,15 @@ impl Vm {
             }
             self.packet_d_fast_path.remove_slot_cache_entry(slot);
             return None;
+        }
+
+        if packet_h_enabled && let Some((_, binding_id)) =
+            self.resolve_binding_entry_with_packet_h_lexical_slot(name, packet_h_slot)
+        {
+            if packet_a_metrics_enabled {
+                self.record_packet_a_binding_guard_hit();
+            }
+            return Some(binding_id);
         }
 
         if packet_g_enabled {
@@ -15929,9 +16230,10 @@ impl Vm {
         &mut self,
         name: &str,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Option<BindingId> {
         if self.with_objects.is_empty() {
-            return self.resolve_binding_id_with_fast_path_no_with(name, identifier_slot);
+            return self.resolve_binding_id_with_fast_path_no_with(name, identifier_slot, packet_h_slot);
         }
 
         let packet_a_metrics_enabled =
@@ -15951,6 +16253,9 @@ impl Vm {
         }
         if packet_g_enabled {
             self.record_packet_g_name_guard_miss();
+        }
+        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            self.record_packet_h_lexical_slot_guard_miss();
         }
         self.resolve_binding_id(name)
     }
@@ -17128,9 +17433,11 @@ impl Vm {
         name: &str,
         realm: &Realm,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Result<Option<IdentifierReference>, VmError> {
         if self.with_objects.is_empty() {
-            if let Some(binding_id) = self.resolve_binding_id_with_fast_path(name, identifier_slot)
+            if let Some(binding_id) =
+                self.resolve_binding_id_with_fast_path(name, identifier_slot, packet_h_slot)
             {
                 let name = self.intern_identifier_name(name);
                 return Ok(Some(IdentifierReference::Binding { name, binding_id }));
@@ -17149,6 +17456,9 @@ impl Vm {
         if self.packet_g_fast_path_enabled() {
             self.record_packet_g_name_guard_miss();
         }
+        if self.packet_h_fast_path_enabled() && packet_h_slot.is_some() {
+            self.record_packet_h_lexical_slot_guard_miss();
+        }
         self.invalidate_binding_fast_path_cache();
         self.record_identifier_resolution_fallback_scan();
 
@@ -17163,6 +17473,7 @@ impl Vm {
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
                 self.packet_g_fast_path.remove_name_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                 return Ok(Some(IdentifierReference::Property {
                     base,
                     property,
@@ -17186,6 +17497,7 @@ impl Vm {
             self.packet_c_fast_path.remove_binding_cache_entry(name);
             self.packet_g_fast_path.remove_name_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
             return Ok(Some(IdentifierReference::Property {
                 base,
                 property,
@@ -17202,9 +17514,10 @@ impl Vm {
         realm: &Realm,
         _strict: bool,
         identifier_slot: Option<u32>,
+        packet_h_slot: Option<u32>,
     ) -> Result<IdentifierReference, VmError> {
         if let Some(reference) =
-            self.resolve_binding_or_with_reference(name, realm, identifier_slot)?
+            self.resolve_binding_or_with_reference(name, realm, identifier_slot, packet_h_slot)?
         {
             return Ok(reference);
         }
@@ -17214,6 +17527,7 @@ impl Vm {
             self.packet_c_fast_path.remove_binding_cache_entry(name);
             self.packet_g_fast_path.remove_name_cache_entry(name);
             self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+            self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
             return Ok(IdentifierReference::Property {
                 base: JsValue::Object(global_object_id),
                 property,
@@ -17229,6 +17543,7 @@ impl Vm {
                 self.packet_c_fast_path.remove_binding_cache_entry(name);
                 self.packet_g_fast_path.remove_name_cache_entry(name);
                 self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+                self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
                 return Ok(IdentifierReference::Property {
                     base,
                     property,
@@ -17241,6 +17556,7 @@ impl Vm {
         self.packet_c_fast_path.remove_binding_cache_entry(name);
         self.packet_g_fast_path.remove_name_cache_entry(name);
         self.invalidate_packet_d_slot_cache_entry(identifier_slot);
+        self.invalidate_packet_h_slot_cache_entry(packet_h_slot);
         let name = self.intern_identifier_name(name);
         Ok(IdentifierReference::Unresolvable { name })
     }

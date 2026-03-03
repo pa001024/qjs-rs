@@ -155,6 +155,7 @@ pub enum IdentifierOpcodeFamily {
 pub struct IdentifierSlotMetadata {
     pub slot: IdentifierSlot,
     pub family: IdentifierOpcodeFamily,
+    pub lexical_binding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -264,6 +265,11 @@ pub fn build_identifier_slot_metadata(code: &[Opcode]) -> Vec<Option<IdentifierS
     let mut slots_by_key: BTreeMap<(IdentifierOpcodeFamily, String), IdentifierSlot> =
         BTreeMap::new();
     let mut next_slot: IdentifierSlot = 0;
+    let lexical_bindings: BTreeSet<String> = code
+        .iter()
+        .filter_map(lexical_binding_name_from_opcode)
+        .map(ToOwned::to_owned)
+        .collect();
 
     for (index, opcode) in code.iter().enumerate() {
         let Some((family, name)) = identifier_slot_key(opcode) else {
@@ -275,7 +281,11 @@ pub fn build_identifier_slot_metadata(code: &[Opcode]) -> Vec<Option<IdentifierS
             next_slot = next_slot.wrapping_add(1);
             slot
         });
-        slots[index] = Some(IdentifierSlotMetadata { slot, family });
+        slots[index] = Some(IdentifierSlotMetadata {
+            slot,
+            family,
+            lexical_binding: lexical_bindings.contains(name),
+        });
     }
 
     slots
@@ -295,6 +305,15 @@ fn identifier_slot_key(opcode: &Opcode) -> Option<(IdentifierOpcodeFamily, &str)
         Opcode::CallIdentifierWithSpread { name, .. } => {
             Some((IdentifierOpcodeFamily::CallWithSpread, name.as_str()))
         }
+        _ => None,
+    }
+}
+
+fn lexical_binding_name_from_opcode(opcode: &Opcode) -> Option<&str> {
+    match opcode {
+        Opcode::DefineVariable { name, .. } => Some(name.as_str()),
+        Opcode::DefineVar(name) => Some(name.as_str()),
+        Opcode::DefineFunction { name, .. } => Some(name.as_str()),
         _ => None,
     }
 }
@@ -2816,6 +2835,24 @@ mod tests {
         assert_ne!(load_slot.slot, store_slot.slot);
         assert_ne!(store_slot.slot, call_slot.slot);
         assert_ne!(load_slot.slot, call_slot.slot);
+    }
+
+    #[test]
+    fn identifier_slot_metadata_marks_lexical_binding_hints() {
+        let code = vec![
+            Opcode::DefineVariable {
+                name: "local".to_string(),
+                mutable: true,
+            },
+            Opcode::LoadIdentifier("local".to_string()),
+            Opcode::LoadIdentifier("globalOnly".to_string()),
+        ];
+        let metadata = build_identifier_slot_metadata(&code);
+        let local = metadata[1].expect("local slot should exist");
+        let global = metadata[2].expect("global slot should exist");
+
+        assert!(local.lexical_binding);
+        assert!(!global.lexical_binding);
     }
 
     #[test]

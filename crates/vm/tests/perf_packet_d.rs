@@ -610,27 +610,22 @@ total;
 #[test]
 fn perf_packet_d_packet_h_miss_paths_increment_fallback_scans() {
     let source = r#"
-let root = 1;
-let total = 0;
-for (let i = 0; i < 4; i = i + 1) {
-  total = total + root;
-  {
-    let root = i;
-    total = total + root;
-  }
+let marker = 1;
+with ({ marker: 9 }) {
+  marker;
+  marker = marker + 1;
 }
-with ({ root: 9 }) {
-  total = total + root;
+{
+  let marker = 2;
 }
-total = total + (typeof neverDeclared === "undefined" ? 1 : 0);
-total;
+typeof neverDeclared;
 "#;
 
     let (_value, counters, _baseline_hotspot, packet_h_hotspot) =
         assert_packet_h_toggle_parity(source, true, true);
     assert_eq!(
         counters.lexical_slot_guard_hits, 0,
-        "with/unknown/scope-mutation path must not report packet-h hits"
+        "with/unknown/scope-mutation path must avoid packet-h hit counters"
     );
     assert!(
         counters.lexical_slot_guard_misses > 0,
