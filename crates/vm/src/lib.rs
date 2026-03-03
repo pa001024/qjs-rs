@@ -4890,6 +4890,12 @@ impl Vm {
                     NativeFunction::PromiseThen
                         | NativeFunction::PromiseCatch
                         | NativeFunction::PromiseFinally
+                        | NativeFunction::PromiseResolve
+                        | NativeFunction::PromiseReject
+                        | NativeFunction::PromiseAll
+                        | NativeFunction::PromiseAny
+                        | NativeFunction::PromiseRace
+                        | NativeFunction::PromiseAllSettled
                 ) {
                     args.insert(0, this_arg.unwrap_or(JsValue::Undefined));
                 }
@@ -8937,12 +8943,14 @@ impl Vm {
                 self.execute_proxy_constructor(&args, called_with_new)
             }
             NativeFunction::PromiseConstructor => {
-                self.execute_promise_constructor(&args, realm, caller_strict)
+                self.execute_promise_constructor(&args, realm, caller_strict, called_with_new)
             }
             NativeFunction::PromiseResolve => {
                 self.execute_promise_resolve(&args, realm, caller_strict)
             }
-            NativeFunction::PromiseReject => self.execute_promise_reject(&args),
+            NativeFunction::PromiseReject => {
+                self.execute_promise_reject(&args, realm, caller_strict)
+            }
             NativeFunction::PromiseAll => self.execute_promise_all(&args, realm, caller_strict),
             NativeFunction::PromiseAny => self.execute_promise_any(&args, realm, caller_strict),
             NativeFunction::PromiseRace => self.execute_promise_race(&args, realm, caller_strict),
@@ -11818,21 +11826,102 @@ impl Vm {
         args: &[JsValue],
         realm: &Realm,
         caller_strict: bool,
+        called_with_new: bool,
     ) -> Result<JsValue, VmError> {
+        if !called_with_new {
+            return Err(VmError::TypeError("Promise constructor requires 'new'"));
+        }
         let executor = args.first().cloned().unwrap_or(JsValue::Undefined);
         if !Self::is_callable_value(&executor) {
             return Err(VmError::TypeError("Promise executor must be callable"));
         }
         let object_id = self.create_pending_promise()?;
-        let resolve = self.create_host_function_value(HostFunction::FunctionPrototype);
-        let reject = self.create_host_function_value(HostFunction::FunctionPrototype);
-        let _ = self.execute_callable(
+        let settled_state = Rc::new(RefCell::new(false));
+
+        let resolve_state = Rc::clone(&settled_state);
+        let resolve = self.register_host_callback_function(
+            "__qjs_promise_constructor_resolve__",
+            1.0,
+            false,
+            move |vm, _this_arg, args, _realm, _strict| {
+                let resolved_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let should_settle = {
+                    let mut settled = resolve_state.borrow_mut();
+                    if *settled {
+                        false
+                    } else {
+                        *settled = true;
+                        true
+                    }
+                };
+                if should_settle {
+                    let mut hooks = NoopPromiseJobHostHooks;
+                    vm.settle_promise_with_hooks(
+                        object_id,
+                        PromiseSettlement::Fulfilled(resolved_value),
+                        &mut hooks,
+                    )?;
+                }
+                Ok(JsValue::Undefined)
+            },
+        );
+
+        let reject_state = Rc::clone(&settled_state);
+        let reject = self.register_host_callback_function(
+            "__qjs_promise_constructor_reject__",
+            1.0,
+            false,
+            move |vm, _this_arg, args, _realm, _strict| {
+                let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let should_settle = {
+                    let mut settled = reject_state.borrow_mut();
+                    if *settled {
+                        false
+                    } else {
+                        *settled = true;
+                        true
+                    }
+                };
+                if should_settle {
+                    let mut hooks = NoopPromiseJobHostHooks;
+                    vm.settle_promise_with_hooks(
+                        object_id,
+                        PromiseSettlement::Rejected(reason),
+                        &mut hooks,
+                    )?;
+                }
+                Ok(JsValue::Undefined)
+            },
+        );
+
+        if let Err(err) = self.execute_callable(
             executor,
             Some(JsValue::Undefined),
             vec![resolve, reject],
             realm,
             caller_strict,
-        )?;
+        ) {
+            let should_settle = {
+                let mut settled = settled_state.borrow_mut();
+                if *settled {
+                    false
+                } else {
+                    *settled = true;
+                    true
+                }
+            };
+            if should_settle {
+                let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone()) else {
+                    return Err(err);
+                };
+                let mut hooks = NoopPromiseJobHostHooks;
+                self.settle_promise_with_hooks(
+                    object_id,
+                    PromiseSettlement::Rejected(rejection),
+                    &mut hooks,
+                )?;
+            }
+        }
         Ok(JsValue::Object(object_id))
     }
 
@@ -11845,8 +11934,13 @@ impl Vm {
         promise_builtins::execute_promise_resolve(self, args, realm, caller_strict)
     }
 
-    fn execute_promise_reject(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        promise_builtins::execute_promise_reject(self, args)
+    fn execute_promise_reject(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        promise_builtins::execute_promise_reject(self, args, realm, caller_strict)
     }
 
     fn execute_promise_all(

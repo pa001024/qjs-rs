@@ -1,12 +1,20 @@
-use runtime::{JsValue, Realm};
+use runtime::{JsValue, NativeFunction, Realm};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{NoopPromiseJobHostHooks, ObjectId, PromiseSettlement, PropertyAttributes, Vm, VmError};
+use crate::{NoopPromiseJobHostHooks, PromiseSettlement, PropertyAttributes, Vm, VmError};
+
+#[derive(Debug, Clone)]
+struct PromiseCapability {
+    promise: JsValue,
+    resolve: JsValue,
+    reject: JsValue,
+}
 
 #[derive(Debug, Clone)]
 struct PromiseAllState {
-    result_promise_id: ObjectId,
+    resolve: JsValue,
+    reject: JsValue,
     values: Vec<Option<JsValue>>,
     remaining: usize,
     settled: bool,
@@ -14,7 +22,8 @@ struct PromiseAllState {
 
 #[derive(Debug, Clone)]
 struct PromiseAnyState {
-    result_promise_id: ObjectId,
+    resolve: JsValue,
+    reject: JsValue,
     reasons: Vec<Option<JsValue>>,
     remaining: usize,
     settled: bool,
@@ -22,7 +31,7 @@ struct PromiseAnyState {
 
 #[derive(Debug, Clone)]
 struct PromiseAllSettledState {
-    result_promise_id: ObjectId,
+    resolve: JsValue,
     values: Vec<Option<JsValue>>,
     remaining: usize,
     settled: bool,
@@ -30,7 +39,8 @@ struct PromiseAllSettledState {
 
 #[derive(Debug, Clone)]
 struct PromiseRaceState {
-    result_promise_id: ObjectId,
+    resolve: JsValue,
+    reject: JsValue,
     settled: bool,
 }
 
@@ -40,13 +50,59 @@ pub(super) fn execute_promise_resolve(
     realm: &Realm,
     caller_strict: bool,
 ) -> Result<JsValue, VmError> {
-    let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-    promise_resolve_value(vm, value, realm, caller_strict)
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError(
+            "Promise.resolve requires constructor receiver",
+        ));
+    }
+
+    let value = static_value_arg(args);
+    if matches!(constructor, JsValue::NativeFunction(NativeFunction::PromiseConstructor)) {
+        if is_promise_object_value(vm, &value) {
+            return Ok(value);
+        }
+        return promise_resolve_value(vm, value, realm, caller_strict);
+    }
+
+    let capability = create_promise_capability(vm, constructor, realm, caller_strict)?;
+    let _ = vm.execute_callable(
+        capability.resolve.clone(),
+        Some(JsValue::Undefined),
+        vec![value],
+        realm,
+        caller_strict,
+    )?;
+    Ok(capability.promise)
 }
 
-pub(super) fn execute_promise_reject(vm: &mut Vm, args: &[JsValue]) -> Result<JsValue, VmError> {
-    let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
-    vm.create_async_settled_promise(false, reason)
+pub(super) fn execute_promise_reject(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+    caller_strict: bool,
+) -> Result<JsValue, VmError> {
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError(
+            "Promise.reject requires constructor receiver",
+        ));
+    }
+
+    let reason = static_value_arg(args);
+    if matches!(constructor, JsValue::NativeFunction(NativeFunction::PromiseConstructor)) {
+        return vm.create_async_settled_promise(false, reason);
+    }
+
+    let capability = create_promise_capability(vm, constructor, realm, caller_strict)?;
+    let _ = vm.execute_callable(
+        capability.reject.clone(),
+        Some(JsValue::Undefined),
+        vec![reason],
+        realm,
+        caller_strict,
+    )?;
+    Ok(capability.promise)
 }
 
 pub(super) fn execute_promise_all(
@@ -55,40 +111,54 @@ pub(super) fn execute_promise_all(
     realm: &Realm,
     caller_strict: bool,
 ) -> Result<JsValue, VmError> {
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError("Promise.all requires constructor receiver"));
+    }
+    let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
+    let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;
     let values = collect_promise_iterable_values(
         vm,
-        args.first().cloned().unwrap_or(JsValue::Undefined),
+        static_value_arg(args),
         realm,
         caller_strict,
         "Promise.all input must be iterable",
     )?;
-    let result_promise_id = vm.create_pending_promise()?;
     if values.is_empty() {
         let aggregate = vm.create_array_from_values(Vec::new())?;
-        let mut hooks = NoopPromiseJobHostHooks;
-        vm.settle_promise_with_hooks(
-            result_promise_id,
-            PromiseSettlement::Fulfilled(aggregate),
-            &mut hooks,
+        let _ = vm.execute_callable(
+            capability.resolve,
+            Some(JsValue::Undefined),
+            vec![aggregate],
+            realm,
+            caller_strict,
         )?;
-        return Ok(JsValue::Object(result_promise_id));
+        return Ok(capability.promise);
     }
 
     let state = Rc::new(RefCell::new(PromiseAllState {
-        result_promise_id,
+        resolve: capability.resolve.clone(),
+        reject: capability.reject.clone(),
         values: vec![None; values.len()],
         remaining: values.len(),
         settled: false,
     }));
 
     for (index, value) in values.into_iter().enumerate() {
-        let promise = promise_resolve_value(vm, value, realm, caller_strict)?;
+        let promise = vm.execute_callable(
+            promise_resolve.clone(),
+            Some(constructor.clone()),
+            vec![value],
+            realm,
+            caller_strict,
+        )?;
+
         let fulfilled_state = Rc::clone(&state);
         let on_fulfilled = vm.register_host_callback_function(
             "__qjs_promise_all_fulfilled__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let settle_payload = {
                     let mut state = fulfilled_state.borrow_mut();
@@ -106,18 +176,19 @@ pub(super) fn execute_promise_all(
                             .iter()
                             .map(|entry| entry.clone().unwrap_or(JsValue::Undefined))
                             .collect::<Vec<_>>();
-                        Some((state.result_promise_id, values))
+                        Some((state.resolve.clone(), values))
                     } else {
                         None
                     }
                 };
-                if let Some((promise_id, values)) = settle_payload {
+                if let Some((resolve, values)) = settle_payload {
                     let aggregate = vm.create_array_from_values(values)?;
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        promise_id,
-                        PromiseSettlement::Fulfilled(aggregate),
-                        &mut hooks,
+                    let _ = vm.execute_callable(
+                        resolve,
+                        Some(JsValue::Undefined),
+                        vec![aggregate],
+                        realm,
+                        caller_strict,
                     )?;
                 }
                 Ok(JsValue::Undefined)
@@ -129,30 +200,30 @@ pub(super) fn execute_promise_all(
             "__qjs_promise_all_rejected__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let promise_id = {
+                let reject = {
                     let mut state = rejected_state.borrow_mut();
                     if state.settled {
                         return Ok(JsValue::Undefined);
                     }
                     state.settled = true;
-                    state.result_promise_id
+                    state.reject.clone()
                 };
-                let mut hooks = NoopPromiseJobHostHooks;
-                vm.settle_promise_with_hooks(
-                    promise_id,
-                    PromiseSettlement::Rejected(reason),
-                    &mut hooks,
+                let _ = vm.execute_callable(
+                    reject,
+                    Some(JsValue::Undefined),
+                    vec![reason],
+                    realm,
+                    caller_strict,
                 )?;
                 Ok(JsValue::Undefined)
             },
         );
 
-        let then_args = vec![promise, on_fulfilled, on_rejected];
-        let _ = vm.execute_promise_then(&then_args, realm, caller_strict)?;
+        invoke_then(vm, promise, on_fulfilled, on_rejected, realm, caller_strict)?;
     }
-    Ok(JsValue::Object(result_promise_id))
+    Ok(capability.promise)
 }
 
 pub(super) fn execute_promise_any(
@@ -161,54 +232,69 @@ pub(super) fn execute_promise_any(
     realm: &Realm,
     caller_strict: bool,
 ) -> Result<JsValue, VmError> {
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError("Promise.any requires constructor receiver"));
+    }
+    let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
+    let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;
     let values = collect_promise_iterable_values(
         vm,
-        args.first().cloned().unwrap_or(JsValue::Undefined),
+        static_value_arg(args),
         realm,
         caller_strict,
         "Promise.any input must be iterable",
     )?;
-    let result_promise_id = vm.create_pending_promise()?;
     if values.is_empty() {
         let aggregate = vm.create_array_from_values(Vec::new())?;
-        let mut hooks = NoopPromiseJobHostHooks;
-        vm.settle_promise_with_hooks(
-            result_promise_id,
-            PromiseSettlement::Rejected(aggregate),
-            &mut hooks,
+        let _ = vm.execute_callable(
+            capability.reject,
+            Some(JsValue::Undefined),
+            vec![aggregate],
+            realm,
+            caller_strict,
         )?;
-        return Ok(JsValue::Object(result_promise_id));
+        return Ok(capability.promise);
     }
 
     let state = Rc::new(RefCell::new(PromiseAnyState {
-        result_promise_id,
+        resolve: capability.resolve.clone(),
+        reject: capability.reject.clone(),
         reasons: vec![None; values.len()],
         remaining: values.len(),
         settled: false,
     }));
 
     for (index, value) in values.into_iter().enumerate() {
-        let promise = promise_resolve_value(vm, value, realm, caller_strict)?;
+        let promise = vm.execute_callable(
+            promise_resolve.clone(),
+            Some(constructor.clone()),
+            vec![value],
+            realm,
+            caller_strict,
+        )?;
+
         let fulfilled_state = Rc::clone(&state);
         let on_fulfilled = vm.register_host_callback_function(
             "__qjs_promise_any_fulfilled__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let promise_id = {
+                let resolve = {
                     let mut state = fulfilled_state.borrow_mut();
                     if state.settled {
                         return Ok(JsValue::Undefined);
                     }
                     state.settled = true;
-                    state.result_promise_id
+                    state.resolve.clone()
                 };
-                let mut hooks = NoopPromiseJobHostHooks;
-                vm.settle_promise_with_hooks(
-                    promise_id,
-                    PromiseSettlement::Fulfilled(value),
-                    &mut hooks,
+                let _ = vm.execute_callable(
+                    resolve,
+                    Some(JsValue::Undefined),
+                    vec![value],
+                    realm,
+                    caller_strict,
                 )?;
                 Ok(JsValue::Undefined)
             },
@@ -219,7 +305,7 @@ pub(super) fn execute_promise_any(
             "__qjs_promise_any_rejected__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let settle_payload = {
                     let mut state = rejected_state.borrow_mut();
@@ -237,28 +323,28 @@ pub(super) fn execute_promise_any(
                             .iter()
                             .map(|entry| entry.clone().unwrap_or(JsValue::Undefined))
                             .collect::<Vec<_>>();
-                        Some((state.result_promise_id, reasons))
+                        Some((state.reject.clone(), reasons))
                     } else {
                         None
                     }
                 };
-                if let Some((promise_id, reasons)) = settle_payload {
+                if let Some((reject, reasons)) = settle_payload {
                     let aggregate = vm.create_array_from_values(reasons)?;
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        promise_id,
-                        PromiseSettlement::Rejected(aggregate),
-                        &mut hooks,
+                    let _ = vm.execute_callable(
+                        reject,
+                        Some(JsValue::Undefined),
+                        vec![aggregate],
+                        realm,
+                        caller_strict,
                     )?;
                 }
                 Ok(JsValue::Undefined)
             },
         );
 
-        let then_args = vec![promise, on_fulfilled, on_rejected];
-        let _ = vm.execute_promise_then(&then_args, realm, caller_strict)?;
+        invoke_then(vm, promise, on_fulfilled, on_rejected, realm, caller_strict)?;
     }
-    Ok(JsValue::Object(result_promise_id))
+    Ok(capability.promise)
 }
 
 pub(super) fn execute_promise_race(
@@ -267,43 +353,59 @@ pub(super) fn execute_promise_race(
     realm: &Realm,
     caller_strict: bool,
 ) -> Result<JsValue, VmError> {
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError(
+            "Promise.race requires constructor receiver",
+        ));
+    }
+    let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
+    let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;
     let values = collect_promise_iterable_values(
         vm,
-        args.first().cloned().unwrap_or(JsValue::Undefined),
+        static_value_arg(args),
         realm,
         caller_strict,
         "Promise.race input must be iterable",
     )?;
-    let result_promise_id = vm.create_pending_promise()?;
     if values.is_empty() {
-        return Ok(JsValue::Object(result_promise_id));
+        return Ok(capability.promise);
     }
+
     let state = Rc::new(RefCell::new(PromiseRaceState {
-        result_promise_id,
+        resolve: capability.resolve.clone(),
+        reject: capability.reject.clone(),
         settled: false,
     }));
     for value in values {
-        let promise = promise_resolve_value(vm, value, realm, caller_strict)?;
+        let promise = vm.execute_callable(
+            promise_resolve.clone(),
+            Some(constructor.clone()),
+            vec![value],
+            realm,
+            caller_strict,
+        )?;
         let fulfilled_state = Rc::clone(&state);
         let on_fulfilled = vm.register_host_callback_function(
             "__qjs_promise_race_fulfilled__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let promise_id = {
+                let resolve = {
                     let mut state = fulfilled_state.borrow_mut();
                     if state.settled {
                         return Ok(JsValue::Undefined);
                     }
                     state.settled = true;
-                    state.result_promise_id
+                    state.resolve.clone()
                 };
-                let mut hooks = NoopPromiseJobHostHooks;
-                vm.settle_promise_with_hooks(
-                    promise_id,
-                    PromiseSettlement::Fulfilled(value),
-                    &mut hooks,
+                let _ = vm.execute_callable(
+                    resolve,
+                    Some(JsValue::Undefined),
+                    vec![value],
+                    realm,
+                    caller_strict,
                 )?;
                 Ok(JsValue::Undefined)
             },
@@ -314,30 +416,30 @@ pub(super) fn execute_promise_race(
             "__qjs_promise_race_rejected__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let promise_id = {
+                let reject = {
                     let mut state = rejected_state.borrow_mut();
                     if state.settled {
                         return Ok(JsValue::Undefined);
                     }
                     state.settled = true;
-                    state.result_promise_id
+                    state.reject.clone()
                 };
-                let mut hooks = NoopPromiseJobHostHooks;
-                vm.settle_promise_with_hooks(
-                    promise_id,
-                    PromiseSettlement::Rejected(reason),
-                    &mut hooks,
+                let _ = vm.execute_callable(
+                    reject,
+                    Some(JsValue::Undefined),
+                    vec![reason],
+                    realm,
+                    caller_strict,
                 )?;
                 Ok(JsValue::Undefined)
             },
         );
 
-        let then_args = vec![promise, on_fulfilled, on_rejected];
-        let _ = vm.execute_promise_then(&then_args, realm, caller_strict)?;
+        invoke_then(vm, promise, on_fulfilled, on_rejected, realm, caller_strict)?;
     }
-    Ok(JsValue::Object(result_promise_id))
+    Ok(capability.promise)
 }
 
 pub(super) fn execute_promise_all_settled(
@@ -346,40 +448,54 @@ pub(super) fn execute_promise_all_settled(
     realm: &Realm,
     caller_strict: bool,
 ) -> Result<JsValue, VmError> {
+    let constructor = static_constructor_arg(args);
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError(
+            "Promise.allSettled requires constructor receiver",
+        ));
+    }
+    let capability = create_promise_capability(vm, constructor.clone(), realm, caller_strict)?;
+    let promise_resolve = get_constructor_resolve(vm, &constructor, realm)?;
     let values = collect_promise_iterable_values(
         vm,
-        args.first().cloned().unwrap_or(JsValue::Undefined),
+        static_value_arg(args),
         realm,
         caller_strict,
         "Promise.allSettled input must be iterable",
     )?;
-    let result_promise_id = vm.create_pending_promise()?;
     if values.is_empty() {
         let aggregate = vm.create_array_from_values(Vec::new())?;
-        let mut hooks = NoopPromiseJobHostHooks;
-        vm.settle_promise_with_hooks(
-            result_promise_id,
-            PromiseSettlement::Fulfilled(aggregate),
-            &mut hooks,
+        let _ = vm.execute_callable(
+            capability.resolve,
+            Some(JsValue::Undefined),
+            vec![aggregate],
+            realm,
+            caller_strict,
         )?;
-        return Ok(JsValue::Object(result_promise_id));
+        return Ok(capability.promise);
     }
 
     let state = Rc::new(RefCell::new(PromiseAllSettledState {
-        result_promise_id,
+        resolve: capability.resolve.clone(),
         values: vec![None; values.len()],
         remaining: values.len(),
         settled: false,
     }));
 
     for (index, value) in values.into_iter().enumerate() {
-        let promise = promise_resolve_value(vm, value, realm, caller_strict)?;
+        let promise = vm.execute_callable(
+            promise_resolve.clone(),
+            Some(constructor.clone()),
+            vec![value],
+            realm,
+            caller_strict,
+        )?;
         let fulfilled_state = Rc::clone(&state);
         let on_fulfilled = vm.register_host_callback_function(
             "__qjs_promise_all_settled_fulfilled__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let entry = create_promise_all_settled_entry(vm, true, value)?;
                 let settle_payload = {
@@ -398,18 +514,19 @@ pub(super) fn execute_promise_all_settled(
                             .iter()
                             .map(|entry| entry.clone().unwrap_or(JsValue::Undefined))
                             .collect::<Vec<_>>();
-                        Some((state.result_promise_id, values))
+                        Some((state.resolve.clone(), values))
                     } else {
                         None
                     }
                 };
-                if let Some((promise_id, values)) = settle_payload {
+                if let Some((resolve, values)) = settle_payload {
                     let aggregate = vm.create_array_from_values(values)?;
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        promise_id,
-                        PromiseSettlement::Fulfilled(aggregate),
-                        &mut hooks,
+                    let _ = vm.execute_callable(
+                        resolve,
+                        Some(JsValue::Undefined),
+                        vec![aggregate],
+                        realm,
+                        caller_strict,
                     )?;
                 }
                 Ok(JsValue::Undefined)
@@ -421,7 +538,7 @@ pub(super) fn execute_promise_all_settled(
             "__qjs_promise_all_settled_rejected__",
             1.0,
             false,
-            move |vm, _this_arg, args, _realm, _strict| {
+            move |vm, _this_arg, args, realm, caller_strict| {
                 let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
                 let entry = create_promise_all_settled_entry(vm, false, reason)?;
                 let settle_payload = {
@@ -440,28 +557,149 @@ pub(super) fn execute_promise_all_settled(
                             .iter()
                             .map(|entry| entry.clone().unwrap_or(JsValue::Undefined))
                             .collect::<Vec<_>>();
-                        Some((state.result_promise_id, values))
+                        Some((state.resolve.clone(), values))
                     } else {
                         None
                     }
                 };
-                if let Some((promise_id, values)) = settle_payload {
+                if let Some((resolve, values)) = settle_payload {
                     let aggregate = vm.create_array_from_values(values)?;
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        promise_id,
-                        PromiseSettlement::Fulfilled(aggregate),
-                        &mut hooks,
+                    let _ = vm.execute_callable(
+                        resolve,
+                        Some(JsValue::Undefined),
+                        vec![aggregate],
+                        realm,
+                        caller_strict,
                     )?;
                 }
                 Ok(JsValue::Undefined)
             },
         );
 
-        let then_args = vec![promise, on_fulfilled, on_rejected];
-        let _ = vm.execute_promise_then(&then_args, realm, caller_strict)?;
+        invoke_then(vm, promise, on_fulfilled, on_rejected, realm, caller_strict)?;
     }
-    Ok(JsValue::Object(result_promise_id))
+    Ok(capability.promise)
+}
+
+fn static_constructor_arg(args: &[JsValue]) -> JsValue {
+    args.first().cloned().unwrap_or(JsValue::Undefined)
+}
+
+fn static_value_arg(args: &[JsValue]) -> JsValue {
+    args.get(1).cloned().unwrap_or(JsValue::Undefined)
+}
+
+fn is_constructor_value(vm: &mut Vm, value: &JsValue) -> Result<bool, VmError> {
+    match value {
+        JsValue::NativeFunction(native) => Ok(Vm::native_function_is_constructor(*native)),
+        JsValue::Function(closure_id) => {
+            Ok(!vm.closure_is_arrow(*closure_id)? && !vm.closure_has_no_prototype(*closure_id))
+        }
+        JsValue::HostFunction(host_id) => Ok(vm.host_function_is_constructable(*host_id)),
+        JsValue::Object(object_id) => Ok(vm.is_class_constructor_object(*object_id)),
+        _ => Ok(false),
+    }
+}
+
+fn create_promise_capability(
+    vm: &mut Vm,
+    constructor: JsValue,
+    realm: &Realm,
+    caller_strict: bool,
+) -> Result<PromiseCapability, VmError> {
+    if !is_constructor_value(vm, &constructor)? {
+        return Err(VmError::TypeError(
+            "Promise capability constructor must be constructor",
+        ));
+    }
+
+    let resolve_slot = Rc::new(RefCell::new(None::<JsValue>));
+    let reject_slot = Rc::new(RefCell::new(None::<JsValue>));
+    let resolve_slot_capture = Rc::clone(&resolve_slot);
+    let reject_slot_capture = Rc::clone(&reject_slot);
+    let executor = vm.register_host_callback_function(
+        "__qjs_promise_capability_executor__",
+        2.0,
+        false,
+        move |_vm, _this_arg, args, _realm, _strict| {
+            let resolve_arg = args.first().cloned().unwrap_or(JsValue::Undefined);
+            let reject_arg = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+
+            if resolve_slot_capture
+                .borrow()
+                .as_ref()
+                .is_some_and(|value| !matches!(value, JsValue::Undefined))
+            {
+                return Err(VmError::TypeError(
+                    "Promise capability executor already initialized",
+                ));
+            }
+            if reject_slot_capture
+                .borrow()
+                .as_ref()
+                .is_some_and(|value| !matches!(value, JsValue::Undefined))
+            {
+                return Err(VmError::TypeError(
+                    "Promise capability executor already initialized",
+                ));
+            }
+
+            *resolve_slot_capture.borrow_mut() = Some(resolve_arg);
+            *reject_slot_capture.borrow_mut() = Some(reject_arg);
+            Ok(JsValue::Undefined)
+        },
+    );
+
+    let promise = vm.execute_construct_value(constructor, vec![executor], realm, caller_strict)?;
+    let resolve = resolve_slot.borrow().clone().unwrap_or(JsValue::Undefined);
+    let reject = reject_slot.borrow().clone().unwrap_or(JsValue::Undefined);
+    if !Vm::is_callable_value(&resolve) || !Vm::is_callable_value(&reject) {
+        return Err(VmError::TypeError(
+            "Promise capability resolve/reject must be callable",
+        ));
+    }
+
+    Ok(PromiseCapability {
+        promise,
+        resolve,
+        reject,
+    })
+}
+
+fn get_constructor_resolve(
+    vm: &mut Vm,
+    constructor: &JsValue,
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let promise_resolve = vm.get_property_from_receiver(constructor.clone(), "resolve", realm)?;
+    if !Vm::is_callable_value(&promise_resolve) {
+        return Err(VmError::TypeError(
+            "Promise constructor resolve must be callable",
+        ));
+    }
+    Ok(promise_resolve)
+}
+
+fn invoke_then(
+    vm: &mut Vm,
+    promise: JsValue,
+    on_fulfilled: JsValue,
+    on_rejected: JsValue,
+    realm: &Realm,
+    caller_strict: bool,
+) -> Result<(), VmError> {
+    let then = vm.get_property_from_receiver(promise.clone(), "then", realm)?;
+    if !Vm::is_callable_value(&then) {
+        return Err(VmError::TypeError("Promise.then must be callable"));
+    }
+    let _ = vm.execute_callable(
+        then,
+        Some(promise),
+        vec![on_fulfilled, on_rejected],
+        realm,
+        caller_strict,
+    )?;
+    Ok(())
 }
 
 fn is_promise_object_value(vm: &Vm, value: &JsValue) -> bool {
@@ -493,7 +731,7 @@ fn promise_resolve_value(
         return vm.create_async_settled_promise(true, value);
     }
 
-    let result_promise_id = vm.create_pending_promise()?;
+    let promise_id = vm.create_pending_promise()?;
     let settled_state = Rc::new(RefCell::new(false));
 
     let resolve_state = Rc::clone(&settled_state);
@@ -515,7 +753,7 @@ fn promise_resolve_value(
             if should_settle {
                 let mut hooks = NoopPromiseJobHostHooks;
                 vm.settle_promise_with_hooks(
-                    result_promise_id,
+                    promise_id,
                     PromiseSettlement::Fulfilled(resolved_value),
                     &mut hooks,
                 )?;
@@ -543,7 +781,7 @@ fn promise_resolve_value(
             if should_settle {
                 let mut hooks = NoopPromiseJobHostHooks;
                 vm.settle_promise_with_hooks(
-                    result_promise_id,
+                    promise_id,
                     PromiseSettlement::Rejected(reason),
                     &mut hooks,
                 )?;
@@ -574,14 +812,14 @@ fn promise_resolve_value(
             };
             let mut hooks = NoopPromiseJobHostHooks;
             vm.settle_promise_with_hooks(
-                result_promise_id,
+                promise_id,
                 PromiseSettlement::Rejected(rejection),
                 &mut hooks,
             )?;
         }
     }
 
-    Ok(JsValue::Object(result_promise_id))
+    Ok(JsValue::Object(promise_id))
 }
 
 fn collect_promise_iterable_values(
