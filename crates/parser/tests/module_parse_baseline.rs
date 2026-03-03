@@ -257,3 +257,48 @@ fn module_parse_multiline_named_reexport_baseline() {
         local: "$__qjs_module_reexport_1__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_destructuring_export_declaration_baseline() {
+    let source = "const payload = { value: 40, extra: 2 };\nexport const { value, extra } = payload;\nexport const [first, , third] = [1, 2, 3];\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "value".to_string(),
+        local: "value".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "extra".to_string(),
+        local: "extra".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "first".to_string(),
+        local: "first".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "third".to_string(),
+        local: "third".to_string(),
+    }));
+    assert!(
+        parsed
+            .exports
+            .iter()
+            .all(|entry| !entry.local.starts_with("$__for_in_decl_")),
+        "module exports should not leak parser-generated temporary bindings",
+    );
+}
+
+#[test]
+fn module_parse_export_with_object_literal_initializer_baseline() {
+    let source = "export const left = { a: 1, b: 2 }, right = 40 + 2;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "left".to_string(),
+        local: "left".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "right".to_string(),
+        local: "right".to_string(),
+    }));
+}

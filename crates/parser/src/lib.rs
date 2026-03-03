@@ -288,10 +288,7 @@ fn collect_module_logical_lines(source: &str) -> Vec<String> {
     logical_lines
 }
 
-fn module_reexport_from_clause_on_next_line(
-    declaration: &str,
-    next_line: Option<&&str>,
-) -> bool {
+fn module_reexport_from_clause_on_next_line(declaration: &str, next_line: Option<&&str>) -> bool {
     let Some(next_line) = next_line else {
         return false;
     };
@@ -771,13 +768,13 @@ fn is_module_identifier_part(ch: char) -> bool {
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
     let declaration = declaration.trim();
     if let Some(rest) = declaration.strip_prefix("const ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("const", rest);
     }
     if let Some(rest) = declaration.strip_prefix("let ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("let", rest);
     }
     if let Some(rest) = declaration.strip_prefix("var ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("var", rest);
     }
     if let Some(rest) = declaration.strip_prefix("function ") {
         let name = parse_leading_identifier(rest)?;
@@ -797,7 +794,10 @@ fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, Pa
     })
 }
 
-fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, ParseError> {
+fn parse_variable_export_bindings(
+    declaration_kind: &str,
+    declarators: &str,
+) -> Result<Vec<String>, ParseError> {
     let body = trim_module_declaration_terminator(declarators);
     if body.is_empty() {
         return Err(ParseError {
@@ -806,23 +806,31 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
         });
     }
 
+    let parsed = parse_script_with_super(&format!("{declaration_kind} {body};"), false)?;
     let mut names = Vec::new();
-    for declarator in body.split(',') {
-        let declarator = declarator.trim();
-        if declarator.is_empty() {
-            continue;
+    for statement in parsed.statements {
+        match statement {
+            Stmt::VariableDeclaration(declaration) => {
+                let name = declaration.name.0;
+                if !is_synthetic_pattern_binding_name(&name) {
+                    names.push(parse_module_binding_identifier(&name)?);
+                }
+            }
+            Stmt::VariableDeclarations(declarations) => {
+                for declaration in declarations {
+                    let name = declaration.name.0;
+                    if !is_synthetic_pattern_binding_name(&name) {
+                        names.push(parse_module_binding_identifier(&name)?);
+                    }
+                }
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "unsupported export declaration form".to_string(),
+                    position: 0,
+                });
+            }
         }
-        let lhs = declarator
-            .split_once('=')
-            .map_or(declarator, |(left, _)| left)
-            .trim();
-        if lhs.contains('{') || lhs.contains('[') {
-            return Err(ParseError {
-                message: "unsupported destructuring export declaration".to_string(),
-                position: 0,
-            });
-        }
-        names.push(parse_module_binding_identifier(lhs)?);
     }
     if names.is_empty() {
         return Err(ParseError {
@@ -831,6 +839,12 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
         });
     }
     Ok(names)
+}
+
+fn is_synthetic_pattern_binding_name(name: &str) -> bool {
+    name.starts_with("$__for_in_decl_array_")
+        || name.starts_with("$__for_in_decl_object_")
+        || name.starts_with("$__for_in_decl_object_effect_")
 }
 
 fn trim_module_declaration_terminator(source: &str) -> &str {

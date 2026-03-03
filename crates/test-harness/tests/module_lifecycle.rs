@@ -419,3 +419,24 @@ fn multiline_named_reexport_parses_and_evaluates() {
     assert_eq!(host.load_count("bridge.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn destructuring_export_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "const payload = { value: 40, extra: 2 };\n\
+         export const { value, extra } = payload;\n\
+         export const [first, , third] = [1, 2, 3];\n\
+         export const left = { a: 1, b: 2 }, right = 40 + 2;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("destructuring module export declarations should evaluate");
+    assert_eq!(expect_number(&exports, "value"), 40.0);
+    assert_eq!(expect_number(&exports, "extra"), 2.0);
+    assert_eq!(expect_number(&exports, "first"), 1.0);
+    assert_eq!(expect_number(&exports, "third"), 3.0);
+    assert_eq!(expect_number(&exports, "right"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
