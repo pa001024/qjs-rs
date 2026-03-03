@@ -122,9 +122,13 @@ const TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE: &str = "OpaqueData:UnsupportedValue";
 const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
+const AWAIT_DRAIN_STEP_BUDGET: usize = 10_000;
+const AWAIT_DRAIN_MAX_CYCLES: usize = 64;
 const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
 const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
   var C = this;
+  var asyncIteratorKey = "Symbol.asyncIterator";
+  var iteratorKey = "Symbol.iterator";
 
   function makeResult(lengthHint) {
     if (useConstructor) {
@@ -148,10 +152,22 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
     if (!(numericLength > 0)) {
       return 0;
     }
-    if (numericLength > 4294967295) {
-      numericLength = 4294967295;
+    if (numericLength > 9007199254740991) {
+      numericLength = 9007199254740991;
     }
-    return numericLength - (numericLength % 1);
+    return Math.floor(numericLength);
+  }
+
+  function defineDataPropertyOrThrow(target, key, value) {
+    var success = Reflect.defineProperty(target, key, {
+      value: value,
+      writable: true,
+      enumerable: true,
+      configurable: true
+    });
+    if (!success) {
+      throw new TypeError("Array.fromAsync cannot define property");
+    }
   }
 
   return new Promise(function(resolve, reject) {
@@ -165,6 +181,10 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
         returnMethod = iterator["return"];
       } catch (err) {
         reject(err);
+        return;
+      }
+      if (returnMethod === null || returnMethod === undefined) {
+        onClosed();
         return;
       }
       if (typeof returnMethod !== "function") {
@@ -207,7 +227,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
         throw new TypeError("Array.fromAsync mapfn must be callable");
       }
 
-      var usingAsyncIterator = items[Symbol.asyncIterator];
+      var usingAsyncIterator = items[asyncIteratorKey];
       if (usingAsyncIterator !== null && usingAsyncIterator !== undefined) {
         if (typeof usingAsyncIterator !== "function") {
           throw new TypeError("Array.fromAsync async iterator must be callable");
@@ -239,35 +259,45 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
               resolveArrayResult(asyncResult, asyncIndex, asyncIterator);
               return;
             }
-            var nextValue = step.value;
-            if (hasMapFn) {
-              var mappedValue;
-              try {
-                mappedValue = mapfn.call(thisArg, nextValue, asyncIndex);
-              } catch (err) {
-                rejectWithIteratorClose(asyncIterator, err);
-                return;
-              }
-              Promise.resolve(mappedValue).then(function(mapped) {
+            function appendAsyncValue(nextValue) {
+              if (hasMapFn) {
+                var mappedValue;
                 try {
-                  asyncResult[asyncIndex] = mapped;
-                  asyncIndex++;
+                  mappedValue = mapfn.call(thisArg, nextValue, asyncIndex);
                 } catch (err) {
                   rejectWithIteratorClose(asyncIterator, err);
                   return;
                 }
-                nextAsync();
+                Promise.resolve(mappedValue).then(function(mapped) {
+                  try {
+                    defineDataPropertyOrThrow(asyncResult, asyncIndex, mapped);
+                    asyncIndex++;
+                  } catch (err) {
+                    rejectWithIteratorClose(asyncIterator, err);
+                    return;
+                  }
+                  nextAsync();
+                }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
+                return;
+              }
+              try {
+                defineDataPropertyOrThrow(asyncResult, asyncIndex, nextValue);
+                asyncIndex++;
+              } catch (err) {
+                rejectWithIteratorClose(asyncIterator, err);
+                return;
+              }
+              nextAsync();
+            }
+
+            var nextValue = step.value;
+            if (asyncIterator["$__qjs_generator_iterator__$"] === true) {
+              Promise.resolve(nextValue).then(function(awaitedValue) {
+                appendAsyncValue(awaitedValue);
               }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
               return;
             }
-            try {
-              asyncResult[asyncIndex] = nextValue;
-              asyncIndex++;
-            } catch (err) {
-              rejectWithIteratorClose(asyncIterator, err);
-              return;
-            }
-            nextAsync();
+            appendAsyncValue(nextValue);
           }, function(reason) { rejectWithIteratorClose(asyncIterator, reason); });
         }
 
@@ -275,7 +305,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
         return;
       }
 
-      var usingSyncIterator = items[Symbol.iterator];
+      var usingSyncIterator = items[iteratorKey];
       if (usingSyncIterator !== null && usingSyncIterator !== undefined) {
         if (typeof usingSyncIterator !== "function") {
           throw new TypeError("Array.fromAsync iterator must be callable");
@@ -310,7 +340,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
               }
               Promise.resolve(mappedValue).then(function(mapped) {
                 try {
-                  syncResult[syncIndex] = mapped;
+                  defineDataPropertyOrThrow(syncResult, syncIndex, mapped);
                   syncIndex++;
                 } catch (err) {
                   rejectWithIteratorClose(syncIterator, err);
@@ -321,7 +351,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
               return;
             }
             try {
-              syncResult[syncIndex] = awaitedValue;
+              defineDataPropertyOrThrow(syncResult, syncIndex, awaitedValue);
               syncIndex++;
             } catch (err) {
               rejectWithIteratorClose(syncIterator, err);
@@ -337,6 +367,9 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
 
       var source = Object(items);
       var length = toLength(source.length);
+      if (!useConstructor && length > 4294967295) {
+        throw new RangeError("Invalid array length");
+      }
       var arrayLikeResult = makeResult(length);
       var index = 0;
 
@@ -345,7 +378,14 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
           resolveArrayResult(arrayLikeResult, index);
           return;
         }
-        Promise.resolve(source[index]).then(function(awaitedValue) {
+        var sourceValue;
+        try {
+          sourceValue = source[index];
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        Promise.resolve(sourceValue).then(function(awaitedValue) {
           if (hasMapFn) {
             var mappedValue;
             try {
@@ -356,7 +396,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
             }
             Promise.resolve(mappedValue).then(function(mapped) {
               try {
-                arrayLikeResult[index] = mapped;
+                defineDataPropertyOrThrow(arrayLikeResult, index, mapped);
                 index++;
               } catch (err) {
                 reject(err);
@@ -367,7 +407,7 @@ const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, h
             return;
           }
           try {
-            arrayLikeResult[index] = awaitedValue;
+            defineDataPropertyOrThrow(arrayLikeResult, index, awaitedValue);
             index++;
           } catch (err) {
             reject(err);
@@ -4174,6 +4214,20 @@ impl Vm {
                         }
                     }
                 }
+                Opcode::Await => {
+                    let result = (|| -> Result<JsValue, VmError> {
+                        let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                        self.await_resolved_value(value, realm, strict)
+                    })();
+                    match result {
+                        Ok(value) => self.stack.push(value),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
                 Opcode::Typeof => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     self.stack
@@ -5247,14 +5301,22 @@ impl Vm {
                     ));
                 }
                 if self.closure_is_generator(closure_id)? {
+                    let is_async_generator = self.closure_is_async(closure_id)?;
                     if self.closure_uses_yield_identifier(closure_id)? {
                         return self.create_generator_iterator_from_closure_call(
                             closure_id, args, this_arg,
                         );
                     }
                     if self.closure_uses_lowered_generator_values_buffer(closure_id)? {
-                        let produced_values =
+                        let mut produced_values =
                             self.execute_closure_call(closure_id, args, this_arg, realm)?;
+                        if is_async_generator {
+                            produced_values = self.resolve_async_generator_values_buffer(
+                                produced_values,
+                                realm,
+                                caller_strict,
+                            )?;
+                        }
                         return self.create_generator_iterator_from_values(produced_values);
                     }
                     return self.execute_closure_call(closure_id, args, this_arg, realm);
@@ -5273,6 +5335,26 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         self.execute_closure_call_internal(closure_id, args, this_arg, realm, None)
+    }
+
+    fn resolve_async_generator_values_buffer(
+        &mut self,
+        produced_values: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let JsValue::Object(object_id) = produced_values.clone() else {
+            return Ok(produced_values);
+        };
+        let is_promise = self
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get("__promiseTag"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+        if !is_promise {
+            return Ok(produced_values);
+        }
+        self.await_promise_settlement(object_id, realm, caller_strict)
     }
 
     fn execute_closure_call_with_generator_resume(
@@ -5582,7 +5664,14 @@ impl Vm {
             let promise = if let Some(rejection) = async_rejection {
                 self.create_async_settled_promise(false, rejection)?
             } else {
-                self.create_async_settled_promise(true, value)?
+                self.execute_promise_resolve(
+                    &[
+                        JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+                        value,
+                    ],
+                    realm,
+                    closure.strict,
+                )?
             };
             self.restore_caller_state(
                 saved_handlers,
@@ -13548,6 +13637,57 @@ impl Vm {
         };
         self.write_promise_settlement(object_id, &settlement)?;
         Ok(JsValue::Object(object_id))
+    }
+
+    fn await_resolved_value(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let promise = self.execute_promise_resolve(
+            &[
+                JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+                value,
+            ],
+            realm,
+            caller_strict,
+        )?;
+        let promise_id = match promise {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::RuntimeIntegrity(
+                    "await Promise.resolve must return promise object",
+                ));
+            }
+        };
+        self.await_promise_settlement(promise_id, realm, caller_strict)
+    }
+
+    fn await_promise_settlement(
+        &mut self,
+        promise_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        for _ in 0..AWAIT_DRAIN_MAX_CYCLES {
+            if let Some(settlement) = self.promise_settlement_from_object(promise_id)? {
+                return match settlement {
+                    PromiseSettlement::Fulfilled(value) => Ok(value),
+                    PromiseSettlement::Rejected(reason) => Err(VmError::UncaughtException(reason)),
+                };
+            }
+            let report = self.drain_promise_jobs(AWAIT_DRAIN_STEP_BUDGET, realm, caller_strict)?;
+            if report.remaining == 0 {
+                break;
+            }
+        }
+
+        match self.promise_settlement_from_object(promise_id)? {
+            Some(PromiseSettlement::Fulfilled(value)) => Ok(value),
+            Some(PromiseSettlement::Rejected(reason)) => Err(VmError::UncaughtException(reason)),
+            None => Err(VmError::TypeError("await promise did not settle")),
+        }
     }
 
     fn call_promise_hook(
@@ -21682,6 +21822,18 @@ impl Vm {
         Ok(self.function_is_generator(function))
     }
 
+    fn closure_is_async(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_is_async(function))
+    }
+
     fn closure_uses_yield_identifier(&self, closure_id: u64) -> Result<bool, VmError> {
         let closure = self
             .closures
@@ -29511,6 +29663,105 @@ mod tests {
     }
 
     #[test]
+    fn array_from_async_observes_array_growth_after_call_boundary() {
+        let setup = parse_script(
+            "var items = [1, 2, 3];\
+             var state = 'pending';\
+             var output = undefined;\
+             Array.fromAsync(items).then(\
+               function (result) { output = result; state = 'fulfilled'; },\
+               function () { state = 'rejected'; }\
+             );\
+             items.push(4);",
+        )
+        .expect("script should parse");
+        let verify = parse_script(
+            "state === 'fulfilled' && output.length === 4 && output[0] === 1 && output[1] === 2 && output[2] === 3 && output[3] === 4;",
+        )
+        .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let setup_result = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        assert!(matches!(setup_result, JsValue::Number(4.0)));
+        let report = vm
+            .drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn array_from_async_applies_async_mapfn_to_array_like() {
+        let setup = parse_script(
+            "var output = undefined;\
+             Array.fromAsync({ length: 4, 0: 0, 1: 2, 2: Promise.resolve(4), 3: 6 }, async function (val, ix) { return Promise.resolve(val * ix); })\
+               .then(function (value) { output = value; });",
+        )
+        .expect("script should parse");
+        let verify =
+            parse_script("output[0] + ':' + output[1] + ':' + output[2] + ':' + output[3];")
+                .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let _ = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        vm.drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::String("0:2:8:18".to_string()))
+        );
+    }
+
+    #[test]
+    fn array_from_async_applies_mapfn_to_async_generator_input() {
+        let setup = parse_script(
+            "async function* asyncGen() {\
+               for (let i = 0; i < 4; i++) {\
+                 yield Promise.resolve(i * 2);\
+               }\
+             }\
+             function syncMap(val, ix) { return val * ix; }\
+             var output = undefined;\
+             Array.fromAsync({ ['Symbol.asyncIterator']: asyncGen }, syncMap)\
+               .then(function (value) { output = value; });",
+        )
+        .expect("script should parse");
+        let verify =
+            parse_script("output[0] + ':' + output[1] + ':' + output[2] + ':' + output[3];")
+                .expect("script should parse");
+        let setup_chunk = compile_script(&setup);
+        let verify_chunk = compile_script(&verify);
+
+        let mut realm = Realm::default();
+        install_baseline(&mut realm);
+        let mut vm = Vm::default();
+        let _ = vm
+            .execute_in_realm_persistent(&setup_chunk, &realm)
+            .expect("setup should execute");
+        vm.drain_promise_jobs(10_000, &realm, false)
+            .expect("promise jobs should drain");
+        assert_eq!(
+            vm.execute_in_realm_persistent(&verify_chunk, &realm),
+            Ok(JsValue::String("0:2:8:18".to_string()))
+        );
+    }
+
+    #[test]
     fn instanceof_uses_function_prototype_getter_for_object_lhs_only() {
         let script = parse_script(
             "var called = 0; Object.defineProperty(Function.prototype, 'prototype', { get: function() { called++; return Array.prototype; } }); var a = [] instanceof Function.prototype; var b = 0 instanceof Function.prototype; a && !b && called === 1;",
@@ -30448,6 +30699,50 @@ mod tests {
         );
         let mut vm = Vm::default();
         assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn async_function_await_drains_promise_chain_before_returning() {
+        let script = parse_script(
+            "async function f() { return await Promise.resolve(3).then(function (value) { return value + 1; }); } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        let promise = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(
+            promise_state(&vm, promise),
+            ("fulfilled".to_string(), JsValue::Number(4.0))
+        );
+    }
+
+    #[test]
+    fn async_function_await_rejection_sets_rejected_result_promise() {
+        let script = parse_script(
+            "async function f() { return await Promise.resolve(0).then(function () { throw 'boom'; }); } f();",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Promise",
+            JsValue::NativeFunction(NativeFunction::PromiseConstructor),
+        );
+        let mut vm = Vm::default();
+        let promise = vm
+            .execute_in_realm(&chunk, &realm)
+            .expect("script should execute");
+        assert_eq!(
+            promise_state(&vm, promise),
+            ("rejected".to_string(), JsValue::String("boom".to_string()))
+        );
     }
 
     #[test]

@@ -5216,7 +5216,11 @@ impl Parser {
             });
         }
         if self.async_function_depth > 0 && self.matches_keyword("await") {
-            return self.parse_unary();
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Await,
+                expr: Box::new(expr),
+            });
         }
         if self.matches_keyword("new") {
             return self.parse_new_expression();
@@ -7185,6 +7189,16 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
+            if let Some(async_method) = self.try_parse_async_object_method()? {
+                properties.push(async_method);
+                if self.matches(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
             let is_generator_method = self.matches(&TokenKind::Star);
             let mut key = self.parse_object_property_key()?;
             if let Some((accessor_key, accessor_value)) = self.try_parse_object_accessor(&key)? {
@@ -7206,14 +7220,14 @@ impl Parser {
                 break;
             }
             let value = if is_generator_method {
-                self.parse_object_method_value(true)?
+                self.parse_object_method_value(true, false)?
             } else if self.matches(&TokenKind::Colon) {
                 if matches!(&key, ObjectPropertyKey::Static(name) if name == "__proto__") {
                     key = ObjectPropertyKey::ProtoSetter;
                 }
                 self.parse_expression_inner()?
             } else if self.check(&TokenKind::LParen) {
-                self.parse_object_method_value(false)?
+                self.parse_object_method_value(false, false)?
             } else {
                 match &key {
                     ObjectPropertyKey::Static(name) => {
@@ -7263,6 +7277,34 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace, "expected '}' after object literal")?;
         Ok(Expr::ObjectLiteral(properties))
+    }
+
+    fn try_parse_async_object_method(&mut self) -> Result<Option<ObjectProperty>, ParseError> {
+        if !self.check_keyword("async") {
+            return Ok(None);
+        }
+        if self.has_line_terminator_between_tokens(self.pos, self.pos + 1) {
+            return Ok(None);
+        }
+
+        let checkpoint = self.pos;
+        self.matches_keyword("async");
+        let is_generator_method = self.matches(&TokenKind::Star);
+        let key = match self.parse_object_property_key() {
+            Ok(key) => key,
+            Err(_) => {
+                self.pos = checkpoint;
+                return Ok(None);
+            }
+        };
+
+        if !self.check(&TokenKind::LParen) {
+            self.pos = checkpoint;
+            return Ok(None);
+        }
+
+        let value = self.parse_object_method_value(is_generator_method, true)?;
+        Ok(Some(ObjectProperty { key, value }))
     }
 
     fn try_parse_object_accessor(
@@ -7373,21 +7415,38 @@ impl Parser {
         }
     }
 
-    fn parse_object_method_value(&mut self, is_generator: bool) -> Result<Expr, ParseError> {
+    fn parse_object_method_value(
+        &mut self,
+        is_generator: bool,
+        is_async: bool,
+    ) -> Result<Expr, ParseError> {
         self.expect(TokenKind::LParen, "expected '(' after method name")?;
         let (params, simple_parameters, default_initializers, pattern_effects) =
             self.parse_parameter_list()?;
         self.expect(TokenKind::RParen, "expected ')' after parameters")?;
 
-        let mut body = self.parse_function_body_with_super_policy(
-            "expected '{' before method body",
-            "expected '}' after method body",
-            true,
-            is_generator,
-        )?;
+        let mut body = if is_async {
+            self.parse_function_body_with_context(
+                "expected '{' before method body",
+                "expected '}' after method body",
+                true,
+                true,
+                is_generator,
+            )?
+        } else {
+            self.parse_function_body_with_super_policy(
+                "expected '{' before method body",
+                "expected '}' after method body",
+                true,
+                is_generator,
+            )?
+        };
         self.prepend_parameter_initializers(&mut body, &default_initializers, &pattern_effects);
         if !simple_parameters {
             self.prepend_non_simple_params_marker(&mut body);
+        }
+        if is_async {
+            self.insert_async_function_marker(&mut body);
         }
         if is_generator {
             self.insert_generator_function_marker(&mut body);
@@ -7869,6 +7928,15 @@ export default value;\n";
             },
         ]);
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_async_methods_in_object_literal_baseline() {
+        parse_script(
+            "var iter = { async next() { return { done: true }; }, async *gen() { yield 1; } };",
+        )
+        .expect("script parsing should succeed");
+        parse_expression("({ async [k]() { await 2; } })").expect("parser should succeed");
     }
 
     #[test]
@@ -8710,6 +8778,42 @@ export default value;\n";
     fn parses_async_function_await_expression_baseline() {
         parse_script("async function foo() { await new Promise(); }")
             .expect("script parsing should succeed");
+    }
+
+    #[test]
+    fn parses_await_expression_as_unary_in_async_function_body() {
+        let parsed = parse_expression("async () => await value").expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected async arrow to parse as function expression");
+        };
+        let has_await_return = body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Return(Some(Expr::Unary {
+                    op: UnaryOp::Await,
+                    ..
+                }))
+            )
+        });
+        assert!(has_await_return, "async arrow body should preserve await");
+    }
+
+    #[test]
+    fn parses_await_expression_inside_async_function_expression_body() {
+        let parsed = parse_expression("(async function () { return await value; })")
+            .expect("parser should succeed");
+        let Expr::Function { body, .. } = parsed else {
+            panic!("expected async function expression");
+        };
+        assert!(body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Stmt::Return(Some(Expr::Unary {
+                    op: UnaryOp::Await,
+                    ..
+                }))
+            )
+        }));
     }
 
     #[test]

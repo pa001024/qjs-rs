@@ -412,6 +412,7 @@ if (typeof $262.AbstractModuleSource !== "function") {
 
 const ASYNC_DONE_PRELUDE: &str = r#"
 globalThis.__qjs_test262_done_state__ = 0;
+globalThis.__qjs_test262_done_error__ = undefined;
 var __qjs_test262_prev_done__ = (typeof globalThis.$DONE === "function") ? globalThis.$DONE : null;
 globalThis.$DONE = function (error) {
   if (globalThis.__qjs_test262_done_state__ !== 0) {
@@ -425,6 +426,7 @@ globalThis.$DONE = function (error) {
     return;
   }
   globalThis.__qjs_test262_done_state__ = 2;
+  globalThis.__qjs_test262_done_error__ = error;
   if (__qjs_test262_prev_done__ !== null) {
     __qjs_test262_prev_done__(error);
   }
@@ -791,6 +793,9 @@ fn drain_async_jobs_and_assert_done(vm: &mut Vm, realm: &Realm) -> Result<(), St
     let done_state = vm.global_property("__qjs_test262_done_state__");
     if matches!(done_state, Some(runtime::JsValue::Number(value)) if value == 1.0) {
         Ok(())
+    } else if matches!(done_state, Some(runtime::JsValue::Number(value)) if value == 2.0) {
+        let done_error = vm.global_property("__qjs_test262_done_error__");
+        Err(format!("$DONE called with error: {done_error:?}"))
     } else {
         Err("$DONE was not called".to_string())
     }
