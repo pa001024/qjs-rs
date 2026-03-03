@@ -17,7 +17,7 @@ cargo test -p test-harness --test test262_lite core_builtins_subset -- --exact
 - `core_builtins_object_array_boolean_function`: 1 passed, 0 failed
 - `core_builtins_string_number_math`: 1 passed, 0 failed
 - `core_builtins_baseline`（integration）: all passed
-- `core_builtins_subset`（test262-lite families）: 8/8 families passed, 0 failed
+- `core_builtins_subset`（test262-lite families）: 9/9 families passed, 0 failed（新增 `Promise` family smoke）
 
 ## Phase 6 Collection and RegExp Subset Contract（2026-02-27）
 
