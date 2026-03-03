@@ -4,16 +4,21 @@ use builtins::install_baseline;
 use bytecode::compile_script;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
-use vm::{PacketDFastPathCounters, PacketGFastPathCounters, Vm, perf::HotspotAttribution};
+use vm::{
+    PacketDFastPathCounters, PacketGFastPathCounters, PacketHFastPathCounters, Vm,
+    perf::HotspotAttribution,
+};
 
 fn run_script(
     source: &str,
     packet_d_enabled: bool,
     packet_g_enabled: bool,
+    packet_h_enabled: bool,
 ) -> (
     JsValue,
     PacketDFastPathCounters,
     PacketGFastPathCounters,
+    PacketHFastPathCounters,
     Option<HotspotAttribution>,
 ) {
     let script = parse_script(source).expect("script should parse");
@@ -29,6 +34,8 @@ fn run_script(
     vm.set_packet_d_fast_path_metrics_enabled(true);
     vm.set_packet_g_fast_path_enabled(packet_g_enabled);
     vm.set_packet_g_fast_path_metrics_enabled(true);
+    vm.set_packet_h_fast_path_enabled(packet_h_enabled);
+    vm.set_packet_h_fast_path_metrics_enabled(true);
 
     let value = vm
         .execute_in_realm(&chunk, &realm)
@@ -37,15 +44,16 @@ fn run_script(
         value,
         vm.packet_d_fast_path_counters(),
         vm.packet_g_fast_path_counters(),
+        vm.packet_h_fast_path_counters(),
         vm.hotspot_attribution_snapshot(),
     )
 }
 
 fn assert_packet_d_parity(source: &str) -> (JsValue, PacketDFastPathCounters, HotspotAttribution) {
-    let (slow_value, slow_d_counters, slow_g_counters, _slow_hotspot) =
-        run_script(source, false, false);
-    let (fast_value, fast_d_counters, fast_g_counters, fast_hotspot) =
-        run_script(source, true, false);
+    let (slow_value, slow_d_counters, slow_g_counters, slow_h_counters, _slow_hotspot) =
+        run_script(source, false, false, false);
+    let (fast_value, fast_d_counters, fast_g_counters, fast_h_counters, fast_hotspot) =
+        run_script(source, true, false, false);
 
     assert_eq!(fast_value, slow_value);
     assert_eq!(
@@ -59,9 +67,19 @@ fn assert_packet_d_parity(source: &str) -> (JsValue, PacketDFastPathCounters, Ho
         "packet-G counters must stay zero when optimization is disabled"
     );
     assert_eq!(
+        slow_h_counters,
+        PacketHFastPathCounters::default(),
+        "packet-H counters must stay zero when optimization is disabled"
+    );
+    assert_eq!(
         fast_g_counters,
         PacketGFastPathCounters::default(),
         "packet-D parity runs should keep packet-G disabled"
+    );
+    assert_eq!(
+        fast_h_counters,
+        PacketHFastPathCounters::default(),
+        "packet-D parity runs should keep packet-H disabled"
     );
 
     (
@@ -75,10 +93,10 @@ fn assert_packet_g_toggle_parity(
     source: &str,
     packet_d_enabled: bool,
 ) -> (JsValue, PacketGFastPathCounters, HotspotAttribution) {
-    let (slow_value, _slow_d_counters, slow_g_counters, _slow_hotspot) =
-        run_script(source, packet_d_enabled, false);
-    let (fast_value, _fast_d_counters, fast_g_counters, fast_hotspot) =
-        run_script(source, packet_d_enabled, true);
+    let (slow_value, _slow_d_counters, slow_g_counters, _slow_h_counters, _slow_hotspot) =
+        run_script(source, packet_d_enabled, false, false);
+    let (fast_value, _fast_d_counters, fast_g_counters, _fast_h_counters, fast_hotspot) =
+        run_script(source, packet_d_enabled, true, false);
     assert_eq!(fast_value, slow_value);
     assert_eq!(
         slow_g_counters,
@@ -89,6 +107,30 @@ fn assert_packet_g_toggle_parity(
         fast_value,
         fast_g_counters,
         fast_hotspot.expect("hotspot attribution should be present"),
+    )
+}
+
+fn assert_packet_h_toggle_parity(
+    source: &str,
+    packet_d_enabled: bool,
+    packet_g_enabled: bool,
+) -> (JsValue, PacketHFastPathCounters, HotspotAttribution, HotspotAttribution) {
+    let (baseline_value, _baseline_d, _baseline_g, baseline_h, baseline_hotspot) =
+        run_script(source, packet_d_enabled, packet_g_enabled, false);
+    let (packet_h_value, _packet_h_d, _packet_h_g, packet_h_counters, packet_h_hotspot) =
+        run_script(source, packet_d_enabled, packet_g_enabled, true);
+
+    assert_eq!(packet_h_value, baseline_value);
+    assert_eq!(
+        baseline_h,
+        PacketHFastPathCounters::default(),
+        "packet-H counters must stay zero when packet-h optimization is disabled"
+    );
+    (
+        packet_h_value,
+        packet_h_counters,
+        baseline_hotspot.expect("baseline hotspot attribution should be present"),
+        packet_h_hotspot.expect("packet-h hotspot attribution should be present"),
     )
 }
 
@@ -477,5 +519,153 @@ total;
     assert!(
         counters.name_guard_revalidate_misses > 0,
         "scope-generation invalidation should reject stale packet-g name cache entries"
+    );
+}
+
+#[test]
+fn perf_packet_d_packet_h_toggle_matches_packet_d_script_families() {
+    let scripts = [
+        r#"
+globalFast = 5;
+let token = 2;
+let sum = 0;
+for (let i = 0; i < 12; i = i + 1) {
+  sum = sum + token;
+  sum = sum + globalFast;
+}
+{
+  let token = 9;
+  sum = sum + token;
+}
+sum = sum + token;
+let scopeObj = { token: 40 };
+with (scopeObj) {
+  sum = sum + token;
+  token = token + 1;
+}
+Object.defineProperty(globalThis, "globalFast", {
+  get: function() { return 11; },
+  set: function(value) { this.__packetDWrite = value; },
+  configurable: true
+});
+sum = sum + globalFast;
+globalThis.globalFast = 3;
+delete globalThis.globalFast;
+globalFast = 4;
+sum + globalFast + scopeObj.token + (globalThis.__packetDWrite === 3 ? 1 : 0);
+"#,
+        r#"
+globalProbe = 1;
+let trace = "";
+let first = globalProbe;
+Object.defineProperty(globalThis, "globalProbe", {
+  get: function() {
+    trace = trace + "get|";
+    return 9;
+  },
+  set: function(value) {
+    trace = trace + "set:" + value + "|";
+  },
+  configurable: true
+});
+let second = globalProbe;
+globalProbe = 5;
+delete globalThis.globalProbe;
+Object.prototype.globalProbe = 13;
+let inherited = globalProbe;
+delete Object.prototype.globalProbe;
+globalProbe = 4;
+let final = globalProbe;
+trace + first + "|" + second + "|" + inherited + "|" + final;
+"#,
+        r#"
+let marker = 1;
+let total = marker;
+{
+  let marker = 9;
+  total = total + marker;
+}
+total = total + marker;
+with ({ marker: 20 }) {
+  total = total + marker;
+}
+total;
+"#,
+    ];
+
+    for source in scripts {
+        let (_value, counters, _baseline_hotspot, packet_h_hotspot) =
+            assert_packet_h_toggle_parity(source, true, true);
+        assert!(
+            counters.lexical_slot_guard_misses > 0,
+            "packet-h should register lexical guard misses on packet-d script families"
+        );
+        assert!(
+            packet_h_hotspot.packet_h_lexical_slot_guard_misses > 0,
+            "packet-h miss counters must serialize into hotspot attribution"
+        );
+    }
+}
+
+#[test]
+fn perf_packet_d_packet_h_miss_paths_increment_fallback_scans() {
+    let source = r#"
+let root = 1;
+let total = 0;
+for (let i = 0; i < 4; i = i + 1) {
+  total = total + root;
+  {
+    let root = i;
+    total = total + root;
+  }
+}
+with ({ root: 9 }) {
+  total = total + root;
+}
+total = total + (typeof neverDeclared === "undefined" ? 1 : 0);
+total;
+"#;
+
+    let (_value, counters, _baseline_hotspot, packet_h_hotspot) =
+        assert_packet_h_toggle_parity(source, true, true);
+    assert_eq!(
+        counters.lexical_slot_guard_hits, 0,
+        "with/unknown/scope-mutation path must not report packet-h hits"
+    );
+    assert!(
+        counters.lexical_slot_guard_misses > 0,
+        "packet-h miss counters must increment for guarded fallback paths"
+    );
+    assert!(
+        packet_h_hotspot.identifier_resolution_fallback_scans > 0,
+        "packet-h guarded misses must preserve fallback-scan attribution"
+    );
+}
+
+#[test]
+fn perf_packet_d_packet_h_stable_lexical_loops_reduce_fallback_scans_vs_packet_g() {
+    let source = r#"
+let stable = 3;
+let total = 0;
+for (let i = 0; i < 60; i = i + 1) {
+  total = total + stable;
+  {
+    let inner = i;
+    total = total + inner;
+  }
+}
+total;
+"#;
+
+    let (_value, counters, packet_g_hotspot, packet_h_hotspot) =
+        assert_packet_h_toggle_parity(source, true, true);
+    assert!(
+        counters.lexical_slot_guard_hits > 0,
+        "stable lexical loops should trigger packet-h lexical slot guard hits"
+    );
+    assert!(
+        packet_h_hotspot.identifier_resolution_fallback_scans
+            < packet_g_hotspot.identifier_resolution_fallback_scans,
+        "packet-h should reduce fallback scans compared with packet-g baseline"
     );
 }
