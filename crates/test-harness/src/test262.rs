@@ -379,6 +379,7 @@ fn classify_skip(
     None
 }
 
+#[cfg(test)]
 fn is_parse_tripwire_runtime_failure(source: &str, outcome: &ExecutionOutcome) -> bool {
     let has_parse_tripwire = source.contains("$DONOTEVALUATE")
         || source.contains("This statement should not be evaluated.");
@@ -551,7 +552,7 @@ impl SuiteCaseExecutor {
 
     fn execute(
         &self,
-        source: &str,
+        source: String,
         auto_gc: bool,
         auto_gc_threshold: Option<usize>,
         runtime_gc: bool,
@@ -559,7 +560,7 @@ impl SuiteCaseExecutor {
     ) -> Result<(ExecutionOutcome, GcStats), String> {
         self.command_tx
             .send(CaseWorkerCommand::Execute(CaseExecutionRequest {
-                source: source.to_string(),
+                source,
                 auto_gc,
                 auto_gc_threshold,
                 runtime_gc,
@@ -628,10 +629,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
         }
         let source_to_execute = build_case_source(&case, harness_root.as_deref())
             .map_err(|err| format!("include setup failed for {}: {err}", file.display()))?;
+        let parse_tripwire = expected == ExpectedOutcome::ParseFail
+            && (source_to_execute.contains("$DONOTEVALUATE")
+                || source_to_execute.contains("This statement should not be evaluated."));
         summary.executed += 1;
         let (actual, gc_stats) = suite_case_executor
             .execute(
-                &source_to_execute,
+                source_to_execute,
                 options.auto_gc,
                 options.auto_gc_threshold,
                 options.runtime_gc,
@@ -653,8 +657,13 @@ pub fn run_suite(root: &Path, options: SuiteOptions) -> Result<SuiteSummary, Str
                     ExpectedOutcome::RuntimeFail,
                     ExecutionOutcome::RuntimeFail(_)
                 )
-        ) || (expected == ExpectedOutcome::ParseFail
-            && is_parse_tripwire_runtime_failure(&source_to_execute, &actual));
+        ) || (parse_tripwire
+            && matches!(
+                &actual,
+                ExecutionOutcome::RuntimeFail(message)
+                    if message.contains("UnknownIdentifier(\"$DONOTEVALUATE\")")
+                        || message.contains("This statement should not be evaluated.")
+            ));
 
         if matched {
             summary.passed += 1;
