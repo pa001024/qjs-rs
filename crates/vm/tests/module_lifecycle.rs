@@ -537,6 +537,23 @@ fn module_empty_named_import_keeps_dependency_edge() {
 }
 
 #[test]
+fn module_import_with_extra_from_spacing_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 41;\n")
+        .with_module(
+            "entry.js",
+            "import { value }   from   './dep.js';\nexport const answer = value + 1;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("import with extra from spacing should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

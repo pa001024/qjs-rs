@@ -224,7 +224,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 continue;
             }
 
-            if export_body.contains(" from ") {
+            if contains_module_from_keyword(export_body) {
                 return Err(ParseError {
                     message: "unsupported export re-export form".to_string(),
                     position: 0,
@@ -286,7 +286,7 @@ fn parse_module_import_declaration(
         });
     }
 
-    let Some((raw_clause, raw_specifier)) = rest.rsplit_once(" from ") else {
+    let Some((raw_clause, raw_specifier)) = split_module_from_clause(rest) else {
         return Err(ParseError {
             message: "unsupported import declaration form".to_string(),
             position: 0,
@@ -461,7 +461,7 @@ fn parse_named_reexport_clause(
     if suffix.is_empty() {
         return Ok(None);
     }
-    let Some(raw_specifier) = suffix.strip_prefix("from ") else {
+    let Some(raw_specifier) = strip_module_from_keyword(suffix) else {
         return Err(ParseError {
             message: "unsupported export re-export form".to_string(),
             position: 0,
@@ -510,25 +510,71 @@ fn parse_export_star_clause(clause: &str) -> Result<Option<ExportStarClause>, Pa
         });
     }
     let body = clause[..clause.len() - 1].trim();
-    let Some(raw_specifier) = body.strip_prefix("* from ") else {
-        if let Some(rest) = body.strip_prefix("* as ") {
-            let Some((raw_exported, raw_specifier)) = rest.split_once(" from ") else {
-                return Err(ParseError {
-                    message: "unsupported export form".to_string(),
-                    position: 0,
-                });
-            };
-            let exported = parse_module_export_name(raw_exported.trim())?;
-            let specifier = parse_module_string_literal(raw_specifier.trim())?;
-            return Ok(Some(ExportStarClause::Namespace {
-                specifier,
-                exported,
-            }));
-        }
+    let Some(after_star) = body.strip_prefix('*') else {
         return Ok(None);
     };
+    let after_star = after_star.trim_start();
+    if let Some(raw_specifier) = strip_module_from_keyword(after_star) {
+        let specifier = parse_module_string_literal(raw_specifier.trim())?;
+        return Ok(Some(ExportStarClause::All { specifier }));
+    }
+
+    let Some(after_as) = after_star.strip_prefix("as") else {
+        return Ok(None);
+    };
+    if !after_as.chars().next().is_some_and(char::is_whitespace) {
+        return Ok(None);
+    }
+    let after_as = after_as.trim_start();
+    let Some((raw_exported, raw_specifier)) = split_module_from_clause(after_as) else {
+        return Err(ParseError {
+            message: "unsupported export form".to_string(),
+            position: 0,
+        });
+    };
+    let exported = parse_module_export_name(raw_exported.trim())?;
     let specifier = parse_module_string_literal(raw_specifier.trim())?;
-    Ok(Some(ExportStarClause::All { specifier }))
+    Ok(Some(ExportStarClause::Namespace {
+        specifier,
+        exported,
+    }))
+}
+
+fn contains_module_from_keyword(source: &str) -> bool {
+    split_module_from_clause(source).is_some()
+}
+
+fn strip_module_from_keyword(source: &str) -> Option<&str> {
+    let source = source.trim_start();
+    let after_from = source.strip_prefix("from")?;
+    if !after_from.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let specifier = after_from.trim_start();
+    (!specifier.is_empty()).then_some(specifier)
+}
+
+fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
+    let mut split_index = None;
+    for (index, _) in source.match_indices("from") {
+        let left = &source[..index];
+        let right = &source[index + "from".len()..];
+        if !left.chars().next_back().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        if !right.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        split_index = Some(index);
+    }
+
+    let index = split_index?;
+    let clause = source[..index].trim_end();
+    let specifier = source[index + "from".len()..].trim_start();
+    if clause.is_empty() || specifier.is_empty() {
+        return None;
+    }
+    Some((clause, specifier))
 }
 
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
@@ -8693,6 +8739,21 @@ export default value;\n";
             parsed.imports[0].bindings.is_empty(),
             "empty named import should keep dependency edge without local bindings"
         );
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_import_with_extra_from_spacing_baseline() {
+        let source = "import { value }   from   './dep.js';\nexport const answer = value;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
         assert!(parsed.exports.contains(&ModuleExport {
             exported: "answer".to_string(),
             local: "answer".to_string(),
