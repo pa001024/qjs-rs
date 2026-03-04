@@ -15800,15 +15800,33 @@ impl Vm {
         };
         let mut pending_array_length_update: Option<(JsValue, Option<bool>)> = None;
         {
+            let dense_index = if target_is_array {
+                Self::canonical_array_index(&property)
+            } else {
+                None
+            };
             let (
                 current_data_value,
+                current_data_is_dense,
                 current_get,
                 current_set,
                 current_attributes,
                 mapped_binding_id,
             ) = {
+                let current_data_from_properties = target_object.properties.get(&property).cloned();
+                let current_data_from_dense = dense_index
+                    .and_then(|index| {
+                        target_object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                    })
+                    .and_then(|entry| entry.clone());
+                let current_data_is_dense =
+                    current_data_from_properties.is_none() && current_data_from_dense.is_some();
                 (
-                    target_object.properties.get(&property).cloned(),
+                    current_data_from_properties.or(current_data_from_dense),
+                    current_data_is_dense,
                     target_object.getters.get(&property).cloned(),
                     target_object.setters.get(&property).cloned(),
                     target_object.property_attributes.get(&property).copied(),
@@ -15818,6 +15836,7 @@ impl Vm {
 
             let current_is_data = current_data_value.is_some();
             let current_is_accessor = current_get.is_some() || current_set.is_some();
+            let current_has_property = current_is_data || current_is_accessor;
             let current_attributes = current_attributes.unwrap_or(if current_is_accessor {
                 PropertyAttributes {
                     writable: false,
@@ -15833,7 +15852,7 @@ impl Vm {
                 ));
             }
             if target_is_array {
-                if let Some(index) = Self::canonical_array_index(&property) {
+                if let Some(index) = dense_index {
                     let current_length = target_object
                         .properties
                         .get("length")
@@ -15918,6 +15937,13 @@ impl Vm {
             let mut remove_mapping = false;
             if has_get || has_set {
                 target_object.properties.remove(&property);
+                if current_data_is_dense
+                    && let Some(index) = dense_index
+                    && let Some(dense_elements) = target_object.dense_elements.as_mut()
+                    && index < dense_elements.len()
+                {
+                    dense_elements[index] = None;
+                }
                 if has_get {
                     target_object
                         .getters
@@ -15931,20 +15957,16 @@ impl Vm {
                 let attributes = target_object
                     .property_attributes
                     .entry(property.clone())
-                    .or_insert(PropertyAttributes {
-                        writable: false,
-                        enumerable: false,
-                        configurable: false,
-                    });
+                    .or_insert(current_attributes);
                 attributes.writable = false;
                 if let Some(enumerable) = desc_enumerable {
                     attributes.enumerable = enumerable;
-                } else if !current_is_data && !current_is_accessor {
+                } else if !current_has_property {
                     attributes.enumerable = false;
                 }
                 if let Some(configurable) = desc_configurable {
                     attributes.configurable = configurable;
-                } else if !current_is_data && !current_is_accessor {
+                } else if !current_has_property {
                     attributes.configurable = false;
                 }
                 remove_mapping = true;
@@ -15957,16 +15979,30 @@ impl Vm {
                 if has_value {
                     if property == "length" && target_is_array {
                         pending_array_length_update = Some((desc_value.clone(), desc_writable));
+                    } else if let Some(index) = dense_index
+                        && let Some(dense_elements) = target_object.dense_elements.as_mut()
+                        && index < dense_elements.len()
+                    {
+                        dense_elements[index] = Some(desc_value.clone());
+                        target_object.properties.remove(&property);
                     } else {
                         target_object
                             .properties
                             .insert(property.clone(), desc_value.clone());
                     }
                 } else if defines_data && current_is_accessor {
-                    target_object
-                        .properties
-                        .insert(property.clone(), JsValue::Undefined);
-                } else if !current_is_data && !current_is_accessor {
+                    if let Some(index) = dense_index
+                        && let Some(dense_elements) = target_object.dense_elements.as_mut()
+                        && index < dense_elements.len()
+                    {
+                        dense_elements[index] = Some(JsValue::Undefined);
+                        target_object.properties.remove(&property);
+                    } else {
+                        target_object
+                            .properties
+                            .insert(property.clone(), JsValue::Undefined);
+                    }
+                } else if !current_has_property {
                     target_object
                         .properties
                         .entry(property.clone())
@@ -15976,12 +16012,16 @@ impl Vm {
                 let attributes = target_object
                     .property_attributes
                     .entry(property.clone())
-                    .or_insert(PropertyAttributes {
-                        writable: false,
-                        enumerable: false,
-                        configurable: false,
+                    .or_insert(if current_has_property {
+                        current_attributes
+                    } else {
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: false,
+                            configurable: false,
+                        }
                     });
-                if !current_is_data && !current_is_accessor {
+                if !current_has_property {
                     attributes.writable = desc_writable.unwrap_or(false);
                     attributes.enumerable = desc_enumerable.unwrap_or(false);
                     attributes.configurable = desc_configurable.unwrap_or(false);
@@ -16022,7 +16062,15 @@ impl Vm {
             }
             let has_property_after = target_object.properties.contains_key(&property)
                 || target_object.getters.contains_key(&property)
-                || target_object.setters.contains_key(&property);
+                || target_object.setters.contains_key(&property)
+                || dense_index
+                    .and_then(|index| {
+                        target_object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                    })
+                    .is_some_and(|entry| entry.is_some());
             Self::update_object_property_order(&mut target_object, &property, has_property_after);
         }
 
@@ -18972,12 +19020,21 @@ impl Vm {
         property: &str,
         realm: &Realm,
     ) -> Result<bool, VmError> {
+        let canonical_index = Self::canonical_array_index(property);
         let mut current = Some(object_id);
         while let Some(id) = current {
             let object = self.objects.get(&id).ok_or(VmError::UnknownObject(id))?;
             if object.properties.contains_key(property)
                 || object.getters.contains_key(property)
                 || object.setters.contains_key(property)
+                || canonical_index
+                    .and_then(|index| {
+                        object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                    })
+                    .is_some_and(|entry| entry.is_some())
             {
                 return Ok(true);
             }
@@ -18998,6 +19055,7 @@ impl Vm {
         mut prototype: Option<ObjectId>,
         property: &str,
     ) -> Result<bool, VmError> {
+        let canonical_index = Self::canonical_array_index(property);
         while let Some(prototype_id) = prototype {
             let object = self
                 .objects
@@ -19006,6 +19064,14 @@ impl Vm {
             if object.properties.contains_key(property)
                 || object.getters.contains_key(property)
                 || object.setters.contains_key(property)
+                || canonical_index
+                    .and_then(|index| {
+                        object
+                            .dense_elements
+                            .as_ref()
+                            .and_then(|dense_elements| dense_elements.get(index))
+                    })
+                    .is_some_and(|entry| entry.is_some())
                 || object.prototype_value.is_some()
             {
                 return Ok(true);
@@ -22567,6 +22633,9 @@ impl Vm {
                 },
             );
             if let JsValue::String(value) = primitive_for_properties {
+                if Self::is_symbol_primitive_string(&value) {
+                    return JsValue::Object(object_id);
+                }
                 object.properties.insert(
                     "length".to_string(),
                     JsValue::Number(Self::utf16_code_unit_length(&value) as f64),
