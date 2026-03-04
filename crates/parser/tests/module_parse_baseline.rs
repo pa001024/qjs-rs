@@ -979,3 +979,35 @@ fn module_parse_attributes_keyword_with_leading_comment_separators() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_default_import_forms_with_comments_before_from_keyword() {
+    let source = "import fallback/* gap */from './dep.js';\nimport fallbackNamed, { value as named }/* gap */from './dep.js';\nimport fallbackNs, * as ns/* gap */from './dep.js';\nexport const answer = fallback + fallbackNamed + named + fallbackNs + ns.value;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 3);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "default".to_string(),
+            local: "fallback".to_string(),
+        }]
+    );
+    assert_eq!(parsed.imports[1].specifier, "./dep.js");
+    assert_eq!(parsed.imports[1].bindings.len(), 2);
+    assert_eq!(parsed.imports[1].bindings[0].imported, "default");
+    assert_eq!(parsed.imports[1].bindings[0].local, "fallbackNamed");
+    assert_eq!(parsed.imports[1].bindings[1].imported, "value");
+    assert_eq!(parsed.imports[1].bindings[1].local, "named");
+    assert_eq!(parsed.imports[2].specifier, "./dep.js");
+    assert_eq!(parsed.imports[2].bindings.len(), 2);
+    assert_eq!(parsed.imports[2].bindings[0].imported, "default");
+    assert_eq!(parsed.imports[2].bindings[0].local, "fallbackNs");
+    assert_eq!(parsed.imports[2].bindings[1].imported, "*");
+    assert_eq!(parsed.imports[2].bindings[1].local, "ns");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}

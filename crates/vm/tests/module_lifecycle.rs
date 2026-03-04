@@ -1360,6 +1360,23 @@ fn module_attributes_keyword_with_leading_comment_separators_parses_and_evaluate
 }
 
 #[test]
+fn module_default_import_forms_with_comments_before_from_keyword_parse_and_evaluate() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export default 7;\nexport const value = 42;\n")
+        .with_module(
+            "entry.js",
+            "import fallback/* gap */from './dep.js';\nimport fallbackNamed, { value as named }/* gap */from './dep.js';\nimport fallbackNs, * as ns/* gap */from './dep.js';\nexport const answer = fallback + fallbackNamed + named + fallbackNs + ns.value;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default import forms with comments before from should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 105.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");
