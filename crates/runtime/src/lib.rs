@@ -64,6 +64,7 @@ pub enum NativeFunction {
     Uint8ArrayConstructor,
     DateConstructor,
     DateParse,
+    DateNow,
     DateUtc,
     DatePrototypeMethod,
     RegExpConstructor,

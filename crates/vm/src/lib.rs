@@ -10198,7 +10198,7 @@ impl Vm {
             NativeFunction::ObjectConstructor => Ok(self.execute_object_constructor(&args)),
             NativeFunction::ArrayConstructor => self.execute_array_constructor(&args),
             NativeFunction::ArrayIsArray => Ok(self.execute_array_is_array(&args)),
-            NativeFunction::ObjectKeys => self.execute_object_keys(&args),
+            NativeFunction::ObjectKeys => self.execute_object_keys(&args, realm),
             NativeFunction::ObjectEntries => self.execute_object_entries(&args, realm),
             NativeFunction::ObjectValues => self.execute_object_values(&args, realm),
             NativeFunction::ObjectGetOwnPropertyNames => {
@@ -10311,6 +10311,13 @@ impl Vm {
                     .map(Self::time_clip)
                     .unwrap_or(f64::NAN);
                 Ok(JsValue::Number(parsed))
+            }
+            NativeFunction::DateNow => {
+                let millis = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as f64)
+                    .unwrap_or(0.0);
+                Ok(JsValue::Number(millis))
             }
             NativeFunction::DateUtc => Ok(JsValue::Number(self.date_utc_from_components(
                 &args,
@@ -14970,6 +14977,7 @@ impl Vm {
                     "getOwnPropertySymbols",
                     "create",
                     "assign",
+                    "fromEntries",
                     "hasOwn",
                     "setPrototypeOf",
                     "preventExtensions",
@@ -14997,6 +15005,7 @@ impl Vm {
                     "fromAsync",
                     "of",
                     "parse",
+                    "now",
                     "UTC",
                     "revocable",
                     "fromCharCode",
@@ -16192,8 +16201,12 @@ impl Vm {
         }
     }
 
-    fn execute_object_keys(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
-        object_builtins::execute_object_keys(self, args)
+    fn execute_object_keys(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        object_builtins::execute_object_keys(self, args, realm)
     }
 
     fn execute_object_entries(
@@ -21742,6 +21755,8 @@ impl Vm {
                     "setFullYear",
                     "setUTCFullYear",
                     "toLocaleString",
+                    "toISOString",
+                    "toJSON",
                     "toUTCString",
                     "toGMTString",
                     "getYear",
@@ -24433,6 +24448,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "toString")
                 | (NativeFunction::ObjectConstructor, "valueOf")
                 | (NativeFunction::DateConstructor, "parse")
+                | (NativeFunction::DateConstructor, "now")
                 | (NativeFunction::DateConstructor, "UTC")
                 | (NativeFunction::ProxyConstructor, "revocable")
                 | (NativeFunction::StringConstructor, "fromCharCode")
@@ -26007,6 +26023,7 @@ impl Vm {
             NativeFunction::Uint8ArrayConstructor => "Uint8Array",
             NativeFunction::SymbolConstructor => "Symbol",
             NativeFunction::DateConstructor => "Date",
+            NativeFunction::DateNow => "now",
             NativeFunction::RegExpConstructor => "RegExp",
             NativeFunction::ErrorConstructor => "Error",
             NativeFunction::TypeErrorConstructor => "TypeError",
@@ -26361,6 +26378,9 @@ impl Vm {
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
             }
+            (NativeFunction::DateConstructor, "now") => {
+                JsValue::NativeFunction(NativeFunction::DateNow)
+            }
             (NativeFunction::DateConstructor, "UTC") => {
                 JsValue::NativeFunction(NativeFunction::DateUtc)
             }
@@ -26483,6 +26503,7 @@ impl Vm {
             | (NativeFunction::ArrayIsArray, "length")
             | (NativeFunction::DateParse, "length")
             | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
+            (NativeFunction::DateNow, "length") => JsValue::Number(0.0),
             (NativeFunction::DateConstructor, "length") | (NativeFunction::DateUtc, "length") => {
                 JsValue::Number(7.0)
             }

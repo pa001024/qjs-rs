@@ -236,22 +236,75 @@ fn object_assign_get_own_property_descriptor(
     Ok(Some(descriptor))
 }
 
-pub(super) fn execute_object_keys(vm: &mut Vm, args: &[JsValue]) -> Result<JsValue, VmError> {
+fn collect_enumerable_own_string_keys(
+    vm: &mut Vm,
+    target: JsValue,
+    realm: &Realm,
+) -> Result<Vec<String>, VmError> {
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
+    let mut keys = Vec::with_capacity(snapshot.len());
+    for key in snapshot {
+        if Vm::is_symbol_primitive_string(&key) {
+            continue;
+        }
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if vm.is_truthy(&enumerable) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn get_property_with_proxy_trap(
+    vm: &mut Vm,
+    receiver: JsValue,
+    property_name: &str,
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let JsValue::Object(object_id) = receiver.clone() else {
+        return vm.get_property_from_receiver(receiver, property_name, realm);
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        return vm.get_property_from_receiver(receiver, property_name, realm);
+    };
+    let trap = vm.get_property_from_receiver(proxy_handler.clone(), "get", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(JsValue::Undefined);
+        }
+        return get_property_with_proxy_trap(vm, proxy_target, property_name, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError("Proxy get trap must be callable"));
+    }
+    vm.execute_callable(
+        trap,
+        Some(proxy_handler),
+        vec![
+            proxy_target,
+            JsValue::String(property_name.to_string()),
+            receiver,
+        ],
+        realm,
+        false,
+    )
+}
+
+pub(super) fn execute_object_keys(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
     let target = vm.coerce_object_for_object_builtins(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.keys target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
-    let mut keys = Vec::new();
-    for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
-            continue;
-        }
-        if !vm.own_property_is_enumerable(&target, &key)? {
-            continue;
-        }
-        keys.push(key);
-    }
+    let keys = collect_enumerable_own_string_keys(vm, target, realm)?;
     vm.create_array_from_string_keys(keys)
 }
 
@@ -264,16 +317,22 @@ pub(super) fn execute_object_entries(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.entries target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
     let mut entries = Vec::with_capacity(snapshot.len());
     for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
+        if Vm::is_symbol_primitive_string(&key) {
             continue;
         }
-        if !vm.own_property_is_enumerable(&target, &key)? {
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
             continue;
         }
-        let value = vm.get_property_from_receiver(target.clone(), &key, realm)?;
+        let value = get_property_with_proxy_trap(vm, target.clone(), &key, realm)?;
         let entry = vm.create_array_from_values(vec![JsValue::String(key), value])?;
         entries.push(entry);
     }
@@ -289,16 +348,22 @@ pub(super) fn execute_object_values(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.values target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
     let mut values = Vec::with_capacity(snapshot.len());
     for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
+        if Vm::is_symbol_primitive_string(&key) {
             continue;
         }
-        if !vm.own_property_is_enumerable(&target, &key)? {
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
             continue;
         }
-        values.push(vm.get_property_from_receiver(target.clone(), &key, realm)?);
+        values.push(get_property_with_proxy_trap(vm, target.clone(), &key, realm)?);
     }
     vm.create_array_from_values(values)
 }

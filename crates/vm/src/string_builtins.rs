@@ -10,6 +10,9 @@ pub(super) fn execute_string_constructor(
 ) -> Result<JsValue, VmError> {
     let value = match args.first() {
         None => String::new(),
+        Some(JsValue::String(text)) if Vm::is_symbol_primitive_string(text) => {
+            Vm::symbol_primitive_display_string(text)
+        }
         Some(value) => vm.coerce_to_string_runtime(value.clone(), realm, caller_strict)?,
     };
     Ok(JsValue::String(value))
