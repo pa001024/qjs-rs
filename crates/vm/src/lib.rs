@@ -43,6 +43,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::external_host::{
     ExternalHostCallbackFuture, ExternalHostCallbacks, block_on_external_host_future,
@@ -597,10 +598,13 @@ enum HostFunction {
     StringEndsWithThis,
     StringConcatThis,
     StringReplaceAllThis,
+    StringLocaleCompareThis,
     StringIndexOfThis,
     StringSplitThis,
+    StringSliceThis,
     StringToLowerCaseThis,
     StringToUpperCase,
+    StringNormalize,
     StringTrim,
     StringTrimStart,
     StringTrimEnd,
@@ -613,6 +617,9 @@ enum HostFunction {
     StringCharCodeAt,
     StringCodePointAt,
     StringLastIndexOf,
+    StringRepeat,
+    StringPadStart,
+    StringPadEnd,
     StringSubstring,
     StringSubstr,
     StringAnchor,
@@ -3139,10 +3146,13 @@ impl Vm {
             | HostFunction::StringEndsWithThis
             | HostFunction::StringConcatThis
             | HostFunction::StringReplaceAllThis
+            | HostFunction::StringLocaleCompareThis
             | HostFunction::StringIndexOfThis
             | HostFunction::StringSplitThis
+            | HostFunction::StringSliceThis
             | HostFunction::StringToLowerCaseThis
             | HostFunction::StringToUpperCase
+            | HostFunction::StringNormalize
             | HostFunction::StringTrim
             | HostFunction::StringTrimStart
             | HostFunction::StringTrimEnd
@@ -3155,6 +3165,9 @@ impl Vm {
             | HostFunction::StringCharCodeAt
             | HostFunction::StringCodePointAt
             | HostFunction::StringLastIndexOf
+            | HostFunction::StringRepeat
+            | HostFunction::StringPadStart
+            | HostFunction::StringPadEnd
             | HostFunction::StringSubstring
             | HostFunction::StringSubstr
             | HostFunction::StringAnchor
@@ -7487,6 +7500,150 @@ impl Vm {
         self.create_array_from_values(parts)
     }
 
+    fn execute_string_slice(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let code_units = self.string_to_js_code_units(&receiver);
+        let len = code_units.len() as i64;
+        let start_number = match args.first().cloned() {
+            Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+            None => 0.0,
+        };
+        let start_integer = Self::to_integer_or_infinity_i64(start_number);
+        let from = if start_integer < 0 {
+            (len + start_integer).max(0)
+        } else {
+            start_integer.min(len)
+        };
+        let end_number = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => len as f64,
+            Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+        };
+        let end_integer = Self::to_integer_or_infinity_i64(end_number);
+        let to = if end_integer < 0 {
+            (len + end_integer).max(0)
+        } else {
+            end_integer.min(len)
+        };
+        if to <= from {
+            return Ok(JsValue::String(String::new()));
+        }
+        Ok(JsValue::String(
+            Self::string_from_js_code_units_preserving_surrogates(
+                &code_units[from as usize..to as usize],
+            ),
+        ))
+    }
+
+    fn execute_string_repeat(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let count_number = self.coerce_number_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let count = Self::to_integer_or_infinity_i64(count_number);
+        if count < 0 || count == i64::MAX {
+            return Err(VmError::UncaughtException(self.create_error_exception(
+                NativeFunction::RangeErrorConstructor,
+                "RangeError",
+                "Invalid count value".to_string(),
+            )));
+        }
+        if count == 0 || receiver.is_empty() {
+            return Ok(JsValue::String(String::new()));
+        }
+        let count = count as usize;
+        let mut output = String::with_capacity(receiver.len().saturating_mul(count));
+        for _ in 0..count {
+            output.push_str(&receiver);
+        }
+        Ok(JsValue::String(output))
+    }
+
+    fn execute_string_pad(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+        at_start: bool,
+    ) -> Result<JsValue, VmError> {
+        let max_length_number = self.coerce_number_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let max_length = Self::to_length_from_number(max_length_number).max(0) as usize;
+        let receiver_units = self.string_to_js_code_units(&receiver);
+        let receiver_len = receiver_units.len();
+        if max_length <= receiver_len {
+            return Ok(JsValue::String(receiver));
+        }
+
+        let fill_string = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => " ".to_string(),
+            Some(value) => self.coerce_to_string_runtime(value, realm, caller_strict)?,
+        };
+        let fill_units = self.string_to_js_code_units(&fill_string);
+        if fill_units.is_empty() {
+            return Ok(JsValue::String(receiver));
+        }
+
+        let fill_len = max_length - receiver_len;
+        let mut repeated_fill = Vec::with_capacity(fill_len);
+        while repeated_fill.len() < fill_len {
+            let remaining = fill_len - repeated_fill.len();
+            if remaining >= fill_units.len() {
+                repeated_fill.extend_from_slice(&fill_units);
+            } else {
+                repeated_fill.extend_from_slice(&fill_units[..remaining]);
+            }
+        }
+        let fill = Self::string_from_js_code_units_preserving_surrogates(&repeated_fill);
+        Ok(JsValue::String(if at_start {
+            format!("{fill}{receiver}")
+        } else {
+            format!("{receiver}{fill}")
+        }))
+    }
+
+    fn execute_string_normalize(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let form = match args.first().cloned() {
+            None | Some(JsValue::Undefined) => "NFC".to_string(),
+            Some(value) => self.coerce_to_string_runtime(value, realm, caller_strict)?,
+        };
+        let normalized = match form.as_str() {
+            "NFC" => receiver.nfc().collect::<String>(),
+            "NFD" => receiver.nfd().collect::<String>(),
+            "NFKC" => receiver.nfkc().collect::<String>(),
+            "NFKD" => receiver.nfkd().collect::<String>(),
+            _ => {
+                return Err(VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::RangeErrorConstructor,
+                    "RangeError",
+                    "The normalization form should be one of NFC, NFD, NFKC, NFKD.".to_string(),
+                )));
+            }
+        };
+        Ok(JsValue::String(normalized))
+    }
+
     fn execute_array_from_this(
         &mut self,
         this_arg: Option<JsValue>,
@@ -9197,6 +9354,24 @@ impl Vm {
                 }
                 Ok(JsValue::Bool(receiver_units[start..end] == search_units))
             }
+            HostFunction::StringLocaleCompareThis => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let that = self.coerce_to_string_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                if receiver == that {
+                    return Ok(JsValue::Number(0.0));
+                }
+                Ok(JsValue::Number(
+                    if self.js_string_less_than(&receiver, &that) {
+                        -1.0
+                    } else {
+                        1.0
+                    },
+                ))
+            }
             HostFunction::StringConcatThis => {
                 let this_value = this_arg.unwrap_or(JsValue::Undefined);
                 if matches!(this_value, JsValue::Null | JsValue::Undefined) {
@@ -9262,6 +9437,10 @@ impl Vm {
                 }
                 self.execute_string_split(receiver, &args)
             }
+            HostFunction::StringSliceThis => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_slice(receiver, &args, realm, caller_strict)
+            }
             HostFunction::StringIteratorThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 self.create_string_iterator_from_value(receiver)
@@ -9273,6 +9452,10 @@ impl Vm {
             HostFunction::StringToUpperCase => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(JsValue::String(receiver.to_uppercase()))
+            }
+            HostFunction::StringNormalize => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_normalize(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringTrim => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -9431,6 +9614,18 @@ impl Vm {
             HostFunction::StringLastIndexOf => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 self.execute_string_last_index_of(receiver, &args, realm, caller_strict)
+            }
+            HostFunction::StringRepeat => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_repeat(receiver, &args, realm, caller_strict)
+            }
+            HostFunction::StringPadStart => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_pad(receiver, &args, realm, caller_strict, true)
+            }
+            HostFunction::StringPadEnd => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_pad(receiver, &args, realm, caller_strict, false)
             }
             HostFunction::StringSubstring => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -11107,6 +11302,7 @@ impl Vm {
             NativeFunction::StringFromCodePoint => {
                 self.execute_string_from_code_point(&args, realm, caller_strict)
             }
+            NativeFunction::StringRaw => self.execute_string_raw(&args, realm, caller_strict),
             NativeFunction::SymbolConstructor => {
                 if called_with_new {
                     return Err(VmError::TypeError("Symbol is not a constructor"));
@@ -14228,6 +14424,44 @@ impl Vm {
         Ok(JsValue::String(
             Self::string_from_js_code_units_preserving_surrogates(&code_units),
         ))
+    }
+
+    fn execute_string_raw(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let template = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let substitutions = &args[1..];
+        let cooked = self
+            .coerce_object_for_object_builtins(template, "String.raw template must be coercible")?;
+        let raw = self.get_property_from_receiver(cooked.clone(), "raw", realm)?;
+        let raw_object =
+            self.coerce_object_for_object_builtins(raw, "String.raw raw must be coercible")?;
+        let length_value = self.get_property_from_receiver(raw_object.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let literal_segments = Self::to_length_from_number(length_number).max(0) as usize;
+        if literal_segments == 0 {
+            return Ok(JsValue::String(String::new()));
+        }
+
+        let mut result = String::new();
+        for index in 0..literal_segments {
+            let next_raw =
+                self.get_property_from_receiver(raw_object.clone(), &index.to_string(), realm)?;
+            result.push_str(&self.coerce_to_string_runtime(next_raw, realm, caller_strict)?);
+            if index + 1 < literal_segments {
+                if let Some(substitution) = substitutions.get(index).cloned() {
+                    result.push_str(&self.coerce_to_string_runtime(
+                        substitution,
+                        realm,
+                        caller_strict,
+                    )?);
+                }
+            }
+        }
+        Ok(JsValue::String(result))
     }
 
     fn execute_array_buffer_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -20139,12 +20373,21 @@ impl Vm {
                         | "match"
                         | "matchAll"
                         | "search"
+                        | "includes"
+                        | "endsWith"
+                        | "localeCompare"
+                        | "concat"
                         | "split"
                         | "replaceAll"
                         | "indexOf"
                         | "lastIndexOf"
+                        | "slice"
                         | "substring"
                         | "substr"
+                        | "repeat"
+                        | "padStart"
+                        | "padEnd"
+                        | "normalize"
                         | "toLowerCase"
                         | "toUpperCase"
                         | "trim"
@@ -20152,6 +20395,8 @@ impl Vm {
                         | "trimLeft"
                         | "trimEnd"
                         | "trimRight"
+                        | "isWellFormed"
+                        | "toWellFormed"
                         | "anchor"
                         | "big"
                         | "blink"
@@ -20167,8 +20412,11 @@ impl Vm {
                         | "sup"
                         | "toString"
                         | "valueOf"
+                        | "at"
                         | "charAt"
                         | "charCodeAt"
+                        | "codePointAt"
+                        | "Symbol.iterator"
                 ))
             }
             JsValue::Undefined
@@ -22744,9 +22992,16 @@ impl Vm {
             let search = self.create_host_function_value(HostFunction::StringSearchThis);
             let includes = self.create_host_function_value(HostFunction::StringIncludesThis);
             let ends_with = self.create_host_function_value(HostFunction::StringEndsWithThis);
+            let locale_compare =
+                self.create_host_function_value(HostFunction::StringLocaleCompareThis);
             let concat = self.create_host_function_value(HostFunction::StringConcatThis);
             let replace_all = self.create_host_function_value(HostFunction::StringReplaceAllThis);
+            let slice = self.create_host_function_value(HostFunction::StringSliceThis);
             let substr = self.create_host_function_value(HostFunction::StringSubstr);
+            let repeat = self.create_host_function_value(HostFunction::StringRepeat);
+            let pad_start = self.create_host_function_value(HostFunction::StringPadStart);
+            let pad_end = self.create_host_function_value(HostFunction::StringPadEnd);
+            let normalize = self.create_host_function_value(HostFunction::StringNormalize);
             let anchor = self.create_host_function_value(HostFunction::StringAnchor);
             let big = self.create_host_function_value(HostFunction::StringBig);
             let blink = self.create_host_function_value(HostFunction::StringBlink);
@@ -22833,6 +23088,8 @@ impl Vm {
             self.set_builtin_function_name(&includes, "includes");
             self.set_builtin_function_length(&ends_with, 1.0);
             self.set_builtin_function_name(&ends_with, "endsWith");
+            self.set_builtin_function_length(&locale_compare, 1.0);
+            self.set_builtin_function_name(&locale_compare, "localeCompare");
             self.set_builtin_function_length(&at, 1.0);
             self.set_builtin_function_name(&at, "at");
             self.set_builtin_function_length(&code_point_at, 1.0);
@@ -22841,6 +23098,16 @@ impl Vm {
             self.set_builtin_function_name(&concat, "concat");
             self.set_builtin_function_length(&replace_all, 2.0);
             self.set_builtin_function_name(&replace_all, "replaceAll");
+            self.set_builtin_function_length(&slice, 2.0);
+            self.set_builtin_function_name(&slice, "slice");
+            self.set_builtin_function_length(&repeat, 1.0);
+            self.set_builtin_function_name(&repeat, "repeat");
+            self.set_builtin_function_length(&pad_start, 1.0);
+            self.set_builtin_function_name(&pad_start, "padStart");
+            self.set_builtin_function_length(&pad_end, 1.0);
+            self.set_builtin_function_name(&pad_end, "padEnd");
+            self.set_builtin_function_length(&normalize, 0.0);
+            self.set_builtin_function_name(&normalize, "normalize");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -22892,8 +23159,14 @@ impl Vm {
                     ("search", search),
                     ("includes", includes),
                     ("endsWith", ends_with),
+                    ("localeCompare", locale_compare),
                     ("concat", concat),
+                    ("slice", slice),
                     ("substr", substr),
+                    ("repeat", repeat),
+                    ("padStart", pad_start),
+                    ("padEnd", pad_end),
+                    ("normalize", normalize),
                     ("anchor", anchor),
                     ("big", big),
                     ("blink", blink),
@@ -26187,6 +26460,7 @@ impl Vm {
                 | (NativeFunction::ProxyConstructor, "revocable")
                 | (NativeFunction::StringConstructor, "fromCharCode")
                 | (NativeFunction::StringConstructor, "fromCodePoint")
+                | (NativeFunction::StringConstructor, "raw")
                 | (NativeFunction::NumberConstructor, "NaN")
                 | (NativeFunction::NumberConstructor, "POSITIVE_INFINITY")
                 | (NativeFunction::NumberConstructor, "NEGATIVE_INFINITY")
@@ -27578,6 +27852,13 @@ impl Vm {
                 self.set_builtin_function_name(&ends_with, "endsWith");
                 ends_with
             }
+            "localeCompare" => {
+                let locale_compare =
+                    self.create_host_function_value(HostFunction::StringLocaleCompareThis);
+                self.set_builtin_function_length(&locale_compare, 1.0);
+                self.set_builtin_function_name(&locale_compare, "localeCompare");
+                locale_compare
+            }
             "concat" => {
                 let concat = self.create_host_function_value(HostFunction::StringConcatThis);
                 self.set_builtin_function_length(&concat, 1.0);
@@ -27595,6 +27876,12 @@ impl Vm {
                 self.set_builtin_function_length(&split, 2.0);
                 self.set_builtin_function_name(&split, "split");
                 split
+            }
+            "slice" => {
+                let slice = self.create_host_function_value(HostFunction::StringSliceThis);
+                self.set_builtin_function_length(&slice, 2.0);
+                self.set_builtin_function_name(&slice, "slice");
+                slice
             }
             "Symbol.iterator" => {
                 let symbol_iterator =
@@ -27672,6 +27959,30 @@ impl Vm {
                 self.set_builtin_function_length(&substr, 2.0);
                 self.set_builtin_function_name(&substr, "substr");
                 substr
+            }
+            "repeat" => {
+                let repeat = self.create_host_function_value(HostFunction::StringRepeat);
+                self.set_builtin_function_length(&repeat, 1.0);
+                self.set_builtin_function_name(&repeat, "repeat");
+                repeat
+            }
+            "padStart" => {
+                let pad_start = self.create_host_function_value(HostFunction::StringPadStart);
+                self.set_builtin_function_length(&pad_start, 1.0);
+                self.set_builtin_function_name(&pad_start, "padStart");
+                pad_start
+            }
+            "padEnd" => {
+                let pad_end = self.create_host_function_value(HostFunction::StringPadEnd);
+                self.set_builtin_function_length(&pad_end, 1.0);
+                self.set_builtin_function_name(&pad_end, "padEnd");
+                pad_end
+            }
+            "normalize" => {
+                let normalize = self.create_host_function_value(HostFunction::StringNormalize);
+                self.set_builtin_function_length(&normalize, 0.0);
+                self.set_builtin_function_name(&normalize, "normalize");
+                normalize
             }
             "trim" => {
                 let trim = self.create_host_function_value(HostFunction::StringTrim);
@@ -27972,6 +28283,7 @@ impl Vm {
             NativeFunction::StringConstructor => "String",
             NativeFunction::StringFromCharCode => "fromCharCode",
             NativeFunction::StringFromCodePoint => "fromCodePoint",
+            NativeFunction::StringRaw => "raw",
             NativeFunction::NumberConstructor => "Number",
             NativeFunction::BooleanConstructor => "Boolean",
             NativeFunction::MapConstructor => "Map",
@@ -28442,6 +28754,9 @@ impl Vm {
             (NativeFunction::StringConstructor, "fromCodePoint") => {
                 JsValue::NativeFunction(NativeFunction::StringFromCodePoint)
             }
+            (NativeFunction::StringConstructor, "raw") => {
+                JsValue::NativeFunction(NativeFunction::StringRaw)
+            }
             (_, "name") => JsValue::String(Self::native_function_display_name(native).to_string()),
             (_, "toString") => self.create_host_function_value(HostFunction::FunctionToString {
                 target: JsValue::NativeFunction(native),
@@ -28502,7 +28817,8 @@ impl Vm {
             | (NativeFunction::ArrayIsArray, "length")
             | (NativeFunction::DateParse, "length")
             | (NativeFunction::StringFromCharCode, "length")
-            | (NativeFunction::StringFromCodePoint, "length") => JsValue::Number(1.0),
+            | (NativeFunction::StringFromCodePoint, "length")
+            | (NativeFunction::StringRaw, "length") => JsValue::Number(1.0),
             (NativeFunction::DateNow, "length") => JsValue::Number(0.0),
             (NativeFunction::DateConstructor, "length") | (NativeFunction::DateUtc, "length") => {
                 JsValue::Number(7.0)

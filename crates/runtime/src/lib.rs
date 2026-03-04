@@ -107,6 +107,7 @@ pub enum NativeFunction {
     StringConstructor,
     StringFromCharCode,
     StringFromCodePoint,
+    StringRaw,
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
