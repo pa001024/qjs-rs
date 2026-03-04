@@ -1276,14 +1276,46 @@ fn normalize_module_declaration_keyword(
     if rest.is_empty() {
         return Some(format!("{keyword} "));
     }
-    let first = rest.chars().next()?;
-    if first.is_whitespace() {
-        return Some(format!("{keyword} {}", rest.trim_start()));
+    if let Some((trimmed, consumed_separator)) = strip_module_keyword_leading_separators(rest)
+        && consumed_separator
+    {
+        return Some(format!("{keyword} {trimmed}"));
     }
+    let first = rest.chars().next()?;
     if no_space_starts.contains(&first) {
         return Some(format!("{keyword} {rest}"));
     }
     None
+}
+
+fn strip_module_keyword_leading_separators(source: &str) -> Option<(&str, bool)> {
+    let mut current = source;
+    let mut consumed_separator = false;
+    loop {
+        let trimmed_ws = current.trim_start();
+        if trimmed_ws.len() != current.len() {
+            consumed_separator = true;
+            current = trimmed_ws;
+            continue;
+        }
+
+        if let Some(rest) = current.strip_prefix("//") {
+            consumed_separator = true;
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            current = rest[line_end..].trim_start_matches('\n');
+            continue;
+        }
+
+        if let Some(rest) = current.strip_prefix("/*") {
+            let closing = rest.find("*/")?;
+            consumed_separator = true;
+            current = &rest[closing + 2..];
+            continue;
+        }
+
+        break;
+    }
+    Some((current, consumed_separator))
 }
 
 fn collect_ts_type_only_declared_bindings(line: &str) -> Vec<String> {
