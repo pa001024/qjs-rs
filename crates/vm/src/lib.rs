@@ -569,6 +569,13 @@ enum CollectionAddMode {
     WeakSet,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrimStringMode {
+    Start,
+    End,
+    StartAndEnd,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum HostFunction {
     BoundMethod {
@@ -7466,38 +7473,103 @@ impl Vm {
         &mut self,
         receiver: String,
         args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
-        let limit = args
-            .get(1)
-            .map(|value| self.to_number(value))
-            .unwrap_or(f64::INFINITY);
-        if limit <= 0.0 {
+        let limit = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => u32::MAX,
+            Some(value) => {
+                let number = self.coerce_number_runtime(value, realm, caller_strict)?;
+                Self::to_uint32_number(number)
+            }
+        } as usize;
+        if limit == 0 {
             return self.create_array_from_values(Vec::new());
         }
         let mut parts: Vec<JsValue> = if matches!(separator, JsValue::Undefined) {
             vec![JsValue::String(receiver)]
         } else {
-            let sep = self.coerce_to_string(&separator);
-            if sep.is_empty() {
-                receiver
-                    .chars()
-                    .map(|ch| JsValue::String(ch.to_string()))
+            let sep = self.coerce_to_string_runtime(separator, realm, caller_strict)?;
+            let receiver_units = self.string_to_js_code_units(&receiver);
+            let sep_units = self.string_to_js_code_units(&sep);
+            if sep_units.is_empty() {
+                receiver_units
+                    .into_iter()
+                    .map(|unit| {
+                        JsValue::String(Self::string_from_js_code_units_preserving_surrogates(&[
+                            unit,
+                        ]))
+                    })
                     .collect()
             } else {
-                receiver
-                    .split(&sep)
-                    .map(|part| JsValue::String(part.to_string()))
-                    .collect()
+                let mut segments = Vec::new();
+                let mut start = 0usize;
+                let mut index = 0usize;
+                while index + sep_units.len() <= receiver_units.len() {
+                    if receiver_units[index..index + sep_units.len()] == sep_units {
+                        segments.push(JsValue::String(
+                            Self::string_from_js_code_units_preserving_surrogates(
+                                &receiver_units[start..index],
+                            ),
+                        ));
+                        index += sep_units.len();
+                        start = index;
+                        if segments.len() >= limit {
+                            break;
+                        }
+                        continue;
+                    }
+                    index += 1;
+                }
+                if segments.len() < limit {
+                    segments.push(JsValue::String(
+                        Self::string_from_js_code_units_preserving_surrogates(
+                            &receiver_units[start..],
+                        ),
+                    ));
+                }
+                segments
             }
         };
-        if limit.is_finite() {
-            let cap = limit.max(0.0) as usize;
-            if parts.len() > cap {
-                parts.truncate(cap);
-            }
+        if parts.len() > limit {
+            parts.truncate(limit);
         }
         self.create_array_from_values(parts)
+    }
+
+    fn execute_string_substring(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let code_units = self.string_to_js_code_units(&receiver);
+        let len = code_units.len() as i64;
+        let start_number = self.coerce_number_runtime(
+            args.first().cloned().unwrap_or(JsValue::Undefined),
+            realm,
+            caller_strict,
+        )?;
+        let mut start = Self::to_integer_or_infinity_i64(start_number).clamp(0, len);
+        let mut end = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => len,
+            Some(value) => Self::to_integer_or_infinity_i64(self.coerce_number_runtime(
+                value,
+                realm,
+                caller_strict,
+            )?)
+            .clamp(0, len),
+        };
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        Ok(JsValue::String(
+            Self::string_from_js_code_units_preserving_surrogates(
+                &code_units[start as usize..end as usize],
+            ),
+        ))
     }
 
     fn execute_string_slice(
@@ -9416,7 +9488,7 @@ impl Vm {
                 self.execute_string_index_of(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringSplitThis => {
-                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 let separator = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if !matches!(separator, JsValue::Undefined | JsValue::Null) {
                     let method =
@@ -9435,22 +9507,22 @@ impl Vm {
                         );
                     }
                 }
-                self.execute_string_split(receiver, &args)
+                self.execute_string_split(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringSliceThis => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 self.execute_string_slice(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringIteratorThis => {
-                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 self.create_string_iterator_from_value(receiver)
             }
             HostFunction::StringToLowerCaseThis => {
-                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 Ok(JsValue::String(receiver.to_lowercase()))
             }
             HostFunction::StringToUpperCase => {
-                let receiver = self.coerce_this_string(this_arg)?;
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
                 Ok(JsValue::String(receiver.to_uppercase()))
             }
             HostFunction::StringNormalize => {
@@ -9458,16 +9530,25 @@ impl Vm {
                 self.execute_string_normalize(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringTrim => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                Ok(JsValue::String(receiver.trim().to_string()))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                Ok(JsValue::String(Self::trim_string_ecmascript(
+                    &receiver,
+                    TrimStringMode::StartAndEnd,
+                )))
             }
             HostFunction::StringTrimStart => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                Ok(JsValue::String(receiver.trim_start().to_string()))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                Ok(JsValue::String(Self::trim_string_ecmascript(
+                    &receiver,
+                    TrimStringMode::Start,
+                )))
             }
             HostFunction::StringTrimEnd => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                Ok(JsValue::String(receiver.trim_end().to_string()))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                Ok(JsValue::String(Self::trim_string_ecmascript(
+                    &receiver,
+                    TrimStringMode::End,
+                )))
             }
             HostFunction::StringIsWellFormed => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
@@ -9628,27 +9709,8 @@ impl Vm {
                 self.execute_string_pad(receiver, &args, realm, caller_strict, false)
             }
             HostFunction::StringSubstring => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                let chars: Vec<char> = receiver.chars().collect();
-                let len = chars.len();
-                let start = args
-                    .first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0)
-                    .max(0.0)
-                    .min(len as f64) as usize;
-                let end = args
-                    .get(1)
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(len as f64)
-                    .max(0.0)
-                    .min(len as f64) as usize;
-                let (from, to) = if start <= end {
-                    (start, end)
-                } else {
-                    (end, start)
-                };
-                Ok(JsValue::String(chars[from..to].iter().collect()))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_substring(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringSubstr => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
@@ -28118,6 +28180,54 @@ impl Vm {
 
     fn utf16_code_unit_at(value: &str, index: usize) -> Option<u16> {
         value.encode_utf16().nth(index)
+    }
+
+    fn is_ecmascript_trim_code_unit(unit: u16) -> bool {
+        matches!(
+            unit,
+            0x0009
+                | 0x000A
+                | 0x000B
+                | 0x000C
+                | 0x000D
+                | 0x0020
+                | 0x00A0
+                | 0x1680
+                | 0x2000
+                | 0x2001
+                | 0x2002
+                | 0x2003
+                | 0x2004
+                | 0x2005
+                | 0x2006
+                | 0x2007
+                | 0x2008
+                | 0x2009
+                | 0x200A
+                | 0x2028
+                | 0x2029
+                | 0x202F
+                | 0x205F
+                | 0x3000
+                | 0xFEFF
+        )
+    }
+
+    fn trim_string_ecmascript(value: &str, mode: TrimStringMode) -> String {
+        let code_units: Vec<u16> = value.encode_utf16().collect();
+        let mut start = 0usize;
+        let mut end = code_units.len();
+        if matches!(mode, TrimStringMode::Start | TrimStringMode::StartAndEnd) {
+            while start < end && Self::is_ecmascript_trim_code_unit(code_units[start]) {
+                start += 1;
+            }
+        }
+        if matches!(mode, TrimStringMode::End | TrimStringMode::StartAndEnd) {
+            while end > start && Self::is_ecmascript_trim_code_unit(code_units[end - 1]) {
+                end -= 1;
+            }
+        }
+        Self::string_from_js_code_units_preserving_surrogates(&code_units[start..end])
     }
 
     fn get_function_property(
