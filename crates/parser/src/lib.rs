@@ -547,7 +547,10 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             .expect("prefix checked")
             .trim();
         let rest = trim_module_declaration_terminator(rest);
-        if rest.is_empty() || rest.starts_with('\'') || rest.starts_with('"') {
+        if rest.is_empty() {
+            return true;
+        }
+        if rest.starts_with('\'') || rest.starts_with('"') {
             return false;
         }
         return split_module_from_clause(rest).is_none();
@@ -563,7 +566,7 @@ fn module_declaration_needs_followup(source: &str) -> bool {
         .trim();
     let export_body = trim_module_declaration_terminator(export_body);
     if export_body.is_empty() {
-        return false;
+        return true;
     }
 
     if export_body.starts_with('{') {
@@ -1207,6 +1210,9 @@ fn normalize_module_declaration_keyword(
 ) -> Option<String> {
     let line = line.trim_start();
     let rest = line.strip_prefix(keyword)?;
+    if rest.is_empty() {
+        return Some(format!("{keyword} "));
+    }
     let first = rest.chars().next()?;
     if first.is_whitespace() {
         return Some(format!("{keyword} {}", rest.trim_start()));

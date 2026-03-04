@@ -566,3 +566,19 @@ fn module_parse_namespace_import_across_linebreaks() {
         local: "answer".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_keyword_only_linebreaks() {
+    let source = "import\n{ value } from './dep.js';\nexport\n{ value as answer };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[0].local, "value");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "value".to_string(),
+    }));
+}
