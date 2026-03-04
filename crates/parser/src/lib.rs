@@ -288,6 +288,7 @@ fn collect_module_logical_lines(source: &str) -> Vec<String> {
         while module_grouping_depth(&logical_line) > 0
             || module_declaration_needs_followup(&logical_line)
             || module_reexport_from_clause_on_next_line(&logical_line, physical_lines.peek())
+            || module_attributes_clause_on_next_line(&logical_line, physical_lines.peek())
         {
             let Some(next_line) = physical_lines.next() else {
                 break;
@@ -327,6 +328,50 @@ fn module_reexport_from_clause_on_next_line(declaration: &str, next_line: Option
     export_body[closing_brace + 1..].trim().is_empty()
 }
 
+fn module_attributes_clause_on_next_line(declaration: &str, next_line: Option<&&str>) -> bool {
+    let Some(next_line) = next_line else {
+        return false;
+    };
+    if !line_starts_with_module_attributes_keyword(next_line.trim_start()) {
+        return false;
+    }
+    if module_declaration_has_explicit_terminator(declaration) {
+        return false;
+    }
+
+    let declaration = declaration.trim();
+    if let Some(import_line) =
+        normalize_module_declaration_keyword(declaration, "import", &['{', '*', '\'', '"'])
+    {
+        let rest = import_line
+            .strip_prefix("import ")
+            .expect("prefix checked")
+            .trim();
+        let rest = trim_module_declaration_terminator(rest);
+        if rest.starts_with('\'') || rest.starts_with('"') {
+            return true;
+        }
+        return split_module_from_clause(rest).is_some();
+    }
+
+    let Some(export_line) =
+        normalize_module_declaration_keyword(declaration, "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    contains_module_from_keyword(export_body)
+}
+
+fn module_declaration_has_explicit_terminator(source: &str) -> bool {
+    strip_module_trailing_line_comment(source)
+        .trim_end()
+        .ends_with(';')
+}
+
 fn line_starts_with_module_from_keyword(source: &str) -> bool {
     let source = source.trim_start();
     let Some(after_from) = source.strip_prefix("from") else {
@@ -336,6 +381,19 @@ fn line_starts_with_module_from_keyword(source: &str) -> bool {
         None => true,
         Some(ch) => ch.is_whitespace() || ch == '\'' || ch == '"',
     }
+}
+
+fn line_starts_with_module_attributes_keyword(source: &str) -> bool {
+    let source = source.trim_start();
+    for keyword in ["assert", "with"] {
+        if let Some(after_keyword) = source.strip_prefix(keyword) {
+            return match after_keyword.chars().next() {
+                None => true,
+                Some(ch) => ch.is_whitespace() || ch == '{',
+            };
+        }
+    }
+    false
 }
 
 fn module_grouping_depth(source: &str) -> usize {
