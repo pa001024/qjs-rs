@@ -456,6 +456,83 @@ fn module_grouping_depth(source: &str) -> usize {
     depth
 }
 
+fn source_contains_unquoted_char(source: &str, target: char) -> bool {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == target {
+            return true;
+        }
+    }
+    false
+}
+
+fn module_export_declaration_head_requires_body(source: &str) -> bool {
+    let source = source.trim_start();
+    let (kind, rest) = if let Some(rest) = source.strip_prefix("async function") {
+        ("function", rest)
+    } else if let Some(rest) = source.strip_prefix("function") {
+        ("function", rest)
+    } else if let Some(rest) = source.strip_prefix("class") {
+        ("class", rest)
+    } else {
+        return false;
+    };
+    let mut rest = rest.trim_start();
+    if kind == "function"
+        && let Some(after_star) = rest.strip_prefix('*')
+    {
+        rest = after_star.trim_start();
+    }
+    !rest.is_empty() && !source_contains_unquoted_char(rest, '{')
+}
+
 fn module_declaration_needs_followup(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() {
@@ -515,9 +592,15 @@ fn module_declaration_needs_followup(source: &str) -> bool {
     }
 
     if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
+        if module_export_declaration_head_requires_body(default_expr) {
+            return true;
+        }
         return trim_module_declaration_terminator(default_expr).is_empty();
     }
     if export_body == "default" {
+        return true;
+    }
+    if module_export_declaration_head_requires_body(export_body) {
         return true;
     }
 

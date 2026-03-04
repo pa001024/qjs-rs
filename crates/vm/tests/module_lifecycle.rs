@@ -904,6 +904,34 @@ fn module_string_named_reexport_clause_parses_and_evaluates() {
 }
 
 #[test]
+fn module_multiline_export_function_declaration_body_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "export function build()\n{\n  return 42;\n}\nexport const answer = build();\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("multiline export function declaration body should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
+fn module_multiline_default_class_declaration_body_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "export default class Counter\n{\n  static value() { return 42; }\n}\nexport const answer = Counter.value();\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("multiline default class declaration body should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

@@ -500,3 +500,33 @@ fn module_parse_string_named_reexport_clause() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_multiline_export_function_declaration_body() {
+    let source = "export function build()\n{\n  return 42;\n}\nexport const answer = build();\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "build".to_string(),
+        local: "build".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_multiline_default_class_declaration_body() {
+    let source = "export default class Counter\n{\n  static value() { return 42; }\n}\nexport const answer = Counter.value();\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Counter".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
