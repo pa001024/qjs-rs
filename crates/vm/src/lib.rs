@@ -593,6 +593,7 @@ enum HostFunction {
     StringMatchThis,
     StringMatchAllThis,
     StringSearchThis,
+    StringConcatThis,
     StringReplaceAllThis,
     StringIndexOfThis,
     StringSplitThis,
@@ -625,6 +626,8 @@ enum HostFunction {
     StringIteratorNextThis,
     SymbolToString,
     SymbolValueOf,
+    SymbolDescriptionGetter,
+    SymbolToPrimitive,
     NumberToString,
     NumberValueOf,
     NumberToFixed,
@@ -1312,6 +1315,8 @@ pub struct Vm {
     native_function_deleted: BTreeSet<(NativeFunction, String)>,
     next_host_function_id: u64,
     next_symbol_id: u64,
+    symbol_registry_by_key: BTreeMap<String, String>,
+    symbol_registry_by_symbol: BTreeMap<String, String>,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
     module_records: BTreeMap<String, ModuleRecord>,
@@ -1452,6 +1457,8 @@ impl Vm {
         self.native_function_deleted.clear();
         self.next_host_function_id = 0;
         self.next_symbol_id = 0;
+        self.symbol_registry_by_key.clear();
+        self.symbol_registry_by_symbol.clear();
         self.host_pins.clear();
         self.next_host_pin_id = 0;
         self.clear_module_cache();
@@ -3122,6 +3129,7 @@ impl Vm {
             | HostFunction::StringMatchThis
             | HostFunction::StringMatchAllThis
             | HostFunction::StringSearchThis
+            | HostFunction::StringConcatThis
             | HostFunction::StringReplaceAllThis
             | HostFunction::StringIndexOfThis
             | HostFunction::StringSplitThis
@@ -3154,6 +3162,8 @@ impl Vm {
             | HostFunction::StringIteratorNextThis
             | HostFunction::SymbolToString
             | HostFunction::SymbolValueOf
+            | HostFunction::SymbolDescriptionGetter
+            | HostFunction::SymbolToPrimitive
             | HostFunction::NumberToString
             | HostFunction::NumberValueOf
             | HostFunction::NumberToFixed
@@ -4293,6 +4303,13 @@ impl Vm {
                             } else {
                                 self.set_host_function_property(host_id, name.clone(), value, realm)
                             }
+                        }
+                        primitive
+                        @ (JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_)) => {
+                            if strict {
+                                self.ensure_assign_target_writable(&primitive, name)?;
+                            }
+                            self.set_property_on_receiver(primitive, name.clone(), value, realm)
                         }
                         _ => Err(VmError::TypeError("property write expects object")),
                     };
@@ -5662,6 +5679,9 @@ impl Vm {
                 if !Self::native_function_is_constructor(native) {
                     return Err(VmError::NotCallable);
                 }
+                if matches!(native, NativeFunction::SymbolConstructor) {
+                    return Err(VmError::TypeError("Symbol is not a constructor"));
+                }
                 if matches!(native, NativeFunction::DateConstructor) {
                     return self.execute_date_constructor(&args, realm, caller_strict);
                 }
@@ -5744,6 +5764,7 @@ impl Vm {
                 | NativeFunction::NumberConstructor
                 | NativeFunction::BooleanConstructor
                 | NativeFunction::StringConstructor
+                | NativeFunction::SymbolConstructor
                 | NativeFunction::ArrayBufferConstructor
                 | NativeFunction::DataViewConstructor
                 | NativeFunction::MapConstructor
@@ -5819,7 +5840,7 @@ impl Vm {
             }
             JsValue::NativeFunction(native) => {
                 if matches!(native, NativeFunction::SymbolConstructor) {
-                    return Err(VmError::NotCallable);
+                    return Err(VmError::TypeError("Symbol is not a constructor"));
                 }
                 let result = if matches!(native, NativeFunction::ObjectConstructor) {
                     super_this.clone()
@@ -9043,6 +9064,20 @@ impl Vm {
                     -1.0
                 }))
             }
+            HostFunction::StringConcatThis => {
+                let this_value = this_arg.unwrap_or(JsValue::Undefined);
+                if matches!(this_value, JsValue::Null | JsValue::Undefined) {
+                    return Err(VmError::TypeError(
+                        "String method called on null or undefined",
+                    ));
+                }
+                let mut result = self.coerce_to_string_runtime(this_value, realm, caller_strict)?;
+                for value in args {
+                    let text = self.coerce_to_string_runtime(value, realm, caller_strict)?;
+                    result.push_str(&text);
+                }
+                Ok(JsValue::String(result))
+            }
             HostFunction::StringReplaceAllThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
@@ -9924,6 +9959,18 @@ impl Vm {
                 )))
             }
             HostFunction::SymbolValueOf => {
+                let value = self.strict_this_symbol_primitive(this_arg)?;
+                Ok(JsValue::String(value))
+            }
+            HostFunction::SymbolDescriptionGetter => {
+                let value = self.strict_this_symbol_primitive(this_arg)?;
+                if let Some(description) = Self::symbol_description_from_primitive(&value) {
+                    Ok(JsValue::String(description.to_string()))
+                } else {
+                    Ok(JsValue::Undefined)
+                }
+            }
+            HostFunction::SymbolToPrimitive => {
                 let value = self.strict_this_symbol_primitive(this_arg)?;
                 Ok(JsValue::String(value))
             }
@@ -10844,12 +10891,46 @@ impl Vm {
                 self.execute_string_from_char_code(&args, realm, caller_strict)
             }
             NativeFunction::SymbolConstructor => {
-                let description = match args.first() {
-                    None | Some(JsValue::Undefined) => String::new(),
-                    Some(value) => self.coerce_to_string(value),
+                if called_with_new {
+                    return Err(VmError::TypeError("Symbol is not a constructor"));
+                }
+                let description = match args.first().cloned() {
+                    None | Some(JsValue::Undefined) => None,
+                    Some(value) => {
+                        Some(self.coerce_to_string_runtime(value, realm, caller_strict)?)
+                    }
                 };
-                let marker = self.create_symbol_primitive_string(&description);
+                let marker = self.create_symbol_primitive_string(description.as_deref());
                 Ok(JsValue::String(marker))
+            }
+            NativeFunction::SymbolFor => {
+                let key = self.coerce_to_string_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                if let Some(symbol) = self.symbol_registry_by_key.get(&key).cloned() {
+                    return Ok(JsValue::String(symbol));
+                }
+                let marker = self.create_symbol_primitive_string(Some(&key));
+                self.symbol_registry_by_key
+                    .insert(key.clone(), marker.clone());
+                self.symbol_registry_by_symbol.insert(marker.clone(), key);
+                Ok(JsValue::String(marker))
+            }
+            NativeFunction::SymbolKeyFor => {
+                let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let JsValue::String(symbol_marker) = value else {
+                    return Err(VmError::TypeError("Symbol.keyFor argument must be symbol"));
+                };
+                if !Self::is_symbol_primitive_string(&symbol_marker) {
+                    return Err(VmError::TypeError("Symbol.keyFor argument must be symbol"));
+                }
+                if let Some(key) = self.symbol_registry_by_symbol.get(&symbol_marker) {
+                    Ok(JsValue::String(key.clone()))
+                } else {
+                    Ok(JsValue::Undefined)
+                }
             }
             NativeFunction::IsNaN => {
                 let value = args.first().cloned().unwrap_or(JsValue::Number(f64::NAN));
@@ -15804,6 +15885,9 @@ impl Vm {
                     .cloned()
                     .unwrap_or_default()
             }
+            JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_) => {
+                return Err(VmError::TypeError("property write expects object"));
+            }
             _ => return Ok(()),
         };
 
@@ -17629,8 +17713,8 @@ impl Vm {
         {
             self.ensure_regexp_legacy_static_accessors();
         }
-        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
-            self.ensure_array_species_accessor();
+        if property == "Symbol.species" {
+            self.ensure_builtin_species_accessor(native);
         }
         if let Some(object) = self.native_function_objects.get(&native).cloned() {
             let data_value = object.properties.get(property).cloned();
@@ -20268,7 +20352,23 @@ impl Vm {
                 }
                 self.get_host_function_property(host_id, property, realm)
             }
-            JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
+            JsValue::String(receiver) => {
+                if Self::is_symbol_primitive_string(&receiver) {
+                    let primitive_receiver = JsValue::String(receiver.clone());
+                    let boxed_receiver = self.box_primitive_receiver(primitive_receiver.clone());
+                    let JsValue::Object(object_id) = boxed_receiver else {
+                        unreachable!();
+                    };
+                    self.get_object_property_with_receiver(
+                        object_id,
+                        property,
+                        primitive_receiver,
+                        realm,
+                    )
+                } else {
+                    Ok(self.get_string_property(&receiver, property))
+                }
+            }
             primitive @ (JsValue::Number(_) | JsValue::Bool(_)) => {
                 let primitive_receiver = primitive.clone();
                 let boxed_receiver = self.box_primitive_receiver(primitive);
@@ -20423,6 +20523,7 @@ impl Vm {
                 }
                 self.set_host_function_property(host_id, property, value, realm)
             }
+            JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_) => Ok(value),
             _ => Err(VmError::TypeError("property write expects object")),
         }
     }
@@ -20478,7 +20579,14 @@ impl Vm {
                 }
                 self.get_host_function_property(host_id, property, realm)
             }
-            JsValue::String(base_string) => Ok(self.get_string_property(&base_string, property)),
+            JsValue::String(base_string) => {
+                if Self::is_symbol_primitive_string(&base_string) {
+                    let boxed_base = self.box_primitive_receiver(JsValue::String(base_string));
+                    self.get_property_from_base_with_receiver(boxed_base, property, receiver, realm)
+                } else {
+                    Ok(self.get_string_property(&base_string, property))
+                }
+            }
             _ => Err(VmError::TypeError("property access expects object")),
         }
     }
@@ -21184,7 +21292,23 @@ impl Vm {
                 if strict && strict_on_missing && !still_exists {
                     return Err(VmError::UnknownIdentifier(property.to_string()));
                 }
-                self.set_property_on_receiver(base, property.to_string(), value, realm)
+                match self.set_property_on_receiver(
+                    base.clone(),
+                    property.to_string(),
+                    value.clone(),
+                    realm,
+                ) {
+                    Err(VmError::TypeError("property write expects object"))
+                        if !strict
+                            && matches!(
+                                base,
+                                JsValue::Number(_) | JsValue::Bool(_) | JsValue::String(_)
+                            ) =>
+                    {
+                        Ok(value)
+                    }
+                    result => result,
+                }
             }
             IdentifierReference::Unresolvable { name } => {
                 if strict {
@@ -22366,6 +22490,7 @@ impl Vm {
             let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
             let match_all = self.create_host_function_value(HostFunction::StringMatchAllThis);
             let search = self.create_host_function_value(HostFunction::StringSearchThis);
+            let concat = self.create_host_function_value(HostFunction::StringConcatThis);
             let replace_all = self.create_host_function_value(HostFunction::StringReplaceAllThis);
             let substr = self.create_host_function_value(HostFunction::StringSubstr);
             let anchor = self.create_host_function_value(HostFunction::StringAnchor);
@@ -22418,6 +22543,8 @@ impl Vm {
             self.set_builtin_function_name(&trim_end, "trimEnd");
             self.set_builtin_function_length(&match_all, 1.0);
             self.set_builtin_function_name(&match_all, "matchAll");
+            self.set_builtin_function_length(&concat, 1.0);
+            self.set_builtin_function_name(&concat, "concat");
             self.set_builtin_function_length(&replace_all, 2.0);
             self.set_builtin_function_name(&replace_all, "replaceAll");
             if let Some(object) = self.objects.get_mut(&id) {
@@ -22465,6 +22592,7 @@ impl Vm {
                     ("match", match_fn),
                     ("matchAll", match_all),
                     ("search", search),
+                    ("concat", concat),
                     ("substr", substr),
                     ("anchor", anchor),
                     ("big", big),
@@ -22550,10 +22678,17 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             let to_string = self.create_host_function_value(HostFunction::SymbolToString);
             let value_of = self.create_host_function_value(HostFunction::SymbolValueOf);
+            let description_getter =
+                self.create_host_function_value(HostFunction::SymbolDescriptionGetter);
+            let to_primitive = self.create_host_function_value(HostFunction::SymbolToPrimitive);
             self.set_builtin_function_length(&to_string, 0.0);
             self.set_builtin_function_name(&to_string, "toString");
             self.set_builtin_function_length(&value_of, 0.0);
             self.set_builtin_function_name(&value_of, "valueOf");
+            self.set_builtin_function_length(&description_getter, 0.0);
+            self.set_builtin_function_name(&description_getter, "get description");
+            self.set_builtin_function_length(&to_primitive, 1.0);
+            self.set_builtin_function_name(&to_primitive, "[Symbol.toPrimitive]");
             if let Some(object) = self.objects.get_mut(&id) {
                 object.properties.insert(
                     "constructor".to_string(),
@@ -22581,6 +22716,28 @@ impl Vm {
                     "valueOf".to_string(),
                     PropertyAttributes {
                         writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .getters
+                    .insert("description".to_string(), description_getter);
+                object.property_attributes.insert(
+                    "description".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object
+                    .properties
+                    .insert("Symbol.toPrimitive".to_string(), to_primitive);
+                object.property_attributes.insert(
+                    "Symbol.toPrimitive".to_string(),
+                    PropertyAttributes {
+                        writable: false,
                         enumerable: false,
                         configurable: true,
                     },
@@ -23475,7 +23632,10 @@ impl Vm {
         match value {
             JsValue::Object(object_id) => {
                 if let Some(boxed) = self.boxed_primitive_value(object_id) {
-                    return Ok(boxed);
+                    if !matches!(&boxed, JsValue::String(text) if Self::is_symbol_primitive_string(text))
+                    {
+                        return Ok(boxed);
+                    }
                 }
                 if self.objects.get(&object_id).is_some_and(|object| {
                     object.properties.contains_key("length")
@@ -23506,7 +23666,10 @@ impl Vm {
         match value {
             JsValue::Object(object_id) => {
                 if let Some(boxed) = self.boxed_primitive_value(object_id) {
-                    return Ok(self.coerce_to_string(&boxed));
+                    if !matches!(&boxed, JsValue::String(text) if Self::is_symbol_primitive_string(text))
+                    {
+                        return Ok(self.coerce_to_string(&boxed));
+                    }
                 }
                 if self.objects.get(&object_id).is_some_and(|object| {
                     object.properties.contains_key("length")
@@ -23585,14 +23748,12 @@ impl Vm {
         } else {
             ["valueOf", "toString"]
         };
-        let mut invoked_callable = false;
 
         for method_name in method_names {
             let method = self.get_object_property(object_id, method_name, realm)?;
             if !Self::is_callable_value(&method) {
                 continue;
             }
-            invoked_callable = true;
             let result = self.execute_callable(
                 method,
                 Some(JsValue::Object(object_id)),
@@ -23605,13 +23766,9 @@ impl Vm {
             }
         }
 
-        if invoked_callable {
-            return Err(VmError::TypeError(
-                "cannot convert object to primitive value",
-            ));
-        }
-
-        Ok(JsValue::String("[object Object]".to_string()))
+        Err(VmError::TypeError(
+            "cannot convert object to primitive value",
+        ))
     }
 
     fn ordinary_to_primitive_for_property_key(
@@ -23688,14 +23845,12 @@ impl Vm {
         } else {
             ["valueOf", "toString"]
         };
-        let mut invoked_callable = false;
 
         for method_name in method_names {
             let method = self.get_function_property(closure_id, method_name, realm)?;
             if !Self::is_callable_value(&method) {
                 continue;
             }
-            invoked_callable = true;
             let result = self.execute_callable(
                 method,
                 Some(JsValue::Function(closure_id)),
@@ -23708,13 +23863,9 @@ impl Vm {
             }
         }
 
-        if invoked_callable {
-            return Err(VmError::TypeError(
-                "cannot convert object to primitive value",
-            ));
-        }
-
-        Ok(JsValue::String("[function]".to_string()))
+        Err(VmError::TypeError(
+            "cannot convert object to primitive value",
+        ))
     }
 
     fn coerce_this_for_sloppy(&mut self, this_arg: Option<JsValue>) -> JsValue {
@@ -25618,6 +25769,10 @@ impl Vm {
         if property == "prototype" && Self::native_function_is_constructor(native) {
             return false;
         }
+        if native == NativeFunction::SymbolConstructor && Self::is_symbol_well_known_name(property)
+        {
+            return false;
+        }
         !matches!(
             (native, property),
             (
@@ -25639,6 +25794,10 @@ impl Vm {
         property: &str,
     ) -> bool {
         if property == "prototype" && Self::native_function_is_constructor(native) {
+            return false;
+        }
+        if native == NativeFunction::SymbolConstructor && Self::is_symbol_well_known_name(property)
+        {
             return false;
         }
         !matches!(
@@ -25709,6 +25868,10 @@ impl Vm {
                 | (NativeFunction::ArrayConstructor, "fromAsync")
                 | (NativeFunction::ArrayConstructor, "of")
                 | (NativeFunction::ArrayConstructor, "Symbol.species")
+                | (NativeFunction::MapConstructor, "Symbol.species")
+                | (NativeFunction::SetConstructor, "Symbol.species")
+                | (NativeFunction::PromiseConstructor, "Symbol.species")
+                | (NativeFunction::RegExpConstructor, "Symbol.species")
                 | (NativeFunction::ObjectConstructor, "getPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "isExtensible")
                 | (NativeFunction::ObjectConstructor, "isSealed")
@@ -25734,6 +25897,8 @@ impl Vm {
                 | (NativeFunction::NumberConstructor, "isFinite")
                 | (NativeFunction::NumberConstructor, "isInteger")
                 | (NativeFunction::NumberConstructor, "isSafeInteger")
+                | (NativeFunction::SymbolConstructor, "for")
+                | (NativeFunction::SymbolConstructor, "keyFor")
                 | (NativeFunction::SymbolConstructor, "iterator")
                 | (NativeFunction::SymbolConstructor, "asyncIterator")
                 | (NativeFunction::SymbolConstructor, "hasInstance")
@@ -25747,6 +25912,8 @@ impl Vm {
                 | (NativeFunction::SymbolConstructor, "toPrimitive")
                 | (NativeFunction::SymbolConstructor, "toStringTag")
                 | (NativeFunction::SymbolConstructor, "unscopables")
+                | (NativeFunction::SymbolConstructor, "dispose")
+                | (NativeFunction::SymbolConstructor, "asyncDispose")
                 | (NativeFunction::Assert, "sameValue")
                 | (NativeFunction::Assert, "notSameValue")
                 | (NativeFunction::Assert, "throws")
@@ -27072,6 +27239,7 @@ impl Vm {
             "match" => self.create_host_function_value(HostFunction::StringMatchThis),
             "matchAll" => self.create_host_function_value(HostFunction::StringMatchAllThis),
             "search" => self.create_host_function_value(HostFunction::StringSearchThis),
+            "concat" => self.create_host_function_value(HostFunction::StringConcatThis),
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
             "split" => self.create_host_function_value(HostFunction::StringSplitThis),
             "Symbol.iterator" => self.create_host_function_value(HostFunction::StringIteratorThis),
@@ -27304,6 +27472,8 @@ impl Vm {
             NativeFunction::DataViewConstructor => "DataView",
             NativeFunction::Uint8ArrayConstructor => "Uint8Array",
             NativeFunction::SymbolConstructor => "Symbol",
+            NativeFunction::SymbolFor => "for",
+            NativeFunction::SymbolKeyFor => "keyFor",
             NativeFunction::DateConstructor => "Date",
             NativeFunction::DateNow => "now",
             NativeFunction::RegExpConstructor => "RegExp",
@@ -27367,16 +27537,26 @@ impl Vm {
         }
     }
 
-    fn ensure_array_species_accessor(&mut self) {
-        if self.native_function_deleted.contains(&(
-            NativeFunction::ArrayConstructor,
-            "Symbol.species".to_string(),
-        )) {
+    fn ensure_builtin_species_accessor(&mut self, native: NativeFunction) {
+        if !matches!(
+            native,
+            NativeFunction::ArrayConstructor
+                | NativeFunction::MapConstructor
+                | NativeFunction::SetConstructor
+                | NativeFunction::PromiseConstructor
+                | NativeFunction::RegExpConstructor
+        ) {
+            return;
+        }
+        if self
+            .native_function_deleted
+            .contains(&(native, "Symbol.species".to_string()))
+        {
             return;
         }
         if self
             .native_function_objects
-            .get(&NativeFunction::ArrayConstructor)
+            .get(&native)
             .is_some_and(|object| object.getters.contains_key("Symbol.species"))
         {
             return;
@@ -27385,10 +27565,7 @@ impl Vm {
         let getter = self.create_host_function_value(HostFunction::ArraySpeciesGetter);
         self.set_builtin_function_length(&getter, 0.0);
         self.set_builtin_function_name(&getter, "get [Symbol.species]");
-        let object = self
-            .native_function_objects
-            .entry(NativeFunction::ArrayConstructor)
-            .or_default();
+        let object = self.native_function_objects.entry(native).or_default();
         object.getters.insert("Symbol.species".to_string(), getter);
         object.property_attributes.insert(
             "Symbol.species".to_string(),
@@ -27407,8 +27584,8 @@ impl Vm {
         receiver: JsValue,
         realm: &Realm,
     ) -> Result<Option<JsValue>, VmError> {
-        if native == NativeFunction::ArrayConstructor && property == "Symbol.species" {
-            self.ensure_array_species_accessor();
+        if property == "Symbol.species" {
+            self.ensure_builtin_species_accessor(native);
         }
         let Some(object) = self.native_function_objects.get(&native).cloned() else {
             return Ok(None);
@@ -27660,6 +27837,12 @@ impl Vm {
             }
             (NativeFunction::RegExpConstructor, "prototype") => self.regexp_prototype_value(),
             (NativeFunction::SymbolConstructor, "prototype") => self.symbol_prototype_value(),
+            (NativeFunction::SymbolConstructor, "for") => {
+                JsValue::NativeFunction(NativeFunction::SymbolFor)
+            }
+            (NativeFunction::SymbolConstructor, "keyFor") => {
+                JsValue::NativeFunction(NativeFunction::SymbolKeyFor)
+            }
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
             }
@@ -27713,6 +27896,12 @@ impl Vm {
             }
             (NativeFunction::SymbolConstructor, "unscopables") => {
                 JsValue::String(Self::well_known_symbol_primitive("Symbol.unscopables"))
+            }
+            (NativeFunction::SymbolConstructor, "dispose") => {
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.dispose"))
+            }
+            (NativeFunction::SymbolConstructor, "asyncDispose") => {
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.asyncDispose"))
             }
             (NativeFunction::Assert, "sameValue") => {
                 self.create_host_function_value(HostFunction::AssertSameValue)
@@ -27802,7 +27991,8 @@ impl Vm {
             | (NativeFunction::PromiseConstructor, "length")
             | (NativeFunction::ArrayBufferConstructor, "length")
             | (NativeFunction::DataViewConstructor, "length")
-            | (NativeFunction::Uint8ArrayConstructor, "length") => JsValue::Number(0.0),
+            | (NativeFunction::Uint8ArrayConstructor, "length")
+            | (NativeFunction::SymbolConstructor, "length") => JsValue::Number(0.0),
             (_, "length") => JsValue::Number(1.0),
             _ => JsValue::Undefined,
         }
@@ -27848,7 +28038,10 @@ impl Vm {
         match value {
             JsValue::Object(object_id) => {
                 if let Some(boxed) = self.boxed_primitive_value(object_id) {
-                    return Ok(boxed);
+                    if !matches!(&boxed, JsValue::String(text) if Self::is_symbol_primitive_string(text))
+                    {
+                        return Ok(boxed);
+                    }
                 }
                 self.ordinary_to_primitive_for_add(object_id, false, realm, caller_strict)
             }
@@ -27946,6 +28139,14 @@ impl Vm {
             let left_primitive = self.primitive_for_numeric(left, realm, caller_strict)?;
             (left_primitive, right_primitive)
         };
+
+        if matches!(&left_primitive, JsValue::String(text) if Self::is_symbol_primitive_string(text))
+            || matches!(&right_primitive, JsValue::String(text) if Self::is_symbol_primitive_string(text))
+        {
+            return Err(VmError::TypeError(
+                "Cannot convert a Symbol value to a number",
+            ));
+        }
 
         if let (JsValue::String(left_string), JsValue::String(right_string)) =
             (&left_primitive, &right_primitive)
@@ -28151,6 +28352,27 @@ impl Vm {
         }
     }
 
+    fn is_symbol_well_known_name(property: &str) -> bool {
+        matches!(
+            property,
+            "iterator"
+                | "asyncIterator"
+                | "hasInstance"
+                | "isConcatSpreadable"
+                | "match"
+                | "matchAll"
+                | "replace"
+                | "search"
+                | "species"
+                | "split"
+                | "toPrimitive"
+                | "toStringTag"
+                | "unscopables"
+                | "dispose"
+                | "asyncDispose"
+        )
+    }
+
     fn is_symbol_primitive_string(value: &str) -> bool {
         value.starts_with(SYMBOL_PRIMITIVE_MARKER_PREFIX)
     }
@@ -28176,26 +28398,35 @@ impl Vm {
             "Symbol.toPrimitive" => Some("Symbol.toPrimitive"),
             "Symbol.toStringTag" => Some("Symbol.toStringTag"),
             "Symbol.unscopables" => Some("Symbol.unscopables"),
+            "Symbol.dispose" => Some("Symbol.dispose"),
+            "Symbol.asyncDispose" => Some("Symbol.asyncDispose"),
             _ => None,
         }
     }
 
-    fn create_symbol_primitive_string(&mut self, description: &str) -> String {
+    fn create_symbol_primitive_string(&mut self, description: Option<&str>) -> String {
         let symbol_id = self.next_symbol_id;
         self.next_symbol_id = self
             .next_symbol_id
             .checked_add(1)
             .expect("symbol id overflow");
-        format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{symbol_id}:{description}")
+        if let Some(description) = description {
+            format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{symbol_id}:{description}")
+        } else {
+            format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{symbol_id}")
+        }
+    }
+
+    fn symbol_description_from_primitive(value: &str) -> Option<&str> {
+        let payload = value.strip_prefix(SYMBOL_PRIMITIVE_MARKER_PREFIX)?;
+        if let Some(name) = payload.strip_prefix(WELL_KNOWN_SYMBOL_MARKER_PREFIX) {
+            return Some(name);
+        }
+        payload.split_once(':').map(|(_, description)| description)
     }
 
     fn symbol_primitive_display_string(value: &str) -> String {
-        let payload = value
-            .strip_prefix(SYMBOL_PRIMITIVE_MARKER_PREFIX)
-            .unwrap_or_default();
-        let description = payload
-            .split_once(':')
-            .map_or(payload, |(_, description)| description);
+        let description = Self::symbol_description_from_primitive(value).unwrap_or_default();
         if description.is_empty() {
             "Symbol()".to_string()
         } else {

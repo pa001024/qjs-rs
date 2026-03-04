@@ -315,6 +315,37 @@ if (typeof $262.createRealm !== "function") {
     otherGlobal.AggregateError = AggregateError;
     otherGlobal.Reflect = Reflect;
     otherGlobal.Proxy = Proxy;
+    otherGlobal.Symbol = function Symbol(description) {
+      return hostGlobal.Symbol(description);
+    };
+    otherGlobal.Symbol.prototype = hostGlobal.Symbol.prototype;
+    otherGlobal.Symbol.for = function (key) {
+      return hostGlobal.Symbol.for(key);
+    };
+    otherGlobal.Symbol.keyFor = function (sym) {
+      return hostGlobal.Symbol.keyFor(sym);
+    };
+    var symbolValueNames = [
+      "iterator",
+      "asyncIterator",
+      "hasInstance",
+      "isConcatSpreadable",
+      "match",
+      "matchAll",
+      "replace",
+      "search",
+      "species",
+      "split",
+      "toPrimitive",
+      "toStringTag",
+      "unscopables",
+      "dispose",
+      "asyncDispose"
+    ];
+    for (var symbolIndex = 0; symbolIndex < symbolValueNames.length; symbolIndex++) {
+      var symbolName = symbolValueNames[symbolIndex];
+      otherGlobal.Symbol[symbolName] = hostGlobal.Symbol[symbolName];
+    }
     otherGlobal.TypeError = function TypeError(message) {
       var err = new hostGlobal.TypeError(message);
       Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);

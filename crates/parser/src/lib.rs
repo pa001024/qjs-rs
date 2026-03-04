@@ -8983,10 +8983,14 @@ impl Parser {
 
         let mut expr = Expr::String(quasis[0].clone());
         for (index, substitution) in expressions.into_iter().enumerate() {
+            let stringified = Expr::Call {
+                callee: Box::new(Expr::Identifier(Identifier("String".to_string()))),
+                arguments: vec![substitution],
+            };
             expr = Expr::Binary {
                 op: BinaryOp::Add,
                 left: Box::new(expr),
-                right: Box::new(substitution),
+                right: Box::new(stringified),
             };
             expr = Expr::Binary {
                 op: BinaryOp::Add,
@@ -10408,7 +10412,10 @@ export default value;\n";
                     value: "a".to_string(),
                     has_escape: false,
                 })),
-                right: Box::new(Expr::Identifier(Identifier("b".to_string()))),
+                right: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Identifier(Identifier("String".to_string()))),
+                    arguments: vec![Expr::Identifier(Identifier("b".to_string()))],
+                }),
             }),
             right: Box::new(Expr::String(StringLiteral {
                 value: "c".to_string(),
