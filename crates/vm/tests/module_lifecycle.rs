@@ -1056,6 +1056,45 @@ fn module_keyword_line_comment_continuation_parses_and_evaluates() {
 }
 
 #[test]
+fn module_import_with_comments_around_from_keyword_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "entry.js",
+            "import { value }/* gap */from/* gap */'./dep.js';\nexport { value as answer };\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("import with comments around from keyword should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn module_reexport_with_comments_around_from_keyword_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "bridge.js",
+            "export { value as answer }/* gap */from/* gap */'./dep.js';\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { answer } from './bridge.js';\nexport const total = answer;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("re-export with comments around from keyword should evaluate");
+    assert_eq!(load_number_export(&exports, "total"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

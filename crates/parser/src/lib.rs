@@ -1031,16 +1031,22 @@ fn contains_module_from_keyword(source: &str) -> bool {
 }
 
 fn strip_module_from_keyword(source: &str) -> Option<&str> {
-    let source = source.trim_start();
+    let (source, _) = strip_module_keyword_leading_separators(source)?;
     let after_from = source.strip_prefix("from")?;
-    let first = after_from.chars().next()?;
-    if !(first.is_whitespace() || first == '\'' || first == '"') {
+    if after_from.is_empty() {
         return None;
     }
-    let specifier = if first.is_whitespace() {
-        after_from.trim_start()
-    } else {
+    let first = after_from.chars().next()?;
+    let specifier = if first == '\'' || first == '"' {
         after_from
+    } else if first.is_whitespace() || first == '/' {
+        let (trimmed, consumed_separator) = strip_module_keyword_leading_separators(after_from)?;
+        if !consumed_separator {
+            return None;
+        }
+        trimmed
+    } else {
+        return None;
     };
     (!specifier.is_empty()).then_some(specifier)
 }
@@ -1060,8 +1066,16 @@ fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
         if right.chars().next().is_some_and(is_module_identifier_part) {
             continue;
         }
-        let clause = source[..index].trim_end();
-        let specifier = source[index + "from".len()..].trim_start();
+        let Some(clause) =
+            trim_module_trailing_block_comment_separators(source[..index].trim_end())
+        else {
+            continue;
+        };
+        let Some((specifier, _)) =
+            strip_module_keyword_leading_separators(&source[index + "from".len()..])
+        else {
+            continue;
+        };
         if clause.is_empty()
             || specifier.is_empty()
             || !(specifier.starts_with('\'') || specifier.starts_with('"'))
@@ -1071,6 +1085,23 @@ fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
         split_result = Some((clause, specifier));
     }
     split_result
+}
+
+fn trim_module_trailing_block_comment_separators(source: &str) -> Option<&str> {
+    let mut current = source;
+    loop {
+        let trimmed_ws = current.trim_end();
+        if trimmed_ws.len() != current.len() {
+            current = trimmed_ws;
+            continue;
+        }
+        let Some(prefix) = current.strip_suffix("*/") else {
+            break;
+        };
+        let start = prefix.rfind("/*")?;
+        current = &current[..start];
+    }
+    Some(current)
 }
 
 fn strip_module_export_default_prefix(source: &str) -> Option<&str> {
