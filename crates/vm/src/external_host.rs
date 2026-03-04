@@ -4,12 +4,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
 use crate::{HostFunction, PropertyAttributes, Realm, Vm, VmError};
+
+static ASYNC_HOST_TOKIO_RUNTIME_HANDLE: OnceLock<Mutex<Option<tokio::runtime::Handle>>> =
+    OnceLock::new();
 
 type ExternalHostCallback =
     dyn FnMut(&mut Vm, Option<JsValue>, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError>;
@@ -23,6 +26,23 @@ type ExternalAsyncHostCallback = dyn FnMut(
 
 pub(super) type ExternalHostCallbackFuture =
     Pin<Box<dyn Future<Output = Result<JsValue, VmError>> + Send + 'static>>;
+
+fn async_host_tokio_runtime_slot() -> &'static Mutex<Option<tokio::runtime::Handle>> {
+    ASYNC_HOST_TOKIO_RUNTIME_HANDLE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_async_host_tokio_runtime_handle(handle: tokio::runtime::Handle) {
+    if let Ok(mut guard) = async_host_tokio_runtime_slot().lock() {
+        *guard = Some(handle);
+    }
+}
+
+pub(crate) fn get_async_host_tokio_runtime_handle() -> Option<tokio::runtime::Handle> {
+    async_host_tokio_runtime_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
 
 pub(super) enum ExternalHostCallbackEntry {
     Sync(Box<ExternalHostCallback>),

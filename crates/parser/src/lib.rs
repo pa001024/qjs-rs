@@ -8,7 +8,8 @@ use std::{
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Module,
     ModuleExport, ModuleImport, ModuleImportBinding, ObjectProperty, ObjectPropertyKey, Script,
-    Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration,
+    SourceLocation, Stmt, StringLiteral, SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration,
+    register_script_statement_locations,
 };
 use lexer::{Token, TokenKind, lex};
 
@@ -73,10 +74,11 @@ pub fn parse_script_with_super(
     })?;
     let mut parser = Parser::new(tokens, source);
     parser.allow_super_reference = allow_super_reference;
-    let statements = parser.parse_statement_list(None)?;
+    let (statements, statement_locations) = parser.parse_top_level_statement_list()?;
     validate_early_errors(&statements)?;
     validate_statement_list_strict_mode(&statements, false)?;
     parser.expect_eof()?;
+    register_script_statement_locations(&statements, statement_locations);
     Ok(Script { statements })
 }
 
@@ -2884,6 +2886,84 @@ impl Parser {
         }
     }
 
+    fn current_token_source_location(&self) -> SourceLocation {
+        let offset = self
+            .tokens
+            .get(self.pos)
+            .map(|token| token.span.start)
+            .unwrap_or(self.source.len());
+        self.offset_to_source_location(offset)
+    }
+
+    fn offset_to_source_location(&self, offset: usize) -> SourceLocation {
+        let mut line = 1u32;
+        let mut column = 1u32;
+        let end = offset.min(self.source.len());
+        for ch in self.source[..end].chars() {
+            if ch == '\n' {
+                line = line.saturating_add(1);
+                column = 1;
+            } else {
+                column = column.saturating_add(1);
+            }
+        }
+        SourceLocation { line, column }
+    }
+
+    fn parse_top_level_statement_list(
+        &mut self,
+    ) -> Result<(Vec<Stmt>, Vec<SourceLocation>), ParseError> {
+        let mut statements = Vec::new();
+        let mut locations = Vec::new();
+
+        loop {
+            if self.is_eof() {
+                break;
+            }
+
+            let location = self.current_token_source_location();
+            if self.matches(&TokenKind::Semicolon) {
+                statements.push(Stmt::Empty);
+                locations.push(location);
+                continue;
+            }
+
+            let starts_class_declaration = self.check_keyword("class");
+            let statement = self.parse_statement()?;
+            let needs_separator = !matches!(
+                statement,
+                Stmt::Block(_)
+                    | Stmt::Empty
+                    | Stmt::FunctionDeclaration(_)
+                    | Stmt::If { .. }
+                    | Stmt::While { .. }
+                    | Stmt::With { .. }
+                    | Stmt::DoWhile { .. }
+                    | Stmt::For { .. }
+                    | Stmt::Switch { .. }
+                    | Stmt::Labeled { .. }
+                    | Stmt::Try { .. }
+            ) && !starts_class_declaration;
+            statements.push(statement);
+            locations.push(location);
+
+            if self.matches(&TokenKind::Semicolon) {
+                continue;
+            }
+            if self.is_eof() {
+                break;
+            }
+            if self.has_line_terminator_between_prev_and_current() {
+                continue;
+            }
+            if needs_separator {
+                return Err(self.error_current("expected ';' between statements"));
+            }
+        }
+
+        Ok((statements, locations))
+    }
+
     fn parse_statement_list(
         &mut self,
         terminator: Option<TokenKind>,
@@ -3439,7 +3519,9 @@ impl Parser {
                                 | TokenKind::MinusEqual
                                 | TokenKind::MinusMinus
                                 | TokenKind::Star
+                                | TokenKind::StarStar
                                 | TokenKind::StarEqual
+                                | TokenKind::StarStarEqual
                                 | TokenKind::Slash
                                 | TokenKind::SlashEqual
                                 | TokenKind::Percent
@@ -6080,6 +6162,11 @@ impl Parser {
                 AssignmentKind::Compound(BinaryOp::Mul),
                 self.previous_position(),
             )
+        } else if self.matches(&TokenKind::StarStarEqual) {
+            (
+                AssignmentKind::Compound(BinaryOp::Pow),
+                self.previous_position(),
+            )
         } else if self.matches(&TokenKind::SlashEqual) {
             (
                 AssignmentKind::Compound(BinaryOp::Div),
@@ -7029,7 +7116,7 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_unary()?;
+        let mut expr = self.parse_exponentiation()?;
         loop {
             let op = if self.matches(&TokenKind::Star) {
                 BinaryOp::Mul
@@ -7040,7 +7127,7 @@ impl Parser {
             } else {
                 break;
             };
-            let right = self.parse_unary()?;
+            let right = self.parse_exponentiation()?;
             expr = Expr::Binary {
                 op,
                 left: Box::new(expr),
@@ -7048,6 +7135,19 @@ impl Parser {
             };
         }
         Ok(expr)
+    }
+
+    fn parse_exponentiation(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_unary()?;
+        if self.matches(&TokenKind::StarStar) {
+            let right = self.parse_exponentiation()?;
+            return Ok(Expr::Binary {
+                op: BinaryOp::Pow,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
+        }
+        Ok(left)
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
@@ -8796,7 +8896,9 @@ impl Parser {
             | TokenKind::MinusEqual
             | TokenKind::MinusMinus
             | TokenKind::Star
+            | TokenKind::StarStar
             | TokenKind::StarEqual
+            | TokenKind::StarStarEqual
             | TokenKind::Bang
             | TokenKind::Tilde
             | TokenKind::Equal
@@ -9686,6 +9788,32 @@ mod tests {
             op: BinaryOp::Sub,
             left: Box::new(add),
             right: Box::new(Expr::Number(3.0)),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_exponentiation_expression() {
+        let parsed = parse_expression("2 ** 3").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::Pow,
+            left: Box::new(Expr::Number(2.0)),
+            right: Box::new(Expr::Number(3.0)),
+        };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_exponentiation_right_associative() {
+        let parsed = parse_expression("2 ** 3 ** 2").expect("parser should succeed");
+        let expected = Expr::Binary {
+            op: BinaryOp::Pow,
+            left: Box::new(Expr::Number(2.0)),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::Pow,
+                left: Box::new(Expr::Number(3.0)),
+                right: Box::new(Expr::Number(2.0)),
+            }),
         };
         assert_eq!(parsed, expected);
     }

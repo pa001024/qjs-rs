@@ -18,7 +18,7 @@ pub use fast_path::PacketDFastPathCounters;
 pub use fast_path::PacketGFastPathCounters;
 pub use fast_path::PacketHFastPathCounters;
 pub use host_adapter::{
-    BoaLikeHostAdapter, ConsoleLevel, ConsoleLogger, HostClassAsyncMethodRegistration,
+    ConsoleLevel, ConsoleLogger, HostAdapter, HostClassAsyncMethodRegistration,
     HostClassAsyncStaticMethodRegistration, HostClassMethodRegistration, HostClassRegistration,
     HostClassStaticMethodRegistration,
 };
@@ -33,8 +33,9 @@ use ast::{
 };
 use builtins::install_baseline;
 use bytecode::{
-    Chunk, CompiledFunction, CompiledModule, IdentifierOpcodeFamily, IdentifierSlotMetadata,
-    Opcode, build_identifier_slot_metadata, compile_expression, compile_module, compile_script,
+    Chunk, CompiledDebugInfo, CompiledFunction, CompiledModule, DebugLocation,
+    IdentifierOpcodeFamily, IdentifierSlotMetadata, Opcode, build_identifier_slot_metadata,
+    compile_expression, compile_module, compile_script,
 };
 use fancy_regex::{Regex, RegexBuilder};
 use parser::{parse_expression, parse_module, parse_script_with_super};
@@ -52,6 +53,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::external_host::{
     ExternalHostCallbackFuture, ExternalHostCallbacks, block_on_external_host_future,
+    get_async_host_tokio_runtime_handle,
+    set_async_host_tokio_runtime_handle as set_async_host_tokio_runtime_handle_inner,
 };
 use crate::fast_path::{
     NumericBinaryOp, NumericRelationalOp, PacketAFastPathState, PacketBFastPathState,
@@ -135,8 +138,9 @@ const JSON_PARSE_SYNTAX_ERROR_MESSAGE: &str = "JSON.parse malformed input";
 const JSON_STRINGIFY_CYCLE_TYPE_ERROR_MESSAGE: &str =
     "JSON.stringify cannot serialize cyclic structures";
 const AWAIT_DRAIN_STEP_BUDGET: usize = 10_000;
-const AWAIT_DRAIN_MAX_CYCLES: usize = 64;
+const AWAIT_DRAIN_MAX_CYCLES: usize = 20_000;
 const ASYNC_HOST_CALLBACK_RECV_TIMEOUT: Duration = Duration::from_millis(5);
+const LONG_LOOP_INTERRUPT_POLL_MASK: usize = 1024 - 1;
 const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
 const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
   var C = this;
@@ -548,6 +552,13 @@ enum FunctionMethod {
     Bind,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum ArrayMapDenseRead {
+    Value(JsValue),
+    Hole,
+    Invalidated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegExpLegacyStaticProperty {
     Input,
@@ -682,6 +693,7 @@ enum HostFunction {
     ArraySomeThis,
     ArrayFilterThis,
     ArrayMapThis,
+    ArrayFlatMapThis,
     ArrayFillThis,
     ArrayFindThis,
     ArrayFindIndexThis,
@@ -907,6 +919,12 @@ struct EvalStateSnapshot {
     with_objects: Vec<WithFrame>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecutionSite {
+    code_key: (usize, usize),
+    pc: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct IdentifierFamilySlots {
     load: Option<u32>,
@@ -989,6 +1007,14 @@ struct PromiseJobQueue {
     callback_in_progress: bool,
 }
 
+#[derive(Debug, Clone)]
+struct DeferredAsyncFunctionCall {
+    closure_id: u64,
+    this_arg: Option<JsValue>,
+    args: Vec<JsValue>,
+    result_promise_id: ObjectId,
+}
+
 #[derive(Debug)]
 struct AsyncHostCallbackCompletion {
     task_id: u64,
@@ -1054,6 +1080,7 @@ pub struct Vm {
     scopes: Vec<ScopeRef>,
     bindings: Vec<Option<Binding>>,
     global_property_sync_bindings: Vec<bool>,
+    free_binding_slots: Vec<BindingId>,
     next_binding_id: BindingId,
     objects: BTreeMap<ObjectId, JsObject>,
     next_object_slot: u32,
@@ -1078,6 +1105,7 @@ pub struct Vm {
     next_pending_job_root_candidate_id: u64,
     pending_promise_records: BTreeMap<ObjectId, PendingPromiseRecord>,
     promise_job_queue: PromiseJobQueue,
+    deferred_async_calls: VecDeque<DeferredAsyncFunctionCall>,
     async_host_callbacks: AsyncHostCallbackState,
     object_to_string_host_id: Option<u64>,
     global_object_id: Option<ObjectId>,
@@ -1172,6 +1200,11 @@ pub struct Vm {
         BTreeMap<(usize, usize), Rc<HashMap<String, IdentifierFamilySlots>>>,
     annex_b_sync_counts_cache: BTreeMap<(usize, usize), Rc<BTreeMap<String, usize>>>,
     last_persistent_chunk_key: Option<(usize, usize)>,
+    debug_code_locations: BTreeMap<(usize, usize), Rc<Vec<DebugLocation>>>,
+    debug_function_tables: BTreeMap<(usize, usize), Rc<Vec<Vec<DebugLocation>>>>,
+    current_execution_site: Option<ExecutionSite>,
+    last_error_location: Option<DebugLocation>,
+    debug_source_name: Option<String>,
 }
 
 impl Vm {
@@ -1181,11 +1214,14 @@ impl Vm {
     }
 
     pub fn execute_in_realm(&mut self, chunk: &Chunk, realm: &Realm) -> Result<JsValue, VmError> {
+        self.last_error_location = None;
+        self.current_execution_site = None;
         self.stack.clear();
         self.scopes.clear();
         self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
         self.bindings.clear();
         self.global_property_sync_bindings.clear();
+        self.free_binding_slots.clear();
         self.next_binding_id = 0;
         self.objects.clear();
         self.next_object_slot = 0;
@@ -1210,6 +1246,7 @@ impl Vm {
         self.next_pending_job_root_candidate_id = 0;
         self.pending_promise_records.clear();
         self.promise_job_queue.jobs.clear();
+        self.deferred_async_calls.clear();
         self.async_host_callbacks = AsyncHostCallbackState::default();
         self.promise_job_queue.draining = false;
         self.promise_job_queue.callback_in_progress = false;
@@ -1418,6 +1455,7 @@ impl Vm {
         let signal = match signal {
             Ok(signal) => signal,
             Err(err) => {
+                self.last_error_location = self.current_execution_location();
                 if matches!(err, VmError::Interrupted) {
                     let mut hooks = NoopPromiseJobHostHooks;
                     self.reject_pending_async_host_promises_due_to_interrupt(&mut hooks)?;
@@ -1437,6 +1475,8 @@ impl Vm {
         chunk: &Chunk,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        self.last_error_location = None;
+        self.current_execution_site = None;
         let chunk_key = (chunk.code.as_ptr() as usize, chunk.code.len());
         let chunk_changed = self.last_persistent_chunk_key != Some(chunk_key);
         if self.last_persistent_chunk_key != Some(chunk_key) {
@@ -1487,6 +1527,7 @@ impl Vm {
         let signal = match signal {
             Ok(signal) => signal,
             Err(err) => {
+                self.last_error_location = self.current_execution_location();
                 if matches!(err, VmError::Interrupted) {
                     let mut hooks = NoopPromiseJobHostHooks;
                     self.reject_pending_async_host_promises_due_to_interrupt(&mut hooks)?;
@@ -1499,6 +1540,109 @@ impl Vm {
             ExecutionSignal::Halt => self.stack.pop().ok_or(VmError::EmptyStack),
             ExecutionSignal::Return => Err(VmError::TopLevelReturn),
         }
+    }
+
+    pub fn execute_in_realm_persistent_with_debug(
+        &mut self,
+        chunk: &Chunk,
+        debug: &CompiledDebugInfo,
+        source_name: Option<&str>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.clear_debug_mappings();
+        self.register_debug_for_chunk(chunk, debug);
+        self.debug_source_name = source_name.map(|name| name.to_string());
+        let result = self.execute_in_realm_persistent(chunk, realm);
+        self.clear_debug_mappings();
+        self.debug_source_name = None;
+        result
+    }
+
+    pub fn last_error_position(&self) -> Option<(u32, u32)> {
+        self.last_error_location
+            .map(|location| (location.line, location.column))
+    }
+
+    fn code_key(code: &[Opcode]) -> (usize, usize) {
+        (code.as_ptr() as usize, code.len())
+    }
+
+    fn functions_key(functions: &[CompiledFunction]) -> (usize, usize) {
+        (functions.as_ptr() as usize, functions.len())
+    }
+
+    fn register_debug_for_chunk(&mut self, chunk: &Chunk, debug: &CompiledDebugInfo) {
+        self.register_debug_code_locations(&chunk.code, &debug.code_locations);
+        self.register_debug_function_table(&chunk.functions, &debug.function_code_locations);
+    }
+
+    fn register_debug_code_locations(&mut self, code: &[Opcode], locations: &[DebugLocation]) {
+        if code.is_empty() || locations.is_empty() {
+            return;
+        }
+        let mut normalized = locations.to_vec();
+        if normalized.len() < code.len() {
+            let fallback = normalized.last().copied().unwrap_or_default();
+            normalized.resize(code.len(), fallback);
+        }
+        self.debug_code_locations
+            .insert(Self::code_key(code), Rc::new(normalized));
+    }
+
+    fn register_debug_function_table(
+        &mut self,
+        functions: &[CompiledFunction],
+        function_locations: &[Vec<DebugLocation>],
+    ) {
+        if functions.is_empty() {
+            return;
+        }
+        let mut normalized = function_locations.to_vec();
+        if normalized.len() < functions.len() {
+            normalized.resize(functions.len(), Vec::new());
+        }
+        let normalized_rc = Rc::new(normalized);
+        self.debug_function_tables
+            .insert(Self::functions_key(functions), Rc::clone(&normalized_rc));
+        for (index, function) in functions.iter().enumerate() {
+            if let Some(locations) = normalized_rc.get(index) {
+                self.register_debug_code_locations(&function.code, locations);
+            }
+        }
+    }
+
+    fn clear_debug_mappings(&mut self) {
+        self.debug_code_locations.clear();
+        self.debug_function_tables.clear();
+        self.current_execution_site = None;
+    }
+
+    fn current_execution_location(&self) -> Option<DebugLocation> {
+        let site = self.current_execution_site?;
+        let locations = self.debug_code_locations.get(&site.code_key)?;
+        locations.get(site.pc).copied()
+    }
+
+    fn current_error_stack_text(&self, name: &str, message: &str) -> Option<String> {
+        let location = self.current_execution_location()?;
+        let source_name = self
+            .debug_source_name
+            .as_deref()
+            .map(Self::sanitize_display_path)
+            .unwrap_or_else(|| "<script>".to_string());
+        Some(format!(
+            "{name}: {message}\n    at {source_name}:{}:{}",
+            location.line, location.column
+        ))
+    }
+
+    fn sanitize_display_path(path: &str) -> String {
+        if cfg!(windows)
+            && let Some(stripped) = path.strip_prefix("\\\\?\\")
+        {
+            return stripped.to_string();
+        }
+        path.to_string()
     }
 
     pub fn with_perf_from_env() -> Self {
@@ -2273,13 +2417,23 @@ impl Vm {
 
     pub fn has_pending_promise_jobs(&self) -> bool {
         !self.promise_job_queue.jobs.is_empty()
+            || !self.deferred_async_calls.is_empty()
             || !self.async_host_callbacks.pending_promises.is_empty()
+    }
+
+    pub fn has_pending_deferred_async_calls(&self) -> bool {
+        !self.deferred_async_calls.is_empty()
+    }
+
+    pub fn pending_deferred_async_call_count(&self) -> usize {
+        self.deferred_async_calls.len()
     }
 
     pub fn pending_promise_job_count(&self) -> usize {
         self.promise_job_queue
             .jobs
             .len()
+            .saturating_add(self.deferred_async_calls.len())
             .saturating_add(self.async_host_callbacks.pending_promises.len())
     }
 
@@ -2415,6 +2569,33 @@ impl Vm {
         self.drain_promise_jobs_with_host_hooks(budget, realm, caller_strict, &mut hooks)
     }
 
+    pub fn drain_deferred_async_calls(
+        &mut self,
+        budget: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<usize, VmError> {
+        if budget == 0 {
+            return Ok(0);
+        }
+        let mut processed = 0usize;
+        let mut hooks = NoopPromiseJobHostHooks;
+        while processed < budget {
+            if let Err(err) = self.enforce_runtime_limits() {
+                if matches!(err, VmError::Interrupted) {
+                    self.reject_pending_async_host_promises_due_to_interrupt(&mut hooks)?;
+                }
+                return Err(err);
+            }
+            let Some(call) = self.deferred_async_calls.pop_front() else {
+                break;
+            };
+            self.execute_deferred_async_call(call, realm, caller_strict, &mut hooks)?;
+            processed = processed.saturating_add(1);
+        }
+        Ok(processed)
+    }
+
     pub fn drain_promise_jobs_with_host_hooks(
         &mut self,
         budget: usize,
@@ -2436,6 +2617,19 @@ impl Vm {
         };
 
         while processed < budget {
+            if let Err(err) = self.enforce_runtime_limits() {
+                if matches!(err, VmError::Interrupted) {
+                    self.reject_pending_async_host_promises_due_to_interrupt(hooks)?;
+                }
+                self.promise_job_queue.draining = false;
+                let report = PromiseJobDrainReport {
+                    processed,
+                    remaining: self.pending_promise_work_count(),
+                    stop_reason: PromiseJobDrainStopReason::InfrastructureFailure,
+                };
+                let _ = self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report));
+                return Err(err);
+            }
             let async_budget = budget.saturating_sub(processed);
             let wait_for_async_completion = self.promise_job_queue.jobs.is_empty();
             let async_processed = self.drain_async_host_callback_completions_with_budget(
@@ -2449,9 +2643,37 @@ impl Vm {
                 break;
             }
 
+            if let Some(call) = self.deferred_async_calls.pop_front() {
+                match self.execute_deferred_async_call(call, realm, caller_strict, hooks) {
+                    Ok(()) => {
+                        processed = processed.saturating_add(1);
+                        if processed == budget {
+                            stop_reason = PromiseJobDrainStopReason::BudgetExhausted;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        if matches!(err, VmError::Interrupted) {
+                            self.reject_pending_async_host_promises_due_to_interrupt(hooks)?;
+                        }
+                        self.promise_job_queue.draining = false;
+                        let report = PromiseJobDrainReport {
+                            processed,
+                            remaining: self.pending_promise_work_count(),
+                            stop_reason: PromiseJobDrainStopReason::InfrastructureFailure,
+                        };
+                        let _ = self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report));
+                        return Err(err);
+                    }
+                }
+            }
+
             let Some(job) = self.promise_job_queue.jobs.pop_front() else {
                 stop_reason = if self.has_pending_async_host_callbacks() {
                     PromiseJobDrainStopReason::PendingAsyncHostCallbacks
+                } else if self.has_pending_deferred_async_calls() {
+                    PromiseJobDrainStopReason::BudgetExhausted
                 } else {
                     PromiseJobDrainStopReason::QueueEmpty
                 };
@@ -2680,6 +2902,7 @@ impl Vm {
         roots.extend(self.module_cache_root_candidates.values().cloned());
         roots.extend(self.pending_job_root_candidates.values().cloned());
         self.collect_pending_promise_record_roots(&mut roots);
+        self.collect_deferred_async_call_roots(&mut roots);
         roots.extend(self.template_cache.values().cloned());
         roots.extend(self.closures.keys().copied().map(JsValue::Function));
         roots.extend(
@@ -2716,6 +2939,16 @@ impl Vm {
                     }
                 }
             }
+        }
+    }
+
+    fn collect_deferred_async_call_roots(&self, roots: &mut Vec<JsValue>) {
+        for call in &self.deferred_async_calls {
+            roots.push(JsValue::Object(call.result_promise_id));
+            if let Some(this_arg) = &call.this_arg {
+                roots.push(this_arg.clone());
+            }
+            roots.extend(call.args.iter().cloned());
         }
     }
 
@@ -2976,6 +3209,7 @@ impl Vm {
             | HostFunction::ArraySomeThis
             | HostFunction::ArrayFilterThis
             | HostFunction::ArrayMapThis
+            | HostFunction::ArrayFlatMapThis
             | HostFunction::ArrayFillThis
             | HostFunction::ArrayFindThis
             | HostFunction::ArrayFindIndexThis
@@ -3168,7 +3402,9 @@ impl Vm {
             && !self.packet_a_fast_path_metrics_enabled();
         let numeric_opcode_direct_mode = !self.packet_a_fast_path_metrics_enabled();
         let mut with_objects_empty = self.with_objects.is_empty();
+        let code_key = Self::code_key(code);
         while pc < code.len() {
+            self.current_execution_site = Some(ExecutionSite { code_key, pc });
             if self.interrupt_state.handler.is_some()
                 || self.max_stack_size.is_some()
                 || self.memory_limit_bytes.is_some()
@@ -4242,13 +4478,7 @@ impl Vm {
                     if self.scopes.is_empty() {
                         return Err(VmError::ScopeUnderflow);
                     }
-                    if !exited_scope.borrow().is_empty() {
-                        let removed_names: Vec<String> =
-                            exited_scope.borrow().keys().cloned().collect();
-                        for name in removed_names {
-                            self.invalidate_binding_fast_path_cache_for_name(&name);
-                        }
-                    }
+                    self.release_scope_bindings_if_unreferenced(exited_scope);
                 }
                 Opcode::EnterParamInitScope => {
                     if self.scopes.len() < 2 {
@@ -4386,6 +4616,44 @@ impl Vm {
                             strict,
                             Some(NumericBinaryOp::Mul),
                             |lhs, rhs| lhs * rhs,
+                        )
+                    };
+                    match result {
+                        Ok(result) => self.stack.push(JsValue::Number(result)),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
+                Opcode::Pow => {
+                    if hotspot_enabled {
+                        self.hotspot_attribution.record_numeric_op_unchecked();
+                    }
+                    let right = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let left = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = if numeric_opcode_direct_mode {
+                        if let (JsValue::Number(lhs), JsValue::Number(rhs)) = (&left, &right) {
+                            Ok(lhs.powf(*rhs))
+                        } else {
+                            self.eval_numeric_binary_from_operands(
+                                left,
+                                right,
+                                realm,
+                                strict,
+                                None,
+                                |lhs, rhs| lhs.powf(rhs),
+                            )
+                        }
+                    } else {
+                        self.eval_numeric_binary_from_operands(
+                            left,
+                            right,
+                            realm,
+                            strict,
+                            None,
+                            |lhs, rhs| lhs.powf(rhs),
                         )
                     };
                     match result {
@@ -5738,7 +6006,88 @@ impl Vm {
                     }
                     return self.execute_closure_call(closure_id, args, this_arg, realm);
                 }
+                if self.closure_is_async(closure_id)? {
+                    return self
+                        .execute_deferred_async_closure_call(closure_id, args, this_arg, realm);
+                }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
+            }
+            _ => Err(VmError::NotCallable),
+        }
+    }
+
+    fn execute_callable_from_slice(
+        &mut self,
+        callee: JsValue,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        match callee {
+            JsValue::NativeFunction(native) => {
+                let mut owned_args = args.to_vec();
+                if matches!(
+                    native,
+                    NativeFunction::PromiseThen
+                        | NativeFunction::PromiseCatch
+                        | NativeFunction::PromiseFinally
+                        | NativeFunction::PromiseResolve
+                        | NativeFunction::PromiseReject
+                        | NativeFunction::PromiseAll
+                        | NativeFunction::PromiseAny
+                        | NativeFunction::PromiseRace
+                        | NativeFunction::PromiseAllSettled
+                ) {
+                    owned_args.insert(0, this_arg.unwrap_or(JsValue::Undefined));
+                }
+                self.execute_native_call(native, owned_args, realm, caller_strict, false)
+            }
+            JsValue::HostFunction(host_id) => self.execute_host_function_call(
+                host_id,
+                this_arg,
+                args.to_vec(),
+                realm,
+                caller_strict,
+            ),
+            JsValue::Function(closure_id) => {
+                if self.closure_is_class_constructor(closure_id) {
+                    return Err(VmError::TypeError(
+                        "class constructor cannot be invoked without 'new'",
+                    ));
+                }
+                if self.closure_is_generator(closure_id)? {
+                    let is_async_generator = self.closure_is_async(closure_id)?;
+                    if self.closure_uses_yield_identifier(closure_id)? {
+                        return self.create_generator_iterator_from_closure_call(
+                            closure_id,
+                            args.to_vec(),
+                            this_arg,
+                        );
+                    }
+                    if self.closure_uses_lowered_generator_values_buffer(closure_id)? {
+                        let mut produced_values =
+                            self.execute_closure_call_from_slice(closure_id, args, this_arg, realm)?;
+                        if is_async_generator {
+                            produced_values = self.resolve_async_generator_values_buffer(
+                                produced_values,
+                                realm,
+                                caller_strict,
+                            )?;
+                        }
+                        return self.create_generator_iterator_from_values(produced_values);
+                    }
+                    return self.execute_closure_call_from_slice(closure_id, args, this_arg, realm);
+                }
+                if self.closure_is_async(closure_id)? {
+                    return self.execute_deferred_async_closure_call(
+                        closure_id,
+                        args.to_vec(),
+                        this_arg,
+                        realm,
+                    );
+                }
+                self.execute_closure_call_from_slice(closure_id, args, this_arg, realm)
             }
             _ => Err(VmError::NotCallable),
         }
@@ -5751,7 +6100,35 @@ impl Vm {
         this_arg: Option<JsValue>,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
+        self.execute_closure_call_internal(closure_id, &args, this_arg, realm, None)
+    }
+
+    fn execute_closure_call_from_slice(
+        &mut self,
+        closure_id: u64,
+        args: &[JsValue],
+        this_arg: Option<JsValue>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
         self.execute_closure_call_internal(closure_id, args, this_arg, realm, None)
+    }
+
+    fn execute_deferred_async_closure_call(
+        &mut self,
+        closure_id: u64,
+        args: Vec<JsValue>,
+        this_arg: Option<JsValue>,
+        _realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let result_promise_id = self.create_pending_promise()?;
+        self.deferred_async_calls
+            .push_back(DeferredAsyncFunctionCall {
+                closure_id,
+                this_arg,
+                args,
+                result_promise_id,
+            });
+        Ok(JsValue::Object(result_promise_id))
     }
 
     fn resolve_async_generator_values_buffer(
@@ -5782,31 +6159,37 @@ impl Vm {
         realm: &Realm,
         resume_value: JsValue,
     ) -> Result<JsValue, VmError> {
-        self.execute_closure_call_internal(closure_id, args, this_arg, realm, Some(resume_value))
+        self.execute_closure_call_internal(closure_id, &args, this_arg, realm, Some(resume_value))
     }
 
     fn execute_closure_call_internal(
         &mut self,
         closure_id: u64,
-        args: Vec<JsValue>,
+        args: &[JsValue],
         this_arg: Option<JsValue>,
         realm: &Realm,
         generator_resume: Option<JsValue>,
     ) -> Result<JsValue, VmError> {
-        let closure = self
-            .closures
-            .get(&closure_id)
-            .cloned()
-            .ok_or(VmError::UnknownClosure(closure_id))?;
-        let function = closure
-            .functions
-            .get(closure.function_id)
-            .cloned()
-            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        let (function_id, functions, captured_scopes, captured_with_objects, closure_strict) = {
+            let closure = self
+                .closures
+                .get(&closure_id)
+                .ok_or(VmError::UnknownClosure(closure_id))?;
+            (
+                closure.function_id,
+                Rc::clone(&closure.functions),
+                closure.captured_scopes.clone(),
+                closure.captured_with_objects.clone(),
+                closure.strict,
+            )
+        };
+        let function = functions
+            .get(function_id)
+            .ok_or(VmError::UnknownFunction(function_id))?;
         let is_arrow_function = self.function_is_arrow(&function);
         let is_derived_class_constructor = self.closure_is_derived_class_constructor(closure_id);
         let restrict_caller_arguments =
-            closure.strict || self.closure_marks_restricted_caller_arguments(closure_id);
+            closure_strict || self.closure_marks_restricted_caller_arguments(closure_id);
         let non_simple_params = self.function_has_non_simple_params(&function);
         let has_arguments_param = function.params.iter().any(|name| name == "arguments");
         let mapped_arguments_enabled =
@@ -5843,7 +6226,7 @@ impl Vm {
                 let this_binding_id = self.create_binding(JsValue::Uninitialized, true);
                 frame_scope.insert("this".to_string(), this_binding_id);
             } else {
-                let this_value = if closure.strict {
+                let this_value = if closure_strict {
                     this_arg.unwrap_or(JsValue::Undefined)
                 } else {
                     self.coerce_this_for_sloppy(this_arg)
@@ -5950,8 +6333,8 @@ impl Vm {
             identifier_references: saved_identifier_references,
         });
 
-        self.scopes = closure.captured_scopes;
-        self.with_objects = closure.captured_with_objects;
+        self.scopes = captured_scopes;
+        self.with_objects = captured_with_objects;
         self.scopes.push(Rc::new(RefCell::new(frame_scope)));
         if non_simple_params {
             self.scopes.push(Rc::new(RefCell::new(HashMap::default())));
@@ -5974,7 +6357,7 @@ impl Vm {
         }
         let pushed_annex_b_context = match self.push_annex_b_var_function_context_for_code(
             &function.code,
-            closure.strict,
+            closure_strict,
             &annex_b_excluded_names,
         ) {
             Ok(pushed) => pushed,
@@ -5990,10 +6373,10 @@ impl Vm {
         };
         let signal = self.execute_code(
             &function.code,
-            closure.functions.as_ref(),
+            functions.as_ref(),
             realm,
             true,
-            closure.strict,
+            closure_strict,
             true,
         );
         if pushed_annex_b_context {
@@ -6087,7 +6470,7 @@ impl Vm {
                         value,
                     ],
                     realm,
-                    closure.strict,
+                    closure_strict,
                 )?
             };
             self.restore_caller_state(
@@ -7094,6 +7477,13 @@ impl Vm {
 
             let mut index = 0usize;
             loop {
+                if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0
+                    && let Err(err) = self.enforce_runtime_limits()
+                {
+                    let _ = self
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
                 let step =
                     self.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
                 let done = self
@@ -7130,12 +7520,9 @@ impl Vm {
                         }
                     };
                 }
-                if let Err(err) = self.create_data_property_or_throw(
-                    result.clone(),
-                    index.to_string(),
-                    value,
-                    realm,
-                ) {
+                if let Err(err) =
+                    self.create_array_index_data_property_or_throw(result.clone(), index, value, realm)
+                {
                     let _ = self
                         .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
                     return Err(err);
@@ -7178,7 +7565,37 @@ impl Vm {
             self.create_array_value()
         };
 
+        let fast_fill_with_undefined =
+            !mapping && self.can_fast_fill_array_from_array_like_undefined(&source);
+        if fast_fill_with_undefined {
+            self.enforce_runtime_limits()?;
+            if self.try_fast_fill_dense_array_with_undefined(result.clone(), source_length)? {
+                return Ok(result);
+            }
+            for index in 0..source_length {
+                if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                    self.enforce_runtime_limits()?;
+                }
+                self.create_array_index_data_property_or_throw(
+                    result.clone(),
+                    index,
+                    JsValue::Undefined,
+                    realm,
+                )?;
+            }
+            let _ = self.set_property_on_receiver(
+                result.clone(),
+                "length".to_string(),
+                JsValue::Number(source_length as f64),
+                realm,
+            )?;
+            return Ok(result);
+        }
+
         for index in 0..source_length {
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
             let mut value =
                 self.get_property_from_receiver(source.clone(), &index.to_string(), realm)?;
             if mapping {
@@ -7190,7 +7607,7 @@ impl Vm {
                     caller_strict,
                 )?;
             }
-            self.create_data_property_or_throw(result.clone(), index.to_string(), value, realm)?;
+            self.create_array_index_data_property_or_throw(result.clone(), index, value, realm)?;
         }
         let _ = self.set_property_on_receiver(
             result.clone(),
@@ -7199,6 +7616,356 @@ impl Vm {
             realm,
         )?;
         Ok(result)
+    }
+
+    fn can_fast_fill_array_from_array_like_undefined(&self, source: &JsValue) -> bool {
+        let JsValue::Object(source_id) = source else {
+            return false;
+        };
+        let Some(object) = self.objects.get(source_id) else {
+            return false;
+        };
+        if object.is_proxy_object || object.prototype_value.is_some() {
+            return false;
+        }
+        if object.prototype != self.object_prototype_id {
+            return false;
+        }
+        if self.packet_b_prototype_chain_may_have_indexed_property {
+            return false;
+        }
+        if !object.getters.is_empty() || !object.setters.is_empty() {
+            return false;
+        }
+        if object
+            .properties
+            .keys()
+            .any(|key| Self::canonical_array_index(key).is_some())
+        {
+            return false;
+        }
+        if object
+            .property_attributes
+            .keys()
+            .any(|key| Self::canonical_array_index(key).is_some())
+        {
+            return false;
+        }
+        true
+    }
+
+    fn try_fast_fill_dense_array_with_undefined(
+        &mut self,
+        target: JsValue,
+        length: usize,
+    ) -> Result<bool, VmError> {
+        let JsValue::Object(object_id) = target else {
+            return Ok(false);
+        };
+
+        let can_fast_fill = {
+            let Some(object) = self.objects.get(&object_id) else {
+                return Ok(false);
+            };
+            let valid_length_descriptor = object.property_attributes.get("length").is_some_and(
+                |attributes| {
+                    attributes.writable && !attributes.enumerable && !attributes.configurable
+                },
+            );
+            object.is_array_object
+                && !object.is_proxy_object
+                && object.prototype_value.is_none()
+                && object.prototype == self.array_prototype_id
+                && object.extensible
+                && valid_length_descriptor
+                && object.getters.is_empty()
+                && object.setters.is_empty()
+                && object
+                    .properties
+                    .keys()
+                    .all(|key| Self::canonical_array_index(key).is_none())
+                && object
+                    .property_attributes
+                    .keys()
+                    .all(|key| key == "length" || Self::canonical_array_index(key).is_none())
+        };
+        if !can_fast_fill {
+            return Ok(false);
+        }
+
+        let Some(object) = self.objects.get_mut(&object_id) else {
+            return Ok(false);
+        };
+        let Some(dense_elements) = object.dense_elements.as_mut() else {
+            return Ok(false);
+        };
+        dense_elements.clear();
+        dense_elements.resize(length, Some(JsValue::Undefined));
+        Self::set_object_array_length(object, length);
+        Ok(true)
+    }
+
+    fn array_map_fast_dense_target_id(&self, target: &JsValue, length: usize) -> Option<ObjectId> {
+        let JsValue::Object(object_id) = target else {
+            return None;
+        };
+        if self.packet_b_prototype_chain_may_have_indexed_property {
+            return None;
+        }
+        let object = self.objects.get(object_id)?;
+        let valid_length_descriptor = object
+            .property_attributes
+            .get("length")
+            .is_some_and(|attributes| !attributes.enumerable && !attributes.configurable);
+        let current_length = object.array_length.unwrap_or(0);
+        let dense_length = object
+            .dense_elements
+            .as_ref()
+            .map(|elements| elements.len())
+            .unwrap_or(0);
+        if !object.is_array_object
+            || object.is_proxy_object
+            || object.prototype_value.is_some()
+            || object.prototype != self.array_prototype_id
+            || !valid_length_descriptor
+            || !object.getters.is_empty()
+            || !object.setters.is_empty()
+            || length > current_length
+            || dense_length < length
+        {
+            return None;
+        }
+        Some(*object_id)
+    }
+
+    fn can_fast_overwrite_dense_array(&self, object_id: ObjectId) -> bool {
+        let Some(object) = self.objects.get(&object_id) else {
+            return false;
+        };
+        let valid_length_descriptor = object
+            .property_attributes
+            .get("length")
+            .is_some_and(|attributes| {
+                attributes.writable && !attributes.enumerable && !attributes.configurable
+            });
+        object.is_array_object
+            && !object.is_proxy_object
+            && object.prototype_value.is_none()
+            && object.prototype == self.array_prototype_id
+            && object.extensible
+            && valid_length_descriptor
+            && object.getters.is_empty()
+            && object.setters.is_empty()
+            && object
+                .properties
+                .keys()
+                .all(|key| Self::canonical_array_index(key).is_none())
+            && object
+                .property_attributes
+                .keys()
+                .all(|key| key == "length" || Self::canonical_array_index(key).is_none())
+            && object.dense_elements.is_some()
+    }
+
+    fn try_fast_map_index_identity_dense(
+        &mut self,
+        target: &JsValue,
+        result: &JsValue,
+        length: usize,
+    ) -> Result<bool, VmError> {
+        let Some(target_id) = self.array_map_fast_dense_target_id(target, length) else {
+            return Ok(false);
+        };
+        let JsValue::Object(result_id) = result else {
+            return Ok(false);
+        };
+
+        let source_present_mask = {
+            let Some(source_object) = self.objects.get(&target_id) else {
+                return Ok(false);
+            };
+            let Some(source_dense_elements) = source_object.dense_elements.as_ref() else {
+                return Ok(false);
+            };
+            if source_dense_elements.len() < length {
+                return Ok(false);
+            }
+            source_dense_elements
+                .iter()
+                .take(length)
+                .map(|value| value.is_some())
+                .collect::<Vec<bool>>()
+        };
+
+        if !self.can_fast_overwrite_dense_array(*result_id) {
+            return Ok(false);
+        }
+
+        let mut mapped_dense_elements = Vec::with_capacity(length);
+        for (index, present) in source_present_mask.iter().copied().enumerate() {
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            if present {
+                mapped_dense_elements.push(Some(JsValue::Number(index as f64)));
+            } else {
+                mapped_dense_elements.push(None);
+            }
+        }
+
+        let Some(result_object) = self.objects.get_mut(result_id) else {
+            return Ok(false);
+        };
+        let Some(result_dense_elements) = result_object.dense_elements.as_mut() else {
+            return Ok(false);
+        };
+        *result_dense_elements = mapped_dense_elements;
+        Self::set_object_array_length(result_object, length);
+        Ok(true)
+    }
+
+    fn try_fast_flat_map_index_identity_dense(
+        &mut self,
+        target: &JsValue,
+        result: &JsValue,
+        length: usize,
+    ) -> Result<bool, VmError> {
+        let Some(target_id) = self.array_map_fast_dense_target_id(target, length) else {
+            return Ok(false);
+        };
+        let JsValue::Object(result_id) = result else {
+            return Ok(false);
+        };
+        if !self.can_fast_overwrite_dense_array(*result_id) {
+            return Ok(false);
+        }
+
+        let source_present_mask = {
+            let Some(source_object) = self.objects.get(&target_id) else {
+                return Ok(false);
+            };
+            let Some(source_dense_elements) = source_object.dense_elements.as_ref() else {
+                return Ok(false);
+            };
+            if source_dense_elements.len() < length {
+                return Ok(false);
+            }
+            source_dense_elements
+                .iter()
+                .take(length)
+                .map(|value| value.is_some())
+                .collect::<Vec<bool>>()
+        };
+
+        let mut mapped_dense_elements = Vec::with_capacity(length);
+        for (index, present) in source_present_mask.iter().copied().enumerate() {
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            if present {
+                mapped_dense_elements.push(Some(JsValue::Number(index as f64)));
+            }
+        }
+        let output_length = mapped_dense_elements.len();
+
+        let Some(result_object) = self.objects.get_mut(result_id) else {
+            return Ok(false);
+        };
+        let Some(result_dense_elements) = result_object.dense_elements.as_mut() else {
+            return Ok(false);
+        };
+        *result_dense_elements = mapped_dense_elements;
+        Self::set_object_array_length(result_object, output_length);
+        Ok(true)
+    }
+
+    fn read_array_map_dense_slot(&self, object_id: ObjectId, index: usize) -> ArrayMapDenseRead {
+        if self.packet_b_prototype_chain_may_have_indexed_property {
+            return ArrayMapDenseRead::Invalidated;
+        }
+
+        let Some(object) = self.objects.get(&object_id) else {
+            return ArrayMapDenseRead::Invalidated;
+        };
+        let valid_length_descriptor = object
+            .property_attributes
+            .get("length")
+            .is_some_and(|attributes| !attributes.enumerable && !attributes.configurable);
+        if !object.is_array_object
+            || object.is_proxy_object
+            || object.prototype_value.is_some()
+            || object.prototype != self.array_prototype_id
+            || !valid_length_descriptor
+            || !object.getters.is_empty()
+            || !object.setters.is_empty()
+        {
+            return ArrayMapDenseRead::Invalidated;
+        }
+
+        let current_length = object.array_length.unwrap_or(0);
+        if index >= current_length {
+            return ArrayMapDenseRead::Hole;
+        }
+        let Some(dense_elements) = object.dense_elements.as_ref() else {
+            return ArrayMapDenseRead::Invalidated;
+        };
+        match dense_elements.get(index).and_then(|value| value.clone()) {
+            Some(value) => ArrayMapDenseRead::Value(value),
+            None => ArrayMapDenseRead::Hole,
+        }
+    }
+
+    fn array_map_source_value_slow(
+        &mut self,
+        target: JsValue,
+        index: usize,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        let key = index.to_string();
+        if !self.has_property_on_receiver(&target, &key, realm)? {
+            return Ok(None);
+        }
+        let value = self.get_property_from_receiver(target, &key, realm)?;
+        Ok(Some(value))
+    }
+
+    fn array_iter_source_value_skip_holes(
+        &mut self,
+        target: JsValue,
+        fast_dense_target_id: &mut Option<ObjectId>,
+        index: usize,
+        realm: &Realm,
+    ) -> Result<Option<JsValue>, VmError> {
+        if let Some(object_id) = *fast_dense_target_id {
+            match self.read_array_map_dense_slot(object_id, index) {
+                ArrayMapDenseRead::Value(value) => return Ok(Some(value)),
+                ArrayMapDenseRead::Hole => return Ok(None),
+                ArrayMapDenseRead::Invalidated => {
+                    *fast_dense_target_id = None;
+                }
+            }
+        }
+        self.array_map_source_value_slow(target, index, realm)
+    }
+
+    fn array_iter_source_value_include_holes(
+        &mut self,
+        target: JsValue,
+        fast_dense_target_id: &mut Option<ObjectId>,
+        index: usize,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if let Some(object_id) = *fast_dense_target_id {
+            match self.read_array_map_dense_slot(object_id, index) {
+                ArrayMapDenseRead::Value(value) => return Ok(value),
+                ArrayMapDenseRead::Hole => return Ok(JsValue::Undefined),
+                ArrayMapDenseRead::Invalidated => {
+                    *fast_dense_target_id = None;
+                }
+            }
+        }
+        let key = index.to_string();
+        self.get_property_from_receiver(target, &key, realm)
     }
 
     fn ensure_array_from_async_impl(
@@ -7470,16 +8237,26 @@ impl Vm {
         if length <= 0 {
             return Ok(JsValue::Bool(true));
         }
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         for index in 0..length {
-            let key = index.to_string();
-            if !self.has_property_on_receiver(&target, &key, realm)? {
-                continue;
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
             }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let passed = self.execute_callable(
+            let value = match self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                Some(value) => value,
+                None => continue,
+            };
+            let callback_args = [value, JsValue::Number(index as f64), target.clone()];
+            let passed = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value, JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
@@ -7515,16 +8292,26 @@ impl Vm {
         if length <= 0 {
             return Ok(JsValue::Bool(false));
         }
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         for index in 0..length {
-            let key = index.to_string();
-            if !self.has_property_on_receiver(&target, &key, realm)? {
-                continue;
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
             }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let passed = self.execute_callable(
+            let value = match self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                Some(value) => value,
+                None => continue,
+            };
+            let callback_args = [value, JsValue::Number(index as f64), target.clone()];
+            let passed = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value, JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
@@ -7557,16 +8344,26 @@ impl Vm {
             ));
         }
         let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         for index in 0..length {
-            let key = index.to_string();
-            if !self.has_property_on_receiver(&target, &key, realm)? {
-                continue;
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
             }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let _ = self.execute_callable(
+            let value = match self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                Some(value) => value,
+                None => continue,
+            };
+            let callback_args = [value, JsValue::Number(index as f64), target.clone()];
+            let _ = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value, JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
@@ -7597,13 +8394,23 @@ impl Vm {
             ));
         }
         let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         for index in 0..length {
-            let key = index.to_string();
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let matched = self.execute_callable(
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            let value = self.array_iter_source_value_include_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )?;
+            let callback_args = [value.clone(), JsValue::Number(index as f64), target.clone()];
+            let matched = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value.clone(), JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
@@ -7645,23 +8452,38 @@ impl Vm {
         let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
         let result =
             self.array_species_create_for_concat(target.clone(), 0, realm, caller_strict)?;
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         let mut to = 0i64;
 
         for index in 0..length {
-            let key = index.to_string();
-            if !self.has_property_on_receiver(&target, &key, realm)? {
-                continue;
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
             }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let keep = self.execute_callable(
+            let value = match self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                Some(value) => value,
+                None => continue,
+            };
+            let callback_args = [value.clone(), JsValue::Number(index as f64), target.clone()];
+            let keep = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value.clone(), JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
             if self.is_truthy(&keep) {
-                self.create_data_property_or_throw(result.clone(), to.to_string(), value, realm)?;
+                self.create_array_index_data_property_or_throw(
+                    result.clone(),
+                    to as usize,
+                    value,
+                    realm,
+                )?;
                 to += 1;
             }
         }
@@ -7699,22 +8521,158 @@ impl Vm {
         let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
         let result =
             self.array_species_create_for_concat(target.clone(), length, realm, caller_strict)?;
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
+        let callback_returns_index = self.map_callback_is_index_identity(&callback);
+        if callback_returns_index
+            && self.try_fast_map_index_identity_dense(&target, &result, length as usize)?
+        {
+            return Ok(result);
+        }
 
         for index in 0..length {
-            let key = index.to_string();
-            if !self.has_property_on_receiver(&target, &key, realm)? {
-                continue;
+            if index % 1024 == 0 {
+                self.enforce_runtime_limits()?;
             }
-            let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-            let mapped = self.execute_callable(
+            let value = if let Some(object_id) = fast_dense_target_id {
+                match self.read_array_map_dense_slot(object_id, index as usize) {
+                    ArrayMapDenseRead::Value(value) => value,
+                    ArrayMapDenseRead::Hole => continue,
+                    ArrayMapDenseRead::Invalidated => {
+                        fast_dense_target_id = None;
+                        match self.array_map_source_value_slow(
+                            target.clone(),
+                            index as usize,
+                            realm,
+                        )? {
+                            Some(value) => value,
+                            None => continue,
+                        }
+                    }
+                }
+            } else {
+                match self.array_map_source_value_slow(target.clone(), index as usize, realm)? {
+                    Some(value) => value,
+                    None => continue,
+                }
+            };
+            let mapped = if callback_returns_index {
+                JsValue::Number(index as f64)
+            } else {
+                let callback_args = [value, JsValue::Number(index as f64), target.clone()];
+                self.execute_callable_from_slice(
+                    callback.clone(),
+                    Some(callback_this.clone()),
+                    &callback_args,
+                    realm,
+                    caller_strict,
+                )?
+            };
+            self.create_array_index_data_property_or_throw(result.clone(), index as usize, mapped, realm)?;
+        }
+        Ok(result)
+    }
+
+    fn execute_array_flat_map_this(
+        &mut self,
+        this_arg: Option<JsValue>,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let target = self.object_prototype_this_object(
+            this_arg,
+            "Array.prototype.flatMap called on null or undefined",
+        )?;
+        let length_value = self.get_property_from_receiver(target.clone(), "length", realm)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number);
+
+        let callback = args.first().cloned().unwrap_or(JsValue::Undefined);
+        if !Self::is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "Array.prototype.flatMap callback must be callable",
+            ));
+        }
+        let callback_this = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+        let result =
+            self.array_species_create_for_concat(target.clone(), 0, realm, caller_strict)?;
+        let callback_returns_index = self.map_callback_is_index_identity(&callback);
+        if callback_returns_index
+            && self.try_fast_flat_map_index_identity_dense(&target, &result, length as usize)?
+        {
+            return Ok(result);
+        }
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
+        let mut to = 0i64;
+
+        for index in 0..length {
+            if index % 1024 == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            let value = match self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                Some(value) => value,
+                None => continue,
+            };
+            let callback_args = [value, JsValue::Number(index as f64), target.clone()];
+            let mapped = self.execute_callable_from_slice(
                 callback.clone(),
                 Some(callback_this.clone()),
-                vec![value, JsValue::Number(index as f64), target.clone()],
+                &callback_args,
                 realm,
                 caller_strict,
             )?;
-            self.create_data_property_or_throw(result.clone(), key, mapped, realm)?;
+
+            let should_flatten = match &mapped {
+                JsValue::Object(object_id) => {
+                    self.has_object_marker(*object_id, ARRAY_OBJECT_MARKER_KEY)?
+                }
+                _ => false,
+            };
+
+            if should_flatten {
+                let inner_length = self.array_like_length_from_value(&mapped, realm)?;
+                for inner_index in 0..inner_length {
+                    if inner_index % 1024 == 0 {
+                        self.enforce_runtime_limits()?;
+                    }
+                    let inner_key = inner_index.to_string();
+                    if !self.has_property_on_receiver(&mapped, &inner_key, realm)? {
+                        continue;
+                    }
+                    let inner_value =
+                        self.get_property_from_receiver(mapped.clone(), &inner_key, realm)?;
+                    self.create_array_index_data_property_or_throw(
+                        result.clone(),
+                        to as usize,
+                        inner_value,
+                        realm,
+                    )?;
+                    to += 1;
+                }
+            } else {
+                self.create_array_index_data_property_or_throw(
+                    result.clone(),
+                    to as usize,
+                    mapped,
+                    realm,
+                )?;
+                to += 1;
+            }
         }
+
+        let _ = self.set_property_on_receiver(
+            result.clone(),
+            "length".to_string(),
+            JsValue::Number(to as f64),
+            realm,
+        )?;
         Ok(result)
     }
 
@@ -7978,15 +8936,21 @@ impl Vm {
                 "Array.prototype.reduce callback must be callable",
             ));
         }
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
         let mut index = 0i64;
         let mut accumulator = if args.len() >= 2 {
             args[1].clone()
         } else {
             let mut initial = None;
             while index < length {
-                let key = index.to_string();
-                if self.has_property_on_receiver(&target, &key, realm)? {
-                    initial = Some(self.get_property_from_receiver(target.clone(), &key, realm)?);
+                if let Some(value) = self.array_iter_source_value_skip_holes(
+                    target.clone(),
+                    &mut fast_dense_target_id,
+                    index as usize,
+                    realm,
+                )? {
+                    initial = Some(value);
                     index += 1;
                     break;
                 }
@@ -7998,18 +8962,25 @@ impl Vm {
         };
 
         while index < length {
-            let key = index.to_string();
-            if self.has_property_on_receiver(&target, &key, realm)? {
-                let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-                accumulator = self.execute_callable(
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            if let Some(value) = self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                let callback_args = [
+                    accumulator,
+                    value,
+                    JsValue::Number(index as f64),
+                    target.clone(),
+                ];
+                accumulator = self.execute_callable_from_slice(
                     callback.clone(),
                     Some(JsValue::Undefined),
-                    vec![
-                        accumulator,
-                        value,
-                        JsValue::Number(index as f64),
-                        target.clone(),
-                    ],
+                    &callback_args,
                     realm,
                     caller_strict,
                 )?;
@@ -8276,6 +9247,8 @@ impl Vm {
                 "Array.prototype.reduceRight callback must be callable",
             ));
         }
+        let mut fast_dense_target_id =
+            self.array_map_fast_dense_target_id(&target, length as usize);
 
         let mut index = length - 1;
         let mut accumulator = if args.len() >= 2 {
@@ -8283,9 +9256,13 @@ impl Vm {
         } else {
             let mut initial = None;
             while index >= 0 {
-                let key = index.to_string();
-                if self.has_property_on_receiver(&target, &key, realm)? {
-                    initial = Some(self.get_property_from_receiver(target.clone(), &key, realm)?);
+                if let Some(value) = self.array_iter_source_value_skip_holes(
+                    target.clone(),
+                    &mut fast_dense_target_id,
+                    index as usize,
+                    realm,
+                )? {
+                    initial = Some(value);
                     index -= 1;
                     break;
                 }
@@ -8297,18 +9274,25 @@ impl Vm {
         };
 
         while index >= 0 {
-            let key = index.to_string();
-            if self.has_property_on_receiver(&target, &key, realm)? {
-                let value = self.get_property_from_receiver(target.clone(), &key, realm)?;
-                accumulator = self.execute_callable(
+            if ((index as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0 {
+                self.enforce_runtime_limits()?;
+            }
+            if let Some(value) = self.array_iter_source_value_skip_holes(
+                target.clone(),
+                &mut fast_dense_target_id,
+                index as usize,
+                realm,
+            )? {
+                let callback_args = [
+                    accumulator,
+                    value,
+                    JsValue::Number(index as f64),
+                    target.clone(),
+                ];
+                accumulator = self.execute_callable_from_slice(
                     callback.clone(),
                     Some(JsValue::Undefined),
-                    vec![
-                        accumulator,
-                        value,
-                        JsValue::Number(index as f64),
-                        target.clone(),
-                    ],
+                    &callback_args,
                     realm,
                     caller_strict,
                 )?;
@@ -9520,6 +10504,9 @@ impl Vm {
             }
             HostFunction::ArrayMapThis => {
                 self.execute_array_map_this(this_arg, &args, realm, caller_strict)
+            }
+            HostFunction::ArrayFlatMapThis => {
+                self.execute_array_flat_map_this(this_arg, &args, realm, caller_strict)
             }
             HostFunction::ArrayFillThis => {
                 self.execute_array_fill_this(this_arg, &args, realm, caller_strict)
@@ -13952,6 +14939,13 @@ impl Vm {
         Ok(*object_id)
     }
 
+    fn is_promise_object(&self, object_id: ObjectId) -> bool {
+        self.objects
+            .get(&object_id)
+            .and_then(|object| object.properties.get("__promiseTag"))
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)))
+    }
+
     fn create_promise_object(&mut self) -> Result<ObjectId, VmError> {
         if self.promise_prototype_id.is_none() {
             let _ = self.promise_prototype_value();
@@ -14015,13 +15009,23 @@ impl Vm {
             .pending_promises
             .insert(task_id, promise_id);
         let sender = self.ensure_async_host_callback_sender();
-        let spawn_result = thread::Builder::new()
-            .name(format!("qjs-rs-host-async-{task_id}"))
-            .spawn(move || {
-                let result = block_on_external_host_future(future);
+        let spawned = if let Some(tokio_handle) = get_async_host_tokio_runtime_handle() {
+            let sender = sender.clone();
+            tokio_handle.spawn(async move {
+                let result = future.await;
                 let _ = sender.send(AsyncHostCallbackCompletion { task_id, result });
             });
-        if spawn_result.is_err() {
+            true
+        } else {
+            thread::Builder::new()
+                .name(format!("qjs-rs-host-async-{task_id}"))
+                .spawn(move || {
+                    let result = block_on_external_host_future(future);
+                    let _ = sender.send(AsyncHostCallbackCompletion { task_id, result });
+                })
+                .is_ok()
+        };
+        if !spawned {
             self.async_host_callbacks.pending_promises.remove(&task_id);
             let rejection = self.create_error_exception(
                 NativeFunction::TypeErrorConstructor,
@@ -14152,6 +15156,7 @@ impl Vm {
         self.promise_job_queue
             .jobs
             .len()
+            .saturating_add(self.deferred_async_calls.len())
             .saturating_add(self.async_host_callbacks.pending_promises.len())
     }
 
@@ -14388,6 +15393,68 @@ impl Vm {
         };
         self.release_job_capture_handles(job.capture_handles);
         result
+    }
+
+    fn execute_deferred_async_call(
+        &mut self,
+        call: DeferredAsyncFunctionCall,
+        realm: &Realm,
+        _caller_strict: bool,
+        hooks: &mut dyn PromiseJobHostHooks,
+    ) -> Result<(), VmError> {
+        let result = self.execute_closure_call_internal(
+            call.closure_id,
+            &call.args,
+            call.this_arg,
+            realm,
+            None,
+        );
+        let value = match result {
+            Ok(value) => value,
+            Err(err) => {
+                let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone()) else {
+                    return Err(err);
+                };
+                return self.settle_promise_with_hooks(
+                    call.result_promise_id,
+                    PromiseSettlement::Rejected(rejection),
+                    hooks,
+                );
+            }
+        };
+
+        let JsValue::Object(object_id) = value.clone() else {
+            return self.settle_promise_with_hooks(
+                call.result_promise_id,
+                PromiseSettlement::Fulfilled(value),
+                hooks,
+            );
+        };
+        if !self.is_promise_object(object_id) {
+            return self.settle_promise_with_hooks(
+                call.result_promise_id,
+                PromiseSettlement::Fulfilled(value),
+                hooks,
+            );
+        }
+
+        let reaction = PromiseReaction {
+            kind: PromiseReactionKind::Then {
+                on_fulfilled: None,
+                on_rejected: None,
+            },
+            result_promise_id: call.result_promise_id,
+        };
+        if let Some(settlement) = self.promise_settlement_from_object(object_id)? {
+            self.enqueue_promise_reaction_job(settlement, reaction, hooks)
+        } else {
+            self.pending_promise_records
+                .entry(object_id)
+                .or_default()
+                .reactions
+                .push(reaction);
+            Ok(())
+        }
     }
 
     fn execute_promise_reaction_job(
@@ -17216,6 +18283,21 @@ impl Vm {
         Ok(())
     }
 
+    fn create_array_index_data_property_or_throw(
+        &mut self,
+        target: JsValue,
+        index: usize,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<(), VmError> {
+        if let JsValue::Object(object_id) = target.clone()
+            && self.try_packet_b_dense_array_index_set_with_index(object_id, index, &value)?
+        {
+            return Ok(());
+        }
+        self.create_data_property_or_throw(target, index.to_string(), value, realm)
+    }
+
     fn execute_inline_chunk(
         &mut self,
         chunk: &Chunk,
@@ -17277,7 +18359,7 @@ impl Vm {
             VmError::NotCallable => Some(self.create_error_exception(
                 NativeFunction::TypeErrorConstructor,
                 "TypeError",
-                "NotCallable".to_string(),
+                "value is not a function".to_string(),
             )),
             VmError::InvalidHandle(_) => Some(self.create_error_exception(
                 NativeFunction::TypeErrorConstructor,
@@ -17314,6 +18396,7 @@ impl Vm {
         name: &str,
         message: String,
     ) -> JsValue {
+        let stack_text = self.current_error_stack_text(name, &message);
         let error = self.create_object_value();
         let JsValue::Object(object_id) = error else {
             unreachable!();
@@ -17331,7 +18414,12 @@ impl Vm {
                 .insert("name".to_string(), JsValue::String(name.to_string()));
             object
                 .properties
-                .insert("message".to_string(), JsValue::String(message));
+                .insert("message".to_string(), JsValue::String(message.clone()));
+            if let Some(stack_text) = stack_text.clone() {
+                object
+                    .properties
+                    .insert("stack".to_string(), JsValue::String(stack_text));
+            }
             object.property_attributes.insert(
                 "constructor".to_string(),
                 PropertyAttributes {
@@ -17356,6 +18444,16 @@ impl Vm {
                     configurable: true,
                 },
             );
+            if stack_text.is_some() {
+                object.property_attributes.insert(
+                    "stack".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
         }
         JsValue::Object(object_id)
     }
@@ -17389,7 +18487,8 @@ impl Vm {
         with_depth: usize,
     ) -> Result<(), VmError> {
         while self.scopes.len() > scope_depth {
-            self.scopes.pop();
+            let exited_scope = self.scopes.pop().ok_or(VmError::ScopeUnderflow)?;
+            self.release_scope_bindings_if_unreferenced(exited_scope);
         }
         if self.scopes.is_empty() {
             return Err(VmError::ScopeUnderflow);
@@ -17424,6 +18523,31 @@ impl Vm {
         deletable: bool,
         sloppy_readonly_write_ignored: bool,
     ) -> BindingId {
+        if let Some(id) = self.free_binding_slots.pop() {
+            if let Some(slot) = self.bindings.get_mut(id) {
+                *slot = Some(Binding {
+                    value,
+                    mutable,
+                    deletable,
+                    sloppy_readonly_write_ignored,
+                });
+            } else {
+                self.bindings.resize_with(id + 1, || None);
+                self.bindings[id] = Some(Binding {
+                    value,
+                    mutable,
+                    deletable,
+                    sloppy_readonly_write_ignored,
+                });
+            }
+            if id >= self.global_property_sync_bindings.len() {
+                self.global_property_sync_bindings.resize(id + 1, false);
+            } else if let Some(mark) = self.global_property_sync_bindings.get_mut(id) {
+                *mark = false;
+            }
+            return id;
+        }
+
         let id = self.next_binding_id;
         self.next_binding_id += 1;
         self.bindings.push(Some(Binding {
@@ -17447,7 +18571,41 @@ impl Vm {
     }
 
     fn remove_binding_entry(&mut self, binding_id: BindingId) -> Option<Binding> {
-        self.bindings.get_mut(binding_id)?.take()
+        let removed = self.bindings.get_mut(binding_id)?.take();
+        if removed.is_some() {
+            self.free_binding_slots.push(binding_id);
+            if let Some(mark) = self.global_property_sync_bindings.get_mut(binding_id) {
+                *mark = false;
+            }
+        }
+        removed
+    }
+
+    fn release_scope_bindings_if_unreferenced(&mut self, scope_ref: ScopeRef) {
+        let should_release_bindings = Rc::strong_count(&scope_ref) == 1;
+        let (removed_names, binding_ids) = {
+            let scope = scope_ref.borrow();
+            let names = scope.keys().cloned().collect::<Vec<_>>();
+            let ids = if should_release_bindings {
+                scope.values().copied().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            (names, ids)
+        };
+
+        for name in removed_names {
+            self.invalidate_binding_fast_path_cache_for_name(&name);
+        }
+
+        if should_release_bindings {
+            let mut dedup_binding_ids = HashSet::new();
+            for binding_id in binding_ids {
+                if dedup_binding_ids.insert(binding_id) {
+                    let _ = self.remove_binding_entry(binding_id);
+                }
+            }
+        }
     }
 
     fn create_object_value(&mut self) -> JsValue {
@@ -17538,11 +18696,28 @@ impl Vm {
             name_scope.insert(function.name.clone(), function_name_binding);
             captured_scopes.push(Rc::new(RefCell::new(name_scope)));
         }
+        let parent_functions_key = Self::functions_key(functions);
+        let inherited_debug_locations = self
+            .debug_function_tables
+            .get(&parent_functions_key)
+            .cloned();
+        let cloned_functions = Rc::new(functions.to_vec());
+        if let Some(debug_locations) = inherited_debug_locations {
+            self.debug_function_tables.insert(
+                Self::functions_key(cloned_functions.as_slice()),
+                Rc::clone(&debug_locations),
+            );
+            for (index, compiled_function) in cloned_functions.iter().enumerate() {
+                if let Some(locations) = debug_locations.get(index) {
+                    self.register_debug_code_locations(&compiled_function.code, locations);
+                }
+            }
+        }
         self.closures.insert(
             closure_id,
             Closure {
                 function_id,
-                functions: Rc::new(functions.to_vec()),
+                functions: cloned_functions,
                 captured_scopes,
                 captured_with_objects,
                 strict,
@@ -18590,6 +19765,12 @@ impl Vm {
     ) -> Result<bool, VmError> {
         match receiver {
             JsValue::Object(object_id) => {
+                if self
+                    .try_packet_b_dense_array_index_get(*object_id, property)?
+                    .is_some()
+                {
+                    return Ok(true);
+                }
                 let has_property =
                     self.object_has_property_in_chain(*object_id, property, _realm)?;
                 if has_property {
@@ -18914,7 +20095,7 @@ impl Vm {
             || has_indexed_accessor
             || self.array_prototype_id != prototype
             || index >= current_length
-            || dense_length != current_length
+            || dense_length > current_length
         {
             self.record_packet_b_dense_array_get_guard_miss();
             return Ok(None);
@@ -19030,7 +20211,7 @@ impl Vm {
             || has_indexed_accessor
             || self.array_prototype_id != prototype
             || index > current_length
-            || dense_length != current_length
+            || dense_length > current_length
         {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
@@ -19048,7 +20229,7 @@ impl Vm {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
-        if !has_own_data_property && (index != current_length || !extensible) {
+        if !has_own_data_property && !extensible {
             self.record_packet_b_dense_array_set_guard_miss();
             return Ok(false);
         }
@@ -19417,6 +20598,9 @@ impl Vm {
         }
         if property == "map" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayMapThis));
+        }
+        if property == "flatMap" && is_array_like && !is_array_prototype {
+            return Ok(self.create_host_function_value(HostFunction::ArrayFlatMapThis));
         }
         if property == "fill" && is_array_like && !is_array_prototype {
             return Ok(self.create_host_function_value(HostFunction::ArrayFillThis));
@@ -20607,6 +21791,7 @@ impl Vm {
             let for_each = self.create_host_function_value(HostFunction::ArrayForEachThis);
             let filter = self.create_host_function_value(HostFunction::ArrayFilterThis);
             let map = self.create_host_function_value(HostFunction::ArrayMapThis);
+            let flat_map = self.create_host_function_value(HostFunction::ArrayFlatMapThis);
             let fill = self.create_host_function_value(HostFunction::ArrayFillThis);
             let find = self.create_host_function_value(HostFunction::ArrayFindThis);
             let find_index = self.create_host_function_value(HostFunction::ArrayFindIndexThis);
@@ -20629,6 +21814,7 @@ impl Vm {
             self.set_builtin_function_length(&for_each, 1.0);
             self.set_builtin_function_length(&filter, 1.0);
             self.set_builtin_function_length(&map, 1.0);
+            self.set_builtin_function_length(&flat_map, 1.0);
             self.set_builtin_function_length(&fill, 1.0);
             self.set_builtin_function_length(&find, 1.0);
             self.set_builtin_function_length(&find_index, 1.0);
@@ -20779,6 +21965,15 @@ impl Vm {
                 object.properties.insert("map".to_string(), map);
                 object.property_attributes.insert(
                     "map".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("flatMap".to_string(), flat_map);
+                object.property_attributes.insert(
+                    "flatMap".to_string(),
                     PropertyAttributes {
                         writable: true,
                         enumerable: false,
@@ -22426,6 +23621,64 @@ impl Vm {
         None
     }
 
+    fn map_callback_is_index_identity(&self, callback: &JsValue) -> bool {
+        let JsValue::Function(closure_id) = callback else {
+            return false;
+        };
+        let Some(closure) = self.closures.get(closure_id) else {
+            return false;
+        };
+        let Some(function) = closure.functions.get(closure.function_id) else {
+            return false;
+        };
+        if function.params.len() < 2 || !self.function_is_arrow(function) {
+            return false;
+        }
+        if self.function_has_non_simple_params(function)
+            || self.function_is_async(function)
+            || self.function_is_generator(function)
+            || self.function_rest_param_index(function).is_some()
+        {
+            return false;
+        }
+
+        let second_param = &function.params[1];
+        let mut cursor = 0usize;
+        while cursor + 1 < function.code.len() {
+            match (&function.code[cursor], &function.code[cursor + 1]) {
+                (Opcode::LoadString(value), Opcode::Pop)
+                    if Self::is_function_parameter_prelude_marker(value) =>
+                {
+                    cursor += 2;
+                }
+                _ => break,
+            }
+        }
+
+        let Some(Opcode::LoadIdentifier(name)) = function.code.get(cursor) else {
+            return false;
+        };
+        if name != second_param {
+            return false;
+        }
+        if !matches!(function.code.get(cursor + 1), Some(Opcode::Return)) {
+            return false;
+        }
+        matches!(
+            function.code.get(cursor + 2..),
+            Some([]) | Some([Opcode::LoadUndefined, Opcode::Return])
+        )
+    }
+
+    fn is_function_parameter_prelude_marker(value: &str) -> bool {
+        value == NON_SIMPLE_PARAMS_MARKER
+            || value == ARROW_FUNCTION_MARKER
+            || value.starts_with(REST_PARAM_MARKER_PREFIX)
+            || value == CLASS_METHOD_NO_PROTOTYPE_MARKER
+            || value == NAMED_FUNCTION_EXPR_MARKER
+            || value == "use strict"
+    }
+
     fn closure_is_arrow(&self, closure_id: u64) -> Result<bool, VmError> {
         let closure = self
             .closures
@@ -23143,6 +24396,7 @@ impl Vm {
             "some" => Some(HostFunction::ArraySomeThis),
             "filter" => Some(HostFunction::ArrayFilterThis),
             "map" => Some(HostFunction::ArrayMapThis),
+            "flatMap" => Some(HostFunction::ArrayFlatMapThis),
             "fill" => Some(HostFunction::ArrayFillThis),
             "find" => Some(HostFunction::ArrayFindThis),
             "findIndex" => Some(HostFunction::ArrayFindIndexThis),
@@ -27733,6 +28987,18 @@ mod tests {
     }
 
     #[test]
+    fn executes_exponentiation() {
+        let chunk = empty_chunk(vec![
+            Opcode::LoadNumber(2.0),
+            Opcode::LoadNumber(3.0),
+            Opcode::Pow,
+            Opcode::Halt,
+        ]);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(8.0)));
+    }
+
+    #[test]
     fn arithmetic_applies_basic_numeric_coercion() {
         let chunk = empty_chunk(vec![
             Opcode::LoadNumber(1.0),
@@ -28540,6 +29806,28 @@ mod tests {
     }
 
     #[test]
+    fn loop_scopes_reuse_binding_slots_instead_of_unbounded_growth() {
+        let script = parse_script(
+            "for (let i = 0; i < 20000; ++i) { let frame = { i: i }; let state = frame.i; }",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Undefined));
+
+        let live_bindings = vm.bindings.iter().flatten().count();
+        assert!(
+            live_bindings < 128,
+            "live binding entries should stay small after loop scope exits, got {live_bindings}"
+        );
+        assert!(
+            vm.bindings.len() < 2048,
+            "binding slot vector should reuse freed slots, len={}",
+            vm.bindings.len()
+        );
+    }
+
+    #[test]
     fn reports_not_callable() {
         let chunk = empty_chunk(vec![Opcode::LoadNumber(1.0), Opcode::Call(0), Opcode::Halt]);
         let mut vm = Vm::default();
@@ -29115,6 +30403,122 @@ mod tests {
             "Object",
             JsValue::NativeFunction(NativeFunction::ObjectConstructor),
         );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_map_over_array_from_invokes_index_callback_semantics() {
+        let script = parse_script(
+            "var out = Array.from({ length: 4 }).map((_, i) => i); out.length === 4 && out[0] === 0 && out[3] === 3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_map_over_array_from_keeps_callback_side_effects() {
+        let script = parse_script(
+            "var calls = 0; var out = Array.from({ length: 4 }).map((_, i) => { calls += 1; return i; }); calls === 4 && out[0] === 0 && out[3] === 3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_flat_map_supports_generic_array_like_values() {
+        let script = parse_script(
+            "var obj = {0: 1, 2: 3, length: 3}; var out = Array.prototype.flatMap.call(obj, function(v) { return [v, v * 2]; }); Array.isArray(out) && out.length === 4 && out[0] === 1 && out[1] === 2 && out[2] === 3 && out[3] === 6;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_flat_map_over_array_from_invokes_index_callback_semantics() {
+        let script = parse_script(
+            "var out = Array.from({ length: 4 }).flatMap((_, i) => i); out.length === 4 && out[0] === 0 && out[3] === 3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_flat_map_over_array_from_keeps_callback_side_effects() {
+        let script = parse_script(
+            "var calls = 0; var out = Array.from({ length: 4 }).flatMap((_, i) => { calls += 1; return i; }); calls === 4 && out.length === 4 && out[3] === 3;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
+        realm.define_global(
+            "Object",
+            JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+        );
+        realm.define_global(
+            "Array",
+            JsValue::NativeFunction(NativeFunction::ArrayConstructor),
+        );
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute_in_realm(&chunk, &realm), Ok(JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn array_flat_map_skips_sparse_source_and_sparse_mapped_holes() {
+        let script = parse_script(
+            "var arr = [1, , 3]; var out = arr.flatMap(function(v) { var t = [v, v + 10]; if (v === 3) { delete t[0]; } return t; }); Array.isArray(out) && out.length === 3 && out[0] === 1 && out[1] === 11 && out[2] === 13 && !out.hasOwnProperty(3);",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut realm = Realm::default();
         realm.define_global(
             "Array",
             JsValue::NativeFunction(NativeFunction::ArrayConstructor),
@@ -33236,3 +34640,8 @@ counter;
         assert_eq!(drop_counter.load(Ordering::SeqCst), 1);
     }
 }
+/// 为 qjs-rs async host 回调线程注入 Tokio runtime 句柄。
+pub fn set_async_host_tokio_runtime_handle(handle: tokio::runtime::Handle) {
+    set_async_host_tokio_runtime_handle_inner(handle);
+}
+

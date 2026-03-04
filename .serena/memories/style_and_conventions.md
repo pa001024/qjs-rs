@@ -1,0 +1,1 @@
+项目以 Rust 2024 为主，强调语义正确性优先。常见约束：避免 unsafe（多个 crate forbid unsafe）；修改 VM 语义需配套测试；错误类型优先使用 VmError/ScriptRuntimeError 稳定标识；性能优化需受控（fast-path 开关与指标）。命名遵循 Rust 常规：snake_case 函数、PascalCase 类型。

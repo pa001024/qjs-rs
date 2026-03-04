@@ -2,8 +2,8 @@
 
 use ast::{
     BinaryOp, BindingKind, Expr, ForInitializer, FunctionDeclaration, Identifier, Module,
-    ModuleExport, ModuleImport, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase,
-    UnaryOp, UpdateTarget, VariableDeclaration,
+    ModuleExport, ModuleImport, ObjectPropertyKey, Script, SourceLocation, Stmt, StringLiteral,
+    SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration, take_script_statement_locations,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -76,6 +76,7 @@ pub enum Opcode {
     Add,
     Sub,
     Mul,
+    Pow,
     Div,
     Mod,
     Shl,
@@ -174,6 +175,18 @@ pub struct Chunk {
     pub functions: Vec<CompiledFunction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DebugLocation {
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompiledDebugInfo {
+    pub code_locations: Vec<DebugLocation>,
+    pub function_code_locations: Vec<Vec<DebugLocation>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompiledModule {
     pub chunk: Chunk,
@@ -184,6 +197,9 @@ pub struct CompiledModule {
 #[derive(Debug, Default)]
 struct Compiler {
     functions: Vec<CompiledFunction>,
+    function_code_locations: Vec<Vec<DebugLocation>>,
+    emitted_locations: Vec<DebugLocation>,
+    current_location: DebugLocation,
     scope_depth: usize,
     handler_depth: usize,
     with_nesting: usize,
@@ -230,17 +246,38 @@ enum FinallyAction {
 }
 
 pub fn compile_script(script: &Script) -> Chunk {
+    compile_script_with_debug(script).0
+}
+
+pub fn compile_script_with_debug(script: &Script) -> (Chunk, CompiledDebugInfo) {
     let mut compiler = Compiler::default();
     let mut code = Vec::new();
-    let produced_value = compiler.compile_statement_list(&script.statements, &mut code, true);
+    let statement_locations = take_script_statement_locations(&script.statements);
+    let location_hints = statement_locations
+        .as_ref()
+        .filter(|locations| locations.len() == script.statements.len())
+        .map(|locations| locations.as_slice());
+    let produced_value =
+        compiler.compile_statement_list(&script.statements, location_hints, &mut code, true);
     if !produced_value {
+        let start = code.len();
         code.push(Opcode::LoadUndefined);
+        compiler.mark_generated_code_with_current_location(start, code.len());
     }
+    let halt_start = code.len();
     code.push(Opcode::Halt);
-    Chunk {
-        code,
-        functions: compiler.functions,
-    }
+    compiler.mark_generated_code_with_current_location(halt_start, code.len());
+    let debug_info = CompiledDebugInfo {
+        code_locations: compiler.finalize_emitted_locations(code.len()),
+        function_code_locations: std::mem::take(&mut compiler.function_code_locations),
+    };
+    (
+        Chunk {
+            code,
+            functions: compiler.functions,
+        },
+        debug_info,
+    )
 }
 
 pub fn compile_expression(expr: &Expr) -> Chunk {
@@ -321,40 +358,86 @@ fn lexical_binding_name_from_opcode(opcode: &Opcode) -> Option<&str> {
 }
 
 impl Compiler {
+    fn set_current_location(&mut self, source_location: Option<SourceLocation>) {
+        self.current_location = source_location
+            .map(|location| DebugLocation {
+                line: location.line.max(1),
+                column: location.column.max(1),
+            })
+            .unwrap_or(DebugLocation { line: 1, column: 1 });
+    }
+
+    fn mark_generated_code_with_current_location(&mut self, start: usize, end: usize) {
+        if end <= start {
+            return;
+        }
+        if self.emitted_locations.len() < end {
+            self.emitted_locations.resize(end, self.current_location);
+        }
+        for slot in &mut self.emitted_locations[start..end] {
+            *slot = self.current_location;
+        }
+    }
+
+    fn finalize_emitted_locations(&mut self, code_len: usize) -> Vec<DebugLocation> {
+        if self.emitted_locations.len() < code_len {
+            self.emitted_locations
+                .resize(code_len, self.current_location);
+        }
+        std::mem::take(&mut self.emitted_locations)
+    }
+
     fn compile_statement_list(
         &mut self,
         statements: &[Stmt],
+        location_hints: Option<&[SourceLocation]>,
         code: &mut Vec<Opcode>,
         preserve_value: bool,
     ) -> bool {
+        let fallback_location = location_hints.and_then(|locations| locations.first().copied());
+        self.set_current_location(fallback_location);
+
         if self.statement_list_has_use_strict_directive(statements) {
+            let start = code.len();
             code.push(Opcode::MarkStrict);
+            self.mark_generated_code_with_current_location(start, code.len());
         }
         if self.scope_depth == 0 {
             let mut hoisted_var_names = BTreeSet::new();
             self.collect_hoisted_var_names(statements, &mut hoisted_var_names);
             for name in hoisted_var_names {
+                let start = code.len();
                 code.push(Opcode::DefineVar(name));
+                self.mark_generated_code_with_current_location(start, code.len());
             }
         }
         let mut hoisted_let_names = BTreeSet::new();
         self.collect_hoisted_let_names(statements, &mut hoisted_let_names);
         for name in hoisted_let_names {
+            let start = code.len();
             code.push(Opcode::LoadUninitialized);
             code.push(Opcode::DefineVariable {
                 name,
                 mutable: true,
             });
+            self.mark_generated_code_with_current_location(start, code.len());
         }
 
         // Function declarations are hoisted to the top of their containing scope.
-        for stmt in statements {
+        for (index, stmt) in statements.iter().enumerate() {
+            self.set_current_location(
+                location_hints
+                    .and_then(|locations| locations.get(index).copied())
+                    .or(fallback_location),
+            );
             if let Stmt::FunctionDeclaration(FunctionDeclaration { name, params, body }) = stmt {
                 let function_id = self.compile_function(Some(name), params, body);
+                let start = code.len();
                 code.push(Opcode::DefineFunction {
                     name: name.0.clone(),
                     function_id,
                 });
+                self.mark_generated_code_with_current_location(start, code.len());
             }
         }
 
@@ -388,12 +471,21 @@ impl Compiler {
             executable_indexes.last().copied()
         };
         for (index, stmt) in statements.iter().enumerate() {
+            self.set_current_location(
+                location_hints
+                    .and_then(|locations| locations.get(index).copied())
+                    .or(fallback_location),
+            );
             if matches!(stmt, Stmt::FunctionDeclaration(_)) {
+                let start = code.len();
                 code.push(Opcode::Nop);
+                self.mark_generated_code_with_current_location(start, code.len());
                 continue;
             }
             let keep_value = preserve_value && Some(index) == last_executable;
+            let start = code.len();
             let statement_produced = self.compile_stmt(stmt, code, keep_value);
+            self.mark_generated_code_with_current_location(start, code.len());
             if keep_value || !preserve_value {
                 produced_value = statement_produced;
             }
@@ -645,7 +737,7 @@ impl Compiler {
             Stmt::Block(statements) => {
                 code.push(Opcode::EnterScope);
                 self.scope_depth += 1;
-                let block_value = self.compile_statement_list(statements, code, keep_value);
+                let block_value = self.compile_statement_list(statements, None, code, keep_value);
                 if keep_value && !block_value {
                     code.push(Opcode::LoadUndefined);
                 }
@@ -1078,7 +1170,7 @@ impl Compiler {
                 }
                 for (index, SwitchCase { consequent, .. }) in cases.iter().enumerate() {
                     case_start_positions[index] = code.len();
-                    self.compile_statement_list(consequent, code, false);
+                    self.compile_statement_list(consequent, None, code, false);
                 }
                 if completion_name.is_some() {
                     self.loop_completion_targets
@@ -1321,7 +1413,7 @@ impl Compiler {
 
         code.push(Opcode::EnterScope);
         self.scope_depth += 1;
-        let try_value = self.compile_statement_list(try_block, code, keep_value);
+        let try_value = self.compile_statement_list(try_block, None, code, keep_value);
         if let Some(name) = &completion_name {
             if try_value {
                 code.push(Opcode::StoreVariable(name.clone()));
@@ -1361,7 +1453,7 @@ impl Compiler {
             }
         }
 
-        let catch_value = self.compile_statement_list(catch_block, code, keep_value);
+        let catch_value = self.compile_statement_list(catch_block, None, code, keep_value);
         if let Some(name) = &completion_name {
             if catch_value {
                 code.push(Opcode::StoreVariable(name.clone()));
@@ -1416,7 +1508,7 @@ impl Compiler {
 
         code.push(Opcode::EnterScope);
         self.scope_depth += 1;
-        let try_value = self.compile_statement_list(try_block, code, keep_value);
+        let try_value = self.compile_statement_list(try_block, None, code, keep_value);
         if let Some(name) = &completion_name {
             if try_value {
                 code.push(Opcode::StoreVariable(name.clone()));
@@ -1515,6 +1607,8 @@ impl Compiler {
         params: &[Identifier],
         body: &[Stmt],
     ) -> usize {
+        let saved_emitted_locations = std::mem::take(&mut self.emitted_locations);
+        let saved_current_location = self.current_location;
         let saved_scope_depth = self.scope_depth;
         let saved_handler_depth = self.handler_depth;
         let saved_loops = std::mem::take(&mut self.loops);
@@ -1530,9 +1624,12 @@ impl Compiler {
         self.function_nesting = self.function_nesting.saturating_add(1);
 
         let mut code = Vec::new();
-        self.compile_statement_list(body, &mut code, false);
+        self.compile_statement_list(body, None, &mut code, false);
+        let tail_start = code.len();
         code.push(Opcode::LoadUndefined);
         code.push(Opcode::Return);
+        self.mark_generated_code_with_current_location(tail_start, code.len());
+        let function_locations = self.finalize_emitted_locations(code.len());
 
         let function_id = self.functions.len();
         let length = Self::compute_expected_function_length(params, body);
@@ -1544,6 +1641,7 @@ impl Compiler {
             params: params.iter().map(|param| param.0.clone()).collect(),
             code,
         });
+        self.function_code_locations.push(function_locations);
 
         self.scope_depth = saved_scope_depth;
         self.handler_depth = saved_handler_depth;
@@ -1554,6 +1652,8 @@ impl Compiler {
         self.loop_completion_targets = saved_loop_completion_targets;
         self.function_nesting = saved_function_nesting;
         self.with_nesting = saved_with_nesting;
+        self.emitted_locations = saved_emitted_locations;
+        self.current_location = saved_current_location;
         function_id
     }
 
@@ -2020,7 +2120,7 @@ impl Compiler {
             code.push(Opcode::Pop);
             (name, saved_name)
         });
-        self.compile_statement_list(statements, code, false);
+        self.compile_statement_list(statements, None, code, false);
         if let Some((name, saved_name)) = loop_completion_restore {
             code.push(Opcode::LoadIdentifier(saved_name));
             code.push(Opcode::StoreVariable(name));
@@ -2644,6 +2744,7 @@ impl Compiler {
             BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::Mul
+                | BinaryOp::Pow
                 | BinaryOp::Div
                 | BinaryOp::Mod
                 | BinaryOp::ShiftLeft
@@ -2739,6 +2840,7 @@ impl Compiler {
             BinaryOp::Add => Opcode::Add,
             BinaryOp::Sub => Opcode::Sub,
             BinaryOp::Mul => Opcode::Mul,
+            BinaryOp::Pow => Opcode::Pow,
             BinaryOp::Div => Opcode::Div,
             BinaryOp::Mod => Opcode::Mod,
             BinaryOp::ShiftLeft => Opcode::Shl,
@@ -2799,6 +2901,26 @@ mod tests {
             functions: vec![],
         };
 
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_exponentiation_binary() {
+        let expr = Expr::Binary {
+            op: BinaryOp::Pow,
+            left: Box::new(Expr::Number(2.0)),
+            right: Box::new(Expr::Number(3.0)),
+        };
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::LoadNumber(2.0),
+                Opcode::LoadNumber(3.0),
+                Opcode::Pow,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
         assert_eq!(chunk, expected);
     }
 

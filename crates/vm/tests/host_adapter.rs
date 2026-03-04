@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use vm::{
-    BoaLikeHostAdapter, ConsoleLevel, ConsoleLogger, HostClassAsyncMethodRegistration,
+    ConsoleLevel, ConsoleLogger, HostAdapter, HostClassAsyncMethodRegistration,
     HostClassMethodRegistration, HostClassRegistration, HostClassStaticMethodRegistration,
     ScriptRuntime, VmError,
 };
@@ -35,9 +35,9 @@ fn host_class_sync_methods() {
             .with_method(HostClassMethodRegistration::new(
                 "add",
                 1.0,
-                |instance: &mut Counter, args| {
+                |_vm, instance: &mut Counter, args, _realm, _strict| {
                     let delta = match args.first() {
-                        Some(JsValue::Number(value)) => *value,
+                        Some(JsValue::Number(value)) => value.to_owned(),
                         _ => 0.0,
                     };
                     instance.value += delta;
@@ -236,8 +236,8 @@ struct HostCtor {
 }
 
 #[test]
-fn boa_like_adapter_smoke() {
-    let mut adapter = BoaLikeHostAdapter::new();
+fn host_adapter_smoke() {
+    let mut adapter = HostAdapter::new();
     adapter
         .register_global_function("rustAdd", 2.0, |_vm, _this_arg, args, _realm, _strict| {
             let lhs = match args.first() {
@@ -280,9 +280,9 @@ fn boa_like_adapter_smoke() {
             .with_method(HostClassMethodRegistration::new(
                 "inc",
                 1.0,
-                |instance: &mut HostCtor, args| {
+                |_vm, instance: &mut HostCtor, args, _realm, _strict| {
                     let delta = match args.first() {
-                        Some(JsValue::Number(value)) => *value,
+                        Some(JsValue::Number(value)) => value.to_owned(),
                         _ => 0.0,
                     };
                     instance.value += delta;

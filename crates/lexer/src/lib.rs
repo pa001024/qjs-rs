@@ -25,7 +25,9 @@ pub enum TokenKind {
     MinusEqual,
     MinusMinus,
     Star,
+    StarStar,
     StarEqual,
+    StarStarEqual,
     Slash,
     SlashEqual,
     Percent,
@@ -657,6 +659,28 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         }
 
         if byte == b'*' {
+            if pos + 2 < bytes.len() && bytes[pos + 1] == b'*' && bytes[pos + 2] == b'=' {
+                tokens.push(Token {
+                    kind: TokenKind::StarStarEqual,
+                    span: Span {
+                        start: pos,
+                        end: pos + 3,
+                    },
+                });
+                pos += 3;
+                continue;
+            }
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'*' {
+                tokens.push(Token {
+                    kind: TokenKind::StarStar,
+                    span: Span {
+                        start: pos,
+                        end: pos + 2,
+                    },
+                });
+                pos += 2;
+                continue;
+            }
             if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
                 tokens.push(Token {
                     kind: TokenKind::StarEqual,
@@ -1878,6 +1902,19 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Number(3.0));
         assert_eq!(tokens[5].kind, TokenKind::Slash);
         assert_eq!(tokens[6].kind, TokenKind::Number(4.0));
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_exponentiation_operators() {
+        let tokens = lex("a ** b; a **= b").expect("tokenization should succeed");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::StarStar);
+        assert_eq!(tokens[2].kind, TokenKind::Identifier("b".to_string()));
+        assert_eq!(tokens[3].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[4].kind, TokenKind::Identifier("a".to_string()));
+        assert_eq!(tokens[5].kind, TokenKind::StarStarEqual);
+        assert_eq!(tokens[6].kind, TokenKind::Identifier("b".to_string()));
         assert_eq!(tokens[7].kind, TokenKind::Eof);
     }
 

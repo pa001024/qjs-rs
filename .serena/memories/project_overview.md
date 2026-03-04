@@ -1,0 +1,1 @@
+qjs-rs 是纯 Rust 的 JavaScript 运行时，目标语义优先并对齐 QuickJS。工作区为 Cargo workspace，核心在 crates/ 下：ast、lexer、parser、bytecode、runtime、builtins、vm、test-harness、benchmarks。vm crate 是执行核心（对象模型、模块、Promise、GC、宿主回调等）。

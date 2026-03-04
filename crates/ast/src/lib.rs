@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identifier(pub String);
 
@@ -14,6 +17,7 @@ pub enum BinaryOp {
     Add,
     Sub,
     Mul,
+    Pow,
     Div,
     Mod,
     ShiftLeft,
@@ -245,6 +249,38 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Script {
     pub statements: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SourceLocation {
+    pub line: u32,
+    pub column: u32,
+}
+
+fn statement_locations_registry() -> &'static Mutex<HashMap<(usize, usize), Vec<SourceLocation>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(usize, usize), Vec<SourceLocation>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn statement_slice_key(statements: &[Stmt]) -> (usize, usize) {
+    (statements.as_ptr() as usize, statements.len())
+}
+
+pub fn register_script_statement_locations(statements: &[Stmt], locations: Vec<SourceLocation>) {
+    if locations.is_empty() {
+        return;
+    }
+    if let Ok(mut registry) = statement_locations_registry().lock() {
+        registry.insert(statement_slice_key(statements), locations);
+    }
+}
+
+pub fn take_script_statement_locations(statements: &[Stmt]) -> Option<Vec<SourceLocation>> {
+    if let Ok(mut registry) = statement_locations_registry().lock() {
+        return registry.remove(&statement_slice_key(statements));
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 use builtins::install_baseline;
-use bytecode::compile_script;
+use bytecode::compile_script_with_debug;
 use parser::parse_script;
 use runtime::{JsValue, Realm};
 use std::error::Error;
@@ -260,11 +260,19 @@ impl ScriptRuntime {
         &mut self,
         source: &str,
     ) -> Result<ScriptRunOutput, ScriptRuntimeError> {
+        self.execute_source_named_without_drain(source, None)
+    }
+
+    fn execute_source_named_without_drain(
+        &mut self,
+        source: &str,
+        source_name: Option<&str>,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError> {
         let script = parse_script(source).map_err(|err| ScriptRuntimeError::Parse(err.message))?;
-        let chunk = compile_script(&script);
+        let (chunk, debug) = compile_script_with_debug(&script);
         let value = self
             .vm
-            .execute_in_realm_persistent(&chunk, &self.realm)
+            .execute_in_realm_persistent_with_debug(&chunk, &debug, source_name, &self.realm)
             .map_err(ScriptRuntimeError::Vm)?;
         let result_text = script_result_text_runtime(&mut self.vm, &value, &self.realm);
         Ok(ScriptRunOutput {
@@ -285,7 +293,7 @@ impl ScriptRuntime {
                 normalized.display()
             ))
         })?;
-        self.execute_source(&source)
+        self.execute_source_named(&source, normalized.to_string_lossy().as_ref())
     }
 
     /// 执行脚本文件但不主动 drain Promise job 队列。
@@ -303,30 +311,42 @@ impl ScriptRuntime {
                 normalized.display()
             ))
         })?;
-        self.execute_source_without_drain(&source)
+        self.execute_source_named_without_drain(
+            &source,
+            Some(normalized.to_string_lossy().as_ref()),
+        )
+    }
+
+    fn execute_source_named(
+        &mut self,
+        source: &str,
+        source_name: &str,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError> {
+        let mut output = self.execute_source_named_without_drain(source, Some(source_name))?;
+        output.drained_promise_jobs = self.drain_all_promise_jobs()?;
+        Ok(output)
     }
 
     /// 按预算 drain Promise jobs，返回本次处理的 job 数量。
     pub fn drain_jobs(&mut self, budget: usize) -> Result<usize, ScriptRuntimeError> {
+        let deferred_processed = self
+            .vm
+            .drain_deferred_async_calls(budget, &self.realm, false)
+            .map_err(ScriptRuntimeError::Vm)?;
+        let remaining_budget = budget.saturating_sub(deferred_processed);
         let report = self
             .vm
-            .drain_promise_jobs(budget, &self.realm, false)
+            .drain_promise_jobs(remaining_budget, &self.realm, false)
             .map_err(ScriptRuntimeError::Vm)?;
-        Ok(report.processed)
+        Ok(deferred_processed.saturating_add(report.processed))
     }
 
     fn drain_all_promise_jobs(&mut self) -> Result<usize, ScriptRuntimeError> {
         let mut drained = 0usize;
         let mut idle_cycles = 0usize;
         while self.vm.has_pending_promise_jobs() {
-            let report = self
-                .vm
-                .drain_promise_jobs(usize::MAX, &self.realm, false)
-                .map_err(ScriptRuntimeError::Vm)?;
-            if report.processed == 0 && report.remaining == 0 {
-                break;
-            }
-            if report.processed == 0 {
+            let processed = self.drain_jobs(usize::MAX)?;
+            if processed == 0 {
                 idle_cycles = idle_cycles.saturating_add(1);
                 if idle_cycles > 128 {
                     break;
@@ -334,7 +354,7 @@ impl ScriptRuntime {
                 continue;
             }
             idle_cycles = 0;
-            drained = drained.saturating_add(report.processed);
+            drained = drained.saturating_add(processed);
         }
         Ok(drained)
     }
@@ -422,7 +442,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -649,5 +669,140 @@ mod tests {
             .execute_source("40 + 2;")
             .expect("execution should resume after clearing stop flag");
         assert_eq!(resumed.value, JsValue::Number(42.0));
+    }
+
+    #[test]
+    fn stop_token_interrupts_running_infinite_loop() {
+        let mut runtime = ScriptRuntime::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+
+        let stop_for_thread = Arc::clone(&stop);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            stop_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let err = runtime
+            .execute_source("while (true) {}")
+            .expect_err("infinite loop should be interrupted");
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+
+        let _ = interrupter.join();
+    }
+
+    #[test]
+    fn stop_token_interrupts_async_infinite_loop_without_await() {
+        let mut runtime = ScriptRuntime::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+
+        let stop_for_thread = Arc::clone(&stop);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            stop_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let err = runtime
+            .execute_source("async function main() { while (true) {} } main();")
+            .expect_err("async infinite loop should be interrupted");
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+
+        let _ = interrupter.join();
+    }
+
+    #[test]
+    fn stop_token_interrupts_async_infinite_loop_with_await() {
+        let mut runtime = ScriptRuntime::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+
+        let stop_for_thread = Arc::clone(&stop);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            stop_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let err = runtime
+            .execute_source("async function main() { while (true) { await Promise.resolve(); } } main();")
+            .expect_err("async promise loop should be interrupted");
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+
+        let _ = interrupter.join();
+    }
+
+    #[test]
+    fn stop_token_interrupts_async_infinite_loop_with_async_host_callback_await() {
+        let mut runtime = ScriptRuntime::new();
+        runtime
+            .register_async_host_callback(ScriptAsyncHostCallbackRegistration::function(
+                "rustSleepTick",
+                0.0,
+                |_vm, _this_arg, _args, _realm, _strict| {
+                    Ok(async move {
+                        thread::sleep(Duration::from_millis(1));
+                        Ok(JsValue::Undefined)
+                    })
+                },
+            ))
+            .expect("async host callback should register");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+
+        let stop_for_thread = Arc::clone(&stop);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            stop_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let err = runtime
+            .execute_source("async function main() { while (true) { await rustSleepTick(); } } main();")
+            .expect_err("async host callback loop should be interrupted");
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+
+        let _ = interrupter.join();
+    }
+
+    #[test]
+    fn stop_token_interrupts_large_array_from_and_map_promptly() {
+        let mut runtime = ScriptRuntime::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        runtime.set_stop_token(Arc::clone(&stop));
+
+        let stop_for_thread = Arc::clone(&stop);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            stop_for_thread.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let err = runtime
+            .execute_source("const data = Array.from({ length: 5000000 }).map((_, i) => i); data.length;")
+            .expect_err("large Array.from/map should be interruptible");
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            err,
+            super::ScriptRuntimeError::Vm(super::VmError::Interrupted)
+        ));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "interrupt latency too high: {:?}",
+            elapsed
+        );
+
+        let _ = interrupter.join();
     }
 }

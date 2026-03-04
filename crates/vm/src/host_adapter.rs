@@ -24,8 +24,8 @@ pub type HostClassConstructor<T> =
     dyn FnMut(Vec<JsValue>, &Realm, bool) -> Result<T, VmError> + 'static;
 
 /// Host class 实例同步方法回调。
-pub type HostClassInstanceMethod<T> =
-    dyn FnMut(&mut crate::Vm, &mut T, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError> + 'static;
+pub type HostClassInstanceMethod<T> = dyn FnMut(&mut crate::Vm, &mut T, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError>
+    + 'static;
 
 /// Host class 实例异步方法回调。
 pub type HostClassAsyncInstanceMethod<T> =
@@ -444,18 +444,18 @@ impl ScriptRuntime {
     }
 }
 
-/// Boa 风格的宿主兼容层，降低从 Boa 迁移时的改造成本。
-pub struct BoaLikeHostAdapter {
+/// 宿主适配层，统一封装 ScriptRuntime 的宿主注册与执行入口。
+pub struct HostAdapter {
     runtime: ScriptRuntime,
 }
 
-impl Default for BoaLikeHostAdapter {
+impl Default for HostAdapter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BoaLikeHostAdapter {
+impl HostAdapter {
     /// 创建适配器实例。
     pub fn new() -> Self {
         Self {
