@@ -763,3 +763,18 @@ fn module_parse_default_async_generator_declaration_binding() {
         local: "genType".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_default_with_comment_separator() {
+    let source = "export default/* gap */function Named() { return 42; }\nexport const namedType = typeof Named;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Named".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "namedType".to_string(),
+        local: "namedType".to_string(),
+    }));
+}

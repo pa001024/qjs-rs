@@ -1149,11 +1149,14 @@ fn trim_module_trailing_block_comment_separators(source: &str) -> Option<&str> {
 fn strip_module_export_default_prefix(source: &str) -> Option<&str> {
     let source = source.trim_start();
     let after_default = source.strip_prefix("default")?;
-    let first = after_default.chars().next()?;
-    if !first.is_whitespace() {
+    if after_default.is_empty() {
         return None;
     }
-    Some(after_default.trim_start())
+    let (rest, consumed_separator) = strip_module_keyword_leading_separators(after_default)?;
+    if !consumed_separator {
+        return None;
+    }
+    Some(rest)
 }
 
 fn is_module_identifier_part(ch: char) -> bool {

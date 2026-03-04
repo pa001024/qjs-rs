@@ -928,3 +928,17 @@ fn default_async_generator_declaration_binding_parses_and_evaluates() {
     assert_eq!(expect_string(&exports, "genType"), "function");
     assert_eq!(host.load_count("entry.js"), 1);
 }
+
+#[test]
+fn default_with_comment_separator_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export default/* gap */function Named() { return 42; }\nexport const namedType = typeof Named;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default declaration with comment separator should evaluate");
+    assert_eq!(expect_string(&exports, "namedType"), "function");
+    assert_eq!(host.load_count("entry.js"), 1);
+}
