@@ -1624,6 +1624,9 @@ fn split_module_string_literal_parts(source: &str) -> Result<(&str, &str), Parse
 
 fn is_supported_module_attributes_clause(source: &str) -> bool {
     let source = source.trim_start();
+    let Some((source, _)) = strip_module_keyword_leading_separators(source) else {
+        return false;
+    };
     let after_keyword = if let Some(rest) = source.strip_prefix("assert") {
         rest
     } else if let Some(rest) = source.strip_prefix("with") {
