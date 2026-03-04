@@ -670,14 +670,8 @@ fn parse_module_import_clause_bindings(
     if clause.starts_with('{') {
         return parse_named_import_bindings(clause);
     }
-    if let Some(local) = clause.strip_prefix("* as ") {
-        return Ok((
-            vec![ModuleImportBinding {
-                imported: "*".to_string(),
-                local: parse_module_binding_identifier(local.trim())?,
-            }],
-            Vec::new(),
-        ));
+    if let Some(binding) = parse_namespace_import_binding(clause)? {
+        return Ok((vec![binding], Vec::new()));
     }
 
     let mut bindings = Vec::new();
@@ -692,11 +686,8 @@ fn parse_module_import_clause_bindings(
             let (named_bindings, named_type_only_locals) = parse_named_import_bindings(remainder)?;
             bindings.extend(named_bindings);
             type_only_locals.extend(named_type_only_locals);
-        } else if let Some(local) = remainder.strip_prefix("* as ") {
-            bindings.push(ModuleImportBinding {
-                imported: "*".to_string(),
-                local: parse_module_binding_identifier(local.trim())?,
-            });
+        } else if let Some(binding) = parse_namespace_import_binding(remainder)? {
+            bindings.push(binding);
         } else {
             return Err(ParseError {
                 message: "unsupported import declaration form".to_string(),
@@ -911,6 +902,25 @@ fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((left, right))
+}
+
+fn parse_namespace_import_binding(clause: &str) -> Result<Option<ModuleImportBinding>, ParseError> {
+    let clause = clause.trim();
+    let Some(after_star) = clause.strip_prefix('*') else {
+        return Ok(None);
+    };
+    let after_star = after_star.trim_start();
+    let Some(after_as) = after_star.strip_prefix("as") else {
+        return Ok(None);
+    };
+    if !after_as.chars().next().is_some_and(char::is_whitespace) {
+        return Ok(None);
+    }
+    let local = parse_module_binding_identifier(after_as.trim_start())?;
+    Ok(Some(ModuleImportBinding {
+        imported: "*".to_string(),
+        local,
+    }))
 }
 
 enum ExportStarClause {

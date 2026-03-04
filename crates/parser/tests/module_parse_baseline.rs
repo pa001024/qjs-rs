@@ -546,3 +546,23 @@ fn module_parse_linebreak_as_alias_clauses() {
         local: "alias".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_namespace_import_across_linebreaks() {
+    let source = "import *\nas\nns from './dep.js';\nexport const answer = ns.value;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "*".to_string(),
+            local: "ns".to_string(),
+        }]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}

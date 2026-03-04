@@ -701,3 +701,20 @@ fn linebreak_as_alias_clauses_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn namespace_import_across_linebreaks_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "entry.js",
+            "import *\nas\nns from './dep.js';\nexport const answer = ns.value;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("namespace import across linebreaks should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
