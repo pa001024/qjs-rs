@@ -470,3 +470,33 @@ fn module_parse_multiline_reexport_with_attributes_clause() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_default_named_generator_declaration_binding() {
+    let source = "export default function* Gen() { yield 40; yield 2; }\nexport const total = Gen().next().value + Gen().next().value;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Gen".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "total".to_string(),
+        local: "total".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_string_named_reexport_clause() {
+    let source = "export { value as \"kebab-name\" } from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "kebab-name".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+}

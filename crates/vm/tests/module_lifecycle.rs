@@ -866,6 +866,44 @@ fn module_multiline_reexport_with_attributes_clause_parses_and_evaluates() {
 }
 
 #[test]
+fn module_default_named_generator_declaration_binding_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "export default function* Gen() { yield 40; yield 2; }\n\
+         const iter = Gen();\n\
+         export const total = iter.next().value + iter.next().value;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default named generator declaration export should evaluate");
+    assert_eq!(load_number_export(&exports, "total"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
+fn module_string_named_reexport_clause_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "bridge.js",
+            "export { value as \"kebab-name\" } from './dep.js';\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { \"kebab-name\" as kebabName } from './bridge.js';\nexport const answer = kebabName;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("string-named re-export clause should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");
