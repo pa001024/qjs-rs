@@ -280,9 +280,22 @@ pub(super) fn execute_object_define_properties(
         args.get(1).cloned().unwrap_or(JsValue::Undefined),
         "Object.defineProperties descriptors must be object",
     )?;
-    let descriptor_keys = vm.collect_own_property_keys(&descriptors, true)?;
+    let descriptor_keys = collect_object_assign_keys(vm, descriptors.clone(), realm)?;
     let mut normalized_descriptors = Vec::with_capacity(descriptor_keys.len());
     for property_name in descriptor_keys {
+        let Some(own_descriptor) = object_assign_get_own_property_descriptor(
+            vm,
+            descriptors.clone(),
+            &property_name,
+            realm,
+        )?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(own_descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
+            continue;
+        }
         let descriptor =
             vm.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
         let parsed = vm.parse_property_descriptor(descriptor, realm)?;

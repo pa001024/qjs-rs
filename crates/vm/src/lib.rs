@@ -4108,9 +4108,21 @@ impl Vm {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let result = match receiver {
                         JsValue::Object(object_id) => {
+                            if strict {
+                                self.ensure_assign_target_writable(
+                                    &JsValue::Object(object_id),
+                                    name,
+                                )?;
+                            }
                             self.set_object_property(object_id, name.clone(), value, realm)
                         }
                         JsValue::Function(closure_id) => {
+                            if strict {
+                                self.ensure_assign_target_writable(
+                                    &JsValue::Function(closure_id),
+                                    name,
+                                )?;
+                            }
                             if self.function_rejects_caller_arguments(closure_id)?
                                 && matches!(name.as_str(), "caller" | "arguments")
                                 && !self.closure_has_own_property(closure_id, name)
@@ -4120,13 +4132,27 @@ impl Vm {
                                 self.set_function_property(closure_id, name.clone(), value, realm)
                             }
                         }
-                        JsValue::NativeFunction(native) => self.set_property_on_receiver(
-                            JsValue::NativeFunction(native),
-                            name.clone(),
-                            value,
-                            realm,
-                        ),
+                        JsValue::NativeFunction(native) => {
+                            if strict {
+                                self.ensure_assign_target_writable(
+                                    &JsValue::NativeFunction(native),
+                                    name,
+                                )?;
+                            }
+                            self.set_property_on_receiver(
+                                JsValue::NativeFunction(native),
+                                name.clone(),
+                                value,
+                                realm,
+                            )
+                        }
                         JsValue::HostFunction(host_id) => {
+                            if strict {
+                                self.ensure_assign_target_writable(
+                                    &JsValue::HostFunction(host_id),
+                                    name,
+                                )?;
+                            }
                             if Self::is_restricted_function_property(name) {
                                 Err(VmError::TypeError("restricted function property access"))
                             } else {
@@ -4159,12 +4185,18 @@ impl Vm {
                                     .record_array_indexed_property_set_unchecked();
                             }
                             if let JsValue::Object(object_id) = receiver {
+                                let key = index.to_string();
+                                if strict {
+                                    self.ensure_assign_target_writable(
+                                        &JsValue::Object(object_id),
+                                        &key,
+                                    )?;
+                                }
                                 if self.try_packet_b_dense_array_index_set_with_index(
                                     object_id, index, &value,
                                 )? {
                                     return Ok(value);
                                 }
-                                let key = index.to_string();
                                 return self.set_object_property_with_known_array_index(
                                     object_id,
                                     key,
@@ -4174,12 +4206,18 @@ impl Vm {
                                 );
                             }
                             let key = index.to_string();
+                            if strict {
+                                self.ensure_assign_target_writable(&receiver, &key)?;
+                            }
                             return self.set_property_on_receiver(receiver, key, value, realm);
                         }
                         let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                         if Self::canonical_array_index(&key).is_some() && hotspot_enabled {
                             self.hotspot_attribution
                                 .record_array_indexed_property_set_unchecked();
+                        }
+                        if strict {
+                            self.ensure_assign_target_writable(&receiver, &key)?;
                         }
                         self.set_property_on_receiver(receiver, key, value, realm)
                     })();
@@ -4287,7 +4325,12 @@ impl Vm {
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let deleted = self.delete_property(receiver, name.clone())?;
                     if strict && !deleted {
-                        return Err(VmError::TypeError("cannot delete property"));
+                        let target = self.route_runtime_error_to_handler(
+                            VmError::TypeError("cannot delete property"),
+                            code.len(),
+                        )?;
+                        pc = target;
+                        continue;
                     }
                     self.stack.push(JsValue::Bool(deleted));
                 }
@@ -4297,7 +4340,12 @@ impl Vm {
                     let key = self.coerce_to_property_key_runtime(key_value, realm, strict)?;
                     let deleted = self.delete_property(receiver, key)?;
                     if strict && !deleted {
-                        return Err(VmError::TypeError("cannot delete property"));
+                        let target = self.route_runtime_error_to_handler(
+                            VmError::TypeError("cannot delete property"),
+                            code.len(),
+                        )?;
+                        pc = target;
+                        continue;
                     }
                     self.stack.push(JsValue::Bool(deleted));
                 }
