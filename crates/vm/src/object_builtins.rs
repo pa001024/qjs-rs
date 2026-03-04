@@ -64,15 +64,114 @@ pub(super) fn execute_object_assign(
         }
         let source_object =
             vm.coerce_object_for_object_builtins(source, "Object.assign source must be coercible")?;
-        let keys = vm.collect_own_property_keys(&source_object, true)?;
+        let keys = collect_object_assign_keys(vm, source_object.clone(), realm)?;
 
         for key in keys {
+            let Some(descriptor) =
+                object_assign_get_own_property_descriptor(vm, source_object.clone(), &key, realm)?
+            else {
+                continue;
+            };
+            let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+            if !vm.is_truthy(&enumerable) {
+                continue;
+            }
             let value = vm.get_property_from_receiver(source_object.clone(), &key, realm)?;
             vm.ensure_assign_target_writable(&target, &key)?;
             let _ = vm.set_property_on_receiver(target.clone(), key, value, realm)?;
         }
     }
     Ok(target)
+}
+
+fn collect_object_assign_keys(
+    vm: &mut Vm,
+    source_object: JsValue,
+    realm: &Realm,
+) -> Result<Vec<String>, VmError> {
+    let JsValue::Object(object_id) = source_object.clone() else {
+        return vm.collect_own_property_keys(&source_object, false);
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        return vm.collect_own_property_keys(&source_object, false);
+    };
+    let trap = vm.get_property_from_receiver(proxy_handler.clone(), "ownKeys", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(Vec::new());
+        }
+        return collect_object_assign_keys(vm, proxy_target, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError("Proxy ownKeys trap must be callable"));
+    }
+    let trap_result =
+        vm.execute_callable(trap, Some(proxy_handler), vec![proxy_target], realm, false)?;
+    if !Vm::is_object_like_value(&trap_result) {
+        return Err(VmError::TypeError("Proxy ownKeys trap must return object"));
+    }
+    let length_value = vm.get_property_from_receiver(trap_result.clone(), "length", realm)?;
+    let length_number = vm.coerce_number_runtime(length_value, realm, false)?;
+    let length = Vm::to_length_from_number(length_number).max(0) as usize;
+    let mut keys = Vec::with_capacity(length);
+    for index in 0..length {
+        let key_value =
+            vm.get_property_from_receiver(trap_result.clone(), &index.to_string(), realm)?;
+        let key = vm.coerce_to_property_key_runtime(key_value, realm, false)?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn object_assign_get_own_property_descriptor(
+    vm: &mut Vm,
+    source_object: JsValue,
+    key: &str,
+    realm: &Realm,
+) -> Result<Option<JsValue>, VmError> {
+    let JsValue::Object(object_id) = source_object.clone() else {
+        let descriptor = vm.execute_object_get_own_property_descriptor(
+            &[source_object, JsValue::String(key.to_string())],
+            realm,
+        )?;
+        return Ok((!matches!(descriptor, JsValue::Undefined)).then_some(descriptor));
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        let descriptor = vm.execute_object_get_own_property_descriptor(
+            &[JsValue::Object(object_id), JsValue::String(key.to_string())],
+            realm,
+        )?;
+        return Ok((!matches!(descriptor, JsValue::Undefined)).then_some(descriptor));
+    };
+    let trap =
+        vm.get_property_from_receiver(proxy_handler.clone(), "getOwnPropertyDescriptor", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(None);
+        }
+        return object_assign_get_own_property_descriptor(vm, proxy_target, key, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError(
+            "Proxy getOwnPropertyDescriptor trap must be callable",
+        ));
+    }
+    let descriptor = vm.execute_callable(
+        trap,
+        Some(proxy_handler),
+        vec![proxy_target, JsValue::String(key.to_string())],
+        realm,
+        false,
+    )?;
+    if matches!(descriptor, JsValue::Undefined) {
+        return Ok(None);
+    }
+    if !Vm::is_object_like_value(&descriptor) {
+        return Err(VmError::TypeError(
+            "Proxy getOwnPropertyDescriptor trap must return object or undefined",
+        ));
+    }
+    Ok(Some(descriptor))
 }
 
 pub(super) fn execute_object_keys(vm: &mut Vm, args: &[JsValue]) -> Result<JsValue, VmError> {

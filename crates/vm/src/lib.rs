@@ -6274,9 +6274,21 @@ impl Vm {
     fn strict_this_string(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
         let value = this_arg.unwrap_or(JsValue::Undefined);
         match value {
-            JsValue::String(value) => Ok(value),
+            JsValue::String(value) => {
+                if Self::is_symbol_primitive_string(&value) {
+                    Ok(Self::symbol_primitive_display_string(&value))
+                } else {
+                    Ok(value)
+                }
+            }
             JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
-                Some(JsValue::String(value)) => Ok(value),
+                Some(JsValue::String(value)) => {
+                    if Self::is_symbol_primitive_string(&value) {
+                        Ok(Self::symbol_primitive_display_string(&value))
+                    } else {
+                        Ok(value)
+                    }
+                }
                 _ => Err(VmError::TypeError(
                     "String.prototype method called on incompatible",
                 )),
@@ -15060,9 +15072,19 @@ impl Vm {
                 ordered_string_keys.push(key);
             }
         }
+        let mut non_symbol_string_keys = Vec::with_capacity(ordered_string_keys.len());
+        let mut symbol_string_keys = Vec::new();
+        for key in ordered_string_keys {
+            if Self::is_symbol_primitive_string(&key) {
+                symbol_string_keys.push(key);
+            } else {
+                non_symbol_string_keys.push(key);
+            }
+        }
+        non_symbol_string_keys.extend(symbol_string_keys);
         let mut keys = Vec::with_capacity(index_keys.len() + string_key_count);
         keys.extend(index_keys.into_iter().map(|(_, key)| key));
-        keys.extend(ordered_string_keys);
+        keys.extend(non_symbol_string_keys);
         keys
     }
 
@@ -15537,6 +15559,16 @@ impl Vm {
                 configurable: false,
             },
         );
+        for key in ["toString", "valueOf", "constructor"] {
+            target.property_attributes.insert(
+                key.to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
         if let Some((year, month, day)) = local_components {
             target
                 .properties
@@ -15547,10 +15579,23 @@ impl Vm {
             target
                 .properties
                 .insert("__dateDay".to_string(), JsValue::Number(day as f64));
+            for key in ["__dateYear", "__dateMonth", "__dateDay"] {
+                target.property_attributes.insert(
+                    key.to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
         } else {
             target.properties.remove("__dateYear");
             target.properties.remove("__dateMonth");
             target.properties.remove("__dateDay");
+            target.property_attributes.remove("__dateYear");
+            target.property_attributes.remove("__dateMonth");
+            target.property_attributes.remove("__dateDay");
         }
         Ok(JsValue::Object(object_id))
     }
@@ -25790,6 +25835,26 @@ impl Vm {
             NativeFunction::FunctionConstructor => "Function",
             NativeFunction::GeneratorFunctionConstructor => "GeneratorFunction",
             NativeFunction::ObjectConstructor => "Object",
+            NativeFunction::ObjectDefineProperty => "defineProperty",
+            NativeFunction::ObjectDefineProperties => "defineProperties",
+            NativeFunction::ObjectKeys => "keys",
+            NativeFunction::ObjectEntries => "entries",
+            NativeFunction::ObjectValues => "values",
+            NativeFunction::ObjectGetOwnPropertyNames => "getOwnPropertyNames",
+            NativeFunction::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
+            NativeFunction::ObjectCreate => "create",
+            NativeFunction::ObjectAssign => "assign",
+            NativeFunction::ObjectSetPrototypeOf => "setPrototypeOf",
+            NativeFunction::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
+            NativeFunction::ObjectGetOwnPropertyDescriptors => "getOwnPropertyDescriptors",
+            NativeFunction::ObjectGetPrototypeOf => "getPrototypeOf",
+            NativeFunction::ObjectPreventExtensions => "preventExtensions",
+            NativeFunction::ObjectIsExtensible => "isExtensible",
+            NativeFunction::ObjectIsSealed => "isSealed",
+            NativeFunction::ObjectIsFrozen => "isFrozen",
+            NativeFunction::ObjectIs => "is",
+            NativeFunction::ObjectFreeze => "freeze",
+            NativeFunction::ObjectSeal => "seal",
             NativeFunction::ArrayConstructor => "Array",
             NativeFunction::StringConstructor => "String",
             NativeFunction::NumberConstructor => "Number",
