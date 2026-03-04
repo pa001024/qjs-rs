@@ -604,6 +604,8 @@ enum HostFunction {
     StringTrim,
     StringTrimStart,
     StringTrimEnd,
+    StringIsWellFormed,
+    StringToWellFormed,
     StringToString,
     StringValueOf,
     StringAt,
@@ -3144,6 +3146,8 @@ impl Vm {
             | HostFunction::StringTrim
             | HostFunction::StringTrimStart
             | HostFunction::StringTrimEnd
+            | HostFunction::StringIsWellFormed
+            | HostFunction::StringToWellFormed
             | HostFunction::StringToString
             | HostFunction::StringValueOf
             | HostFunction::StringAt
@@ -7373,31 +7377,76 @@ impl Vm {
         }
     }
 
-    fn execute_string_index_of(&self, receiver: String, args: &[JsValue]) -> JsValue {
-        let search_value = args.first().map_or_else(
-            || "undefined".to_string(),
-            |value| self.coerce_to_string(value),
-        );
-        let start_index = args
-            .get(1)
-            .map(|value| self.to_number(value))
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .map_or(0usize, |value| value as usize);
-        let receiver_chars: Vec<char> = receiver.chars().collect();
-        let search_chars: Vec<char> = search_value.chars().collect();
-        let bounded_start = start_index.min(receiver_chars.len());
-        if search_chars.is_empty() {
-            return JsValue::Number(bounded_start as f64);
+    fn execute_string_index_of(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let search_value = match args.first().cloned() {
+            Some(value) => self.coerce_to_string_runtime(value, realm, caller_strict)?,
+            None => "undefined".to_string(),
+        };
+        let receiver_units = self.string_to_js_code_units(&receiver);
+        let search_units = self.string_to_js_code_units(&search_value);
+        let len = receiver_units.len() as i64;
+        let position_number = match args.get(1).cloned() {
+            Some(JsValue::Undefined) | None => 0.0,
+            Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+        };
+        let start = Self::to_integer_or_infinity_i64(position_number).clamp(0, len) as usize;
+        if search_units.is_empty() {
+            return Ok(JsValue::Number(start as f64));
         }
-        if search_chars.len() > receiver_chars.len().saturating_sub(bounded_start) {
-            return JsValue::Number(-1.0);
+        if start + search_units.len() > receiver_units.len() {
+            return Ok(JsValue::Number(-1.0));
         }
-        for index in bounded_start..=receiver_chars.len() - search_chars.len() {
-            if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
-                return JsValue::Number(index as f64);
+        for index in start..=receiver_units.len() - search_units.len() {
+            if receiver_units[index..index + search_units.len()] == search_units {
+                return Ok(JsValue::Number(index as f64));
             }
         }
-        JsValue::Number(-1.0)
+        Ok(JsValue::Number(-1.0))
+    }
+
+    fn execute_string_last_index_of(
+        &mut self,
+        receiver: String,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let search_value = match args.first().cloned() {
+            Some(value) => self.coerce_to_string_runtime(value, realm, caller_strict)?,
+            None => "undefined".to_string(),
+        };
+        let receiver_units = self.string_to_js_code_units(&receiver);
+        let search_units = self.string_to_js_code_units(&search_value);
+        let len = receiver_units.len() as i64;
+        let raw_position = match args.get(1).cloned() {
+            None | Some(JsValue::Undefined) => f64::INFINITY,
+            Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+        };
+        let position = if raw_position.is_nan() {
+            i64::MAX
+        } else {
+            Self::to_integer_or_infinity_i64(raw_position)
+        };
+        let mut start = position.clamp(0, len) as usize;
+        if search_units.is_empty() {
+            return Ok(JsValue::Number(start as f64));
+        }
+        if search_units.len() > receiver_units.len() {
+            return Ok(JsValue::Number(-1.0));
+        }
+        start = start.min(receiver_units.len() - search_units.len());
+        for index in (0..=start).rev() {
+            if receiver_units[index..index + search_units.len()] == search_units {
+                return Ok(JsValue::Number(index as f64));
+            }
+        }
+        Ok(JsValue::Number(-1.0))
     }
 
     fn execute_string_split(
@@ -9188,8 +9237,8 @@ impl Vm {
                 self.execute_string_replace(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringIndexOfThis => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                Ok(self.execute_string_index_of(receiver, &args))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_index_of(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringSplitThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -9237,6 +9286,63 @@ impl Vm {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(JsValue::String(receiver.trim_end().to_string()))
             }
+            HostFunction::StringIsWellFormed => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let units = self.string_to_js_code_units(&receiver);
+                let mut index = 0usize;
+                while index < units.len() {
+                    let unit = units[index];
+                    if (0xD800..=0xDBFF).contains(&unit) {
+                        if index + 1 >= units.len() {
+                            return Ok(JsValue::Bool(false));
+                        }
+                        let next = units[index + 1];
+                        if !(0xDC00..=0xDFFF).contains(&next) {
+                            return Ok(JsValue::Bool(false));
+                        }
+                        index += 2;
+                        continue;
+                    }
+                    if (0xDC00..=0xDFFF).contains(&unit) {
+                        return Ok(JsValue::Bool(false));
+                    }
+                    index += 1;
+                }
+                Ok(JsValue::Bool(true))
+            }
+            HostFunction::StringToWellFormed => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let units = self.string_to_js_code_units(&receiver);
+                let mut output = Vec::with_capacity(units.len());
+                let mut index = 0usize;
+                while index < units.len() {
+                    let unit = units[index];
+                    if (0xD800..=0xDBFF).contains(&unit) {
+                        if index + 1 < units.len() {
+                            let next = units[index + 1];
+                            if (0xDC00..=0xDFFF).contains(&next) {
+                                output.push(unit);
+                                output.push(next);
+                                index += 2;
+                                continue;
+                            }
+                        }
+                        output.push(0xFFFD);
+                        index += 1;
+                        continue;
+                    }
+                    if (0xDC00..=0xDFFF).contains(&unit) {
+                        output.push(0xFFFD);
+                        index += 1;
+                        continue;
+                    }
+                    output.push(unit);
+                    index += 1;
+                }
+                Ok(JsValue::String(
+                    Self::string_from_js_code_units_preserving_surrogates(&output),
+                ))
+            }
             HostFunction::StringToString | HostFunction::StringValueOf => {
                 let receiver = self.strict_this_string(this_arg)?;
                 Ok(JsValue::String(receiver))
@@ -9266,36 +9372,37 @@ impl Vm {
                 ))
             }
             HostFunction::StringCharAt => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                let receiver_chars: Vec<char> = receiver.chars().collect();
-                let index = args
-                    .first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0);
-                let index = if index.is_finite() && index >= 0.0 {
-                    index as usize
-                } else {
-                    0
-                };
-                Ok(receiver_chars
-                    .get(index)
-                    .map(|ch| JsValue::String(ch.to_string()))
-                    .unwrap_or_else(|| JsValue::String(String::new())))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let receiver_units = self.string_to_js_code_units(&receiver);
+                let length = receiver_units.len() as i64;
+                let position_number = self.coerce_number_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let position = Self::to_integer_or_infinity_i64(position_number);
+                if position < 0 || position >= length {
+                    return Ok(JsValue::String(String::new()));
+                }
+                let unit = receiver_units[position as usize];
+                Ok(JsValue::String(
+                    Self::string_from_js_code_units_preserving_surrogates(&[unit]),
+                ))
             }
             HostFunction::StringCharCodeAt => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                let index = args
-                    .first()
-                    .map(|value| self.to_number(value))
-                    .unwrap_or(0.0);
-                let index = if index.is_finite() && index >= 0.0 {
-                    index as usize
-                } else {
-                    0
-                };
-                Ok(Self::utf16_code_unit_at(&receiver, index)
-                    .map(|unit| JsValue::Number(unit as f64))
-                    .unwrap_or(JsValue::Number(f64::NAN)))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let receiver_units = self.string_to_js_code_units(&receiver);
+                let length = receiver_units.len() as i64;
+                let position_number = self.coerce_number_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let position = Self::to_integer_or_infinity_i64(position_number);
+                if position < 0 || position >= length {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
+                Ok(JsValue::Number(receiver_units[position as usize] as f64))
             }
             HostFunction::StringCodePointAt => {
                 let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
@@ -9322,33 +9429,8 @@ impl Vm {
                 Ok(JsValue::Number(code_point as f64))
             }
             HostFunction::StringLastIndexOf => {
-                let receiver = self.coerce_this_string(this_arg)?;
-                let search_value = args.first().map_or_else(
-                    || "undefined".to_string(),
-                    |value| self.coerce_to_string(value),
-                );
-                if search_value.is_empty() {
-                    return Ok(JsValue::Number(receiver.chars().count() as f64));
-                }
-                let start_index = args
-                    .get(1)
-                    .map(|value| self.to_number(value))
-                    .filter(|value| value.is_finite() && *value >= 0.0)
-                    .map(|value| value as usize)
-                    .unwrap_or_else(|| receiver.chars().count());
-                let receiver_chars: Vec<char> = receiver.chars().collect();
-                let search_chars: Vec<char> = search_value.chars().collect();
-                if search_chars.len() > receiver_chars.len() {
-                    return Ok(JsValue::Number(-1.0));
-                }
-                let start =
-                    start_index.min(receiver_chars.len().saturating_sub(search_chars.len()));
-                for index in (0..=start).rev() {
-                    if receiver_chars[index..index + search_chars.len()] == search_chars[..] {
-                        return Ok(JsValue::Number(index as f64));
-                    }
-                }
-                Ok(JsValue::Number(-1.0))
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                self.execute_string_last_index_of(receiver, &args, realm, caller_strict)
             }
             HostFunction::StringSubstring => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -22654,6 +22736,8 @@ impl Vm {
             let trim = self.create_host_function_value(HostFunction::StringTrim);
             let trim_start = self.create_host_function_value(HostFunction::StringTrimStart);
             let trim_end = self.create_host_function_value(HostFunction::StringTrimEnd);
+            let is_well_formed = self.create_host_function_value(HostFunction::StringIsWellFormed);
+            let to_well_formed = self.create_host_function_value(HostFunction::StringToWellFormed);
             let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
             let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
             let match_all = self.create_host_function_value(HostFunction::StringMatchAllThis);
@@ -22677,6 +22761,38 @@ impl Vm {
             let sub = self.create_host_function_value(HostFunction::StringSub);
             let sup = self.create_host_function_value(HostFunction::StringSup);
             let symbol_iterator = self.create_host_function_value(HostFunction::StringIteratorThis);
+            self.set_builtin_function_length(&to_string, 0.0);
+            self.set_builtin_function_name(&to_string, "toString");
+            self.set_builtin_function_length(&value_of, 0.0);
+            self.set_builtin_function_name(&value_of, "valueOf");
+            self.set_builtin_function_length(&char_at, 1.0);
+            self.set_builtin_function_name(&char_at, "charAt");
+            self.set_builtin_function_length(&char_code_at, 1.0);
+            self.set_builtin_function_name(&char_code_at, "charCodeAt");
+            self.set_builtin_function_length(&index_of, 1.0);
+            self.set_builtin_function_name(&index_of, "indexOf");
+            self.set_builtin_function_length(&last_index_of, 1.0);
+            self.set_builtin_function_name(&last_index_of, "lastIndexOf");
+            self.set_builtin_function_length(&split, 2.0);
+            self.set_builtin_function_name(&split, "split");
+            self.set_builtin_function_length(&substring, 2.0);
+            self.set_builtin_function_name(&substring, "substring");
+            self.set_builtin_function_length(&to_lower_case, 0.0);
+            self.set_builtin_function_name(&to_lower_case, "toLowerCase");
+            self.set_builtin_function_length(&to_upper_case, 0.0);
+            self.set_builtin_function_name(&to_upper_case, "toUpperCase");
+            self.set_builtin_function_length(&trim, 0.0);
+            self.set_builtin_function_name(&trim, "trim");
+            self.set_builtin_function_length(&is_well_formed, 0.0);
+            self.set_builtin_function_name(&is_well_formed, "isWellFormed");
+            self.set_builtin_function_length(&to_well_formed, 0.0);
+            self.set_builtin_function_name(&to_well_formed, "toWellFormed");
+            self.set_builtin_function_length(&replace, 2.0);
+            self.set_builtin_function_name(&replace, "replace");
+            self.set_builtin_function_length(&match_fn, 1.0);
+            self.set_builtin_function_name(&match_fn, "match");
+            self.set_builtin_function_length(&search, 1.0);
+            self.set_builtin_function_name(&search, "search");
             self.set_builtin_function_length(&substr, 2.0);
             self.set_builtin_function_name(&substr, "substr");
             self.set_builtin_function_length(&anchor, 1.0);
@@ -22763,6 +22879,8 @@ impl Vm {
                     ("toLowerCase", to_lower_case),
                     ("toUpperCase", to_upper_case),
                     ("trim", trim),
+                    ("isWellFormed", is_well_formed),
+                    ("toWellFormed", to_well_formed),
                     ("trimStart", trim_start.clone()),
                     ("trimLeft", trim_start),
                     ("trimEnd", trim_end.clone()),
@@ -27417,11 +27535,37 @@ impl Vm {
     fn get_string_property(&mut self, receiver: &str, property: &str) -> JsValue {
         match property {
             "length" => JsValue::Number(Self::utf16_code_unit_length(receiver) as f64),
-            "replace" => self.create_host_function_value(HostFunction::StringReplaceThis),
-            "replaceAll" => self.create_host_function_value(HostFunction::StringReplaceAllThis),
-            "match" => self.create_host_function_value(HostFunction::StringMatchThis),
-            "matchAll" => self.create_host_function_value(HostFunction::StringMatchAllThis),
-            "search" => self.create_host_function_value(HostFunction::StringSearchThis),
+            "replace" => {
+                let replace = self.create_host_function_value(HostFunction::StringReplaceThis);
+                self.set_builtin_function_length(&replace, 2.0);
+                self.set_builtin_function_name(&replace, "replace");
+                replace
+            }
+            "replaceAll" => {
+                let replace_all =
+                    self.create_host_function_value(HostFunction::StringReplaceAllThis);
+                self.set_builtin_function_length(&replace_all, 2.0);
+                self.set_builtin_function_name(&replace_all, "replaceAll");
+                replace_all
+            }
+            "match" => {
+                let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
+                self.set_builtin_function_length(&match_fn, 1.0);
+                self.set_builtin_function_name(&match_fn, "match");
+                match_fn
+            }
+            "matchAll" => {
+                let match_all = self.create_host_function_value(HostFunction::StringMatchAllThis);
+                self.set_builtin_function_length(&match_all, 1.0);
+                self.set_builtin_function_name(&match_all, "matchAll");
+                match_all
+            }
+            "search" => {
+                let search = self.create_host_function_value(HostFunction::StringSearchThis);
+                self.set_builtin_function_length(&search, 1.0);
+                self.set_builtin_function_name(&search, "search");
+                search
+            }
             "includes" => {
                 let includes = self.create_host_function_value(HostFunction::StringIncludesThis);
                 self.set_builtin_function_length(&includes, 1.0);
@@ -27440,21 +27584,69 @@ impl Vm {
                 self.set_builtin_function_name(&concat, "concat");
                 concat
             }
-            "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
-            "split" => self.create_host_function_value(HostFunction::StringSplitThis),
-            "Symbol.iterator" => self.create_host_function_value(HostFunction::StringIteratorThis),
-            "toLowerCase" => self.create_host_function_value(HostFunction::StringToLowerCaseThis),
-            "toUpperCase" => self.create_host_function_value(HostFunction::StringToUpperCase),
-            "toString" => self.create_host_function_value(HostFunction::StringToString),
-            "valueOf" => self.create_host_function_value(HostFunction::StringValueOf),
+            "indexOf" => {
+                let index_of = self.create_host_function_value(HostFunction::StringIndexOfThis);
+                self.set_builtin_function_length(&index_of, 1.0);
+                self.set_builtin_function_name(&index_of, "indexOf");
+                index_of
+            }
+            "split" => {
+                let split = self.create_host_function_value(HostFunction::StringSplitThis);
+                self.set_builtin_function_length(&split, 2.0);
+                self.set_builtin_function_name(&split, "split");
+                split
+            }
+            "Symbol.iterator" => {
+                let symbol_iterator =
+                    self.create_host_function_value(HostFunction::StringIteratorThis);
+                self.set_builtin_function_length(&symbol_iterator, 0.0);
+                self.set_builtin_function_name(&symbol_iterator, "[Symbol.iterator]");
+                symbol_iterator
+            }
+            "toLowerCase" => {
+                let to_lower_case =
+                    self.create_host_function_value(HostFunction::StringToLowerCaseThis);
+                self.set_builtin_function_length(&to_lower_case, 0.0);
+                self.set_builtin_function_name(&to_lower_case, "toLowerCase");
+                to_lower_case
+            }
+            "toUpperCase" => {
+                let to_upper_case =
+                    self.create_host_function_value(HostFunction::StringToUpperCase);
+                self.set_builtin_function_length(&to_upper_case, 0.0);
+                self.set_builtin_function_name(&to_upper_case, "toUpperCase");
+                to_upper_case
+            }
+            "toString" => {
+                let to_string = self.create_host_function_value(HostFunction::StringToString);
+                self.set_builtin_function_length(&to_string, 0.0);
+                self.set_builtin_function_name(&to_string, "toString");
+                to_string
+            }
+            "valueOf" => {
+                let value_of = self.create_host_function_value(HostFunction::StringValueOf);
+                self.set_builtin_function_length(&value_of, 0.0);
+                self.set_builtin_function_name(&value_of, "valueOf");
+                value_of
+            }
             "at" => {
                 let at = self.create_host_function_value(HostFunction::StringAt);
                 self.set_builtin_function_length(&at, 1.0);
                 self.set_builtin_function_name(&at, "at");
                 at
             }
-            "charAt" => self.create_host_function_value(HostFunction::StringCharAt),
-            "charCodeAt" => self.create_host_function_value(HostFunction::StringCharCodeAt),
+            "charAt" => {
+                let char_at = self.create_host_function_value(HostFunction::StringCharAt);
+                self.set_builtin_function_length(&char_at, 1.0);
+                self.set_builtin_function_name(&char_at, "charAt");
+                char_at
+            }
+            "charCodeAt" => {
+                let char_code_at = self.create_host_function_value(HostFunction::StringCharCodeAt);
+                self.set_builtin_function_length(&char_code_at, 1.0);
+                self.set_builtin_function_name(&char_code_at, "charCodeAt");
+                char_code_at
+            }
             "codePointAt" => {
                 let code_point_at =
                     self.create_host_function_value(HostFunction::StringCodePointAt);
@@ -27462,34 +27654,148 @@ impl Vm {
                 self.set_builtin_function_name(&code_point_at, "codePointAt");
                 code_point_at
             }
-            "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
-            "substring" => self.create_host_function_value(HostFunction::StringSubstring),
-            "substr" => self.create_host_function_value(HostFunction::StringSubstr),
-            "trim" => self.create_host_function_value(HostFunction::StringTrim),
-            "trimStart" | "trimLeft" => {
-                self.create_host_function_value(HostFunction::StringTrimStart)
+            "lastIndexOf" => {
+                let last_index_of =
+                    self.create_host_function_value(HostFunction::StringLastIndexOf);
+                self.set_builtin_function_length(&last_index_of, 1.0);
+                self.set_builtin_function_name(&last_index_of, "lastIndexOf");
+                last_index_of
             }
-            "trimEnd" | "trimRight" => self.create_host_function_value(HostFunction::StringTrimEnd),
-            "anchor" => self.create_host_function_value(HostFunction::StringAnchor),
-            "big" => self.create_host_function_value(HostFunction::StringBig),
-            "blink" => self.create_host_function_value(HostFunction::StringBlink),
-            "bold" => self.create_host_function_value(HostFunction::StringBold),
-            "fixed" => self.create_host_function_value(HostFunction::StringFixed),
-            "fontcolor" => self.create_host_function_value(HostFunction::StringFontColor),
-            "fontsize" => self.create_host_function_value(HostFunction::StringFontSize),
-            "italics" => self.create_host_function_value(HostFunction::StringItalics),
-            "link" => self.create_host_function_value(HostFunction::StringLink),
-            "small" => self.create_host_function_value(HostFunction::StringSmall),
-            "strike" => self.create_host_function_value(HostFunction::StringStrike),
-            "sub" => self.create_host_function_value(HostFunction::StringSub),
-            "sup" => self.create_host_function_value(HostFunction::StringSup),
+            "substring" => {
+                let substring = self.create_host_function_value(HostFunction::StringSubstring);
+                self.set_builtin_function_length(&substring, 2.0);
+                self.set_builtin_function_name(&substring, "substring");
+                substring
+            }
+            "substr" => {
+                let substr = self.create_host_function_value(HostFunction::StringSubstr);
+                self.set_builtin_function_length(&substr, 2.0);
+                self.set_builtin_function_name(&substr, "substr");
+                substr
+            }
+            "trim" => {
+                let trim = self.create_host_function_value(HostFunction::StringTrim);
+                self.set_builtin_function_length(&trim, 0.0);
+                self.set_builtin_function_name(&trim, "trim");
+                trim
+            }
+            "isWellFormed" => {
+                let is_well_formed =
+                    self.create_host_function_value(HostFunction::StringIsWellFormed);
+                self.set_builtin_function_length(&is_well_formed, 0.0);
+                self.set_builtin_function_name(&is_well_formed, "isWellFormed");
+                is_well_formed
+            }
+            "toWellFormed" => {
+                let to_well_formed =
+                    self.create_host_function_value(HostFunction::StringToWellFormed);
+                self.set_builtin_function_length(&to_well_formed, 0.0);
+                self.set_builtin_function_name(&to_well_formed, "toWellFormed");
+                to_well_formed
+            }
+            "trimStart" | "trimLeft" => {
+                let trim_start = self.create_host_function_value(HostFunction::StringTrimStart);
+                self.set_builtin_function_length(&trim_start, 0.0);
+                self.set_builtin_function_name(&trim_start, "trimStart");
+                trim_start
+            }
+            "trimEnd" | "trimRight" => {
+                let trim_end = self.create_host_function_value(HostFunction::StringTrimEnd);
+                self.set_builtin_function_length(&trim_end, 0.0);
+                self.set_builtin_function_name(&trim_end, "trimEnd");
+                trim_end
+            }
+            "anchor" => {
+                let anchor = self.create_host_function_value(HostFunction::StringAnchor);
+                self.set_builtin_function_length(&anchor, 1.0);
+                self.set_builtin_function_name(&anchor, "anchor");
+                anchor
+            }
+            "big" => {
+                let big = self.create_host_function_value(HostFunction::StringBig);
+                self.set_builtin_function_length(&big, 0.0);
+                self.set_builtin_function_name(&big, "big");
+                big
+            }
+            "blink" => {
+                let blink = self.create_host_function_value(HostFunction::StringBlink);
+                self.set_builtin_function_length(&blink, 0.0);
+                self.set_builtin_function_name(&blink, "blink");
+                blink
+            }
+            "bold" => {
+                let bold = self.create_host_function_value(HostFunction::StringBold);
+                self.set_builtin_function_length(&bold, 0.0);
+                self.set_builtin_function_name(&bold, "bold");
+                bold
+            }
+            "fixed" => {
+                let fixed = self.create_host_function_value(HostFunction::StringFixed);
+                self.set_builtin_function_length(&fixed, 0.0);
+                self.set_builtin_function_name(&fixed, "fixed");
+                fixed
+            }
+            "fontcolor" => {
+                let fontcolor = self.create_host_function_value(HostFunction::StringFontColor);
+                self.set_builtin_function_length(&fontcolor, 1.0);
+                self.set_builtin_function_name(&fontcolor, "fontcolor");
+                fontcolor
+            }
+            "fontsize" => {
+                let fontsize = self.create_host_function_value(HostFunction::StringFontSize);
+                self.set_builtin_function_length(&fontsize, 1.0);
+                self.set_builtin_function_name(&fontsize, "fontsize");
+                fontsize
+            }
+            "italics" => {
+                let italics = self.create_host_function_value(HostFunction::StringItalics);
+                self.set_builtin_function_length(&italics, 0.0);
+                self.set_builtin_function_name(&italics, "italics");
+                italics
+            }
+            "link" => {
+                let link = self.create_host_function_value(HostFunction::StringLink);
+                self.set_builtin_function_length(&link, 1.0);
+                self.set_builtin_function_name(&link, "link");
+                link
+            }
+            "small" => {
+                let small = self.create_host_function_value(HostFunction::StringSmall);
+                self.set_builtin_function_length(&small, 0.0);
+                self.set_builtin_function_name(&small, "small");
+                small
+            }
+            "strike" => {
+                let strike = self.create_host_function_value(HostFunction::StringStrike);
+                self.set_builtin_function_length(&strike, 0.0);
+                self.set_builtin_function_name(&strike, "strike");
+                strike
+            }
+            "sub" => {
+                let sub = self.create_host_function_value(HostFunction::StringSub);
+                self.set_builtin_function_length(&sub, 0.0);
+                self.set_builtin_function_name(&sub, "sub");
+                sub
+            }
+            "sup" => {
+                let sup = self.create_host_function_value(HostFunction::StringSup);
+                self.set_builtin_function_length(&sup, 0.0);
+                self.set_builtin_function_name(&sup, "sup");
+                sup
+            }
             "constructor" => JsValue::NativeFunction(NativeFunction::StringConstructor),
             _ => match property.parse::<usize>() {
-                Ok(index) => receiver
-                    .chars()
-                    .nth(index)
-                    .map(|ch| JsValue::String(ch.to_string()))
-                    .unwrap_or(JsValue::Undefined),
+                Ok(index) => {
+                    let code_units = self.string_to_js_code_units(receiver);
+                    code_units
+                        .get(index)
+                        .map(|unit| {
+                            JsValue::String(Self::string_from_js_code_units_preserving_surrogates(
+                                &[*unit],
+                            ))
+                        })
+                        .unwrap_or(JsValue::Undefined)
+                }
                 Err(_) => JsValue::Undefined,
             },
         }
