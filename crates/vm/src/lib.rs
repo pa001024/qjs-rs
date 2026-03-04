@@ -483,6 +483,7 @@ struct JsObject {
     array_length: Option<usize>,
     is_array_object: bool,
     is_proxy_object: bool,
+    is_json_raw_json: bool,
     prototype: Option<ObjectId>,
     prototype_value: Option<JsValue>,
     prototype_overridden: bool,
@@ -501,6 +502,7 @@ impl Default for JsObject {
             array_length: None,
             is_array_object: false,
             is_proxy_object: false,
+            is_json_raw_json: false,
             prototype: None,
             prototype_value: None,
             prototype_overridden: false,
@@ -654,6 +656,8 @@ enum HostFunction {
     FunctionPrototype,
     JsonStringify,
     JsonParse,
+    JsonRawJSON,
+    JsonIsRawJSON,
     ArrayPushThis,
     ArrayForEachThis,
     ArrayReduceThis,
@@ -2850,6 +2854,8 @@ impl Vm {
             | HostFunction::FunctionPrototype
             | HostFunction::JsonStringify
             | HostFunction::JsonParse
+            | HostFunction::JsonRawJSON
+            | HostFunction::JsonIsRawJSON
             | HostFunction::ObjectToString
             | HostFunction::ObjectToLocaleString
             | HostFunction::ObjectPropertyIsEnumerable
@@ -9289,6 +9295,8 @@ impl Vm {
             HostFunction::FunctionPrototype => Ok(JsValue::Undefined),
             HostFunction::JsonStringify => self.execute_json_stringify(&args, realm, caller_strict),
             HostFunction::JsonParse => self.execute_json_parse(&args, realm, caller_strict),
+            HostFunction::JsonRawJSON => self.execute_json_raw_json(&args, realm, caller_strict),
+            HostFunction::JsonIsRawJSON => self.execute_json_is_raw_json(&args),
             HostFunction::ArrayPushThis => {
                 self.execute_array_push_this(this_arg, &args, realm, caller_strict)
             }
@@ -20273,10 +20281,16 @@ impl Vm {
         };
         let stringify = self.create_host_function_value(HostFunction::JsonStringify);
         let parse = self.create_host_function_value(HostFunction::JsonParse);
+        let raw_json = self.create_host_function_value(HostFunction::JsonRawJSON);
+        let is_raw_json = self.create_host_function_value(HostFunction::JsonIsRawJSON);
         self.set_builtin_function_length(&stringify, 3.0);
         self.set_builtin_function_name(&stringify, "stringify");
         self.set_builtin_function_length(&parse, 2.0);
         self.set_builtin_function_name(&parse, "parse");
+        self.set_builtin_function_length(&raw_json, 1.0);
+        self.set_builtin_function_name(&raw_json, "rawJSON");
+        self.set_builtin_function_length(&is_raw_json, 1.0);
+        self.set_builtin_function_name(&is_raw_json, "isRawJSON");
         {
             let json_object = self
                 .objects
@@ -20296,6 +20310,28 @@ impl Vm {
             json_object.properties.insert("parse".to_string(), parse);
             json_object.property_attributes.insert(
                 "parse".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            json_object
+                .properties
+                .insert("rawJSON".to_string(), raw_json);
+            json_object.property_attributes.insert(
+                "rawJSON".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            json_object
+                .properties
+                .insert("isRawJSON".to_string(), is_raw_json);
+            json_object.property_attributes.insert(
+                "isRawJSON".to_string(),
                 PropertyAttributes {
                     writable: true,
                     enumerable: false,
@@ -26528,12 +26564,75 @@ impl Vm {
         Ok(result)
     }
 
+    fn execute_json_raw_json(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let input = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let json_string = self.coerce_to_string_runtime(input, realm, caller_strict)?;
+        if json_string.is_empty() || Self::json_raw_json_has_illegal_boundary(&json_string) {
+            return Err(self.json_parse_syntax_error());
+        }
+        let parsed = match serde_json::from_str::<JsonValue>(&json_string) {
+            Ok(parsed) => parsed,
+            Err(_) => return Err(self.json_parse_syntax_error()),
+        };
+        if matches!(parsed, JsonValue::Array(_) | JsonValue::Object(_)) {
+            return Err(self.json_parse_syntax_error());
+        }
+        let object = self.create_object_value();
+        let JsValue::Object(object_id) = object else {
+            unreachable!();
+        };
+        let target = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        target.prototype = None;
+        target.prototype_value = None;
+        target.is_json_raw_json = true;
+        target
+            .properties
+            .insert("rawJSON".to_string(), JsValue::String(json_string));
+        target
+            .property_attributes
+            .insert("rawJSON".to_string(), PropertyAttributes::default());
+        Self::freeze_object_state(target);
+        Ok(JsValue::Object(object_id))
+    }
+
+    fn execute_json_is_raw_json(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
+        let value = args.first().cloned().unwrap_or(JsValue::Undefined);
+        let is_raw_json = match value {
+            JsValue::Object(object_id) => self.is_json_raw_json_object(object_id),
+            _ => false,
+        };
+        Ok(JsValue::Bool(is_raw_json))
+    }
+
     fn json_parse_syntax_error(&mut self) -> VmError {
         VmError::UncaughtException(self.create_error_exception(
             NativeFunction::SyntaxErrorConstructor,
             "SyntaxError",
             JSON_PARSE_SYNTAX_ERROR_MESSAGE.to_string(),
         ))
+    }
+
+    fn json_raw_json_has_illegal_boundary(value: &str) -> bool {
+        if value.is_empty() {
+            return false;
+        }
+        let bytes = value.as_bytes();
+        let is_disallowed = |byte: u8| matches!(byte, b'\t' | b'\n' | b'\r' | b' ');
+        is_disallowed(bytes[0]) || is_disallowed(bytes[bytes.len() - 1])
+    }
+
+    fn is_json_raw_json_object(&self, object_id: ObjectId) -> bool {
+        self.objects
+            .get(&object_id)
+            .is_some_and(|object| object.is_json_raw_json)
     }
 
     fn json_value_to_js_value(&mut self, value: JsonValue) -> Result<JsValue, VmError> {
@@ -26742,6 +26841,16 @@ impl Vm {
             if let Some(boxed) = self.boxed_primitive_value(object_id) {
                 value = boxed;
             }
+        }
+        if let JsValue::Object(object_id) = value.clone()
+            && self.is_json_raw_json_object(object_id)
+        {
+            let raw_json =
+                self.get_property_from_receiver(JsValue::Object(object_id), "rawJSON", realm)?;
+            if let JsValue::String(text) = raw_json {
+                return Ok(Some(text));
+            }
+            return Ok(None);
         }
         match value {
             JsValue::Undefined
