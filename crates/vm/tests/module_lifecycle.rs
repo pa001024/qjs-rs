@@ -983,6 +983,45 @@ fn module_keyword_only_linebreaks_parses_and_evaluates() {
 }
 
 #[test]
+fn module_string_named_alias_with_spaces_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "const value = 42;\nexport { value as \"kebab name\" };\n")
+        .with_module(
+            "entry.js",
+            "import { \"kebab name\" as kebabName } from './dep.js';\nexport const answer = kebabName;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("string-named alias with spaces should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn module_string_named_reexport_with_spaces_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "bridge.js",
+            "export { value as \"kebab name\" } from './dep.js';\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { \"kebab name\" as kebabName } from './bridge.js';\nexport const answer = kebabName;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("string-named re-export with spaces should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

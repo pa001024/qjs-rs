@@ -897,11 +897,74 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
 }
 
 fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
-    let mut parts = source.split_whitespace();
-    let left = parts.next()?;
-    let as_keyword = parts.next()?;
-    let right = parts.next()?;
-    if as_keyword != "as" || parts.next().is_some() {
+    let source = source.trim();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut split_index = None;
+
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if ch == '/' {
+            if chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+
+        if ch != 'a' || !source[index..].starts_with("as") {
+            continue;
+        }
+        let prev = source[..index].chars().next_back();
+        let next = source[index + 2..].chars().next();
+        if prev.is_some_and(char::is_whitespace) && next.is_some_and(char::is_whitespace) {
+            split_index = Some(index);
+        }
+    }
+
+    let split_index = split_index?;
+    let left = source[..split_index].trim_end();
+    let right = source[split_index + 2..].trim_start();
+    if left.is_empty() || right.is_empty() {
         return None;
     }
     Some((left, right))
