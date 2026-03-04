@@ -714,6 +714,12 @@ enum HostFunction {
     ObjectPropertyIsEnumerable,
     ObjectValueOf,
     ObjectHasOwn,
+    ObjectDefineGetterLegacy,
+    ObjectDefineSetterLegacy,
+    ObjectLookupGetterLegacy,
+    ObjectLookupSetterLegacy,
+    ObjectProtoGetter,
+    ObjectProtoSetter,
     ErrorToStringThis,
     AssertSameValue,
     AssertNotSameValue,
@@ -1543,12 +1549,40 @@ impl Vm {
             });
             let property_is_enumerable =
                 self.create_host_function_value(HostFunction::ObjectPropertyIsEnumerable);
+            let define_getter =
+                self.create_host_function_value(HostFunction::ObjectDefineGetterLegacy);
+            let define_setter =
+                self.create_host_function_value(HostFunction::ObjectDefineSetterLegacy);
+            let lookup_getter =
+                self.create_host_function_value(HostFunction::ObjectLookupGetterLegacy);
+            let lookup_setter =
+                self.create_host_function_value(HostFunction::ObjectLookupSetterLegacy);
+            let proto_getter = self.create_host_function_value(HostFunction::ObjectProtoGetter);
+            let proto_setter = self.create_host_function_value(HostFunction::ObjectProtoSetter);
             self.set_builtin_function_length(&to_string, 0.0);
             self.set_builtin_function_length(&to_locale_string, 0.0);
             self.set_builtin_function_length(&value_of, 0.0);
             self.set_builtin_function_length(&has_own_property, 1.0);
             self.set_builtin_function_length(&is_prototype_of, 1.0);
             self.set_builtin_function_length(&property_is_enumerable, 1.0);
+            self.set_builtin_function_length(&define_getter, 2.0);
+            self.set_builtin_function_length(&define_setter, 2.0);
+            self.set_builtin_function_length(&lookup_getter, 1.0);
+            self.set_builtin_function_length(&lookup_setter, 1.0);
+            self.set_builtin_function_length(&proto_getter, 0.0);
+            self.set_builtin_function_length(&proto_setter, 1.0);
+            self.set_builtin_function_name(&to_string, "toString");
+            self.set_builtin_function_name(&to_locale_string, "toLocaleString");
+            self.set_builtin_function_name(&value_of, "valueOf");
+            self.set_builtin_function_name(&has_own_property, "hasOwnProperty");
+            self.set_builtin_function_name(&is_prototype_of, "isPrototypeOf");
+            self.set_builtin_function_name(&property_is_enumerable, "propertyIsEnumerable");
+            self.set_builtin_function_name(&define_getter, "__defineGetter__");
+            self.set_builtin_function_name(&define_setter, "__defineSetter__");
+            self.set_builtin_function_name(&lookup_getter, "__lookupGetter__");
+            self.set_builtin_function_name(&lookup_setter, "__lookupSetter__");
+            self.set_builtin_function_name(&proto_getter, "get __proto__");
+            self.set_builtin_function_name(&proto_setter, "set __proto__");
             if let Some(object_prototype) = self.objects.get_mut(&object_prototype_id) {
                 object_prototype.properties.insert(
                     "constructor".to_string(),
@@ -1624,6 +1658,64 @@ impl Vm {
                     "propertyIsEnumerable".to_string(),
                     PropertyAttributes {
                         writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("__defineGetter__".to_string(), define_getter);
+                object_prototype.property_attributes.insert(
+                    "__defineGetter__".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("__defineSetter__".to_string(), define_setter);
+                object_prototype.property_attributes.insert(
+                    "__defineSetter__".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("__lookupGetter__".to_string(), lookup_getter);
+                object_prototype.property_attributes.insert(
+                    "__lookupGetter__".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .properties
+                    .insert("__lookupSetter__".to_string(), lookup_setter);
+                object_prototype.property_attributes.insert(
+                    "__lookupSetter__".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object_prototype
+                    .getters
+                    .insert("__proto__".to_string(), proto_getter);
+                object_prototype
+                    .setters
+                    .insert("__proto__".to_string(), proto_setter);
+                object_prototype.property_attributes.insert(
+                    "__proto__".to_string(),
+                    PropertyAttributes {
+                        writable: false,
                         enumerable: false,
                         configurable: true,
                     },
@@ -3094,6 +3186,12 @@ impl Vm {
             | HostFunction::ObjectPropertyIsEnumerable
             | HostFunction::ObjectValueOf
             | HostFunction::ObjectHasOwn
+            | HostFunction::ObjectDefineGetterLegacy
+            | HostFunction::ObjectDefineSetterLegacy
+            | HostFunction::ObjectLookupGetterLegacy
+            | HostFunction::ObjectLookupSetterLegacy
+            | HostFunction::ObjectProtoGetter
+            | HostFunction::ObjectProtoSetter
             | HostFunction::ReflectDefineProperty
             | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
@@ -9888,14 +9986,14 @@ impl Vm {
                 self.create_array_from_values(keys.into_iter().map(JsValue::String).collect())
             }
             HostFunction::HasOwnProperty { .. } => {
-                let target = self.object_prototype_this_object(
-                    this_arg,
-                    "Object.prototype.hasOwnProperty called on null or undefined",
-                )?;
                 let key = self.coerce_to_property_key_runtime(
                     args.first().cloned().unwrap_or(JsValue::Undefined),
                     realm,
                     caller_strict,
+                )?;
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.hasOwnProperty called on null or undefined",
                 )?;
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
@@ -9912,27 +10010,38 @@ impl Vm {
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
             HostFunction::IsPrototypeOf { .. } => {
-                let target = self.object_prototype_this_object(
-                    this_arg,
-                    "Object.prototype.isPrototypeOf called on null or undefined",
-                )?;
                 let value = args.first().cloned().unwrap_or(JsValue::Undefined);
                 if !Self::is_object_like_value(&value) {
                     return Ok(JsValue::Bool(false));
                 }
-                Ok(JsValue::Bool(self.object_is_prototype_of(target, value)?))
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.isPrototypeOf called on null or undefined",
+                )?;
+                Ok(JsValue::Bool(
+                    self.object_is_prototype_of(target, value, realm)?,
+                ))
             }
             HostFunction::ObjectToString => {
                 let tag = self.object_to_string_tag(this_arg, realm)?;
                 Ok(JsValue::String(format!("[object {tag}]")))
             }
             HostFunction::ObjectToLocaleString => {
-                let target = self.object_prototype_this_object(
+                let target = self.object_prototype_this_coercible(
                     this_arg,
                     "Object.prototype.toLocaleString called on null or undefined",
                 )?;
-                let to_string =
-                    self.get_property_from_receiver(target.clone(), "toString", realm)?;
+                let to_string = if Self::is_object_like_value(&target) {
+                    self.get_property_from_receiver(target.clone(), "toString", realm)?
+                } else {
+                    let boxed_target = self.box_primitive_receiver(target.clone());
+                    self.get_property_from_base_with_receiver(
+                        boxed_target,
+                        "toString",
+                        target.clone(),
+                        realm,
+                    )?
+                };
                 if !Self::is_callable_value(&to_string) {
                     return Err(VmError::TypeError(
                         "Object.prototype.toLocaleString toString must be callable",
@@ -9941,14 +10050,14 @@ impl Vm {
                 self.execute_callable(to_string, Some(target), Vec::new(), realm, caller_strict)
             }
             HostFunction::ObjectPropertyIsEnumerable => {
-                let target = self.object_prototype_this_object(
-                    this_arg,
-                    "Object.prototype.propertyIsEnumerable called on null or undefined",
-                )?;
                 let key = self.coerce_to_property_key_runtime(
                     args.first().cloned().unwrap_or(JsValue::Undefined),
                     realm,
                     caller_strict,
+                )?;
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.propertyIsEnumerable called on null or undefined",
                 )?;
                 let enumerable = self.has_own_property(&target, &key)?
                     && self.own_property_is_enumerable(&target, &key)?;
@@ -9958,6 +10067,96 @@ impl Vm {
                 this_arg,
                 "Object.prototype.valueOf called on null or undefined",
             ),
+            HostFunction::ObjectDefineGetterLegacy => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.__defineGetter__ called on null or undefined",
+                )?;
+                let getter = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_callable_value(&getter) {
+                    return Err(VmError::NotCallable);
+                }
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let descriptor = self.create_descriptor_object(vec![
+                    ("get", getter),
+                    ("enumerable", JsValue::Bool(true)),
+                    ("configurable", JsValue::Bool(true)),
+                ]);
+                self.define_integrity_property_on_target(target, key, descriptor, realm)?;
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::ObjectDefineSetterLegacy => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.__defineSetter__ called on null or undefined",
+                )?;
+                let setter = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_callable_value(&setter) {
+                    return Err(VmError::NotCallable);
+                }
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let descriptor = self.create_descriptor_object(vec![
+                    ("set", setter),
+                    ("enumerable", JsValue::Bool(true)),
+                    ("configurable", JsValue::Bool(true)),
+                ]);
+                self.define_integrity_property_on_target(target, key, descriptor, realm)?;
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::ObjectLookupGetterLegacy => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.__lookupGetter__ called on null or undefined",
+                )?;
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                self.object_prototype_lookup_accessor(target, key, "get", realm)
+            }
+            HostFunction::ObjectLookupSetterLegacy => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.__lookupSetter__ called on null or undefined",
+                )?;
+                let key = self.coerce_to_property_key_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                self.object_prototype_lookup_accessor(target, key, "set", realm)
+            }
+            HostFunction::ObjectProtoGetter => {
+                let target = self.object_prototype_this_object(
+                    this_arg,
+                    "Object.prototype.__proto__ called on null or undefined",
+                )?;
+                self.get_prototype_of_value_proxy_aware(target, realm)
+            }
+            HostFunction::ObjectProtoSetter => {
+                let this_value = self.object_prototype_this_coercible(
+                    this_arg,
+                    "Object.prototype.__proto__ called on null or undefined",
+                )?;
+                let proto = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&proto) && !matches!(proto, JsValue::Null) {
+                    return Ok(JsValue::Undefined);
+                }
+                if !Self::is_object_like_value(&this_value) {
+                    return Ok(JsValue::Undefined);
+                }
+                let _ = self.execute_object_set_prototype_of(&[this_value, proto])?;
+                Ok(JsValue::Undefined)
+            }
             HostFunction::ErrorToStringThis => {
                 let receiver = this_arg.unwrap_or(JsValue::Undefined);
                 if !Self::is_object_like_value(&receiver) {
@@ -15401,6 +15600,10 @@ impl Vm {
 
         let (prototype, prototype_value) =
             self.parse_prototype_value(args.get(1).cloned().unwrap_or(JsValue::Undefined))?;
+        let prototype_argument = prototype
+            .map(JsValue::Object)
+            .or_else(|| prototype_value.clone())
+            .unwrap_or(JsValue::Null);
 
         if matches!(target, JsValue::Null | JsValue::Undefined) {
             return Err(VmError::TypeError(
@@ -15408,6 +15611,42 @@ impl Vm {
             ));
         }
         if !Self::is_object_like_value(&target) {
+            return Ok(target);
+        }
+        if let JsValue::Object(target_id) = target.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(target_id)?
+        {
+            let empty_realm = Realm::default();
+            let trap = self.get_property_from_receiver(
+                proxy_handler.clone(),
+                "setPrototypeOf",
+                &empty_realm,
+            )?;
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(proxy_target, JsValue::Object(id) if id == target_id) {
+                    return Ok(target);
+                }
+                let _ =
+                    self.execute_object_set_prototype_of(&[proxy_target, prototype_argument])?;
+                return Ok(target);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError(
+                    "Proxy setPrototypeOf trap must be callable",
+                ));
+            }
+            let trap_result = self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![proxy_target, prototype_argument],
+                &empty_realm,
+                false,
+            )?;
+            if !self.is_truthy(&trap_result) {
+                return Err(VmError::TypeError(
+                    "Object.setPrototypeOf target must be extensible",
+                ));
+            }
             return Ok(target);
         }
         if self.prototype_would_create_cycle(&target, prototype, prototype_value.clone())? {
@@ -15502,6 +15741,11 @@ impl Vm {
         while Self::is_object_like_value(&current) {
             if self.same_value(&current, target) {
                 return Ok(true);
+            }
+            if let JsValue::Object(object_id) = current.clone()
+                && self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)?
+            {
+                return Ok(false);
             }
             current = self.get_prototype_of_value(&current)?;
             guard += 1;
@@ -19699,11 +19943,17 @@ impl Vm {
             }
             JsValue::String(receiver) => Ok(self.get_string_property(&receiver, property)),
             primitive @ (JsValue::Number(_) | JsValue::Bool(_)) => {
+                let primitive_receiver = primitive.clone();
                 let boxed_receiver = self.box_primitive_receiver(primitive);
                 let JsValue::Object(object_id) = boxed_receiver.clone() else {
                     unreachable!();
                 };
-                self.get_object_property_with_receiver(object_id, property, boxed_receiver, realm)
+                self.get_object_property_with_receiver(
+                    object_id,
+                    property,
+                    primitive_receiver,
+                    realm,
+                )
             }
             _ => Err(VmError::TypeError("property access expects object")),
         }
@@ -22830,6 +23080,77 @@ impl Vm {
         self.coerce_object_for_object_builtins(value, null_undefined_error)
     }
 
+    fn object_prototype_this_coercible(
+        &self,
+        this_arg: Option<JsValue>,
+        null_undefined_error: &'static str,
+    ) -> Result<JsValue, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        if matches!(value, JsValue::Null | JsValue::Undefined) {
+            return Err(VmError::TypeError(null_undefined_error));
+        }
+        Ok(value)
+    }
+
+    fn object_prototype_lookup_accessor(
+        &mut self,
+        mut target: JsValue,
+        key: String,
+        accessor_name: &str,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let mut guard = 0usize;
+        while Self::is_object_like_value(&target) {
+            if let Some(descriptor) = object_builtins::object_assign_get_own_property_descriptor(
+                self,
+                target.clone(),
+                &key,
+                realm,
+            )? {
+                return self.get_property_from_receiver(descriptor, accessor_name, realm);
+            }
+            target = self.get_prototype_of_value_proxy_aware(target, realm)?;
+            guard += 1;
+            if guard > 1024 {
+                break;
+            }
+        }
+        Ok(JsValue::Undefined)
+    }
+
+    fn get_prototype_of_value_proxy_aware(
+        &mut self,
+        target: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        if let JsValue::Object(object_id) = target.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap =
+                self.get_property_from_receiver(proxy_handler.clone(), "getPrototypeOf", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+                    return Ok(JsValue::Null);
+                }
+                return self.get_prototype_of_value_proxy_aware(proxy_target, realm);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError(
+                    "Proxy getPrototypeOf trap must be callable",
+                ));
+            }
+            let trap_result =
+                self.execute_callable(trap, Some(proxy_handler), vec![proxy_target], realm, false)?;
+            if !matches!(trap_result, JsValue::Null) && !Self::is_object_like_value(&trap_result) {
+                return Err(VmError::TypeError(
+                    "Proxy getPrototypeOf trap must return object or null",
+                ));
+            }
+            return Ok(trap_result);
+        }
+        self.get_prototype_of_value(&target)
+    }
+
     fn object_to_string_tag(
         &mut self,
         this_arg: Option<JsValue>,
@@ -25638,16 +25959,17 @@ impl Vm {
         &mut self,
         prototype: JsValue,
         value: JsValue,
+        realm: &Realm,
     ) -> Result<bool, VmError> {
         if !Self::is_object_like_value(&prototype) {
             return Ok(false);
         }
-        let mut current = self.get_prototype_of_value(&value)?;
+        let mut current = self.get_prototype_of_value_proxy_aware(value, realm)?;
         while Self::is_object_like_value(&current) {
             if self.same_value(&current, &prototype) {
                 return Ok(true);
             }
-            current = self.get_prototype_of_value(&current)?;
+            current = self.get_prototype_of_value_proxy_aware(current, realm)?;
         }
         Ok(false)
     }
