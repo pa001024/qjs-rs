@@ -1020,3 +1020,51 @@ fn export_star_namespace_with_split_attributes_clause_parses_and_evaluates() {
     assert_eq!(host.load_count("bridge.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn mixed_default_named_import_with_comments_around_comma_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export default 40;\nexport const value = 2;\n")
+        .with_module(
+            "entry.js",
+            "import fallback/* gap */,/* gap */{ value as named } from './dep.js';\nexport const answer = fallback + named;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("mixed default+named import with comment separators should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn mixed_default_namespace_import_with_comments_around_comma_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export default 40;\nexport const value = 2;\n")
+        .with_module(
+            "entry.js",
+            "import fallback/* gap */,/* gap */* as ns from './dep.js';\nexport const answer = fallback + ns.value;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("mixed default+namespace import with comment separators should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn named_clause_entries_with_trailing_comments_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "const value = 42;\nexport { value/* gap */ };\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("named module clauses with trailing comments should evaluate");
+    assert_eq!(expect_number(&exports, "value"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}

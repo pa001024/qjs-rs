@@ -843,3 +843,83 @@ fn module_parse_export_star_namespace_with_split_attributes_clause() {
     assert_eq!(parsed.exports.len(), 1);
     assert_eq!(parsed.exports[0].exported, "ns");
 }
+
+#[test]
+fn module_parse_mixed_default_named_import_with_comments_around_comma() {
+    let source = "import fallback/* gap */,/* gap */{ value as named } from './dep.js';\nexport { fallback as left, named as right };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![
+            ModuleImportBinding {
+                imported: "default".to_string(),
+                local: "fallback".to_string(),
+            },
+            ModuleImportBinding {
+                imported: "value".to_string(),
+                local: "named".to_string(),
+            },
+        ]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "left".to_string(),
+        local: "fallback".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "right".to_string(),
+        local: "named".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_mixed_default_namespace_import_with_comments_around_comma() {
+    let source = "import fallback/* gap */,/* gap */* as ns from './dep.js';\nexport const answer = fallback + ns.value;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![
+            ModuleImportBinding {
+                imported: "default".to_string(),
+                local: "fallback".to_string(),
+            },
+            ModuleImportBinding {
+                imported: "*".to_string(),
+                local: "ns".to_string(),
+            },
+        ]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_named_clause_entries_with_trailing_comments() {
+    let source = "const local = 42;\nexport { local/* gap */ };\nexport { value/* gap */ } from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert!(
+        parsed.imports[0].bindings[0]
+            .local
+            .starts_with("$__qjs_module_reexport_")
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "local".to_string(),
+        local: "local".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "value".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+}

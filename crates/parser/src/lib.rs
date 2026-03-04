@@ -693,6 +693,10 @@ fn parse_module_type_only_import_locals(line: &str) -> Result<Vec<String>, Parse
 fn parse_module_import_clause_bindings(
     clause: &str,
 ) -> Result<(Vec<ModuleImportBinding>, Vec<String>), ParseError> {
+    let clause = strip_module_keyword_leading_separators(clause)
+        .map(|(trimmed, _)| trimmed)
+        .unwrap_or(clause)
+        .trim();
     if clause.starts_with('{') {
         return parse_named_import_bindings(clause);
     }
@@ -703,11 +707,20 @@ fn parse_module_import_clause_bindings(
     let mut bindings = Vec::new();
     let mut type_only_locals = Vec::new();
     if let Some((default_binding, remainder)) = clause.split_once(',') {
+        let Some(default_binding) = parse_module_clause_single_token(default_binding) else {
+            return Err(ParseError {
+                message: "unsupported import declaration form".to_string(),
+                position: 0,
+            });
+        };
         bindings.push(ModuleImportBinding {
             imported: "default".to_string(),
-            local: parse_module_binding_identifier(default_binding.trim())?,
+            local: parse_module_binding_identifier(default_binding)?,
         });
-        let remainder = remainder.trim();
+        let remainder = strip_module_keyword_leading_separators(remainder)
+            .map(|(trimmed, _)| trimmed)
+            .unwrap_or(remainder)
+            .trim();
         if remainder.starts_with('{') {
             let (named_bindings, named_type_only_locals) = parse_named_import_bindings(remainder)?;
             bindings.extend(named_bindings);
@@ -723,9 +736,15 @@ fn parse_module_import_clause_bindings(
         return Ok((bindings, type_only_locals));
     }
 
+    let Some(default_binding) = parse_module_clause_single_token(clause) else {
+        return Err(ParseError {
+            message: "unsupported import declaration form".to_string(),
+            position: 0,
+        });
+    };
     bindings.push(ModuleImportBinding {
         imported: "default".to_string(),
-        local: parse_module_binding_identifier(clause.trim())?,
+        local: parse_module_binding_identifier(default_binding)?,
     });
     Ok((bindings, type_only_locals))
 }
@@ -749,7 +768,13 @@ fn parse_named_import_bindings(
             let local = if let Some((_imported, local)) = split_module_as_alias(type_only_part) {
                 parse_module_binding_identifier(local.trim())?
             } else {
-                parse_module_binding_identifier(type_only_part)?
+                let Some(local) = parse_module_clause_single_token(type_only_part) else {
+                    return Err(ParseError {
+                        message: "unsupported import declaration form".to_string(),
+                        position: 0,
+                    });
+                };
+                parse_module_binding_identifier(local)?
             };
             type_only_locals.push(local);
             continue;
@@ -760,7 +785,13 @@ fn parse_named_import_bindings(
                 parse_module_binding_identifier(local.trim())?,
             )
         } else {
-            let ident = parse_module_binding_identifier(part)?;
+            let Some(ident) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported import declaration form".to_string(),
+                    position: 0,
+                });
+            };
+            let ident = parse_module_binding_identifier(ident)?;
             (ident.clone(), ident)
         };
         bindings.push(ModuleImportBinding { imported, local });
@@ -789,7 +820,13 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
                 exported: parse_module_export_name(exported.trim())?,
             }
         } else {
-            let local = parse_module_binding_identifier(part)?;
+            let Some(local) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported export form".to_string(),
+                    position: 0,
+                });
+            };
+            let local = parse_module_binding_identifier(local)?;
             ModuleExport {
                 local: local.clone(),
                 exported: local,
@@ -911,12 +948,78 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
                 parse_module_export_name(exported.trim())?,
             )
         } else {
-            let imported = parse_module_import_name(part)?;
-            (imported.clone(), parse_module_export_name(part)?)
+            let Some(imported) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported export re-export form".to_string(),
+                    position: 0,
+                });
+            };
+            let imported = parse_module_import_name(imported)?;
+            (
+                imported.clone(),
+                parse_module_export_name(imported.as_str())?,
+            )
         };
         bindings.push((imported, exported));
     }
     Ok(bindings)
+}
+
+fn parse_module_clause_single_token(source: &str) -> Option<&str> {
+    let source = source.trim();
+    let start = skip_module_clause_separators(source, 0)?;
+    if start >= source.len() {
+        return None;
+    }
+
+    let mut cursor = start;
+    let first = source[cursor..].chars().next()?;
+    if first == '\'' || first == '"' {
+        cursor += first.len_utf8();
+        let mut escaped = false;
+        let mut closed = false;
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            cursor += next.len_utf8();
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if next == '\\' {
+                escaped = true;
+                continue;
+            }
+            if next == first {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            return None;
+        }
+    } else {
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            if next.is_whitespace() {
+                break;
+            }
+            if next == '/'
+                && (source[cursor..].starts_with("//") || source[cursor..].starts_with("/*"))
+            {
+                break;
+            }
+            cursor += next.len_utf8();
+        }
+    }
+
+    if cursor <= start {
+        return None;
+    }
+    let end = skip_module_clause_separators(source, cursor)?;
+    if end != source.len() {
+        return None;
+    }
+    Some(&source[start..cursor])
 }
 
 fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
