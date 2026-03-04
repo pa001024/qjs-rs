@@ -55,6 +55,7 @@ pub enum Opcode {
     DefineSetter(String),
     DefineGetterByValue,
     DefineSetterByValue,
+    CopyDataProperties,
     SetProperty(String),
     SetPropertyByValue,
     SetSuperProperty(String),
@@ -1838,6 +1839,7 @@ impl Compiler {
                     }
                     ObjectPropertyKey::Static(_)
                     | ObjectPropertyKey::ProtoSetter
+                    | ObjectPropertyKey::Spread
                     | ObjectPropertyKey::AccessorGet(_)
                     | ObjectPropertyKey::AccessorSet(_) => false,
                 };
@@ -2118,6 +2120,10 @@ impl Compiler {
                             self.compile_expr(&property.value, code);
                             code.push(Opcode::DefineSetterByValue);
                             code.push(Opcode::Pop);
+                        }
+                        ObjectPropertyKey::Spread => {
+                            self.compile_expr(&property.value, code);
+                            code.push(Opcode::CopyDataProperties);
                         }
                     }
                 }
@@ -2962,6 +2968,40 @@ mod tests {
                 Opcode::LoadNumber(1.0),
                 Opcode::SetPropertyByValue,
                 Opcode::Pop,
+                Opcode::Halt,
+            ],
+            functions: vec![],
+        };
+        assert_eq!(chunk, expected);
+    }
+
+    #[test]
+    fn compiles_object_literal_with_spread_property() {
+        let expr = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("answer".to_string()),
+                value: Expr::Number(1.0),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Spread,
+                value: Expr::Identifier(Identifier("rest".to_string())),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("tail".to_string()),
+                value: Expr::Number(2.0),
+            },
+        ]);
+
+        let chunk = compile_expression(&expr);
+        let expected = Chunk {
+            code: vec![
+                Opcode::CreateObject,
+                Opcode::LoadNumber(1.0),
+                Opcode::DefineProperty("answer".to_string()),
+                Opcode::LoadIdentifier("rest".to_string()),
+                Opcode::CopyDataProperties,
+                Opcode::LoadNumber(2.0),
+                Opcode::DefineProperty("tail".to_string()),
                 Opcode::Halt,
             ],
             functions: vec![],

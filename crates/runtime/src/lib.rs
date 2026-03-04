@@ -229,6 +229,14 @@ macro_rules! js_value {
     (false) => {
         $crate::JsValue::Bool(false)
     };
+    ([$($value:tt),* $(,)?]) => {{
+        let mut values: ::std::vec::Vec<$crate::JsValue> = ::std::vec::Vec::new();
+        $(
+            let value: $crate::JsValue = $crate::js_value!($value);
+            values.push(value);
+        )*
+        values
+    }};
     ($value:expr) => {{
         let value: $crate::JsValue = ::core::convert::Into::into($value);
         value
@@ -299,6 +307,21 @@ mod tests {
         assert_eq!(
             crate::js_value!("hello"),
             JsValue::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn js_value_macro_converts_array_literals() {
+        let value = crate::js_value!([1, true, null, "hello", undefined,]);
+        assert_eq!(
+            value,
+            vec![
+                JsValue::Number(1.0),
+                JsValue::Bool(true),
+                JsValue::Null,
+                JsValue::String("hello".to_string()),
+                JsValue::Undefined,
+            ]
         );
     }
 }

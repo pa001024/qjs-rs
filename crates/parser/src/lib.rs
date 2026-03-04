@@ -87,11 +87,14 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut type_only_bindings = BTreeSet::new();
     let mut transformed_lines = Vec::new();
     let mut default_export_index = 0usize;
+    let mut reexport_binding_index = 0usize;
+    let mut export_star_binding_index = 0usize;
+    let mut export_star_namespace_binding_index = 0usize;
 
-    for raw_line in source.lines() {
+    for raw_line in collect_module_logical_lines(source) {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
-            transformed_lines.push(raw_line.to_string());
+            transformed_lines.push(raw_line.clone());
             continue;
         }
         type_only_bindings.extend(collect_ts_type_only_declared_bindings(trimmed));
@@ -105,20 +108,45 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
         {
             continue;
         }
-        if trimmed.starts_with("import ") {
-            let parsed_import = parse_module_import_declaration(trimmed)?;
+        if let Some(import_line) =
+            normalize_module_declaration_keyword(trimmed, "import", &['{', '*', '\'', '"'])
+        {
+            let parsed_import = parse_module_import_declaration(&import_line)?;
             type_only_bindings.extend(parsed_import.type_only_locals);
             if let Some(import) = parsed_import.import {
                 imports.push(import);
             }
             continue;
         }
-        if trimmed.starts_with("export ") {
-            let export_body = trimmed
+        if let Some(export_line) =
+            normalize_module_declaration_keyword(trimmed, "export", &['{', '*'])
+        {
+            let export_body = export_line
                 .strip_prefix("export ")
                 .expect("prefix checked")
                 .trim();
             if export_body.starts_with('{') {
+                if let Some((specifier, bindings)) = parse_named_reexport_clause(export_body)? {
+                    let mut import_bindings = Vec::new();
+                    for (imported, exported) in bindings {
+                        let local = format!("$__qjs_module_reexport_{reexport_binding_index}__$");
+                        reexport_binding_index += 1;
+                        import_bindings.push(ModuleImportBinding {
+                            imported,
+                            local: local.clone(),
+                        });
+                        register_module_export(
+                            &mut exports,
+                            &mut exported_names,
+                            ModuleExport { exported, local },
+                        )?;
+                    }
+                    imports.push(ModuleImport {
+                        specifier,
+                        bindings: import_bindings,
+                    });
+                    continue;
+                }
                 for export in parse_named_export_clause(export_body)? {
                     if type_only_bindings.contains(&export.local) {
                         continue;
@@ -128,29 +156,74 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 continue;
             }
             if export_body.starts_with('*') {
+                if let Some(clause) = parse_export_star_clause(export_body)? {
+                    match clause {
+                        ExportStarClause::All { specifier } => {
+                            let local =
+                                format!("$__qjs_module_export_star_{export_star_binding_index}__$");
+                            export_star_binding_index += 1;
+                            imports.push(ModuleImport {
+                                specifier,
+                                bindings: vec![ModuleImportBinding {
+                                    imported: "*".to_string(),
+                                    local,
+                                }],
+                            });
+                        }
+                        ExportStarClause::Namespace {
+                            specifier,
+                            exported,
+                        } => {
+                            let local = format!(
+                                "$__qjs_module_export_star_namespace_{export_star_namespace_binding_index}__$"
+                            );
+                            export_star_namespace_binding_index += 1;
+                            imports.push(ModuleImport {
+                                specifier,
+                                bindings: vec![ModuleImportBinding {
+                                    imported: "*".to_string(),
+                                    local: local.clone(),
+                                }],
+                            });
+                            register_module_export(
+                                &mut exports,
+                                &mut exported_names,
+                                ModuleExport { exported, local },
+                            )?;
+                        }
+                    }
+                    continue;
+                }
                 return Err(ParseError {
                     message: "unsupported export form".to_string(),
                     position: 0,
                 });
             }
-            if let Some(default_expr) = export_body.strip_prefix("default ") {
+            if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
                 let default_expr = default_expr.trim();
-                if !default_expr.ends_with(';') {
-                    return Err(ParseError {
-                        message: "module declaration must end with ';'".to_string(),
-                        position: 0,
-                    });
-                }
-                let expr = default_expr[..default_expr.len() - 1].trim();
-                if expr.is_empty() {
+                if default_expr.is_empty() {
                     return Err(ParseError {
                         message: "export default requires an expression".to_string(),
                         position: 0,
                     });
                 }
-                let local = format!("$__qjs_module_default_export_{default_export_index}__$");
-                default_export_index += 1;
-                transformed_lines.push(format!("const {local} = {expr};"));
+                let local = if let Some(binding) = parse_named_default_export_binding(default_expr)?
+                {
+                    transformed_lines.push(ensure_module_statement_terminated(default_expr));
+                    binding
+                } else {
+                    let expr = trim_module_declaration_terminator(default_expr);
+                    if expr.is_empty() {
+                        return Err(ParseError {
+                            message: "export default requires an expression".to_string(),
+                            position: 0,
+                        });
+                    }
+                    let local = format!("$__qjs_module_default_export_{default_export_index}__$");
+                    default_export_index += 1;
+                    transformed_lines.push(format!("const {local} = {expr};"));
+                    local
+                };
                 register_module_export(
                     &mut exports,
                     &mut exported_names,
@@ -162,7 +235,7 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                 continue;
             }
 
-            if export_body.contains(" from ") {
+            if contains_module_from_keyword(export_body) {
                 return Err(ParseError {
                     message: "unsupported export re-export form".to_string(),
                     position: 0,
@@ -178,11 +251,11 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
                     },
                 )?;
             }
-            transformed_lines.push(export_body.to_string());
+            transformed_lines.push(ensure_module_statement_terminated(export_body));
             continue;
         }
 
-        transformed_lines.push(raw_line.to_string());
+        transformed_lines.push(raw_line);
     }
 
     if !exports.is_empty() {
@@ -197,6 +270,370 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     })
 }
 
+fn collect_module_logical_lines(source: &str) -> Vec<String> {
+    let mut logical_lines = Vec::new();
+    let mut physical_lines = source.lines().peekable();
+    while let Some(raw_line) = physical_lines.next() {
+        let mut logical_line = raw_line.to_string();
+        let trimmed = raw_line.trim();
+        let is_module_declaration =
+            normalize_module_declaration_keyword(trimmed, "import", &['{', '*', '\'', '"'])
+                .is_some()
+                || normalize_module_declaration_keyword(trimmed, "export", &['{', '*']).is_some();
+        if !is_module_declaration {
+            logical_lines.push(logical_line);
+            continue;
+        }
+
+        while module_grouping_depth(&logical_line) > 0
+            || module_declaration_needs_followup(&logical_line)
+            || module_reexport_from_clause_on_next_line(&logical_line, physical_lines.peek())
+            || module_attributes_clause_on_next_line(&logical_line, physical_lines.peek())
+        {
+            let Some(next_line) = physical_lines.next() else {
+                break;
+            };
+            logical_line.push('\n');
+            logical_line.push_str(next_line);
+        }
+
+        logical_lines.push(logical_line);
+    }
+    logical_lines
+}
+
+fn module_reexport_from_clause_on_next_line(declaration: &str, next_line: Option<&&str>) -> bool {
+    let Some(next_line) = next_line else {
+        return false;
+    };
+    if !line_starts_with_module_from_keyword(next_line.trim_start()) {
+        return false;
+    }
+    let Some(export_line) =
+        normalize_module_declaration_keyword(declaration.trim(), "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    let export_body = trim_module_declaration_terminator(export_body);
+    if !export_body.starts_with('{') {
+        return false;
+    }
+    let Some(closing_brace) = export_body.rfind('}') else {
+        return false;
+    };
+    export_body[closing_brace + 1..].trim().is_empty()
+}
+
+fn module_attributes_clause_on_next_line(declaration: &str, next_line: Option<&&str>) -> bool {
+    let Some(next_line) = next_line else {
+        return false;
+    };
+    if !line_starts_with_module_attributes_keyword(next_line.trim_start()) {
+        return false;
+    }
+    if module_declaration_has_explicit_terminator(declaration) {
+        return false;
+    }
+
+    let declaration = declaration.trim();
+    if let Some(import_line) =
+        normalize_module_declaration_keyword(declaration, "import", &['{', '*', '\'', '"'])
+    {
+        let rest = import_line
+            .strip_prefix("import ")
+            .expect("prefix checked")
+            .trim();
+        let rest = trim_module_declaration_terminator(rest);
+        if rest.starts_with('\'') || rest.starts_with('"') {
+            return true;
+        }
+        return split_module_from_clause(rest).is_some();
+    }
+
+    let Some(export_line) =
+        normalize_module_declaration_keyword(declaration, "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    contains_module_from_keyword(export_body)
+}
+
+fn module_declaration_has_explicit_terminator(source: &str) -> bool {
+    strip_module_trailing_line_comment(source)
+        .trim_end()
+        .ends_with(';')
+}
+
+fn line_starts_with_module_from_keyword(source: &str) -> bool {
+    let source = source.trim_start();
+    let Some(after_from) = source.strip_prefix("from") else {
+        return false;
+    };
+    match after_from.chars().next() {
+        None => true,
+        Some(ch) => ch.is_whitespace() || ch == '\'' || ch == '"',
+    }
+}
+
+fn line_starts_with_module_attributes_keyword(source: &str) -> bool {
+    let source = source.trim_start();
+    for keyword in ["assert", "with"] {
+        if let Some(after_keyword) = source.strip_prefix(keyword) {
+            return match after_keyword.chars().next() {
+                None => true,
+                Some(ch) => ch.is_whitespace() || ch == '{',
+            };
+        }
+    }
+    false
+}
+
+fn module_grouping_depth(source: &str) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+fn source_contains_unquoted_char(source: &str, target: char) -> bool {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == target {
+            return true;
+        }
+    }
+    false
+}
+
+fn module_export_declaration_head_requires_body(source: &str) -> bool {
+    let source = source.trim_start();
+    let (kind, rest) = if let Some(rest) = source.strip_prefix("async function") {
+        ("function", rest)
+    } else if let Some(rest) = source.strip_prefix("function") {
+        ("function", rest)
+    } else if let Some(rest) = source.strip_prefix("class") {
+        ("class", rest)
+    } else {
+        return false;
+    };
+    let mut rest = rest.trim_start();
+    if kind == "function"
+        && let Some(after_star) = rest.strip_prefix('*')
+    {
+        rest = after_star.trim_start();
+    }
+    !rest.is_empty() && !source_contains_unquoted_char(rest, '{')
+}
+
+fn module_declaration_needs_followup(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+
+    if let Some(import_line) =
+        normalize_module_declaration_keyword(source, "import", &['{', '*', '\'', '"'])
+    {
+        let rest = import_line
+            .strip_prefix("import ")
+            .expect("prefix checked")
+            .trim();
+        let rest = trim_module_declaration_terminator(rest);
+        if rest.is_empty() {
+            return true;
+        }
+        if rest.starts_with('\'') || rest.starts_with('"') {
+            return module_string_literal_has_incomplete_attributes(rest);
+        }
+        let Some((_clause, raw_specifier)) = split_module_from_clause(rest) else {
+            return true;
+        };
+        return module_string_literal_has_incomplete_attributes(raw_specifier);
+    }
+
+    let Some(export_line) = normalize_module_declaration_keyword(source, "export", &['{', '*'])
+    else {
+        return false;
+    };
+    let export_body = export_line
+        .strip_prefix("export ")
+        .expect("prefix checked")
+        .trim();
+    let export_body = trim_module_declaration_terminator(export_body);
+    if export_body.is_empty() {
+        return true;
+    }
+
+    if export_body.starts_with('{') {
+        let Some(closing_brace) = export_body.rfind('}') else {
+            return true;
+        };
+        let suffix = export_body[closing_brace + 1..].trim();
+        if suffix.is_empty() {
+            return false;
+        }
+        let Some(raw_specifier) = strip_module_from_keyword(suffix) else {
+            return true;
+        };
+        return module_string_literal_has_incomplete_attributes(raw_specifier);
+    }
+
+    if export_body.starts_with('*') {
+        let after_star = export_body
+            .strip_prefix('*')
+            .expect("prefix checked")
+            .trim_start();
+        if strip_module_from_keyword(after_star).is_some() {
+            return strip_module_from_keyword(after_star)
+                .is_some_and(module_string_literal_has_incomplete_attributes);
+        }
+        if let Some(after_as) = after_star.strip_prefix("as") {
+            if !(after_as.chars().next().is_some_and(char::is_whitespace)
+                || after_as.starts_with('/'))
+            {
+                return false;
+            }
+            let Some((after_as, consumed_separator)) =
+                strip_module_keyword_leading_separators(after_as)
+            else {
+                return true;
+            };
+            if !consumed_separator {
+                return false;
+            }
+            let Some((_exported, raw_specifier)) = split_module_from_clause(after_as) else {
+                return true;
+            };
+            return module_string_literal_has_incomplete_attributes(raw_specifier);
+        }
+        return true;
+    }
+
+    if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
+        if module_export_declaration_head_requires_body(default_expr) {
+            return true;
+        }
+        return trim_module_declaration_terminator(default_expr).is_empty();
+    }
+    if export_body == "default" {
+        return true;
+    }
+    if module_export_declaration_head_requires_body(export_body) {
+        return true;
+    }
+
+    let body = export_body.trim_end();
+    body.ends_with('=') || body.ends_with(',')
+}
+
 struct ParsedModuleImportDeclaration {
     import: Option<ModuleImport>,
     type_only_locals: Vec<String>,
@@ -206,13 +643,13 @@ fn parse_module_import_declaration(
     line: &str,
 ) -> Result<ParsedModuleImportDeclaration, ParseError> {
     let mut rest = line.strip_prefix("import ").expect("prefix checked").trim();
-    if !rest.ends_with(';') {
+    rest = trim_module_declaration_terminator(rest);
+    if rest.is_empty() {
         return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
+            message: "unsupported import declaration form".to_string(),
             position: 0,
         });
     }
-    rest = rest[..rest.len() - 1].trim();
 
     if rest.starts_with('\'') || rest.starts_with('"') {
         return Ok(ParsedModuleImportDeclaration {
@@ -224,7 +661,7 @@ fn parse_module_import_declaration(
         });
     }
 
-    let Some((raw_clause, raw_specifier)) = rest.rsplit_once(" from ") else {
+    let Some((raw_clause, raw_specifier)) = split_module_from_clause(rest) else {
         return Err(ParseError {
             message: "unsupported import declaration form".to_string(),
             position: 0,
@@ -233,8 +670,9 @@ fn parse_module_import_declaration(
     let clause = raw_clause.trim();
     let specifier = parse_module_string_literal(raw_specifier.trim())?;
     let (bindings, type_only_locals) = parse_module_import_clause_bindings(clause)?;
+    let keep_runtime_import = !bindings.is_empty() || type_only_locals.is_empty();
     Ok(ParsedModuleImportDeclaration {
-        import: (!bindings.is_empty()).then_some(ModuleImport {
+        import: keep_runtime_import.then_some(ModuleImport {
             specifier,
             bindings,
         }),
@@ -255,36 +693,40 @@ fn parse_module_type_only_import_locals(line: &str) -> Result<Vec<String>, Parse
 fn parse_module_import_clause_bindings(
     clause: &str,
 ) -> Result<(Vec<ModuleImportBinding>, Vec<String>), ParseError> {
+    let clause = strip_module_keyword_leading_separators(clause)
+        .map(|(trimmed, _)| trimmed)
+        .unwrap_or(clause)
+        .trim();
     if clause.starts_with('{') {
         return parse_named_import_bindings(clause);
     }
-    if let Some(local) = clause.strip_prefix("* as ") {
-        return Ok((
-            vec![ModuleImportBinding {
-                imported: "*".to_string(),
-                local: parse_module_binding_identifier(local.trim())?,
-            }],
-            Vec::new(),
-        ));
+    if let Some(binding) = parse_namespace_import_binding(clause)? {
+        return Ok((vec![binding], Vec::new()));
     }
 
     let mut bindings = Vec::new();
     let mut type_only_locals = Vec::new();
     if let Some((default_binding, remainder)) = clause.split_once(',') {
+        let Some(default_binding) = parse_module_clause_single_token(default_binding) else {
+            return Err(ParseError {
+                message: "unsupported import declaration form".to_string(),
+                position: 0,
+            });
+        };
         bindings.push(ModuleImportBinding {
             imported: "default".to_string(),
-            local: parse_module_binding_identifier(default_binding.trim())?,
+            local: parse_module_binding_identifier(default_binding)?,
         });
-        let remainder = remainder.trim();
+        let remainder = strip_module_keyword_leading_separators(remainder)
+            .map(|(trimmed, _)| trimmed)
+            .unwrap_or(remainder)
+            .trim();
         if remainder.starts_with('{') {
             let (named_bindings, named_type_only_locals) = parse_named_import_bindings(remainder)?;
             bindings.extend(named_bindings);
             type_only_locals.extend(named_type_only_locals);
-        } else if let Some(local) = remainder.strip_prefix("* as ") {
-            bindings.push(ModuleImportBinding {
-                imported: "*".to_string(),
-                local: parse_module_binding_identifier(local.trim())?,
-            });
+        } else if let Some(binding) = parse_namespace_import_binding(remainder)? {
+            bindings.push(binding);
         } else {
             return Err(ParseError {
                 message: "unsupported import declaration form".to_string(),
@@ -294,9 +736,15 @@ fn parse_module_import_clause_bindings(
         return Ok((bindings, type_only_locals));
     }
 
+    let Some(default_binding) = parse_module_clause_single_token(clause) else {
+        return Err(ParseError {
+            message: "unsupported import declaration form".to_string(),
+            position: 0,
+        });
+    };
     bindings.push(ModuleImportBinding {
         imported: "default".to_string(),
-        local: parse_module_binding_identifier(clause.trim())?,
+        local: parse_module_binding_identifier(default_binding)?,
     });
     Ok((bindings, type_only_locals))
 }
@@ -317,21 +765,33 @@ fn parse_named_import_bindings(
         }
         if let Some(type_only_part) = part.strip_prefix("type ") {
             let type_only_part = type_only_part.trim();
-            let local = if let Some((_imported, local)) = type_only_part.split_once(" as ") {
+            let local = if let Some((_imported, local)) = split_module_as_alias(type_only_part) {
                 parse_module_binding_identifier(local.trim())?
             } else {
-                parse_module_binding_identifier(type_only_part)?
+                let Some(local) = parse_module_clause_single_token(type_only_part) else {
+                    return Err(ParseError {
+                        message: "unsupported import declaration form".to_string(),
+                        position: 0,
+                    });
+                };
+                parse_module_binding_identifier(local)?
             };
             type_only_locals.push(local);
             continue;
         }
-        let (imported, local) = if let Some((imported, local)) = part.split_once(" as ") {
+        let (imported, local) = if let Some((imported, local)) = split_module_as_alias(part) {
             (
                 parse_module_import_name(imported.trim())?,
                 parse_module_binding_identifier(local.trim())?,
             )
         } else {
-            let ident = parse_module_binding_identifier(part)?;
+            let Some(ident) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported import declaration form".to_string(),
+                    position: 0,
+                });
+            };
+            let ident = parse_module_binding_identifier(ident)?;
             (ident.clone(), ident)
         };
         bindings.push(ModuleImportBinding { imported, local });
@@ -340,13 +800,7 @@ fn parse_named_import_bindings(
 }
 
 fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseError> {
-    if !clause.ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = clause[..clause.len() - 1].trim();
+    let body = trim_module_declaration_terminator(clause);
     let inner = parse_braced_clause_inner(body)?;
     if inner.is_empty() {
         return Ok(Vec::new());
@@ -360,13 +814,19 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
         if part.starts_with("type ") {
             continue;
         }
-        let export = if let Some((local, exported)) = part.split_once(" as ") {
+        let export = if let Some((local, exported)) = split_module_as_alias(part) {
             ModuleExport {
                 local: parse_module_binding_identifier(local.trim())?,
                 exported: parse_module_export_name(exported.trim())?,
             }
         } else {
-            let local = parse_module_binding_identifier(part)?;
+            let Some(local) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported export form".to_string(),
+                    position: 0,
+                });
+            };
+            let local = parse_module_binding_identifier(local)?;
             ModuleExport {
                 local: local.clone(),
                 exported: local,
@@ -377,23 +837,460 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
     Ok(exports)
 }
 
+fn parse_named_reexport_clause(
+    clause: &str,
+) -> Result<Option<(String, Vec<(String, String)>)>, ParseError> {
+    let body = trim_module_declaration_terminator(clause);
+    let Some(closing_brace) = find_matching_brace_end(body) else {
+        return Err(ParseError {
+            message: "unsupported export re-export form".to_string(),
+            position: 0,
+        });
+    };
+    let named_clause = body[..=closing_brace].trim();
+    let suffix = body[closing_brace + 1..].trim();
+    if suffix.is_empty() {
+        return Ok(None);
+    }
+    let Some(raw_specifier) = strip_module_from_keyword(suffix) else {
+        return Err(ParseError {
+            message: "unsupported export re-export form".to_string(),
+            position: 0,
+        });
+    };
+    let specifier = parse_module_string_literal(raw_specifier.trim())?;
+    let bindings = parse_named_reexport_bindings(named_clause)?;
+    Ok(Some((specifier, bindings)))
+}
+
+fn find_matching_brace_end(source: &str) -> Option<usize> {
+    if !source.trim_start().starts_with('{') {
+        return None;
+    }
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut depth = 0usize;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '{' {
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, ParseError> {
+    let inner = parse_braced_clause_inner(clause)?;
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bindings = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (imported, exported) = if let Some((imported, exported)) = split_module_as_alias(part) {
+            (
+                parse_module_import_name(imported.trim())?,
+                parse_module_export_name(exported.trim())?,
+            )
+        } else {
+            let Some(imported) = parse_module_clause_single_token(part) else {
+                return Err(ParseError {
+                    message: "unsupported export re-export form".to_string(),
+                    position: 0,
+                });
+            };
+            let imported = parse_module_import_name(imported)?;
+            (
+                imported.clone(),
+                parse_module_export_name(imported.as_str())?,
+            )
+        };
+        bindings.push((imported, exported));
+    }
+    Ok(bindings)
+}
+
+fn parse_module_clause_single_token(source: &str) -> Option<&str> {
+    let source = source.trim();
+    let start = skip_module_clause_separators(source, 0)?;
+    if start >= source.len() {
+        return None;
+    }
+
+    let mut cursor = start;
+    let first = source[cursor..].chars().next()?;
+    if first == '\'' || first == '"' {
+        cursor += first.len_utf8();
+        let mut escaped = false;
+        let mut closed = false;
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            cursor += next.len_utf8();
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if next == '\\' {
+                escaped = true;
+                continue;
+            }
+            if next == first {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            return None;
+        }
+    } else {
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            if next.is_whitespace() {
+                break;
+            }
+            if next == '/'
+                && (source[cursor..].starts_with("//") || source[cursor..].starts_with("/*"))
+            {
+                break;
+            }
+            cursor += next.len_utf8();
+        }
+    }
+
+    if cursor <= start {
+        return None;
+    }
+    let end = skip_module_clause_separators(source, cursor)?;
+    if end != source.len() {
+        return None;
+    }
+    Some(&source[start..cursor])
+}
+
+fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
+    let source = source.trim();
+    let mut tokens: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        cursor = skip_module_clause_separators(source, cursor)?;
+        if cursor >= source.len() {
+            break;
+        }
+
+        let start = cursor;
+        let ch = source[cursor..].chars().next()?;
+        if ch == '\'' || ch == '"' {
+            cursor += ch.len_utf8();
+            let mut escaped = false;
+            let mut closed = false;
+            while cursor < source.len() {
+                let next = source[cursor..].chars().next()?;
+                cursor += next.len_utf8();
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if next == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if next == ch {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed {
+                return None;
+            }
+            tokens.push((start, cursor));
+            continue;
+        }
+
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            if next.is_whitespace() {
+                break;
+            }
+            if next == '/' {
+                if source[cursor..].starts_with("//") || source[cursor..].starts_with("/*") {
+                    break;
+                }
+            }
+            cursor += next.len_utf8();
+        }
+        tokens.push((start, cursor));
+    }
+
+    if tokens.len() != 3 {
+        return None;
+    }
+    if &source[tokens[1].0..tokens[1].1] != "as" {
+        return None;
+    }
+    Some((
+        &source[tokens[0].0..tokens[0].1],
+        &source[tokens[2].0..tokens[2].1],
+    ))
+}
+
+fn skip_module_clause_separators(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    loop {
+        while cursor < source.len() {
+            let ch = source[cursor..].chars().next()?;
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        if source[cursor..].starts_with("//") {
+            cursor += 2;
+            let newline = source[cursor..].find('\n').unwrap_or(source.len() - cursor);
+            cursor += newline;
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor += 2;
+            let closing = source[cursor..].find("*/")?;
+            cursor += closing + 2;
+            continue;
+        }
+        break;
+    }
+    Some(cursor)
+}
+
+fn parse_namespace_import_binding(clause: &str) -> Result<Option<ModuleImportBinding>, ParseError> {
+    let clause = clause.trim();
+    let Some(after_star) = clause.strip_prefix('*') else {
+        return Ok(None);
+    };
+    let after_star = after_star.trim_start();
+    let Some(after_as) = after_star.strip_prefix("as") else {
+        return Ok(None);
+    };
+    if !(after_as.chars().next().is_some_and(char::is_whitespace) || after_as.starts_with('/')) {
+        return Ok(None);
+    }
+    let Some((after_as, consumed_separator)) = strip_module_keyword_leading_separators(after_as)
+    else {
+        return Ok(None);
+    };
+    if !consumed_separator {
+        return Ok(None);
+    }
+    let local = parse_module_binding_identifier(after_as)?;
+    Ok(Some(ModuleImportBinding {
+        imported: "*".to_string(),
+        local,
+    }))
+}
+
+enum ExportStarClause {
+    All { specifier: String },
+    Namespace { specifier: String, exported: String },
+}
+
+fn parse_export_star_clause(clause: &str) -> Result<Option<ExportStarClause>, ParseError> {
+    let body = trim_module_declaration_terminator(clause);
+    let Some(after_star) = body.strip_prefix('*') else {
+        return Ok(None);
+    };
+    let after_star = after_star.trim_start();
+    if let Some(raw_specifier) = strip_module_from_keyword(after_star) {
+        let specifier = parse_module_string_literal(raw_specifier.trim())?;
+        return Ok(Some(ExportStarClause::All { specifier }));
+    }
+
+    let Some(after_as) = after_star.strip_prefix("as") else {
+        return Ok(None);
+    };
+    if !(after_as.chars().next().is_some_and(char::is_whitespace) || after_as.starts_with('/')) {
+        return Ok(None);
+    }
+    let Some((after_as, consumed_separator)) = strip_module_keyword_leading_separators(after_as)
+    else {
+        return Ok(None);
+    };
+    if !consumed_separator {
+        return Ok(None);
+    }
+    let Some((raw_exported, raw_specifier)) = split_module_from_clause(after_as) else {
+        return Err(ParseError {
+            message: "unsupported export form".to_string(),
+            position: 0,
+        });
+    };
+    let exported = parse_module_export_name(raw_exported.trim())?;
+    let specifier = parse_module_string_literal(raw_specifier.trim())?;
+    Ok(Some(ExportStarClause::Namespace {
+        specifier,
+        exported,
+    }))
+}
+
+fn contains_module_from_keyword(source: &str) -> bool {
+    split_module_from_clause(source).is_some()
+}
+
+fn strip_module_from_keyword(source: &str) -> Option<&str> {
+    let (source, _) = strip_module_keyword_leading_separators(source)?;
+    let after_from = source.strip_prefix("from")?;
+    if after_from.is_empty() {
+        return None;
+    }
+    let first = after_from.chars().next()?;
+    let specifier = if first == '\'' || first == '"' {
+        after_from
+    } else if first.is_whitespace() || first == '/' {
+        let (trimmed, consumed_separator) = strip_module_keyword_leading_separators(after_from)?;
+        if !consumed_separator {
+            return None;
+        }
+        trimmed
+    } else {
+        return None;
+    };
+    (!specifier.is_empty()).then_some(specifier)
+}
+
+fn split_module_from_clause(source: &str) -> Option<(&str, &str)> {
+    let mut split_result = None;
+    for (index, _) in source.match_indices("from") {
+        let left = &source[..index];
+        let right = &source[index + "from".len()..];
+        if left
+            .chars()
+            .next_back()
+            .is_some_and(is_module_identifier_part)
+        {
+            continue;
+        }
+        if right.chars().next().is_some_and(is_module_identifier_part) {
+            continue;
+        }
+        let Some(clause) =
+            trim_module_trailing_block_comment_separators(source[..index].trim_end())
+        else {
+            continue;
+        };
+        let Some((specifier, _)) =
+            strip_module_keyword_leading_separators(&source[index + "from".len()..])
+        else {
+            continue;
+        };
+        if clause.is_empty()
+            || specifier.is_empty()
+            || !(specifier.starts_with('\'') || specifier.starts_with('"'))
+        {
+            continue;
+        }
+        split_result = Some((clause, specifier));
+    }
+    split_result
+}
+
+fn trim_module_trailing_block_comment_separators(source: &str) -> Option<&str> {
+    let mut current = source;
+    loop {
+        let trimmed_ws = current.trim_end();
+        if trimmed_ws.len() != current.len() {
+            current = trimmed_ws;
+            continue;
+        }
+        let Some(prefix) = current.strip_suffix("*/") else {
+            break;
+        };
+        let start = prefix.rfind("/*")?;
+        current = &current[..start];
+    }
+    Some(current)
+}
+
+fn strip_module_export_default_prefix(source: &str) -> Option<&str> {
+    let source = source.trim_start();
+    let after_default = source.strip_prefix("default")?;
+    if after_default.is_empty() {
+        return None;
+    }
+    let (rest, consumed_separator) = strip_module_keyword_leading_separators(after_default)?;
+    if !consumed_separator {
+        return None;
+    }
+    Some(rest)
+}
+
+fn is_module_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
 fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, ParseError> {
     let declaration = declaration.trim();
     if let Some(rest) = declaration.strip_prefix("const ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("const", rest);
     }
     if let Some(rest) = declaration.strip_prefix("let ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("let", rest);
     }
     if let Some(rest) = declaration.strip_prefix("var ") {
-        return parse_variable_export_bindings(rest);
+        return parse_variable_export_bindings("var", rest);
     }
-    if let Some(rest) = declaration.strip_prefix("function ") {
-        let name = parse_leading_identifier(rest)?;
-        return Ok(vec![name]);
-    }
-    if let Some(rest) = declaration.strip_prefix("async function ") {
-        let name = parse_leading_identifier(rest)?;
+    if let Some(name) = parse_module_export_function_name(declaration)? {
         return Ok(vec![name]);
     }
     if let Some(rest) = declaration.strip_prefix("class ") {
@@ -406,15 +1303,11 @@ fn collect_module_declared_bindings(declaration: &str) -> Result<Vec<String>, Pa
     })
 }
 
-fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, ParseError> {
-    if !declarators.trim_end().ends_with(';') {
-        return Err(ParseError {
-            message: "module declaration must end with ';'".to_string(),
-            position: 0,
-        });
-    }
-    let body = declarators.trim_end();
-    let body = body[..body.len() - 1].trim();
+fn parse_variable_export_bindings(
+    declaration_kind: &str,
+    declarators: &str,
+) -> Result<Vec<String>, ParseError> {
+    let body = trim_module_declaration_terminator(declarators);
     if body.is_empty() {
         return Err(ParseError {
             message: "unsupported export declaration form".to_string(),
@@ -422,23 +1315,31 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
         });
     }
 
+    let parsed = parse_script_with_super(&format!("{declaration_kind} {body};"), false)?;
     let mut names = Vec::new();
-    for declarator in body.split(',') {
-        let declarator = declarator.trim();
-        if declarator.is_empty() {
-            continue;
+    for statement in parsed.statements {
+        match statement {
+            Stmt::VariableDeclaration(declaration) => {
+                let name = declaration.name.0;
+                if !is_synthetic_pattern_binding_name(&name) {
+                    names.push(parse_module_binding_identifier(&name)?);
+                }
+            }
+            Stmt::VariableDeclarations(declarations) => {
+                for declaration in declarations {
+                    let name = declaration.name.0;
+                    if !is_synthetic_pattern_binding_name(&name) {
+                        names.push(parse_module_binding_identifier(&name)?);
+                    }
+                }
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "unsupported export declaration form".to_string(),
+                    position: 0,
+                });
+            }
         }
-        let lhs = declarator
-            .split_once('=')
-            .map_or(declarator, |(left, _)| left)
-            .trim();
-        if lhs.contains('{') || lhs.contains('[') {
-            return Err(ParseError {
-                message: "unsupported destructuring export declaration".to_string(),
-                position: 0,
-            });
-        }
-        names.push(parse_module_binding_identifier(lhs)?);
     }
     if names.is_empty() {
         return Err(ParseError {
@@ -447,6 +1348,166 @@ fn parse_variable_export_bindings(declarators: &str) -> Result<Vec<String>, Pars
         });
     }
     Ok(names)
+}
+
+fn is_synthetic_pattern_binding_name(name: &str) -> bool {
+    name.starts_with("$__for_in_decl_array_")
+        || name.starts_with("$__for_in_decl_object_")
+        || name.starts_with("$__for_in_decl_object_effect_")
+}
+
+fn parse_module_export_function_name(declaration: &str) -> Result<Option<String>, ParseError> {
+    let rest = if let Some(rest) = declaration.strip_prefix("function") {
+        rest
+    } else if let Some(rest) = declaration.strip_prefix("async function") {
+        rest
+    } else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    let rest = if let Some(after_star) = rest.strip_prefix('*') {
+        after_star.trim_start()
+    } else {
+        rest
+    };
+    if rest.is_empty() {
+        return Err(ParseError {
+            message: "unsupported export declaration form".to_string(),
+            position: 0,
+        });
+    }
+    Ok(Some(parse_leading_identifier(rest)?))
+}
+
+fn parse_named_default_export_binding(declaration: &str) -> Result<Option<String>, ParseError> {
+    if let Some(rest) = declaration.strip_prefix("function") {
+        return parse_named_default_export_function_binding(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("async function") {
+        return parse_named_default_export_function_binding(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("class") {
+        let rest = rest.trim_start();
+        if !starts_with_module_identifier_start(rest) {
+            return Ok(None);
+        }
+        return Ok(Some(parse_leading_identifier(rest)?));
+    }
+    Ok(None)
+}
+
+fn parse_named_default_export_function_binding(rest: &str) -> Result<Option<String>, ParseError> {
+    let rest = rest.trim_start();
+    let rest = if let Some(rest) = rest.strip_prefix('*') {
+        rest.trim_start()
+    } else {
+        rest
+    };
+    if !starts_with_module_identifier_start(rest) {
+        return Ok(None);
+    }
+    Ok(Some(parse_leading_identifier(rest)?))
+}
+
+fn starts_with_module_identifier_start(source: &str) -> bool {
+    source
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphabetic())
+}
+
+fn trim_module_declaration_terminator(source: &str) -> &str {
+    let source = strip_module_trailing_line_comment(source).trim_end();
+    if let Some(stripped) = source.strip_suffix(';') {
+        stripped.trim_end()
+    } else {
+        source
+    }
+}
+
+fn strip_module_trailing_line_comment(source: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '/' {
+            let next = source[index + ch.len_utf8()..].chars().next();
+            if next == Some('/') {
+                return source[..index].trim_end();
+            }
+        }
+    }
+    source
+}
+
+fn normalize_module_declaration_keyword(
+    line: &str,
+    keyword: &str,
+    no_space_starts: &[char],
+) -> Option<String> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix(keyword)?;
+    if rest.is_empty() {
+        return Some(format!("{keyword} "));
+    }
+    if let Some((trimmed, consumed_separator)) = strip_module_keyword_leading_separators(rest)
+        && consumed_separator
+    {
+        return Some(format!("{keyword} {trimmed}"));
+    }
+    let first = rest.chars().next()?;
+    if no_space_starts.contains(&first) {
+        return Some(format!("{keyword} {rest}"));
+    }
+    None
+}
+
+fn strip_module_keyword_leading_separators(source: &str) -> Option<(&str, bool)> {
+    let mut current = source;
+    let mut consumed_separator = false;
+    loop {
+        let trimmed_ws = current.trim_start();
+        if trimmed_ws.len() != current.len() {
+            consumed_separator = true;
+            current = trimmed_ws;
+            continue;
+        }
+
+        if let Some(rest) = current.strip_prefix("//") {
+            consumed_separator = true;
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            current = rest[line_end..].trim_start_matches('\n');
+            continue;
+        }
+
+        if let Some(rest) = current.strip_prefix("/*") {
+            let closing = rest.find("*/")?;
+            consumed_separator = true;
+            current = &rest[closing + 2..];
+            continue;
+        }
+
+        break;
+    }
+    Some((current, consumed_separator))
 }
 
 fn collect_ts_type_only_declared_bindings(line: &str) -> Vec<String> {
@@ -511,6 +1572,17 @@ fn parse_braced_clause_inner(clause: &str) -> Result<String, ParseError> {
 }
 
 fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
+    let (literal, trailing) = split_module_string_literal_parts(source)?;
+    if !trailing.is_empty() && !is_supported_module_attributes_clause(trailing) {
+        return Err(ParseError {
+            message: "unsupported module attributes clause".to_string(),
+            position: 0,
+        });
+    }
+    Ok(literal.to_string())
+}
+
+fn split_module_string_literal_parts(source: &str) -> Result<(&str, &str), ParseError> {
     let source = source.trim();
     let quote = source.chars().next().ok_or(ParseError {
         message: "expected module specifier".to_string(),
@@ -522,27 +1594,178 @@ fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
             position: 0,
         });
     }
-    if !source.ends_with(quote) || source.len() < 2 {
+
+    let mut escaped = false;
+    let mut closing_index = None;
+    for (index, ch) in source.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            closing_index = Some(index);
+            break;
+        }
+    }
+    let Some(closing_index) = closing_index else {
         return Err(ParseError {
             message: "unterminated module specifier literal".to_string(),
             position: 0,
         });
+    };
+    let literal = &source[quote.len_utf8()..closing_index];
+    let trailing = source[closing_index + quote.len_utf8()..].trim();
+    Ok((literal, trailing))
+}
+
+fn is_supported_module_attributes_clause(source: &str) -> bool {
+    let source = source.trim_start();
+    let Some((source, _)) = strip_module_keyword_leading_separators(source) else {
+        return false;
+    };
+    let after_keyword = if let Some(rest) = source.strip_prefix("assert") {
+        rest
+    } else if let Some(rest) = source.strip_prefix("with") {
+        rest
+    } else {
+        return false;
+    };
+
+    let clause = if after_keyword.starts_with('{') {
+        after_keyword
+    } else {
+        let Some((trimmed, consumed_separator)) =
+            strip_module_keyword_leading_separators(after_keyword)
+        else {
+            return false;
+        };
+        if !consumed_separator {
+            return false;
+        }
+        trimmed
+    };
+    if !clause.starts_with('{') {
+        return false;
     }
-    Ok(source[1..source.len() - 1].to_string())
+
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut depth = 0usize;
+    let mut closing_index = None;
+    let mut chars = clause.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '{' {
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                closing_index = Some(index);
+                break;
+            }
+        }
+    }
+
+    let Some(closing_index) = closing_index else {
+        return false;
+    };
+    clause[closing_index + 1..].trim().is_empty()
+}
+
+fn module_string_literal_has_incomplete_attributes(source: &str) -> bool {
+    let Ok((_literal, trailing)) = split_module_string_literal_parts(source) else {
+        return false;
+    };
+    if trailing.is_empty() {
+        return false;
+    }
+    let Some((normalized, _)) = strip_module_keyword_leading_separators(trailing) else {
+        return false;
+    };
+    let starts_with_attributes_keyword =
+        normalized.starts_with("assert") || normalized.starts_with("with");
+    starts_with_attributes_keyword && !is_supported_module_attributes_clause(normalized)
 }
 
 fn parse_module_import_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
     }
-    parse_module_binding_identifier(name)
+    if name.starts_with('\'') || name.starts_with('"') {
+        return parse_module_string_literal(name);
+    }
+    parse_module_identifier_name(name)
 }
 
 fn parse_module_export_name(name: &str) -> Result<String, ParseError> {
     if name == "default" {
         return Ok(name.to_string());
     }
-    parse_module_binding_identifier(name)
+    if name.starts_with('\'') || name.starts_with('"') {
+        return parse_module_string_literal(name);
+    }
+    parse_module_identifier_name(name)
+}
+
+fn parse_module_identifier_name(name: &str) -> Result<String, ParseError> {
+    let name = name.trim();
+    if !is_valid_module_identifier(name) {
+        return Err(ParseError {
+            message: "invalid module identifier name".to_string(),
+            position: 0,
+        });
+    }
+    Ok(name.to_string())
 }
 
 fn parse_module_binding_identifier(name: &str) -> Result<String, ParseError> {
@@ -583,17 +1806,47 @@ fn register_module_export(
 }
 
 fn render_module_export_snapshot_statement(exports: &[ModuleExport]) -> String {
-    let mut rendered = String::from("({");
+    // Prefix with an explicit statement separator so semicolonless preceding
+    // statements don't merge with the synthetic snapshot expression.
+    let mut rendered = String::from(";({");
     for (index, export) in exports.iter().enumerate() {
         if index > 0 {
             rendered.push_str(", ");
         }
-        rendered.push_str(&export.exported);
+        render_module_export_property_key(&mut rendered, &export.exported);
         rendered.push_str(": ");
         rendered.push_str(&export.local);
     }
     rendered.push_str("});");
     rendered
+}
+
+fn render_module_export_property_key(rendered: &mut String, key: &str) {
+    if is_valid_module_identifier(key) {
+        rendered.push_str(key);
+        return;
+    }
+    rendered.push('"');
+    for ch in key.chars() {
+        match ch {
+            '\\' => rendered.push_str("\\\\"),
+            '"' => rendered.push_str("\\\""),
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            _ => rendered.push(ch),
+        }
+    }
+    rendered.push('"');
+}
+
+fn ensure_module_statement_terminated(statement: &str) -> String {
+    let statement = statement.trim_end();
+    if statement.ends_with(';') {
+        statement.to_string()
+    } else {
+        format!("{statement};")
+    }
 }
 
 fn validate_early_errors(statements: &[Stmt]) -> Result<(), ParseError> {
@@ -801,6 +2054,7 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
                     }
                     ObjectPropertyKey::Static(_)
                     | ObjectPropertyKey::ProtoSetter
+                    | ObjectPropertyKey::Spread
                     | ObjectPropertyKey::AccessorGet(_)
                     | ObjectPropertyKey::AccessorSet(_) => {}
                 }
@@ -5115,7 +6369,8 @@ impl Parser {
                     has_escape: false,
                 }),
                 ObjectPropertyKey::Computed(expr) => *expr,
-                ObjectPropertyKey::AccessorGet(_)
+                ObjectPropertyKey::Spread
+                | ObjectPropertyKey::AccessorGet(_)
                 | ObjectPropertyKey::AccessorSet(_)
                 | ObjectPropertyKey::AccessorGetComputed(_)
                 | ObjectPropertyKey::AccessorSetComputed(_) => {
@@ -7233,6 +8488,7 @@ impl Parser {
                             ObjectPropertyKey::Computed(key_expr) => ObjectPropertyKey::Computed(
                                 Box::new(Self::rewrite_constructor_super_property_expr(*key_expr)),
                             ),
+                            ObjectPropertyKey::Spread => ObjectPropertyKey::Spread,
                             ObjectPropertyKey::AccessorGet(name) => {
                                 ObjectPropertyKey::AccessorGet(name)
                             }
@@ -7851,6 +9107,20 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
+            if self.matches(&TokenKind::Ellipsis) {
+                let spread_source = self.parse_expression_inner()?;
+                properties.push(ObjectProperty {
+                    key: ObjectPropertyKey::Spread,
+                    value: spread_source,
+                });
+                if self.matches(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
             if let Some(async_method) = self.try_parse_async_object_method()? {
                 properties.push(async_method);
                 if self.matches(&TokenKind::Comma) {
@@ -7920,6 +9190,9 @@ impl Parser {
                     | ObjectPropertyKey::AccessorGetComputed(_)
                     | ObjectPropertyKey::AccessorSetComputed(_) => {
                         return Err(self.error_current("unexpected accessor in object literal"));
+                    }
+                    ObjectPropertyKey::Spread => {
+                        return Err(self.error_current("unexpected spread in object literal"));
                     }
                     ObjectPropertyKey::ProtoSetter => {
                         return Err(
@@ -8463,6 +9736,168 @@ export default value;\n";
     }
 
     #[test]
+    fn module_parse_named_reexport_baseline() {
+        let source = "export { value as answer, default as fallback } from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 2);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[1].imported, "default");
+        assert!(
+            parsed
+                .imports
+                .iter()
+                .flat_map(|entry| entry.bindings.iter())
+                .all(|binding| binding.local.starts_with("$__qjs_module_reexport_")),
+            "re-export should synthesize hidden locals to avoid source-level collisions"
+        );
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "answer")
+        );
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "fallback")
+        );
+    }
+
+    #[test]
+    fn module_parse_export_star_baseline() {
+        let source = "export * from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert!(
+            parsed.imports[0].bindings[0]
+                .local
+                .starts_with("$__qjs_module_export_star_"),
+            "export * should synthesize hidden namespace capture binding"
+        );
+        assert!(parsed.exports.is_empty());
+    }
+
+    #[test]
+    fn module_parse_export_star_namespace_baseline() {
+        let source = "export * as ns from './dep.js';\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert!(
+            parsed.imports[0].bindings[0]
+                .local
+                .starts_with("$__qjs_module_export_star_namespace_"),
+            "export * as ns should synthesize hidden namespace capture binding"
+        );
+        assert_eq!(parsed.exports.len(), 1);
+        assert_eq!(parsed.exports[0].exported, "ns");
+        assert_eq!(parsed.exports[0].local, parsed.imports[0].bindings[0].local);
+    }
+
+    #[test]
+    fn module_parse_empty_named_import_keeps_runtime_dependency() {
+        let source = "import {} from './dep.js';\nexport const answer = 42;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert!(
+            parsed.imports[0].bindings.is_empty(),
+            "empty named import should keep dependency edge without local bindings"
+        );
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_import_with_extra_from_spacing_baseline() {
+        let source = "import { value }   from   './dep.js';\nexport const answer = value;\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_semicolonless_import_export_baseline() {
+        let source = "import { value } from './dep.js'\nexport const answer = value\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_compact_keyword_spacing_baseline() {
+        let source = "import{ value }from'./dep.js'\nconst answer = value\nexport{answer}\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_trailing_line_comment_baseline() {
+        let source = "import { value } from './from-token-dep.js' // from trailing comment\nexport const answer = value // still semicolonless\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].specifier, "./from-token-dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+        assert_eq!(parsed.imports[0].bindings[0].local, "value");
+        assert!(parsed.exports.contains(&ModuleExport {
+            exported: "answer".to_string(),
+            local: "answer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn module_parse_compact_reexport_from_baseline() {
+        let source = "export*from'./dep.js'\nexport{value as answer}from'./dep.js'\n";
+        let parsed = parse_module(source).expect("module parsing should succeed");
+        assert_eq!(parsed.imports.len(), 2);
+        assert_eq!(parsed.imports[0].specifier, "./dep.js");
+        assert_eq!(parsed.imports[0].bindings.len(), 1);
+        assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+        assert_eq!(parsed.imports[1].specifier, "./dep.js");
+        assert_eq!(parsed.imports[1].bindings.len(), 1);
+        assert_eq!(parsed.imports[1].bindings[0].imported, "value");
+        assert!(
+            parsed
+                .exports
+                .iter()
+                .any(|entry| entry.exported == "answer")
+        );
+    }
+
+    #[test]
     fn parses_call_expression() {
         let parsed = parse_expression("add(1, mul(2, 3))").expect("parser should succeed");
         let expected = Expr::Call {
@@ -8508,6 +9943,27 @@ export default value;\n";
                 },
             ])),
         };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_object_literal_with_spread_properties() {
+        let parsed =
+            parse_expression("({ answer: 1, ...rest, tail: 2 })").expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("answer".to_string()),
+                value: Expr::Number(1.0),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Spread,
+                value: Expr::Identifier(Identifier("rest".to_string())),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("tail".to_string()),
+                value: Expr::Number(2.0),
+            },
+        ]);
         assert_eq!(parsed, expected);
     }
 

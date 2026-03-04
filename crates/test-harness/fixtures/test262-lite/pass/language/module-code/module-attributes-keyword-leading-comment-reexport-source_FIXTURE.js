@@ -1,0 +1,1 @@
+export { value as answer } from "./module-attributes-keyword-comment-dep_FIXTURE.js" /* gap */ assert { type: "json" };
