@@ -18,6 +18,7 @@ pub enum NativeFunction {
     ObjectCreate,
     ObjectAssign,
     ObjectFromEntries,
+    ObjectGroupBy,
     ObjectSetPrototypeOf,
     ObjectDefineProperty,
     ObjectDefineProperties,

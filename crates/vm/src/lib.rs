@@ -10210,6 +10210,7 @@ impl Vm {
             NativeFunction::ObjectCreate => self.execute_object_create(&args, realm),
             NativeFunction::ObjectAssign => self.execute_object_assign(&args, realm),
             NativeFunction::ObjectFromEntries => self.execute_object_from_entries(&args, realm),
+            NativeFunction::ObjectGroupBy => self.execute_object_group_by(&args, realm),
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
@@ -14978,6 +14979,7 @@ impl Vm {
                     "create",
                     "assign",
                     "fromEntries",
+                    "groupBy",
                     "hasOwn",
                     "setPrototypeOf",
                     "preventExtensions",
@@ -16231,6 +16233,14 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         object_builtins::execute_object_from_entries(self, args, realm)
+    }
+
+    fn execute_object_group_by(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        object_builtins::execute_object_group_by(self, args, realm)
     }
 
     fn execute_object_get_own_property_names(
@@ -19772,39 +19782,29 @@ impl Vm {
         receiver: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        if property == "hasOwnProperty" {
-            if self.object_prototype_id == Some(object_id) {
-                if let Some(value) = self
-                    .objects
-                    .get(&object_id)
-                    .and_then(|object| object.properties.get(property))
-                    .cloned()
-                {
-                    return Ok(value);
-                }
+        if matches!(property, "hasOwnProperty" | "isPrototypeOf") {
+            if let Some(value) = self
+                .objects
+                .get(&object_id)
+                .and_then(|object| object.properties.get(property))
+                .cloned()
+            {
+                return Ok(value);
             }
-            return Ok(
-                self.create_host_function_value(HostFunction::HasOwnProperty {
-                    target: JsValue::Object(object_id),
-                }),
-            );
-        }
-        if property == "isPrototypeOf" {
-            if self.object_prototype_id == Some(object_id) {
-                if let Some(value) = self
-                    .objects
-                    .get(&object_id)
-                    .and_then(|object| object.properties.get(property))
-                    .cloned()
-                {
-                    return Ok(value);
-                }
+            if let Some(object_prototype_id) = self.object_prototype_id
+                && self.object_inherits_prototype(object_id, object_prototype_id)?
+            {
+                let host_function = if property == "hasOwnProperty" {
+                    HostFunction::HasOwnProperty {
+                        target: JsValue::Object(object_id),
+                    }
+                } else {
+                    HostFunction::IsPrototypeOf {
+                        target: JsValue::Object(object_id),
+                    }
+                };
+                return Ok(self.create_host_function_value(host_function));
             }
-            return Ok(
-                self.create_host_function_value(HostFunction::IsPrototypeOf {
-                    target: JsValue::Object(object_id),
-                }),
-            );
         }
         if let Some(value) = self.get_object_own_property_with_receiver(
             object_id,
@@ -23502,26 +23502,28 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         if matches!(property, "hasOwnProperty" | "isPrototypeOf") {
-            if self.object_prototype_id == Some(object_id) {
-                if let Some(value) = self
-                    .objects
-                    .get(&object_id)
-                    .and_then(|object| object.properties.get(property))
-                    .cloned()
-                {
-                    return Ok(value);
-                }
+            if let Some(value) = self
+                .objects
+                .get(&object_id)
+                .and_then(|object| object.properties.get(property))
+                .cloned()
+            {
+                return Ok(value);
             }
-            let host_function = if property == "hasOwnProperty" {
-                HostFunction::HasOwnProperty {
-                    target: JsValue::Object(object_id),
-                }
-            } else {
-                HostFunction::IsPrototypeOf {
-                    target: JsValue::Object(object_id),
-                }
-            };
-            return Ok(self.create_host_function_value(host_function));
+            if let Some(object_prototype_id) = self.object_prototype_id
+                && self.object_inherits_prototype(object_id, object_prototype_id)?
+            {
+                let host_function = if property == "hasOwnProperty" {
+                    HostFunction::HasOwnProperty {
+                        target: JsValue::Object(object_id),
+                    }
+                } else {
+                    HostFunction::IsPrototypeOf {
+                        target: JsValue::Object(object_id),
+                    }
+                };
+                return Ok(self.create_host_function_value(host_function));
+            }
         }
         if let Some(value) = self.get_object_own_property_with_receiver(
             object_id,
@@ -24509,6 +24511,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "assign")
                 | (NativeFunction::ObjectConstructor, "fromEntries")
+                | (NativeFunction::ObjectConstructor, "groupBy")
                 | (NativeFunction::ObjectConstructor, "hasOwn")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "preventExtensions")
@@ -26083,6 +26086,7 @@ impl Vm {
             NativeFunction::ObjectCreate => "create",
             NativeFunction::ObjectAssign => "assign",
             NativeFunction::ObjectFromEntries => "fromEntries",
+            NativeFunction::ObjectGroupBy => "groupBy",
             NativeFunction::ObjectSetPrototypeOf => "setPrototypeOf",
             NativeFunction::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
             NativeFunction::ObjectGetOwnPropertyDescriptors => "getOwnPropertyDescriptors",
@@ -26334,6 +26338,9 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "fromEntries") => {
                 JsValue::NativeFunction(NativeFunction::ObjectFromEntries)
             }
+            (NativeFunction::ObjectConstructor, "groupBy") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGroupBy)
+            }
             (NativeFunction::ObjectConstructor, "hasOwn") => {
                 let has_own = self.create_host_function_value(HostFunction::ObjectHasOwn);
                 self.set_builtin_function_length(&has_own, 2.0);
@@ -26580,6 +26587,7 @@ impl Vm {
             | (NativeFunction::ObjectSetPrototypeOf, "length")
             | (NativeFunction::ObjectCreate, "length")
             | (NativeFunction::ObjectAssign, "length")
+            | (NativeFunction::ObjectGroupBy, "length")
             | (NativeFunction::ObjectIs, "length") => JsValue::Number(2.0),
             (NativeFunction::ObjectGetPrototypeOf, "length")
             | (NativeFunction::ObjectGetOwnPropertyDescriptors, "length")

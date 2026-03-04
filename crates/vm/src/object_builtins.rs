@@ -146,6 +146,132 @@ pub(super) fn execute_object_from_entries(
     Ok(target)
 }
 
+fn append_group_by_item(
+    vm: &mut Vm,
+    bucket: JsValue,
+    value: JsValue,
+    realm: &Realm,
+) -> Result<(), VmError> {
+    if !Vm::is_object_like_value(&bucket) {
+        return Err(VmError::TypeError("Object.groupBy bucket must be object"));
+    }
+    let length_value = vm.get_property_from_receiver(bucket.clone(), "length", realm)?;
+    let length_number = vm.coerce_number_runtime(length_value, realm, false)?;
+    let length = Vm::to_length_from_number(length_number).max(0);
+    vm.create_data_property_or_throw(bucket, length.to_string(), value, realm)
+}
+
+pub(super) fn execute_object_group_by(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let items = args.first().cloned().unwrap_or(JsValue::Undefined);
+    let callback = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+    if !Vm::is_callable_value(&callback) {
+        return Err(VmError::NotCallable);
+    }
+
+    let groups = vm.create_object_value();
+    let groups_id = match groups {
+        JsValue::Object(id) => id,
+        _ => unreachable!(),
+    };
+    let groups_object = vm
+        .objects
+        .get_mut(&groups_id)
+        .ok_or(VmError::UnknownObject(groups_id))?;
+    groups_object.prototype = None;
+    groups_object.prototype_value = None;
+
+    let iterator_record = match items {
+        JsValue::String(value) => vm.create_for_of_snapshot_record(vm.js_string_iterator_values(&value))?,
+        JsValue::Null | JsValue::Undefined => {
+            return Err(VmError::TypeError("for-of expects iterable"));
+        }
+        value if Vm::is_object_like_value(&value) => {
+            vm.create_for_of_runtime_iterator_record(value, realm)?
+        }
+        primitive => {
+            let boxed = vm.box_primitive_receiver(primitive);
+            vm.create_for_of_runtime_iterator_record(boxed, realm)?
+        }
+    };
+    let mut index: usize = 0;
+    loop {
+        let step = vm.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+        let done = vm
+            .get_property_from_receiver(step.clone(), "done", realm)
+            .map(|value| vm.is_truthy(&value))?;
+        if done {
+            break;
+        }
+
+        let next = match vm.get_property_from_receiver(step, "value", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key_value = match vm.execute_callable(
+            callback.clone(),
+            Some(JsValue::Undefined),
+            vec![next.clone(), JsValue::Number(index as f64)],
+            realm,
+            false,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key = match vm.coerce_to_property_key_runtime(key_value, realm, false) {
+            Ok(key) => key,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+
+        let bucket = match vm.get_property_from_receiver(groups.clone(), &key, realm) {
+            Ok(JsValue::Undefined) => {
+                let array = match vm.create_array_from_values(Vec::new()) {
+                    Ok(array) => array,
+                    Err(err) => {
+                        let _ = vm.execute_object_for_of_close(
+                            std::slice::from_ref(&iterator_record),
+                            realm,
+                        );
+                        return Err(err);
+                    }
+                };
+                if let Err(err) =
+                    vm.set_property_on_receiver(groups.clone(), key.clone(), array.clone(), realm)
+                {
+                    let _ = vm
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
+                array
+            }
+            Ok(existing) => existing,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if let Err(err) = append_group_by_item(vm, bucket, next, realm) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(err);
+        }
+        index += 1;
+    }
+
+    Ok(groups)
+}
+
 pub(super) fn collect_object_assign_keys(
     vm: &mut Vm,
     source_object: JsValue,
