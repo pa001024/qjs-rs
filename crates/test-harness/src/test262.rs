@@ -225,21 +225,26 @@ fn resolve_suite_root(root: &Path) -> PathBuf {
 }
 
 fn infer_harness_root(root: &Path, suite_root: &Path) -> Option<PathBuf> {
-    let direct_candidate = root.join("harness");
-    if direct_candidate.is_dir() {
-        return Some(direct_candidate);
+    let find_harness = |start: &Path| -> Option<PathBuf> {
+        let mut fallback: Option<PathBuf> = None;
+        for ancestor in start.ancestors() {
+            let candidate = ancestor.join("harness");
+            if candidate.is_dir() {
+                if candidate.join("assert.js").is_file() {
+                    return Some(candidate);
+                }
+                fallback = fallback.or(Some(candidate));
+            }
+        }
+        fallback
+    };
+
+    if let Some(found) = find_harness(root) {
+        return Some(found);
     }
 
-    if let Some(candidate) = suite_root.parent().map(|parent| parent.join("harness"))
-        && candidate.is_dir()
-    {
-        return Some(candidate);
-    }
-
-    if let Some(candidate) = root.parent().map(|parent| parent.join("harness"))
-        && candidate.is_dir()
-    {
-        return Some(candidate);
+    if let Some(found) = find_harness(suite_root) {
+        return Some(found);
     }
 
     None
