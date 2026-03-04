@@ -732,3 +732,34 @@ fn module_parse_named_alias_with_comments_around_as() {
         local: "alias".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_default_async_function_declaration_binding() {
+    let source = "export default async function Named() { return 42; }\nexport const namedType = typeof Named;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Named".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "namedType".to_string(),
+        local: "namedType".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_default_async_generator_declaration_binding() {
+    let source =
+        "export default async function* Gen() { yield 1; }\nexport const genType = typeof Gen;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Gen".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "genType".to_string(),
+        local: "genType".to_string(),
+    }));
+}

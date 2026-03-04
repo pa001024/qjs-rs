@@ -900,3 +900,31 @@ fn named_alias_with_comments_around_as_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn default_async_function_declaration_binding_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export default async function Named() { return 42; }\nexport const namedType = typeof Named;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default async function declaration export should evaluate");
+    assert_eq!(expect_string(&exports, "namedType"), "function");
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
+fn default_async_generator_declaration_binding_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export default async function* Gen() { yield 1; }\nexport const genType = typeof Gen;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default async generator declaration export should evaluate");
+    assert_eq!(expect_string(&exports, "genType"), "function");
+    assert_eq!(host.load_count("entry.js"), 1);
+}
