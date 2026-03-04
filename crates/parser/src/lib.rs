@@ -729,7 +729,7 @@ fn parse_named_import_bindings(
         }
         if let Some(type_only_part) = part.strip_prefix("type ") {
             let type_only_part = type_only_part.trim();
-            let local = if let Some((_imported, local)) = type_only_part.split_once(" as ") {
+            let local = if let Some((_imported, local)) = split_module_as_alias(type_only_part) {
                 parse_module_binding_identifier(local.trim())?
             } else {
                 parse_module_binding_identifier(type_only_part)?
@@ -737,7 +737,7 @@ fn parse_named_import_bindings(
             type_only_locals.push(local);
             continue;
         }
-        let (imported, local) = if let Some((imported, local)) = part.split_once(" as ") {
+        let (imported, local) = if let Some((imported, local)) = split_module_as_alias(part) {
             (
                 parse_module_import_name(imported.trim())?,
                 parse_module_binding_identifier(local.trim())?,
@@ -766,7 +766,7 @@ fn parse_named_export_clause(clause: &str) -> Result<Vec<ModuleExport>, ParseErr
         if part.starts_with("type ") {
             continue;
         }
-        let export = if let Some((local, exported)) = part.split_once(" as ") {
+        let export = if let Some((local, exported)) = split_module_as_alias(part) {
             ModuleExport {
                 local: parse_module_binding_identifier(local.trim())?,
                 exported: parse_module_export_name(exported.trim())?,
@@ -888,7 +888,7 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
         if part.is_empty() {
             continue;
         }
-        let (imported, exported) = if let Some((imported, exported)) = part.split_once(" as ") {
+        let (imported, exported) = if let Some((imported, exported)) = split_module_as_alias(part) {
             (
                 parse_module_import_name(imported.trim())?,
                 parse_module_export_name(exported.trim())?,
@@ -900,6 +900,17 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
         bindings.push((imported, exported));
     }
     Ok(bindings)
+}
+
+fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
+    let mut parts = source.split_whitespace();
+    let left = parts.next()?;
+    let as_keyword = parts.next()?;
+    let right = parts.next()?;
+    if as_keyword != "as" || parts.next().is_some() {
+        return None;
+    }
+    Some((left, right))
 }
 
 enum ExportStarClause {

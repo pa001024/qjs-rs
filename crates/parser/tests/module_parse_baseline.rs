@@ -530,3 +530,19 @@ fn module_parse_multiline_default_class_declaration_body() {
         local: "answer".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_linebreak_as_alias_clauses() {
+    let source = "import {\n  value\n  as\n  alias,\n} from './dep.js';\nexport {\n  alias\n  as\n  answer,\n};\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[0].local, "alias");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "alias".to_string(),
+    }));
+}

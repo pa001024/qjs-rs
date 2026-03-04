@@ -684,3 +684,20 @@ fn multiline_default_class_declaration_body_parses_and_evaluates() {
     assert_eq!(expect_number(&exports, "answer"), 42.0);
     assert_eq!(host.load_count("entry.js"), 1);
 }
+
+#[test]
+fn linebreak_as_alias_clauses_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "entry.js",
+            "import {\n  value\n  as\n  alias,\n} from './dep.js';\nexport {\n  alias\n  as\n  answer,\n};\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("linebreak as-alias clauses should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
