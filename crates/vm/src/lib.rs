@@ -593,6 +593,8 @@ enum HostFunction {
     StringMatchThis,
     StringMatchAllThis,
     StringSearchThis,
+    StringIncludesThis,
+    StringEndsWithThis,
     StringConcatThis,
     StringReplaceAllThis,
     StringIndexOfThis,
@@ -604,8 +606,10 @@ enum HostFunction {
     StringTrimEnd,
     StringToString,
     StringValueOf,
+    StringAt,
     StringCharAt,
     StringCharCodeAt,
+    StringCodePointAt,
     StringLastIndexOf,
     StringSubstring,
     StringSubstr,
@@ -3129,6 +3133,8 @@ impl Vm {
             | HostFunction::StringMatchThis
             | HostFunction::StringMatchAllThis
             | HostFunction::StringSearchThis
+            | HostFunction::StringIncludesThis
+            | HostFunction::StringEndsWithThis
             | HostFunction::StringConcatThis
             | HostFunction::StringReplaceAllThis
             | HostFunction::StringIndexOfThis
@@ -3140,8 +3146,10 @@ impl Vm {
             | HostFunction::StringTrimEnd
             | HostFunction::StringToString
             | HostFunction::StringValueOf
+            | HostFunction::StringAt
             | HostFunction::StringCharAt
             | HostFunction::StringCharCodeAt
+            | HostFunction::StringCodePointAt
             | HostFunction::StringLastIndexOf
             | HostFunction::StringSubstring
             | HostFunction::StringSubstr
@@ -7718,6 +7726,20 @@ impl Vm {
         }
     }
 
+    fn is_regexp_value(&mut self, value: JsValue, realm: &Realm) -> Result<bool, VmError> {
+        if !Self::is_object_like_value(&value) {
+            return Ok(false);
+        }
+        let matcher = self.get_property_from_receiver(value.clone(), "Symbol.match", realm)?;
+        if !matches!(matcher, JsValue::Undefined) {
+            return Ok(self.is_truthy(&matcher));
+        }
+        match value {
+            JsValue::Object(object_id) => self.has_object_marker(object_id, "__regexpTag"),
+            _ => Ok(false),
+        }
+    }
+
     fn array_species_create_for_concat(
         &mut self,
         original: JsValue,
@@ -9064,6 +9086,68 @@ impl Vm {
                     -1.0
                 }))
             }
+            HostFunction::StringIncludesThis => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if self.is_regexp_value(search_value.clone(), realm)? {
+                    return Err(VmError::TypeError(
+                        "First argument to String.prototype.includes must not be a RegExp",
+                    ));
+                }
+                let search_string =
+                    self.coerce_to_string_runtime(search_value, realm, caller_strict)?;
+                let position_number = match args.get(1).cloned() {
+                    Some(JsValue::Undefined) | None => 0.0,
+                    Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+                };
+                let start = Self::to_integer_or_infinity_i64(position_number);
+                let receiver_units = self.string_to_js_code_units(&receiver);
+                let search_units = self.string_to_js_code_units(&search_string);
+                let len = receiver_units.len() as i64;
+                let start = start.clamp(0, len) as usize;
+                if search_units.is_empty() {
+                    return Ok(JsValue::Bool(true));
+                }
+                if start + search_units.len() > receiver_units.len() {
+                    return Ok(JsValue::Bool(false));
+                }
+                for index in start..=receiver_units.len() - search_units.len() {
+                    if receiver_units[index..index + search_units.len()] == search_units {
+                        return Ok(JsValue::Bool(true));
+                    }
+                }
+                Ok(JsValue::Bool(false))
+            }
+            HostFunction::StringEndsWithThis => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let search_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if self.is_regexp_value(search_value.clone(), realm)? {
+                    return Err(VmError::TypeError(
+                        "First argument to String.prototype.endsWith must not be a RegExp",
+                    ));
+                }
+                let search_string =
+                    self.coerce_to_string_runtime(search_value, realm, caller_strict)?;
+                let receiver_units = self.string_to_js_code_units(&receiver);
+                let search_units = self.string_to_js_code_units(&search_string);
+                let len = receiver_units.len() as i64;
+                let position_number = match args.get(1).cloned() {
+                    Some(JsValue::Undefined) | None => len as f64,
+                    Some(value) => self.coerce_number_runtime(value, realm, caller_strict)?,
+                };
+                let end = Self::to_integer_or_infinity_i64(position_number).clamp(0, len);
+                let search_len = search_units.len() as i64;
+                let start = end - search_len;
+                if start < 0 {
+                    return Ok(JsValue::Bool(false));
+                }
+                let start = start as usize;
+                let end = end as usize;
+                if end > receiver_units.len() || end - start != search_units.len() {
+                    return Ok(JsValue::Bool(false));
+                }
+                Ok(JsValue::Bool(receiver_units[start..end] == search_units))
+            }
             HostFunction::StringConcatThis => {
                 let this_value = this_arg.unwrap_or(JsValue::Undefined);
                 if matches!(this_value, JsValue::Null | JsValue::Undefined) {
@@ -9157,6 +9241,30 @@ impl Vm {
                 let receiver = self.strict_this_string(this_arg)?;
                 Ok(JsValue::String(receiver))
             }
+            HostFunction::StringAt => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let length = Self::utf16_code_unit_length(&receiver) as i64;
+                let index_number = self.coerce_number_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let relative_index = Self::to_integer_or_infinity_i64(index_number);
+                let index = if relative_index >= 0 {
+                    relative_index
+                } else {
+                    length + relative_index
+                };
+                if index < 0 || index >= length {
+                    return Ok(JsValue::Undefined);
+                }
+                let Some(code_unit) = Self::utf16_code_unit_at(&receiver, index as usize) else {
+                    return Ok(JsValue::Undefined);
+                };
+                Ok(JsValue::String(
+                    Self::string_from_js_code_units_preserving_surrogates(&[code_unit]),
+                ))
+            }
             HostFunction::StringCharAt => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 let receiver_chars: Vec<char> = receiver.chars().collect();
@@ -9188,6 +9296,30 @@ impl Vm {
                 Ok(Self::utf16_code_unit_at(&receiver, index)
                     .map(|unit| JsValue::Number(unit as f64))
                     .unwrap_or(JsValue::Number(f64::NAN)))
+            }
+            HostFunction::StringCodePointAt => {
+                let receiver = self.coerce_this_string_runtime(this_arg, realm, caller_strict)?;
+                let receiver_units = self.string_to_js_code_units(&receiver);
+                let length = receiver_units.len() as i64;
+                let position_number = self.coerce_number_runtime(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                let position = Self::to_integer_or_infinity_i64(position_number);
+                if position < 0 || position >= length {
+                    return Ok(JsValue::Undefined);
+                }
+                let first = receiver_units[position as usize] as u32;
+                if !(0xD800..=0xDBFF).contains(&first) || position + 1 >= length {
+                    return Ok(JsValue::Number(first as f64));
+                }
+                let second = receiver_units[(position + 1) as usize] as u32;
+                if !(0xDC00..=0xDFFF).contains(&second) {
+                    return Ok(JsValue::Number(first as f64));
+                }
+                let code_point = (first - 0xD800) * 0x400 + (second - 0xDC00) + 0x10000;
+                Ok(JsValue::Number(code_point as f64))
             }
             HostFunction::StringLastIndexOf => {
                 let receiver = self.coerce_this_string(this_arg)?;
@@ -10889,6 +11021,9 @@ impl Vm {
             }
             NativeFunction::StringFromCharCode => {
                 self.execute_string_from_char_code(&args, realm, caller_strict)
+            }
+            NativeFunction::StringFromCodePoint => {
+                self.execute_string_from_code_point(&args, realm, caller_strict)
             }
             NativeFunction::SymbolConstructor => {
                 if called_with_new {
@@ -13980,6 +14115,37 @@ impl Vm {
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
         string_builtins::execute_string_from_char_code(self, args, realm, caller_strict)
+    }
+
+    fn execute_string_from_code_point(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let mut code_units = Vec::new();
+        for value in args {
+            let number = self.coerce_number_runtime(value.clone(), realm, caller_strict)?;
+            let is_integral = number.is_finite() && number.trunc() == number;
+            if !is_integral || !(0.0..=0x10FFFF as f64).contains(&number) {
+                return Err(VmError::UncaughtException(self.create_error_exception(
+                    NativeFunction::RangeErrorConstructor,
+                    "RangeError",
+                    "Invalid code point".to_string(),
+                )));
+            }
+            let code_point = number as u32;
+            if code_point <= 0xFFFF {
+                code_units.push(code_point as u16);
+                continue;
+            }
+            let adjusted = code_point - 0x10000;
+            code_units.push((0xD800 + (adjusted >> 10)) as u16);
+            code_units.push((0xDC00 + (adjusted & 0x3FF)) as u16);
+        }
+        Ok(JsValue::String(
+            Self::string_from_js_code_units_preserving_surrogates(&code_units),
+        ))
     }
 
     fn execute_array_buffer_constructor(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
@@ -22474,8 +22640,10 @@ impl Vm {
         if let JsValue::Object(id) = prototype {
             let to_string = self.create_host_function_value(HostFunction::StringToString);
             let value_of = self.create_host_function_value(HostFunction::StringValueOf);
+            let at = self.create_host_function_value(HostFunction::StringAt);
             let char_at = self.create_host_function_value(HostFunction::StringCharAt);
             let char_code_at = self.create_host_function_value(HostFunction::StringCharCodeAt);
+            let code_point_at = self.create_host_function_value(HostFunction::StringCodePointAt);
             let index_of = self.create_host_function_value(HostFunction::StringIndexOfThis);
             let last_index_of = self.create_host_function_value(HostFunction::StringLastIndexOf);
             let split = self.create_host_function_value(HostFunction::StringSplitThis);
@@ -22490,6 +22658,8 @@ impl Vm {
             let match_fn = self.create_host_function_value(HostFunction::StringMatchThis);
             let match_all = self.create_host_function_value(HostFunction::StringMatchAllThis);
             let search = self.create_host_function_value(HostFunction::StringSearchThis);
+            let includes = self.create_host_function_value(HostFunction::StringIncludesThis);
+            let ends_with = self.create_host_function_value(HostFunction::StringEndsWithThis);
             let concat = self.create_host_function_value(HostFunction::StringConcatThis);
             let replace_all = self.create_host_function_value(HostFunction::StringReplaceAllThis);
             let substr = self.create_host_function_value(HostFunction::StringSubstr);
@@ -22543,6 +22713,14 @@ impl Vm {
             self.set_builtin_function_name(&trim_end, "trimEnd");
             self.set_builtin_function_length(&match_all, 1.0);
             self.set_builtin_function_name(&match_all, "matchAll");
+            self.set_builtin_function_length(&includes, 1.0);
+            self.set_builtin_function_name(&includes, "includes");
+            self.set_builtin_function_length(&ends_with, 1.0);
+            self.set_builtin_function_name(&ends_with, "endsWith");
+            self.set_builtin_function_length(&at, 1.0);
+            self.set_builtin_function_name(&at, "at");
+            self.set_builtin_function_length(&code_point_at, 1.0);
+            self.set_builtin_function_name(&code_point_at, "codePointAt");
             self.set_builtin_function_length(&concat, 1.0);
             self.set_builtin_function_name(&concat, "concat");
             self.set_builtin_function_length(&replace_all, 2.0);
@@ -22574,8 +22752,10 @@ impl Vm {
                 for (name, value) in [
                     ("toString", to_string),
                     ("valueOf", value_of),
+                    ("at", at),
                     ("charAt", char_at),
                     ("charCodeAt", char_code_at),
+                    ("codePointAt", code_point_at),
                     ("indexOf", index_of),
                     ("lastIndexOf", last_index_of),
                     ("split", split),
@@ -22592,6 +22772,8 @@ impl Vm {
                     ("match", match_fn),
                     ("matchAll", match_all),
                     ("search", search),
+                    ("includes", includes),
+                    ("endsWith", ends_with),
                     ("concat", concat),
                     ("substr", substr),
                     ("anchor", anchor),
@@ -25886,6 +26068,7 @@ impl Vm {
                 | (NativeFunction::DateConstructor, "UTC")
                 | (NativeFunction::ProxyConstructor, "revocable")
                 | (NativeFunction::StringConstructor, "fromCharCode")
+                | (NativeFunction::StringConstructor, "fromCodePoint")
                 | (NativeFunction::NumberConstructor, "NaN")
                 | (NativeFunction::NumberConstructor, "POSITIVE_INFINITY")
                 | (NativeFunction::NumberConstructor, "NEGATIVE_INFINITY")
@@ -27239,7 +27422,24 @@ impl Vm {
             "match" => self.create_host_function_value(HostFunction::StringMatchThis),
             "matchAll" => self.create_host_function_value(HostFunction::StringMatchAllThis),
             "search" => self.create_host_function_value(HostFunction::StringSearchThis),
-            "concat" => self.create_host_function_value(HostFunction::StringConcatThis),
+            "includes" => {
+                let includes = self.create_host_function_value(HostFunction::StringIncludesThis);
+                self.set_builtin_function_length(&includes, 1.0);
+                self.set_builtin_function_name(&includes, "includes");
+                includes
+            }
+            "endsWith" => {
+                let ends_with = self.create_host_function_value(HostFunction::StringEndsWithThis);
+                self.set_builtin_function_length(&ends_with, 1.0);
+                self.set_builtin_function_name(&ends_with, "endsWith");
+                ends_with
+            }
+            "concat" => {
+                let concat = self.create_host_function_value(HostFunction::StringConcatThis);
+                self.set_builtin_function_length(&concat, 1.0);
+                self.set_builtin_function_name(&concat, "concat");
+                concat
+            }
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
             "split" => self.create_host_function_value(HostFunction::StringSplitThis),
             "Symbol.iterator" => self.create_host_function_value(HostFunction::StringIteratorThis),
@@ -27247,8 +27447,21 @@ impl Vm {
             "toUpperCase" => self.create_host_function_value(HostFunction::StringToUpperCase),
             "toString" => self.create_host_function_value(HostFunction::StringToString),
             "valueOf" => self.create_host_function_value(HostFunction::StringValueOf),
+            "at" => {
+                let at = self.create_host_function_value(HostFunction::StringAt);
+                self.set_builtin_function_length(&at, 1.0);
+                self.set_builtin_function_name(&at, "at");
+                at
+            }
             "charAt" => self.create_host_function_value(HostFunction::StringCharAt),
             "charCodeAt" => self.create_host_function_value(HostFunction::StringCharCodeAt),
+            "codePointAt" => {
+                let code_point_at =
+                    self.create_host_function_value(HostFunction::StringCodePointAt);
+                self.set_builtin_function_length(&code_point_at, 1.0);
+                self.set_builtin_function_name(&code_point_at, "codePointAt");
+                code_point_at
+            }
             "lastIndexOf" => self.create_host_function_value(HostFunction::StringLastIndexOf),
             "substring" => self.create_host_function_value(HostFunction::StringSubstring),
             "substr" => self.create_host_function_value(HostFunction::StringSubstr),
@@ -27451,6 +27664,8 @@ impl Vm {
             NativeFunction::ObjectSeal => "seal",
             NativeFunction::ArrayConstructor => "Array",
             NativeFunction::StringConstructor => "String",
+            NativeFunction::StringFromCharCode => "fromCharCode",
+            NativeFunction::StringFromCodePoint => "fromCodePoint",
             NativeFunction::NumberConstructor => "Number",
             NativeFunction::BooleanConstructor => "Boolean",
             NativeFunction::MapConstructor => "Map",
@@ -27918,6 +28133,9 @@ impl Vm {
             (NativeFunction::StringConstructor, "fromCharCode") => {
                 JsValue::NativeFunction(NativeFunction::StringFromCharCode)
             }
+            (NativeFunction::StringConstructor, "fromCodePoint") => {
+                JsValue::NativeFunction(NativeFunction::StringFromCodePoint)
+            }
             (_, "name") => JsValue::String(Self::native_function_display_name(native).to_string()),
             (_, "toString") => self.create_host_function_value(HostFunction::FunctionToString {
                 target: JsValue::NativeFunction(native),
@@ -27977,7 +28195,8 @@ impl Vm {
             | (NativeFunction::ObjectFreeze, "length")
             | (NativeFunction::ArrayIsArray, "length")
             | (NativeFunction::DateParse, "length")
-            | (NativeFunction::StringFromCharCode, "length") => JsValue::Number(1.0),
+            | (NativeFunction::StringFromCharCode, "length")
+            | (NativeFunction::StringFromCodePoint, "length") => JsValue::Number(1.0),
             (NativeFunction::DateNow, "length") => JsValue::Number(0.0),
             (NativeFunction::DateConstructor, "length") | (NativeFunction::DateUtc, "length") => {
                 JsValue::Number(7.0)

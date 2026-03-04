@@ -106,6 +106,7 @@ pub enum NativeFunction {
     MathTanh,
     StringConstructor,
     StringFromCharCode,
+    StringFromCodePoint,
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
