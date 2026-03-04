@@ -479,6 +479,7 @@ struct JsObject {
     getters: HashMap<String, JsValue>,
     setters: HashMap<String, JsValue>,
     property_attributes: HashMap<String, PropertyAttributes>,
+    property_order: Vec<String>,
     argument_mappings: HashMap<String, BindingId>,
     array_length: Option<usize>,
     is_array_object: bool,
@@ -498,6 +499,7 @@ impl Default for JsObject {
             getters: HashMap::default(),
             setters: HashMap::default(),
             property_attributes: HashMap::default(),
+            property_order: Vec::new(),
             argument_mappings: HashMap::default(),
             array_length: None,
             is_array_object: false,
@@ -3690,6 +3692,7 @@ impl Vm {
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.properties.insert(name.clone(), value);
                     object.property_attributes.entry(name.clone()).or_default();
+                    Self::update_object_property_order(object, name, true);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineProtoProperty => {
@@ -3779,6 +3782,7 @@ impl Vm {
                             configurable: true,
                         },
                     );
+                    Self::update_object_property_order(object, name, true);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineSetter(name) => {
@@ -3801,6 +3805,7 @@ impl Vm {
                             configurable: true,
                         },
                     );
+                    Self::update_object_property_order(object, name, true);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineGetterByValue => {
@@ -3818,13 +3823,14 @@ impl Vm {
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.getters.insert(key.clone(), getter);
                     object.property_attributes.insert(
-                        key,
+                        key.clone(),
                         PropertyAttributes {
                             writable: false,
                             enumerable: true,
                             configurable: true,
                         },
                     );
+                    Self::update_object_property_order(object, &key, true);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::DefineSetterByValue => {
@@ -3842,13 +3848,14 @@ impl Vm {
                         .ok_or(VmError::UnknownObject(object_id))?;
                     object.setters.insert(key.clone(), setter);
                     object.property_attributes.insert(
-                        key,
+                        key.clone(),
                         PropertyAttributes {
                             writable: false,
                             enumerable: true,
                             configurable: true,
                         },
                     );
+                    Self::update_object_property_order(object, &key, true);
                     self.stack.push(JsValue::Object(object_id));
                 }
                 Opcode::CopyDataProperties => {
@@ -13516,39 +13523,9 @@ impl Vm {
                 );
             }
         }
-        // Minimal ownKeys forwarding for Object.assign baseline:
-        // mirror listed keys from the target as own data properties.
+        // Mirror target own keys at construction time.
         let empty_realm = Realm::default();
-        let own_keys_trap =
-            self.get_property_from_receiver(handler.clone(), "ownKeys", &empty_realm)?;
-        let (mirrored_keys, own_keys_from_trap) = if matches!(own_keys_trap, JsValue::Undefined) {
-            (self.collect_own_property_keys(&target, false)?, false)
-        } else {
-            if !Self::is_callable_value(&own_keys_trap) {
-                return Err(VmError::TypeError("Proxy ownKeys trap must be callable"));
-            }
-            let trap_result = self.execute_callable(
-                own_keys_trap,
-                Some(handler.clone()),
-                vec![target.clone()],
-                &empty_realm,
-                false,
-            )?;
-            let trap_length = match &trap_result {
-                JsValue::Object(array_id) => self.array_length(*array_id)?,
-                _ => 0usize,
-            };
-            let mut keys = Vec::new();
-            for index in 0..trap_length {
-                let key_value = self.get_property_from_receiver(
-                    trap_result.clone(),
-                    &index.to_string(),
-                    &empty_realm,
-                )?;
-                keys.push(self.coerce_to_string(&key_value));
-            }
-            (keys, true)
-        };
+        let mirrored_keys = self.collect_own_property_keys(&target, false)?;
         let mut mirrored = Vec::new();
         for key in mirrored_keys.iter().cloned() {
             if matches!(
@@ -13574,20 +13551,6 @@ impl Vm {
                     enumerable: true,
                     configurable: true,
                 });
-        }
-        if own_keys_from_trap {
-            proxy.properties.insert(
-                PROXY_OWN_KEYS_ORDER_KEY.to_string(),
-                JsValue::String(mirrored_keys.join("\u{1F}")),
-            );
-            proxy.property_attributes.insert(
-                PROXY_OWN_KEYS_ORDER_KEY.to_string(),
-                PropertyAttributes {
-                    writable: false,
-                    enumerable: false,
-                    configurable: false,
-                },
-            );
         }
         Ok(JsValue::Object(object_id))
     }
@@ -14788,6 +14751,21 @@ impl Vm {
         }
     }
 
+    fn update_object_property_order(object: &mut JsObject, key: &str, present: bool) {
+        if Self::canonical_array_index(key).is_some() {
+            return;
+        }
+        if present {
+            if !object.property_order.iter().any(|entry| entry == key) {
+                object.property_order.push(key.to_string());
+            }
+            return;
+        }
+        if let Some(index) = object.property_order.iter().position(|entry| entry == key) {
+            object.property_order.remove(index);
+        }
+    }
+
     fn collect_own_property_keys_from_object(
         object: &JsObject,
         enumerable_only: bool,
@@ -14806,6 +14784,7 @@ impl Vm {
 
         let mut index_keys: Vec<(usize, String)> = Vec::new();
         let mut string_keys = Vec::new();
+        let mut seen_string_keys = HashSet::new();
         for key in all_keys {
             let enumerable = object
                 .property_attributes
@@ -14818,13 +14797,26 @@ impl Vm {
             if let Some(index) = Self::canonical_array_index(&key) {
                 index_keys.push((index, key));
             } else {
+                seen_string_keys.insert(key.clone());
                 string_keys.push(key);
             }
         }
         index_keys.sort_by_key(|(index, _)| *index);
-        let mut keys = Vec::with_capacity(index_keys.len() + string_keys.len());
+        let mut ordered_string_keys = Vec::with_capacity(string_keys.len());
+        for key in &object.property_order {
+            if seen_string_keys.remove(key) {
+                ordered_string_keys.push(key.clone());
+            }
+        }
+        let string_key_count = string_keys.len();
+        for key in string_keys {
+            if seen_string_keys.remove(&key) {
+                ordered_string_keys.push(key);
+            }
+        }
+        let mut keys = Vec::with_capacity(index_keys.len() + string_key_count);
         keys.extend(index_keys.into_iter().map(|(_, key)| key));
-        keys.extend(string_keys);
+        keys.extend(ordered_string_keys);
         keys
     }
 
@@ -15737,6 +15729,10 @@ impl Vm {
                 }
                 target_object.argument_mappings.remove(&property);
             }
+            let has_property_after = target_object.properties.contains_key(&property)
+                || target_object.getters.contains_key(&property)
+                || target_object.setters.contains_key(&property);
+            Self::update_object_property_order(&mut target_object, &property, has_property_after);
         }
 
         match target {
@@ -16781,6 +16777,9 @@ impl Vm {
             .get(PROXY_HANDLER_KEY)
             .cloned()
             .unwrap_or(JsValue::Undefined);
+        if matches!(target, JsValue::Null) || matches!(handler, JsValue::Null) {
+            return Err(VmError::TypeError("Proxy has been revoked"));
+        }
         Ok(Some((target, handler)))
     }
 
@@ -23299,6 +23298,7 @@ impl Vm {
             None => return Err(self.classify_unknown_object_error(object_id)),
         };
         object.properties.insert(property.clone(), value.clone());
+        Self::update_object_property_order(object, &property, true);
         self.sync_global_binding_from_property_write(object_id, &property, &value)?;
         Ok(value)
     }
@@ -25102,6 +25102,34 @@ impl Vm {
         object_id: ObjectId,
         property: &str,
     ) -> Result<bool, VmError> {
+        if let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)? {
+            if matches!(proxy_target, JsValue::Object(id) if id == object_id) {
+                return Ok(false);
+            }
+            let empty_realm = Realm::default();
+            let trap = self.get_property_from_receiver(
+                proxy_handler.clone(),
+                "deleteProperty",
+                &empty_realm,
+            )?;
+            if matches!(trap, JsValue::Undefined) {
+                return self.delete_property(proxy_target, property.to_string());
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError(
+                    "Proxy deleteProperty trap must be callable",
+                ));
+            }
+            let trap_result = self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![proxy_target, JsValue::String(property.to_string())],
+                &empty_realm,
+                false,
+            )?;
+            return Ok(self.is_truthy(&trap_result));
+        }
+
         let is_configurable = self
             .objects
             .get(&object_id)
@@ -25128,6 +25156,7 @@ impl Vm {
         object.setters.remove(property);
         object.property_attributes.remove(property);
         object.argument_mappings.remove(property);
+        Self::update_object_property_order(object, property, false);
         Ok(true)
     }
 
@@ -26447,7 +26476,10 @@ impl Vm {
     }
 
     fn coerce_to_property_key(&self, value: &JsValue) -> String {
-        self.coerce_to_string(value)
+        match value {
+            JsValue::String(text) => text.clone(),
+            other => self.coerce_to_string(other),
+        }
     }
 
     fn coerce_to_property_key_runtime(
@@ -26459,7 +26491,7 @@ impl Vm {
         match value {
             JsValue::Object(object_id) => self
                 .ordinary_to_primitive_for_property_key(object_id, realm, caller_strict)
-                .map(|primitive| self.coerce_to_string(&primitive)),
+                .map(|primitive| self.coerce_to_property_key(&primitive)),
             JsValue::Function(closure_id) => {
                 let to_string = self.get_function_property(closure_id, "toString", realm)?;
                 if Self::is_callable_value(&to_string) {
@@ -26470,9 +26502,9 @@ impl Vm {
                         realm,
                         caller_strict,
                     )?;
-                    Ok(self.coerce_to_string(&primitive))
+                    Ok(self.coerce_to_property_key(&primitive))
                 } else {
-                    Ok(self.coerce_to_string(&JsValue::Function(closure_id)))
+                    Ok(self.coerce_to_property_key(&JsValue::Function(closure_id)))
                 }
             }
             JsValue::NativeFunction(native) => {
@@ -26485,9 +26517,9 @@ impl Vm {
                         realm,
                         caller_strict,
                     )?;
-                    Ok(self.coerce_to_string(&primitive))
+                    Ok(self.coerce_to_property_key(&primitive))
                 } else {
-                    Ok(self.coerce_to_string(&JsValue::NativeFunction(native)))
+                    Ok(self.coerce_to_property_key(&JsValue::NativeFunction(native)))
                 }
             }
             JsValue::HostFunction(host_id) => {
@@ -26500,12 +26532,12 @@ impl Vm {
                         realm,
                         caller_strict,
                     )?;
-                    Ok(self.coerce_to_string(&primitive))
+                    Ok(self.coerce_to_property_key(&primitive))
                 } else {
-                    Ok(self.coerce_to_string(&JsValue::HostFunction(host_id)))
+                    Ok(self.coerce_to_property_key(&JsValue::HostFunction(host_id)))
                 }
             }
-            primitive => Ok(self.coerce_to_string(&primitive)),
+            primitive => Ok(self.coerce_to_property_key(&primitive)),
         }
     }
 
@@ -26523,8 +26555,12 @@ impl Vm {
             } else {
                 None
             },
-            property_list: self.json_stringify_property_list(args.get(1).cloned(), realm)?,
-            gap: self.json_stringify_gap_string(args.get(2).cloned()),
+            property_list: self.json_stringify_property_list(
+                args.get(1).cloned(),
+                realm,
+                caller_strict,
+            )?,
+            gap: self.json_stringify_gap_string(args.get(2).cloned(), realm, caller_strict)?,
         };
         let holder = self.create_object_value();
         self.create_data_property_or_throw(holder.clone(), String::new(), value, realm)?;
@@ -26681,11 +26717,15 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let mut value = self.get_property_from_receiver(holder.clone(), key, realm)?;
+        let mut value = self.json_get_property(holder.clone(), key, realm, caller_strict)?;
         if let JsValue::Object(object_id) = value.clone() {
-            let is_array = self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)?;
+            let is_array = self.json_is_array_object(object_id)?;
             if is_array {
-                let length = self.array_length(object_id)?;
+                let length_value =
+                    self.json_get_property(value.clone(), "length", realm, caller_strict)?;
+                let length_number =
+                    self.coerce_number_runtime(length_value, realm, caller_strict)?;
+                let length = Self::to_length_from_number(length_number).max(0) as usize;
                 for index in 0..length {
                     let entry_key = index.to_string();
                     let revived = self.json_internalize_property(
@@ -26695,10 +26735,12 @@ impl Vm {
                         realm,
                         caller_strict,
                     )?;
-                    self.json_define_or_remove_property(object_id, &entry_key, revived);
+                    self.json_define_or_remove_property(value.clone(), &entry_key, revived, realm)?;
                 }
             } else {
-                for entry_key in self.collect_own_property_keys(&value, true)? {
+                for entry_key in
+                    self.json_collect_own_property_keys(&value, true, realm, caller_strict)?
+                {
                     let revived = self.json_internalize_property(
                         value.clone(),
                         &entry_key,
@@ -26706,7 +26748,7 @@ impl Vm {
                         realm,
                         caller_strict,
                     )?;
-                    self.json_define_or_remove_property(object_id, &entry_key, revived);
+                    self.json_define_or_remove_property(value.clone(), &entry_key, revived, realm)?;
                 }
             }
             value = JsValue::Object(object_id);
@@ -26720,22 +26762,78 @@ impl Vm {
         )
     }
 
-    fn json_define_or_remove_property(&mut self, object_id: ObjectId, key: &str, value: JsValue) {
-        let Some(object) = self.objects.get_mut(&object_id) else {
-            return;
-        };
+    fn json_define_or_remove_property(
+        &mut self,
+        holder: JsValue,
+        key: &str,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<(), VmError> {
         if matches!(value, JsValue::Undefined) {
-            object.properties.remove(key);
-            object.getters.remove(key);
-            object.setters.remove(key);
-            object.property_attributes.remove(key);
-            return;
+            let _ = self.delete_property(holder, key.to_string())?;
+            return Ok(());
         }
-        object.properties.insert(key.to_string(), value);
-        object
-            .property_attributes
-            .entry(key.to_string())
-            .or_default();
+        let _ = self.json_create_data_property(holder, key.to_string(), value, realm)?;
+        Ok(())
+    }
+
+    fn json_create_data_property(
+        &mut self,
+        target: JsValue,
+        key: String,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<bool, VmError> {
+        if let JsValue::Object(object_id) = target.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap =
+                self.get_property_from_receiver(proxy_handler.clone(), "defineProperty", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                return self.json_create_data_property(proxy_target, key, value, realm);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError(
+                    "Proxy defineProperty trap must be callable",
+                ));
+            }
+            let descriptor = self.create_descriptor_object(vec![
+                ("value", value),
+                ("writable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(true)),
+                ("configurable", JsValue::Bool(true)),
+            ]);
+            let trap_result = self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![proxy_target, JsValue::String(key), descriptor],
+                realm,
+                false,
+            )?;
+            return Ok(self.is_truthy(&trap_result));
+        }
+        let descriptor = self.create_descriptor_object(vec![
+            ("value", value),
+            ("writable", JsValue::Bool(true)),
+            ("enumerable", JsValue::Bool(true)),
+            ("configurable", JsValue::Bool(true)),
+        ]);
+        match self
+            .execute_object_define_property(&[target, JsValue::String(key), descriptor], realm)
+        {
+            Ok(result) => Ok(self.is_truthy(&result)),
+            Err(VmError::TypeError(message))
+                if matches!(
+                    message,
+                    "cannot redefine non-configurable property"
+                        | "cannot define property on non-extensible object"
+                        | "cannot define array index when length is non-writable"
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn json_stringify_cycle_error(&mut self) -> VmError {
@@ -26750,21 +26848,31 @@ impl Vm {
         &mut self,
         replacer: Option<JsValue>,
         realm: &Realm,
+        caller_strict: bool,
     ) -> Result<Option<Vec<String>>, VmError> {
         let Some(JsValue::Object(object_id)) = replacer else {
             return Ok(None);
         };
-        if !self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
+        if !self.json_is_array_object(object_id)? {
             return Ok(None);
         }
         let mut property_list = Vec::new();
         let mut seen = BTreeSet::new();
-        let length = self.array_length(object_id)?;
+        let length_value =
+            self.json_get_property(JsValue::Object(object_id), "length", realm, caller_strict)?;
+        let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+        let length = Self::to_length_from_number(length_number).max(0) as usize;
         for index in 0..length {
             let index_key = index.to_string();
-            let item =
-                self.get_property_from_receiver(JsValue::Object(object_id), &index_key, realm)?;
-            if let Some(property_name) = self.json_replacer_property_name(item) {
+            let item = self.json_get_property(
+                JsValue::Object(object_id),
+                &index_key,
+                realm,
+                caller_strict,
+            )?;
+            if let Some(property_name) =
+                self.json_replacer_property_name(item, realm, caller_strict)?
+            {
                 if seen.insert(property_name.clone()) {
                     property_list.push(property_name);
                 }
@@ -26773,35 +26881,76 @@ impl Vm {
         Ok(Some(property_list))
     }
 
-    fn json_replacer_property_name(&self, value: JsValue) -> Option<String> {
+    fn json_replacer_property_name(
+        &mut self,
+        value: JsValue,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Option<String>, VmError> {
         match value {
-            JsValue::String(string) => Some(string),
-            JsValue::Number(number) => Some(Self::coerce_number_to_string(number)),
+            JsValue::String(string) => {
+                if Self::is_symbol_primitive_string(&string) {
+                    Ok(None)
+                } else {
+                    Ok(Some(string))
+                }
+            }
+            JsValue::Number(number) => Ok(Some(Self::coerce_number_to_string(number))),
             JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
-                Some(JsValue::String(string)) => Some(string),
-                Some(JsValue::Number(number)) => Some(Self::coerce_number_to_string(number)),
-                _ => None,
+                Some(JsValue::String(_) | JsValue::Number(_)) => {
+                    let primitive =
+                        self.ordinary_to_primitive_for_add(object_id, true, realm, caller_strict)?;
+                    let key = self.coerce_to_string_runtime(primitive, realm, caller_strict)?;
+                    Ok(Some(key))
+                }
+                _ => Ok(None),
             },
-            _ => None,
+            _ => Ok(None),
         }
     }
 
-    fn json_stringify_gap_string(&self, space: Option<JsValue>) -> String {
+    fn json_stringify_gap_string(
+        &mut self,
+        space: Option<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<String, VmError> {
         match space.unwrap_or(JsValue::Undefined) {
             JsValue::Number(number) => {
                 let width = Self::to_integer_or_infinity_i64(number).clamp(0, 10);
-                " ".repeat(width as usize)
+                Ok(" ".repeat(width as usize))
             }
-            JsValue::String(string) => string.chars().take(10).collect(),
-            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
-                Some(JsValue::Number(number)) => {
-                    let width = Self::to_integer_or_infinity_i64(number).clamp(0, 10);
-                    " ".repeat(width as usize)
+            JsValue::String(string) => {
+                if Self::is_symbol_primitive_string(&string) {
+                    Ok(String::new())
+                } else {
+                    Ok(string.chars().take(10).collect())
                 }
-                Some(JsValue::String(string)) => string.chars().take(10).collect(),
-                _ => String::new(),
+            }
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::Number(_)) => {
+                    let primitive =
+                        self.ordinary_to_primitive_for_add(object_id, false, realm, caller_strict)?;
+                    if let JsValue::String(text) = &primitive
+                        && Self::is_symbol_primitive_string(text)
+                    {
+                        return Err(VmError::TypeError(
+                            "Cannot convert a Symbol value to a number",
+                        ));
+                    }
+                    let numeric = self.to_number(&primitive);
+                    let width = Self::to_integer_or_infinity_i64(numeric).clamp(0, 10);
+                    Ok(" ".repeat(width as usize))
+                }
+                Some(JsValue::String(_)) => {
+                    let primitive =
+                        self.ordinary_to_primitive_for_add(object_id, true, realm, caller_strict)?;
+                    let string = self.coerce_to_string_runtime(primitive, realm, caller_strict)?;
+                    Ok(string.chars().take(10).collect())
+                }
+                _ => Ok(String::new()),
             },
-            _ => String::new(),
+            _ => Ok(String::new()),
         }
     }
 
@@ -26815,9 +26964,9 @@ impl Vm {
         call_context: (&Realm, bool),
     ) -> Result<Option<String>, VmError> {
         let (realm, caller_strict) = call_context;
-        let mut value = self.get_property_from_receiver(holder.clone(), key, realm)?;
+        let mut value = self.json_get_property(holder.clone(), key, realm, caller_strict)?;
         if Self::is_object_like_value(&value) {
-            let to_json = self.get_property_from_receiver(value.clone(), "toJSON", realm)?;
+            let to_json = self.json_get_property(value.clone(), "toJSON", realm, caller_strict)?;
             if Self::is_callable_value(&to_json) {
                 value = self.execute_callable(
                     to_json,
@@ -26838,15 +26987,21 @@ impl Vm {
             )?;
         }
         if let JsValue::Object(object_id) = value.clone() {
-            if let Some(boxed) = self.boxed_primitive_value(object_id) {
+            if let Some(boxed) =
+                self.json_stringify_boxed_primitive_value(object_id, realm, caller_strict)?
+            {
                 value = boxed;
             }
         }
         if let JsValue::Object(object_id) = value.clone()
             && self.is_json_raw_json_object(object_id)
         {
-            let raw_json =
-                self.get_property_from_receiver(JsValue::Object(object_id), "rawJSON", realm)?;
+            let raw_json = self.json_get_property(
+                JsValue::Object(object_id),
+                "rawJSON",
+                realm,
+                caller_strict,
+            )?;
             if let JsValue::String(text) = raw_json {
                 return Ok(Some(text));
             }
@@ -26867,8 +27022,9 @@ impl Vm {
                     Ok(Some("null".to_string()))
                 }
             }
+            JsValue::String(string) if Self::is_symbol_primitive_string(&string) => Ok(None),
             JsValue::String(string) => {
-                Ok(Some(format!("\"{}\"", Self::escape_json_string(&string))))
+                Ok(Some(format!("\"{}\"", self.escape_json_string(&string))))
             }
             JsValue::Object(object_id) => {
                 self.json_stringify_object(object_id, stack, indent, context, realm, caller_strict)
@@ -26892,8 +27048,11 @@ impl Vm {
         let stepback = indent.to_string();
         let next_indent = format!("{indent}{}", context.gap);
         let value = JsValue::Object(object_id);
-        let serialized = if self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
-            let length = self.array_length(object_id)?;
+        let serialized = if self.json_is_array_object(object_id)? {
+            let length_value =
+                self.json_get_property(value.clone(), "length", realm, caller_strict)?;
+            let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+            let length = Self::to_length_from_number(length_number).max(0) as usize;
             let mut partial = Vec::with_capacity(length);
             for index in 0..length {
                 let key = index.to_string();
@@ -26921,10 +27080,13 @@ impl Vm {
             let keys = if let Some(property_list) = &context.property_list {
                 property_list.clone()
             } else {
-                self.collect_own_property_keys(&value, true)?
+                self.json_collect_own_property_keys(&value, true, realm, caller_strict)?
             };
             let mut members = Vec::new();
             for key in keys {
+                if Self::is_symbol_primitive_string(&key) {
+                    continue;
+                }
                 if let Some(serialized_value) = self.json_stringify_property(
                     value.clone(),
                     &key,
@@ -26933,7 +27095,7 @@ impl Vm {
                     context,
                     (realm, caller_strict),
                 )? {
-                    let escaped_key = Self::escape_json_string(&key);
+                    let escaped_key = self.escape_json_string(&key);
                     let member = if context.gap.is_empty() {
                         format!("\"{escaped_key}\":{serialized_value}")
                     } else {
@@ -26957,19 +27119,236 @@ impl Vm {
         Ok(Some(serialized))
     }
 
-    fn escape_json_string(value: &str) -> String {
-        let mut escaped = String::with_capacity(value.len());
-        for ch in value.chars() {
-            match ch {
-                '"' => escaped.push_str("\\\""),
-                '\\' => escaped.push_str("\\\\"),
-                '\n' => escaped.push_str("\\n"),
-                '\r' => escaped.push_str("\\r"),
-                '\t' => escaped.push_str("\\t"),
-                '\u{08}' => escaped.push_str("\\b"),
-                '\u{0C}' => escaped.push_str("\\f"),
-                other => escaped.push(other),
+    fn json_is_array_object(&self, object_id: ObjectId) -> Result<bool, VmError> {
+        if self.has_object_marker(object_id, ARRAY_OBJECT_MARKER_KEY)? {
+            return Ok(true);
+        }
+        if let Some((target, _)) = self.object_proxy_slots(object_id)? {
+            if let JsValue::Object(target_id) = target {
+                if target_id == object_id {
+                    return Ok(false);
+                }
+                return self.json_is_array_object(target_id);
             }
+        }
+        Ok(false)
+    }
+
+    fn json_get_property(
+        &mut self,
+        receiver: JsValue,
+        property: &str,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        if let JsValue::Object(object_id) = receiver.clone()
+            && let Some((target, handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap = self.get_property_from_receiver(handler.clone(), "get", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(target, JsValue::Object(target_id) if target_id == object_id) {
+                    return Ok(JsValue::Undefined);
+                }
+                return self.json_get_property(target, property, realm, caller_strict);
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError("Proxy get trap must be callable"));
+            }
+            return self.execute_callable(
+                trap,
+                Some(handler),
+                vec![
+                    target,
+                    JsValue::String(property.to_string()),
+                    receiver.clone(),
+                ],
+                realm,
+                caller_strict,
+            );
+        }
+        self.get_property_from_receiver(receiver, property, realm)
+    }
+
+    fn json_proxy_property_is_enumerable(
+        &mut self,
+        target: JsValue,
+        handler: JsValue,
+        key: &str,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<bool, VmError> {
+        let trap =
+            self.get_property_from_receiver(handler.clone(), "getOwnPropertyDescriptor", realm)?;
+        if matches!(trap, JsValue::Undefined) {
+            return self.own_property_is_enumerable(&target, key);
+        }
+        if !Self::is_callable_value(&trap) {
+            return Err(VmError::TypeError(
+                "Proxy getOwnPropertyDescriptor trap must be callable",
+            ));
+        }
+        let descriptor = self.execute_callable(
+            trap,
+            Some(handler),
+            vec![target, JsValue::String(key.to_string())],
+            realm,
+            caller_strict,
+        )?;
+        if matches!(descriptor, JsValue::Undefined) {
+            return Ok(false);
+        }
+        if !Self::is_object_like_value(&descriptor) {
+            return Err(VmError::TypeError(
+                "Proxy getOwnPropertyDescriptor trap must return object or undefined",
+            ));
+        }
+        let enumerable = self.json_get_property(descriptor, "enumerable", realm, caller_strict)?;
+        Ok(self.is_truthy(&enumerable))
+    }
+
+    fn json_collect_own_property_keys(
+        &mut self,
+        value: &JsValue,
+        enumerable_only: bool,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Vec<String>, VmError> {
+        let JsValue::Object(object_id) = value else {
+            return self.collect_own_property_keys(value, enumerable_only);
+        };
+        if let Some((target, handler)) = self.object_proxy_slots(*object_id)? {
+            let trap = self.get_property_from_receiver(handler.clone(), "ownKeys", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(target, JsValue::Object(target_id) if target_id == *object_id) {
+                    return Ok(Vec::new());
+                }
+                return self.json_collect_own_property_keys(
+                    &target,
+                    enumerable_only,
+                    realm,
+                    caller_strict,
+                );
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError("Proxy ownKeys trap must be callable"));
+            }
+            let trap_result = self.execute_callable(
+                trap,
+                Some(handler.clone()),
+                vec![target.clone()],
+                realm,
+                caller_strict,
+            )?;
+            if !Self::is_object_like_value(&trap_result) {
+                return Err(VmError::TypeError("Proxy ownKeys trap must return object"));
+            }
+            let length_value =
+                self.json_get_property(trap_result.clone(), "length", realm, caller_strict)?;
+            let length_number = self.coerce_number_runtime(length_value, realm, caller_strict)?;
+            let length = Self::to_length_from_number(length_number).max(0) as usize;
+            let mut keys = Vec::with_capacity(length);
+            for index in 0..length {
+                let key_value = self.json_get_property(
+                    trap_result.clone(),
+                    &index.to_string(),
+                    realm,
+                    caller_strict,
+                )?;
+                let key = self.coerce_to_property_key_runtime(key_value, realm, caller_strict)?;
+                if Self::is_symbol_primitive_string(&key) {
+                    continue;
+                }
+                if enumerable_only
+                    && !self.json_proxy_property_is_enumerable(
+                        target.clone(),
+                        handler.clone(),
+                        &key,
+                        realm,
+                        caller_strict,
+                    )?
+                {
+                    continue;
+                }
+                keys.push(key);
+            }
+            return Ok(keys);
+        }
+        self.collect_own_property_keys(value, enumerable_only)
+    }
+
+    fn json_stringify_boxed_primitive_value(
+        &mut self,
+        object_id: ObjectId,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<Option<JsValue>, VmError> {
+        match self.boxed_primitive_value(object_id) {
+            Some(JsValue::Number(_)) => {
+                let primitive =
+                    self.ordinary_to_primitive_for_add(object_id, false, realm, caller_strict)?;
+                if let JsValue::String(text) = &primitive
+                    && Self::is_symbol_primitive_string(text)
+                {
+                    return Err(VmError::TypeError(
+                        "Cannot convert a Symbol value to a number",
+                    ));
+                }
+                Ok(Some(JsValue::Number(self.to_number(&primitive))))
+            }
+            Some(JsValue::String(_)) => {
+                let primitive =
+                    self.ordinary_to_primitive_for_add(object_id, true, realm, caller_strict)?;
+                let string = self.coerce_to_string_runtime(primitive, realm, caller_strict)?;
+                Ok(Some(JsValue::String(string)))
+            }
+            Some(JsValue::Bool(boolean)) => Ok(Some(JsValue::Bool(boolean))),
+            _ => Ok(None),
+        }
+    }
+
+    fn escape_json_string(&self, value: &str) -> String {
+        let units = self.string_to_js_code_units(value);
+        let mut escaped = String::with_capacity(value.len());
+        let mut index = 0usize;
+        while index < units.len() {
+            let code_unit = units[index];
+            match code_unit {
+                0x22 => escaped.push_str("\\\""),
+                0x5C => escaped.push_str("\\\\"),
+                0x08 => escaped.push_str("\\b"),
+                0x09 => escaped.push_str("\\t"),
+                0x0A => escaped.push_str("\\n"),
+                0x0C => escaped.push_str("\\f"),
+                0x0D => escaped.push_str("\\r"),
+                0x00..=0x1F => {
+                    escaped.push_str(&format!("\\u{code_unit:04x}"));
+                }
+                0xD800..=0xDBFF => {
+                    if index + 1 < units.len() {
+                        let next = units[index + 1];
+                        if (0xDC00..=0xDFFF).contains(&next) {
+                            let code_point = 0x1_0000
+                                + (((code_unit as u32) - 0xD800) << 10)
+                                + ((next as u32) - 0xDC00);
+                            if let Some(ch) = char::from_u32(code_point) {
+                                escaped.push(ch);
+                                index += 2;
+                                continue;
+                            }
+                        }
+                    }
+                    escaped.push_str(&format!("\\u{code_unit:04x}"));
+                }
+                0xDC00..=0xDFFF => {
+                    escaped.push_str(&format!("\\u{code_unit:04x}"));
+                }
+                _ => {
+                    if let Some(ch) = char::from_u32(code_unit as u32) {
+                        escaped.push(ch);
+                    }
+                }
+            }
+            index += 1;
         }
         escaped
     }

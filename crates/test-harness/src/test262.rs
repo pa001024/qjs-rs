@@ -308,6 +308,7 @@ if (typeof $262.createRealm !== "function") {
     otherGlobal.Error = Error;
     otherGlobal.AggregateError = AggregateError;
     otherGlobal.Reflect = Reflect;
+    otherGlobal.Proxy = Proxy;
     otherGlobal.TypeError = function TypeError(message) {
       var err = new hostGlobal.TypeError(message);
       Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);
