@@ -908,76 +908,95 @@ fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, 
 
 fn split_module_as_alias(source: &str) -> Option<(&str, &str)> {
     let source = source.trim();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let mut split_index = None;
-
-    let mut chars = source.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-            }
-            continue;
-        }
-        if in_block_comment {
-            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
-                chars.next();
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == active_quote {
-                quote = None;
-            }
-            continue;
+    let mut tokens: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        cursor = skip_module_clause_separators(source, cursor)?;
+        if cursor >= source.len() {
+            break;
         }
 
-        if ch == '/' {
-            if chars.peek().is_some_and(|(_, next)| *next == '/') {
-                chars.next();
-                in_line_comment = true;
-                continue;
+        let start = cursor;
+        let ch = source[cursor..].chars().next()?;
+        if ch == '\'' || ch == '"' {
+            cursor += ch.len_utf8();
+            let mut escaped = false;
+            let mut closed = false;
+            while cursor < source.len() {
+                let next = source[cursor..].chars().next()?;
+                cursor += next.len_utf8();
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if next == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if next == ch {
+                    closed = true;
+                    break;
+                }
             }
-            if chars.peek().is_some_and(|(_, next)| *next == '*') {
-                chars.next();
-                in_block_comment = true;
-                continue;
+            if !closed {
+                return None;
             }
-        }
-        if ch == '\'' || ch == '"' || ch == '`' {
-            quote = Some(ch);
+            tokens.push((start, cursor));
             continue;
         }
 
-        if ch != 'a' || !source[index..].starts_with("as") {
-            continue;
+        while cursor < source.len() {
+            let next = source[cursor..].chars().next()?;
+            if next.is_whitespace() {
+                break;
+            }
+            if next == '/' {
+                if source[cursor..].starts_with("//") || source[cursor..].starts_with("/*") {
+                    break;
+                }
+            }
+            cursor += next.len_utf8();
         }
-        let prev = source[..index].chars().next_back();
-        let next = source[index + 2..].chars().next();
-        if prev.is_some_and(char::is_whitespace) && next.is_some_and(char::is_whitespace) {
-            split_index = Some(index);
-        }
+        tokens.push((start, cursor));
     }
 
-    let split_index = split_index?;
-    let left = source[..split_index].trim_end();
-    let right = source[split_index + 2..].trim_start();
-    if left.is_empty() || right.is_empty() {
+    if tokens.len() != 3 {
         return None;
     }
-    Some((left, right))
+    if &source[tokens[1].0..tokens[1].1] != "as" {
+        return None;
+    }
+    Some((
+        &source[tokens[0].0..tokens[0].1],
+        &source[tokens[2].0..tokens[2].1],
+    ))
+}
+
+fn skip_module_clause_separators(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    loop {
+        while cursor < source.len() {
+            let ch = source[cursor..].chars().next()?;
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        if source[cursor..].starts_with("//") {
+            cursor += 2;
+            let newline = source[cursor..].find('\n').unwrap_or(source.len() - cursor);
+            cursor += newline;
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor += 2;
+            let closing = source[cursor..].find("*/")?;
+            cursor += closing + 2;
+            continue;
+        }
+        break;
+    }
+    Some(cursor)
 }
 
 fn parse_namespace_import_binding(clause: &str) -> Result<Option<ModuleImportBinding>, ParseError> {

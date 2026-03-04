@@ -712,3 +712,23 @@ fn module_parse_export_star_namespace_with_comment_after_as() {
     assert_eq!(parsed.exports.len(), 1);
     assert_eq!(parsed.exports[0].exported, "ns");
 }
+
+#[test]
+fn module_parse_named_alias_with_comments_around_as() {
+    let source = "import { value/* gap */as/* gap */alias } from './dep.js';\nexport { alias/* gap */as/* gap */answer };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "value".to_string(),
+            local: "alias".to_string(),
+        }]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "alias".to_string(),
+    }));
+}
