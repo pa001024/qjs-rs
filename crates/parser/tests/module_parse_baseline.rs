@@ -923,3 +923,35 @@ fn module_parse_named_clause_entries_with_trailing_comments() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_attributes_keyword_with_comment_separators() {
+    let source = "import { value } from './dep.js' with/* gap */{ type: 'json' };\nexport { value as answer } from './dep.js' assert/* gap */{ type: 'json' };\nexport * from './dep.js' with/* gap */{ mode: 'strict' };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 3);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert_eq!(parsed.imports[0].bindings[0].local, "value");
+    assert_eq!(parsed.imports[1].specifier, "./dep.js");
+    assert_eq!(parsed.imports[1].bindings.len(), 1);
+    assert_eq!(parsed.imports[1].bindings[0].imported, "value");
+    assert!(
+        parsed.imports[1].bindings[0]
+            .local
+            .starts_with("$__qjs_module_reexport_")
+    );
+    assert_eq!(parsed.imports[2].specifier, "./dep.js");
+    assert_eq!(parsed.imports[2].bindings.len(), 1);
+    assert_eq!(parsed.imports[2].bindings[0].imported, "*");
+    assert!(
+        parsed.imports[2].bindings[0]
+            .local
+            .starts_with("$__qjs_module_export_star_")
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+}

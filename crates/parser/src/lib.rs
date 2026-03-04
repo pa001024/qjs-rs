@@ -1632,15 +1632,18 @@ fn is_supported_module_attributes_clause(source: &str) -> bool {
         return false;
     };
 
-    if let Some(first) = after_keyword.chars().next()
-        && !(first.is_whitespace() || first == '{')
-    {
-        return false;
-    }
     let clause = if after_keyword.starts_with('{') {
         after_keyword
     } else {
-        after_keyword.trim_start()
+        let Some((trimmed, consumed_separator)) =
+            strip_module_keyword_leading_separators(after_keyword)
+        else {
+            return false;
+        };
+        if !consumed_separator {
+            return false;
+        }
+        trimmed
     };
     if !clause.starts_with('{') {
         return false;

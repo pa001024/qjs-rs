@@ -1316,6 +1316,28 @@ fn module_named_clause_entries_with_trailing_comments_parses_and_evaluates() {
 }
 
 #[test]
+fn module_attributes_keyword_with_comment_separators_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "bridge.js",
+            "export { value as answer } from './dep.js' assert/* gap */{ type: 'json' };\nexport * from './dep.js' with/* gap */{ mode: 'strict' };\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { value } from './dep.js' with/* gap */{ type: 'json' };\nimport { answer, value as forwarded } from './bridge.js';\nexport const total = value + answer + forwarded;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("comment-separated module attributes keywords should evaluate");
+    assert_eq!(load_number_export(&exports, "total"), 126.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");
