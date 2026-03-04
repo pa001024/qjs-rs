@@ -702,6 +702,7 @@ enum HostFunction {
     ReflectDefineProperty,
     ReflectConstruct,
     ReflectGetOwnPropertyDescriptor,
+    ReflectOwnKeys,
     HasOwnProperty {
         target: JsValue,
     },
@@ -1295,6 +1296,7 @@ pub struct Vm {
     native_function_objects: BTreeMap<NativeFunction, JsObject>,
     native_function_deleted: BTreeSet<(NativeFunction, String)>,
     next_host_function_id: u64,
+    next_symbol_id: u64,
     host_pins: BTreeMap<u64, JsValue>,
     next_host_pin_id: u64,
     module_records: BTreeMap<String, ModuleRecord>,
@@ -1427,6 +1429,7 @@ impl Vm {
         self.native_function_objects.clear();
         self.native_function_deleted.clear();
         self.next_host_function_id = 0;
+        self.next_symbol_id = 0;
         self.host_pins.clear();
         self.next_host_pin_id = 0;
         self.clear_module_cache();
@@ -3094,6 +3097,7 @@ impl Vm {
             | HostFunction::ReflectDefineProperty
             | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
+            | HostFunction::ReflectOwnKeys
             | HostFunction::ArrayJoinThis
             | HostFunction::ArrayToStringThis
             | HostFunction::ArrayToLocaleStringThis
@@ -9875,6 +9879,14 @@ impl Vm {
                 let property = args.get(1).cloned().unwrap_or(JsValue::Undefined);
                 self.execute_object_get_own_property_descriptor(&[target, property], realm)
             }
+            HostFunction::ReflectOwnKeys => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&target) {
+                    return Err(VmError::TypeError("Reflect.ownKeys target must be object"));
+                }
+                let keys = object_builtins::collect_object_assign_keys(self, target, realm)?;
+                self.create_array_from_values(keys.into_iter().map(JsValue::String).collect())
+            }
             HostFunction::HasOwnProperty { .. } => {
                 let target = self.object_prototype_this_object(
                     this_arg,
@@ -10202,10 +10214,10 @@ impl Vm {
             NativeFunction::ObjectEntries => self.execute_object_entries(&args, realm),
             NativeFunction::ObjectValues => self.execute_object_values(&args, realm),
             NativeFunction::ObjectGetOwnPropertyNames => {
-                self.execute_object_get_own_property_names(&args)
+                self.execute_object_get_own_property_names(&args, realm)
             }
             NativeFunction::ObjectGetOwnPropertySymbols => {
-                self.execute_object_get_own_property_symbols(&args)
+                self.execute_object_get_own_property_symbols(&args, realm)
             }
             NativeFunction::ObjectCreate => self.execute_object_create(&args, realm),
             NativeFunction::ObjectAssign => self.execute_object_assign(&args, realm),
@@ -10530,7 +10542,7 @@ impl Vm {
                     None | Some(JsValue::Undefined) => String::new(),
                     Some(value) => self.coerce_to_string(value),
                 };
-                let marker = format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{description}");
+                let marker = self.create_symbol_primitive_string(&description);
                 Ok(JsValue::String(marker))
             }
             NativeFunction::IsNaN => {
@@ -10886,6 +10898,7 @@ impl Vm {
                 configurable: false,
             },
         );
+        Self::update_object_property_order(target, "lastIndex", true);
         Ok(JsValue::Object(object_id))
     }
 
@@ -12292,7 +12305,7 @@ impl Vm {
         target.prototype_value = None;
         target
             .properties
-            .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive);
+            .insert(BOXED_PRIMITIVE_VALUE_KEY.to_string(), primitive.clone());
         target.property_attributes.insert(
             BOXED_PRIMITIVE_VALUE_KEY.to_string(),
             PropertyAttributes {
@@ -12301,9 +12314,37 @@ impl Vm {
                 configurable: false,
             },
         );
-        target
-            .properties
-            .insert("constructor".to_string(), JsValue::NativeFunction(native));
+        if let JsValue::String(value) = primitive {
+            if !Self::is_symbol_primitive_string(&value) {
+                target.properties.insert(
+                    "length".to_string(),
+                    JsValue::Number(Self::utf16_code_unit_length(&value) as f64),
+                );
+                target.property_attributes.insert(
+                    "length".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+                Self::update_object_property_order(target, "length", true);
+                for (index, ch) in value.chars().enumerate() {
+                    let key = index.to_string();
+                    target
+                        .properties
+                        .insert(key.clone(), JsValue::String(ch.to_string()));
+                    target.property_attributes.insert(
+                        key,
+                        PropertyAttributes {
+                            writable: false,
+                            enumerable: true,
+                            configurable: false,
+                        },
+                    );
+                }
+            }
+        }
         Ok(object)
     }
 
@@ -15088,8 +15129,15 @@ impl Vm {
         object: &JsObject,
         enumerable_only: bool,
     ) -> Vec<String> {
+        let hide_regexp_surface_keys = object
+            .properties
+            .get("__regexpTag")
+            .is_some_and(|value| matches!(value, JsValue::Bool(true)))
+            && object.properties.contains_key(REGEXP_SOURCE_SLOT_KEY)
+            && object.properties.contains_key(REGEXP_FLAGS_SLOT_KEY);
         let mut all_keys = BTreeSet::new();
         all_keys.extend(object.properties.keys().cloned());
+        all_keys.extend(object.property_attributes.keys().cloned());
         all_keys.extend(object.getters.keys().cloned());
         all_keys.extend(object.setters.keys().cloned());
         if let Some(dense_elements) = object.dense_elements.as_ref() {
@@ -15104,6 +15152,22 @@ impl Vm {
         let mut string_keys = Vec::new();
         let mut seen_string_keys = HashSet::new();
         for key in all_keys {
+            if hide_regexp_surface_keys
+                && matches!(
+                    key.as_str(),
+                    "source"
+                        | "flags"
+                        | "global"
+                        | "ignoreCase"
+                        | "multiline"
+                        | "dotAll"
+                        | "unicode"
+                        | "sticky"
+                        | "hasIndices"
+                )
+            {
+                continue;
+            }
             let enumerable = object
                 .property_attributes
                 .get(&key)
@@ -15146,6 +15210,19 @@ impl Vm {
         keys.extend(index_keys.into_iter().map(|(_, key)| key));
         keys.extend(non_symbol_string_keys);
         keys
+    }
+
+    fn is_hidden_runtime_property_key(key: &str) -> bool {
+        if Self::is_symbol_primitive_string(key) {
+            return false;
+        }
+        if key.starts_with("$__qjs_") {
+            return true;
+        }
+        matches!(
+            key,
+            "__regexpTag" | "__uint8ArrayTag" | "__dateYear" | "__dateMonth" | "__dateDay"
+        )
     }
 
     fn own_property_is_enumerable(
@@ -16203,11 +16280,7 @@ impl Vm {
         }
     }
 
-    fn execute_object_keys(
-        &mut self,
-        args: &[JsValue],
-        realm: &Realm,
-    ) -> Result<JsValue, VmError> {
+    fn execute_object_keys(&mut self, args: &[JsValue], realm: &Realm) -> Result<JsValue, VmError> {
         object_builtins::execute_object_keys(self, args, realm)
     }
 
@@ -16246,15 +16319,17 @@ impl Vm {
     fn execute_object_get_own_property_names(
         &mut self,
         args: &[JsValue],
+        realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        object_builtins::execute_object_get_own_property_names(self, args)
+        object_builtins::execute_object_get_own_property_names(self, args, realm)
     }
 
     fn execute_object_get_own_property_symbols(
         &mut self,
         args: &[JsValue],
+        realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        object_builtins::execute_object_get_own_property_symbols(self, args)
+        object_builtins::execute_object_get_own_property_symbols(self, args, realm)
     }
 
     fn execute_object_define_properties(
@@ -16757,33 +16832,24 @@ impl Vm {
             args.first().cloned().unwrap_or(JsValue::Undefined),
             "Object.getOwnPropertyDescriptors target must be object",
         )?;
-        let mut keys = self.collect_own_property_keys(&target, false)?;
-        keys.retain(|key| key != BOXED_PRIMITIVE_VALUE_KEY);
-        let mut descriptors = Vec::new();
-        for key in keys {
-            let descriptor = self.execute_object_get_own_property_descriptor(
-                &[target.clone(), JsValue::String(key.clone())],
-                realm,
-            )?;
-            if !matches!(descriptor, JsValue::Undefined) {
-                descriptors.push((key, descriptor));
-            }
-        }
-
         let result = self.create_object_value();
-        let result_id = match result {
-            JsValue::Object(object_id) => object_id,
-            _ => unreachable!(),
-        };
-        let object = self
-            .objects
-            .get_mut(&result_id)
-            .ok_or(VmError::UnknownObject(result_id))?;
-        for (key, descriptor) in descriptors {
-            object.properties.insert(key.clone(), descriptor);
-            object.property_attributes.entry(key).or_default();
+        let mut keys = object_builtins::collect_object_assign_keys(self, target.clone(), realm)?;
+        keys.retain(|key| {
+            key != BOXED_PRIMITIVE_VALUE_KEY && !Self::is_hidden_runtime_property_key(key)
+        });
+        for key in keys {
+            let Some(descriptor) = object_builtins::object_assign_get_own_property_descriptor(
+                self,
+                target.clone(),
+                &key,
+                realm,
+            )?
+            else {
+                continue;
+            };
+            self.create_data_property_or_throw(result.clone(), key, descriptor, realm)?;
         }
-        Ok(JsValue::Object(result_id))
+        Ok(result)
     }
 
     fn execute_object_get_own_property_descriptor_for_object(
@@ -17283,11 +17349,15 @@ impl Vm {
     fn execute_object_is_extensible(&mut self, args: &[JsValue]) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         let extensible = match target {
-            JsValue::Object(object_id) => self
-                .objects
-                .get(&object_id)
-                .map(|object| object.extensible)
-                .unwrap_or(false),
+            JsValue::Object(object_id) => {
+                if let Some((proxy_target, _)) = self.object_proxy_slots(object_id)? {
+                    return self.execute_object_is_extensible(&[proxy_target]);
+                }
+                self.objects
+                    .get(&object_id)
+                    .map(|object| object.extensible)
+                    .unwrap_or(false)
+            }
             JsValue::Function(closure_id) => self
                 .closure_objects
                 .get(&closure_id)
@@ -17339,7 +17409,9 @@ impl Vm {
             if object.properties.contains_key(&key) {
                 continue;
             }
-            object.properties.insert(key.clone(), JsValue::String(ch.to_string()));
+            object
+                .properties
+                .insert(key.clone(), JsValue::String(ch.to_string()));
             object.property_attributes.entry(key).or_default();
         }
         Ok(())
@@ -17368,7 +17440,9 @@ impl Vm {
                 return Ok(());
             }
             if !Self::is_callable_value(&trap) {
-                return Err(VmError::TypeError("Proxy defineProperty trap must be callable"));
+                return Err(VmError::TypeError(
+                    "Proxy defineProperty trap must be callable",
+                ));
             }
             let trap_result = self.execute_callable(
                 trap,
@@ -17378,11 +17452,14 @@ impl Vm {
                 false,
             )?;
             if !self.is_truthy(&trap_result) {
-                return Err(VmError::TypeError("Proxy defineProperty trap returned false"));
+                return Err(VmError::TypeError(
+                    "Proxy defineProperty trap returned false",
+                ));
             }
             return Ok(());
         }
-        let _ = self.execute_object_define_property(&[target, JsValue::String(key), descriptor], realm)?;
+        let _ = self
+            .execute_object_define_property(&[target, JsValue::String(key), descriptor], realm)?;
         Ok(())
     }
 
@@ -17393,16 +17470,62 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         let target = args.first().cloned().unwrap_or(JsValue::Undefined);
         let (object, extensible) = match target {
-            JsValue::Object(object_id) => (
-                self.objects
-                    .get(&object_id)
-                    .cloned()
-                    .ok_or(VmError::UnknownObject(object_id))?,
-                self.objects
-                    .get(&object_id)
-                    .map(|object| object.extensible)
-                    .unwrap_or(true),
-            ),
+            JsValue::Object(object_id) => {
+                if self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
+                    let realm = Realm::default();
+                    let proxy = JsValue::Object(object_id);
+                    let extensible =
+                        match self.execute_object_is_extensible(std::slice::from_ref(&proxy))? {
+                            JsValue::Bool(value) => value,
+                            _ => false,
+                        };
+                    let keys =
+                        object_builtins::collect_object_assign_keys(self, proxy.clone(), &realm)?;
+                    for key in keys {
+                        let Some(descriptor) =
+                            object_builtins::object_assign_get_own_property_descriptor(
+                                self,
+                                proxy.clone(),
+                                &key,
+                                &realm,
+                            )?
+                        else {
+                            continue;
+                        };
+                        let configurable = self.get_property_from_receiver(
+                            descriptor.clone(),
+                            "configurable",
+                            &realm,
+                        )?;
+                        if self.is_truthy(&configurable) {
+                            return Ok(JsValue::Bool(false));
+                        }
+                        if is_frozen {
+                            let is_accessor =
+                                self.has_property_on_receiver(&descriptor, "get", &realm)?
+                                    || self.has_property_on_receiver(&descriptor, "set", &realm)?;
+                            if !is_accessor {
+                                let writable = self
+                                    .get_property_from_receiver(descriptor, "writable", &realm)?;
+                                if self.is_truthy(&writable) {
+                                    return Ok(JsValue::Bool(false));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(JsValue::Bool(!extensible));
+                }
+                (
+                    self.objects
+                        .get(&object_id)
+                        .cloned()
+                        .ok_or(VmError::UnknownObject(object_id))?,
+                    self.objects
+                        .get(&object_id)
+                        .map(|object| object.extensible)
+                        .unwrap_or(true),
+                )
+            }
             JsValue::Function(closure_id) => {
                 if !self.closures.contains_key(&closure_id) {
                     return Err(VmError::UnknownClosure(closure_id));
@@ -17462,19 +17585,24 @@ impl Vm {
                     let keys =
                         object_builtins::collect_object_assign_keys(self, proxy.clone(), &realm)?;
                     for key in keys {
-                        let Some(current_desc) = object_builtins::object_assign_get_own_property_descriptor(
-                            self,
-                            proxy.clone(),
-                            &key,
-                            &realm,
-                        )?
+                        let Some(current_desc) =
+                            object_builtins::object_assign_get_own_property_descriptor(
+                                self,
+                                proxy.clone(),
+                                &key,
+                                &realm,
+                            )?
                         else {
                             continue;
                         };
-                        let is_accessor = self.has_property_on_receiver(&current_desc, "get", &realm)?
-                            || self.has_property_on_receiver(&current_desc, "set", &realm)?;
+                        let is_accessor =
+                            self.has_property_on_receiver(&current_desc, "get", &realm)?
+                                || self.has_property_on_receiver(&current_desc, "set", &realm)?;
                         let descriptor = if is_accessor {
-                            self.create_descriptor_object(vec![("configurable", JsValue::Bool(false))])
+                            self.create_descriptor_object(vec![(
+                                "configurable",
+                                JsValue::Bool(false),
+                            )])
                         } else {
                             self.create_descriptor_object(vec![
                                 ("configurable", JsValue::Bool(false)),
@@ -17908,18 +18036,6 @@ impl Vm {
             object.array_length = Some(0);
             object.is_array_object = true;
             object.dense_elements = Some(Vec::new());
-            object.properties.insert(
-                "constructor".to_string(),
-                JsValue::NativeFunction(NativeFunction::ArrayConstructor),
-            );
-            object.property_attributes.insert(
-                "constructor".to_string(),
-                PropertyAttributes {
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
             Self::set_object_array_length(object, 0);
             object.property_attributes.insert(
                 "length".to_string(),
@@ -17929,6 +18045,7 @@ impl Vm {
                     configurable: false,
                 },
             );
+            Self::update_object_property_order(object, "length", true);
             object
                 .properties
                 .insert(ARRAY_OBJECT_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -20918,9 +21035,11 @@ impl Vm {
         let construct = self.create_host_function_value(HostFunction::ReflectConstruct);
         let get_own_property_descriptor =
             self.create_host_function_value(HostFunction::ReflectGetOwnPropertyDescriptor);
+        let own_keys = self.create_host_function_value(HostFunction::ReflectOwnKeys);
         self.set_builtin_function_length(&define_property, 3.0);
         self.set_builtin_function_length(&construct, 2.0);
         self.set_builtin_function_length(&get_own_property_descriptor, 2.0);
+        self.set_builtin_function_length(&own_keys, 1.0);
         if let Some(reflect_object) = self.objects.get_mut(&reflect_id) {
             reflect_object
                 .properties
@@ -20950,6 +21069,17 @@ impl Vm {
             );
             reflect_object.property_attributes.insert(
                 "getOwnPropertyDescriptor".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            reflect_object
+                .properties
+                .insert("ownKeys".to_string(), own_keys);
+            reflect_object.property_attributes.insert(
+                "ownKeys".to_string(),
                 PropertyAttributes {
                     writable: true,
                     enumerable: false,
@@ -23906,7 +24036,7 @@ impl Vm {
         value: JsValue,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        let (setter, getter_exists, data_writable) = self
+        let (setter, getter_exists, data_writable, own_exists, extensible) = self
             .closure_objects
             .get(&closure_id)
             .map(|object| {
@@ -23919,9 +24049,13 @@ impl Vm {
                             .get(&property)
                             .is_none_or(|attributes| attributes.writable)
                     }),
+                    object.properties.contains_key(&property)
+                        || object.getters.contains_key(&property)
+                        || object.setters.contains_key(&property),
+                    object.extensible,
                 )
             })
-            .unwrap_or((None, false, None));
+            .unwrap_or((None, false, None, false, true));
 
         if let Some(setter) = setter {
             let _ = self.execute_callable(
@@ -24055,6 +24189,10 @@ impl Vm {
                 }
                 current = self.get_prototype_of_value(&current)?;
             }
+        }
+
+        if !own_exists && !extensible {
+            return Ok(value);
         }
 
         Ok(self.set_closure_property(closure_id, property, value))
@@ -26972,10 +27110,22 @@ impl Vm {
         value.starts_with(SYMBOL_PRIMITIVE_MARKER_PREFIX)
     }
 
+    fn create_symbol_primitive_string(&mut self, description: &str) -> String {
+        let symbol_id = self.next_symbol_id;
+        self.next_symbol_id = self
+            .next_symbol_id
+            .checked_add(1)
+            .expect("symbol id overflow");
+        format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{symbol_id}:{description}")
+    }
+
     fn symbol_primitive_display_string(value: &str) -> String {
-        let description = value
+        let payload = value
             .strip_prefix(SYMBOL_PRIMITIVE_MARKER_PREFIX)
             .unwrap_or_default();
+        let description = payload
+            .split_once(':')
+            .map_or(payload, |(_, description)| description);
         if description.is_empty() {
             "Symbol()".to_string()
         } else {
