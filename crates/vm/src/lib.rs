@@ -703,6 +703,7 @@ enum HostFunction {
     ReflectConstruct,
     ReflectGetOwnPropertyDescriptor,
     ReflectOwnKeys,
+    ReflectSetPrototypeOf,
     HasOwnProperty {
         target: JsValue,
     },
@@ -3196,6 +3197,7 @@ impl Vm {
             | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
             | HostFunction::ReflectOwnKeys
+            | HostFunction::ReflectSetPrototypeOf
             | HostFunction::ArrayJoinThis
             | HostFunction::ArrayToStringThis
             | HostFunction::ArrayToLocaleStringThis
@@ -4216,7 +4218,12 @@ impl Vm {
                                     name,
                                 )?;
                             }
-                            self.set_object_property(object_id, name.clone(), value, realm)
+                            self.set_property_on_receiver(
+                                JsValue::Object(object_id),
+                                name.clone(),
+                                value,
+                                realm,
+                            )
                         }
                         JsValue::Function(closure_id) => {
                             if strict {
@@ -5788,7 +5795,9 @@ impl Vm {
                 if matches!(native, NativeFunction::SymbolConstructor) {
                     return Err(VmError::NotCallable);
                 }
-                let result = if matches!(native, NativeFunction::DateConstructor) {
+                let result = if matches!(native, NativeFunction::ObjectConstructor) {
+                    super_this.clone()
+                } else if matches!(native, NativeFunction::DateConstructor) {
                     self.execute_date_constructor(&args, realm, caller_strict)?
                 } else if matches!(
                     native,
@@ -9967,6 +9976,28 @@ impl Vm {
                             caller_strict,
                             Some(new_target),
                         ),
+                    JsValue::NativeFunction(NativeFunction::ObjectConstructor)
+                        if !self.same_value(
+                            &new_target,
+                            &JsValue::NativeFunction(NativeFunction::ObjectConstructor),
+                        ) =>
+                    {
+                        let instance = self.create_object_value();
+                        let target_prototype =
+                            self.get_constructor_prototype_property(new_target, realm)?;
+                        let default_proto = self.object_prototype_value();
+                        let (prototype, prototype_value) = self
+                            .constructor_prototype_components_or_default(
+                                target_prototype,
+                                default_proto,
+                            )?;
+                        self.apply_prototype_components_to_value(
+                            &instance,
+                            prototype,
+                            prototype_value,
+                        );
+                        Ok(instance)
+                    }
                     other => {
                         self.execute_construct_value(other, construct_args, realm, caller_strict)
                     }
@@ -9984,6 +10015,19 @@ impl Vm {
                 }
                 let keys = object_builtins::collect_object_assign_keys(self, target, realm)?;
                 self.create_array_from_values(keys.into_iter().map(JsValue::String).collect())
+            }
+            HostFunction::ReflectSetPrototypeOf => {
+                let target = args.first().cloned().unwrap_or(JsValue::Undefined);
+                if !Self::is_object_like_value(&target) {
+                    return Err(VmError::TypeError(
+                        "Reflect.setPrototypeOf target must be object",
+                    ));
+                }
+                let (prototype, prototype_value) =
+                    self.parse_prototype_value(args.get(1).cloned().unwrap_or(JsValue::Undefined))?;
+                let status =
+                    self.set_prototype_of_components(target, prototype, prototype_value)?;
+                Ok(JsValue::Bool(status))
             }
             HostFunction::HasOwnProperty { .. } => {
                 let key = self.coerce_to_property_key_runtime(
@@ -15600,10 +15644,6 @@ impl Vm {
 
         let (prototype, prototype_value) =
             self.parse_prototype_value(args.get(1).cloned().unwrap_or(JsValue::Undefined))?;
-        let prototype_argument = prototype
-            .map(JsValue::Object)
-            .or_else(|| prototype_value.clone())
-            .unwrap_or(JsValue::Null);
 
         if matches!(target, JsValue::Null | JsValue::Undefined) {
             return Err(VmError::TypeError(
@@ -15613,46 +15653,66 @@ impl Vm {
         if !Self::is_object_like_value(&target) {
             return Ok(target);
         }
-        if let JsValue::Object(target_id) = target.clone()
-            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(target_id)?
-        {
-            let empty_realm = Realm::default();
-            let trap = self.get_property_from_receiver(
-                proxy_handler.clone(),
-                "setPrototypeOf",
-                &empty_realm,
-            )?;
-            if matches!(trap, JsValue::Undefined) {
-                if matches!(proxy_target, JsValue::Object(id) if id == target_id) {
-                    return Ok(target);
-                }
-                let _ =
-                    self.execute_object_set_prototype_of(&[proxy_target, prototype_argument])?;
-                return Ok(target);
-            }
-            if !Self::is_callable_value(&trap) {
-                return Err(VmError::TypeError(
-                    "Proxy setPrototypeOf trap must be callable",
-                ));
-            }
-            let trap_result = self.execute_callable(
-                trap,
-                Some(proxy_handler),
-                vec![proxy_target, prototype_argument],
-                &empty_realm,
-                false,
-            )?;
-            if !self.is_truthy(&trap_result) {
-                return Err(VmError::TypeError(
-                    "Object.setPrototypeOf target must be extensible",
-                ));
-            }
-            return Ok(target);
-        }
-        if self.prototype_would_create_cycle(&target, prototype, prototype_value.clone())? {
+        let status =
+            self.set_prototype_of_components(target.clone(), prototype, prototype_value)?;
+        if !status {
             return Err(VmError::TypeError(
-                "Object.setPrototypeOf would create a prototype cycle",
+                "Object.setPrototypeOf target must be extensible",
             ));
+        }
+        Ok(target)
+    }
+
+    fn set_prototype_of_components(
+        &mut self,
+        target: JsValue,
+        prototype: Option<ObjectId>,
+        prototype_value: Option<JsValue>,
+    ) -> Result<bool, VmError> {
+        let prototype_argument = prototype
+            .map(JsValue::Object)
+            .or_else(|| prototype_value.clone())
+            .unwrap_or(JsValue::Null);
+        if let JsValue::Object(target_id) = target.clone() {
+            if Some(target_id) == self.object_prototype_id {
+                let current = self.get_prototype_of_value(&target)?;
+                return Ok(self.same_value(&current, &prototype_argument));
+            }
+            if let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(target_id)? {
+                let empty_realm = Realm::default();
+                let trap = self.get_property_from_receiver(
+                    proxy_handler.clone(),
+                    "setPrototypeOf",
+                    &empty_realm,
+                )?;
+                if matches!(trap, JsValue::Undefined) {
+                    if matches!(proxy_target, JsValue::Object(id) if id == target_id) {
+                        return Ok(false);
+                    }
+                    return self.set_prototype_of_components(
+                        proxy_target,
+                        prototype,
+                        prototype_value,
+                    );
+                }
+                if !Self::is_callable_value(&trap) {
+                    return Err(VmError::TypeError(
+                        "Proxy setPrototypeOf trap must be callable",
+                    ));
+                }
+                let trap_result = self.execute_callable(
+                    trap,
+                    Some(proxy_handler),
+                    vec![proxy_target, prototype_argument],
+                    &empty_realm,
+                    false,
+                )?;
+                return Ok(self.is_truthy(&trap_result));
+            }
+        }
+
+        if self.prototype_would_create_cycle(&target, prototype, prototype_value.clone())? {
+            return Ok(false);
         }
 
         match target {
@@ -15664,13 +15724,11 @@ impl Vm {
                 let unchanged =
                     object.prototype == prototype && object.prototype_value == prototype_value;
                 if !object.extensible && !unchanged {
-                    return Err(VmError::TypeError(
-                        "Object.setPrototypeOf target must be extensible",
-                    ));
+                    return Ok(false);
                 }
                 object.prototype = prototype;
                 object.prototype_value = prototype_value.clone();
-                Ok(JsValue::Object(target_id))
+                Ok(true)
             }
             JsValue::Function(closure_id) => {
                 if !self.closures.contains_key(&closure_id) {
@@ -15680,14 +15738,12 @@ impl Vm {
                 let unchanged = closure_object.prototype == prototype
                     && closure_object.prototype_value == prototype_value;
                 if !closure_object.extensible && !unchanged {
-                    return Err(VmError::TypeError(
-                        "Object.setPrototypeOf target must be extensible",
-                    ));
+                    return Ok(false);
                 }
                 closure_object.prototype = prototype;
                 closure_object.prototype_value = prototype_value.clone();
                 closure_object.prototype_overridden = true;
-                Ok(JsValue::Function(closure_id))
+                Ok(true)
             }
             JsValue::HostFunction(host_id) => {
                 if !self.host_functions.contains_key(&host_id) {
@@ -15697,30 +15753,26 @@ impl Vm {
                 let unchanged = host_object.prototype == prototype
                     && host_object.prototype_value == prototype_value;
                 if !host_object.extensible && !unchanged {
-                    return Err(VmError::TypeError(
-                        "Object.setPrototypeOf target must be extensible",
-                    ));
+                    return Ok(false);
                 }
                 host_object.prototype = prototype;
-                host_object.prototype_value = prototype_value;
+                host_object.prototype_value = prototype_value.clone();
                 host_object.prototype_overridden = true;
-                Ok(JsValue::HostFunction(host_id))
+                Ok(true)
             }
             JsValue::NativeFunction(native) => {
                 let native_object = self.native_function_objects.entry(native).or_default();
                 let unchanged = native_object.prototype == prototype
                     && native_object.prototype_value == prototype_value;
                 if !native_object.extensible && !unchanged {
-                    return Err(VmError::TypeError(
-                        "Object.setPrototypeOf target must be extensible",
-                    ));
+                    return Ok(false);
                 }
                 native_object.prototype = prototype;
                 native_object.prototype_value = prototype_value;
                 native_object.prototype_overridden = true;
-                Ok(JsValue::NativeFunction(native))
+                Ok(true)
             }
-            _ => Ok(target),
+            _ => Ok(false),
         }
     }
 
@@ -16094,6 +16146,8 @@ impl Vm {
             realm,
             false,
         )?;
+        let descriptor_tuple = self
+            .parse_property_descriptor(args.get(2).cloned().unwrap_or(JsValue::Undefined), realm)?;
         let (
             has_value,
             desc_value,
@@ -16104,8 +16158,43 @@ impl Vm {
             desc_writable,
             desc_enumerable,
             desc_configurable,
-        ) = self
-            .parse_property_descriptor(args.get(2).cloned().unwrap_or(JsValue::Undefined), realm)?;
+        ) = descriptor_tuple.clone();
+
+        if let Some(JsValue::Object(target_id)) = args.first()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(*target_id)?
+        {
+            let trap =
+                self.get_property_from_receiver(proxy_handler.clone(), "defineProperty", realm)?;
+            let descriptor = self.materialize_property_descriptor(&descriptor_tuple);
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(proxy_target, JsValue::Object(id) if id == *target_id) {
+                    return Ok(JsValue::Object(*target_id));
+                }
+                let _ = self.execute_object_define_property(
+                    &[proxy_target, JsValue::String(property), descriptor],
+                    realm,
+                )?;
+                return Ok(JsValue::Object(*target_id));
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError(
+                    "Proxy defineProperty trap must be callable",
+                ));
+            }
+            let trap_result = self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![proxy_target, JsValue::String(property), descriptor],
+                realm,
+                false,
+            )?;
+            if !self.is_truthy(&trap_result) {
+                return Err(VmError::TypeError(
+                    "Proxy defineProperty trap returned false",
+                ));
+            }
+            return Ok(JsValue::Object(*target_id));
+        }
         if let Some(JsValue::HostFunction(host_id)) = args.first() {
             if Some(*host_id) == self.function_prototype_host_id && property == "prototype" {
                 if has_get {
@@ -17898,6 +17987,20 @@ impl Vm {
         match target {
             JsValue::Object(object_id) => {
                 if self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
+                    let realm = Realm::default();
+                    let proxy = JsValue::Object(object_id);
+                    let keys =
+                        object_builtins::collect_object_assign_keys(self, proxy.clone(), &realm)?;
+                    for key in keys {
+                        let descriptor = self
+                            .create_descriptor_object(vec![("configurable", JsValue::Bool(false))]);
+                        self.define_integrity_property_on_target(
+                            proxy.clone(),
+                            key,
+                            descriptor,
+                            &realm,
+                        )?;
+                    }
                     return Ok(JsValue::Object(object_id));
                 }
                 let object = self
@@ -19888,6 +19991,36 @@ impl Vm {
     ) -> Result<JsValue, VmError> {
         match receiver {
             JsValue::Object(object_id) => {
+                if let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)? {
+                    let trap =
+                        self.get_property_from_receiver(proxy_handler.clone(), "get", realm)?;
+                    if matches!(trap, JsValue::Undefined) {
+                        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id)
+                        {
+                            return Ok(JsValue::Undefined);
+                        }
+                        return self.get_property_from_base_with_receiver(
+                            proxy_target,
+                            property,
+                            JsValue::Object(object_id),
+                            realm,
+                        );
+                    }
+                    if !Self::is_callable_value(&trap) {
+                        return Err(VmError::TypeError("Proxy get trap must be callable"));
+                    }
+                    return self.execute_callable(
+                        trap,
+                        Some(proxy_handler),
+                        vec![
+                            proxy_target,
+                            JsValue::String(property.to_string()),
+                            JsValue::Object(object_id),
+                        ],
+                        realm,
+                        false,
+                    );
+                }
                 if property == "length"
                     && let Some(length) = self.try_packet_b_array_length_get(object_id)?
                 {
@@ -19976,6 +20109,40 @@ impl Vm {
         }
         match receiver {
             JsValue::Object(object_id) => {
+                if let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)? {
+                    let trap =
+                        self.get_property_from_receiver(proxy_handler.clone(), "set", realm)?;
+                    if matches!(trap, JsValue::Undefined) {
+                        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id)
+                        {
+                            return Ok(value);
+                        }
+                        let _ = self.set_property_on_base_with_receiver(
+                            proxy_target,
+                            property,
+                            value.clone(),
+                            JsValue::Object(object_id),
+                            realm,
+                        )?;
+                        return Ok(value);
+                    }
+                    if !Self::is_callable_value(&trap) {
+                        return Err(VmError::TypeError("Proxy set trap must be callable"));
+                    }
+                    let _ = self.execute_callable(
+                        trap,
+                        Some(proxy_handler),
+                        vec![
+                            proxy_target,
+                            JsValue::String(property),
+                            value.clone(),
+                            JsValue::Object(object_id),
+                        ],
+                        realm,
+                        false,
+                    )?;
+                    return Ok(value);
+                }
                 if self.try_packet_b_dense_array_index_set(object_id, &property, &value)? {
                     return Ok(value);
                 }
@@ -20410,6 +20577,25 @@ impl Vm {
             }
         }
 
+        if let JsValue::Object(receiver_id) = receiver.clone()
+            && self.has_object_marker(receiver_id, PROXY_OBJECT_MARKER_KEY)?
+        {
+            let descriptor = self.create_descriptor_object(vec![
+                ("value", value.clone()),
+                ("writable", JsValue::Bool(true)),
+                ("enumerable", JsValue::Bool(true)),
+                ("configurable", JsValue::Bool(true)),
+            ]);
+            let _ = self.execute_object_define_property(
+                &[
+                    JsValue::Object(receiver_id),
+                    JsValue::String(property),
+                    descriptor,
+                ],
+                realm,
+            )?;
+            return Ok(value);
+        }
         self.set_property_on_receiver(receiver, property, value, realm)
     }
 
@@ -21286,10 +21472,12 @@ impl Vm {
         let get_own_property_descriptor =
             self.create_host_function_value(HostFunction::ReflectGetOwnPropertyDescriptor);
         let own_keys = self.create_host_function_value(HostFunction::ReflectOwnKeys);
+        let set_prototype_of = self.create_host_function_value(HostFunction::ReflectSetPrototypeOf);
         self.set_builtin_function_length(&define_property, 3.0);
         self.set_builtin_function_length(&construct, 2.0);
         self.set_builtin_function_length(&get_own_property_descriptor, 2.0);
         self.set_builtin_function_length(&own_keys, 1.0);
+        self.set_builtin_function_length(&set_prototype_of, 2.0);
         if let Some(reflect_object) = self.objects.get_mut(&reflect_id) {
             reflect_object
                 .properties
@@ -21330,6 +21518,17 @@ impl Vm {
                 .insert("ownKeys".to_string(), own_keys);
             reflect_object.property_attributes.insert(
                 "ownKeys".to_string(),
+                PropertyAttributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+            reflect_object
+                .properties
+                .insert("setPrototypeOf".to_string(), set_prototype_of);
+            reflect_object.property_attributes.insert(
+                "setPrototypeOf".to_string(),
                 PropertyAttributes {
                     writable: true,
                     enumerable: false,
