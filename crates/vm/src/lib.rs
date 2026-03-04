@@ -99,6 +99,10 @@ const SET_ITERATOR_TARGET_KEY: &str = "$__qjs_set_iterator_target__$";
 const SET_ITERATOR_INDEX_KEY: &str = "$__qjs_set_iterator_index__$";
 const SET_ITERATOR_KIND_KEY: &str = "$__qjs_set_iterator_kind__$";
 const SET_ITERATOR_MARKER_KEY: &str = "$__qjs_set_iterator__$";
+const STRING_ITERATOR_TARGET_KEY: &str = "$__qjs_string_iterator_target__$";
+const STRING_ITERATOR_INDEX_KEY: &str = "$__qjs_string_iterator_index__$";
+const STRING_ITERATOR_MARKER_KEY: &str = "$__qjs_string_iterator__$";
+const WELL_KNOWN_SYMBOL_MARKER_PREFIX: &str = "wk:";
 const REGEXP_SOURCE_SLOT_KEY: &str = "$__qjs_regexp_source_slot__$";
 const REGEXP_FLAGS_SLOT_KEY: &str = "$__qjs_regexp_flags_slot__$";
 const SURROGATE_PLACEHOLDER_START: u32 = 0xE000;
@@ -617,6 +621,10 @@ enum HostFunction {
     StringStrike,
     StringSub,
     StringSup,
+    StringIteratorThis,
+    StringIteratorNextThis,
+    SymbolToString,
+    SymbolValueOf,
     NumberToString,
     NumberValueOf,
     NumberToFixed,
@@ -1322,8 +1330,15 @@ pub struct Vm {
     function_prototype_host_id: Option<u64>,
     function_prototype_prototype_getter: Option<JsValue>,
     generator_function_prototype_id: Option<ObjectId>,
+    generator_prototype_id: Option<ObjectId>,
+    iterator_prototype_id: Option<ObjectId>,
+    array_iterator_prototype_id: Option<ObjectId>,
+    map_iterator_prototype_id: Option<ObjectId>,
+    set_iterator_prototype_id: Option<ObjectId>,
+    string_iterator_prototype_id: Option<ObjectId>,
     array_prototype_id: Option<ObjectId>,
     string_prototype_id: Option<ObjectId>,
+    symbol_prototype_id: Option<ObjectId>,
     number_prototype_id: Option<ObjectId>,
     boolean_prototype_id: Option<ObjectId>,
     error_prototype_id: Option<ObjectId>,
@@ -1457,8 +1472,15 @@ impl Vm {
         self.function_prototype_host_id = None;
         self.function_prototype_prototype_getter = None;
         self.generator_function_prototype_id = None;
+        self.generator_prototype_id = None;
+        self.iterator_prototype_id = None;
+        self.array_iterator_prototype_id = None;
+        self.map_iterator_prototype_id = None;
+        self.set_iterator_prototype_id = None;
+        self.string_iterator_prototype_id = None;
         self.array_prototype_id = None;
         self.string_prototype_id = None;
+        self.symbol_prototype_id = None;
         self.number_prototype_id = None;
         self.boolean_prototype_id = None;
         self.error_prototype_id = None;
@@ -3128,6 +3150,10 @@ impl Vm {
             | HostFunction::StringStrike
             | HostFunction::StringSub
             | HostFunction::StringSup
+            | HostFunction::StringIteratorThis
+            | HostFunction::StringIteratorNextThis
+            | HostFunction::SymbolToString
+            | HostFunction::SymbolValueOf
             | HostFunction::NumberToString
             | HostFunction::NumberValueOf
             | HostFunction::NumberToFixed
@@ -6023,11 +6049,6 @@ impl Vm {
                 }
                 if self.closure_is_generator(closure_id)? {
                     let is_async_generator = self.closure_is_async(closure_id)?;
-                    if self.closure_uses_yield_identifier(closure_id)? {
-                        return self.create_generator_iterator_from_closure_call(
-                            closure_id, args, this_arg,
-                        );
-                    }
                     if self.closure_uses_lowered_generator_values_buffer(closure_id)? {
                         let mut produced_values =
                             self.execute_closure_call(closure_id, args, this_arg, realm)?;
@@ -6040,7 +6061,8 @@ impl Vm {
                         }
                         return self.create_generator_iterator_from_values(produced_values);
                     }
-                    return self.execute_closure_call(closure_id, args, this_arg, realm);
+                    return self
+                        .create_generator_iterator_from_closure_call(closure_id, args, this_arg);
                 }
                 self.execute_closure_call(closure_id, args, this_arg, realm)
             }
@@ -6454,6 +6476,32 @@ impl Vm {
             },
             _ => Err(VmError::TypeError(
                 "String.prototype method called on incompatible",
+            )),
+        }
+    }
+
+    fn strict_this_symbol_primitive(&self, this_arg: Option<JsValue>) -> Result<String, VmError> {
+        let value = this_arg.unwrap_or(JsValue::Undefined);
+        match value {
+            JsValue::String(value) => {
+                if Self::is_symbol_primitive_string(&value) {
+                    Ok(value)
+                } else {
+                    Err(VmError::TypeError(
+                        "Symbol.prototype method called on incompatible receiver",
+                    ))
+                }
+            }
+            JsValue::Object(object_id) => match self.boxed_primitive_value(object_id) {
+                Some(JsValue::String(value)) if Self::is_symbol_primitive_string(&value) => {
+                    Ok(value)
+                }
+                _ => Err(VmError::TypeError(
+                    "Symbol.prototype method called on incompatible receiver",
+                )),
+            },
+            _ => Err(VmError::TypeError(
+                "Symbol.prototype method called on incompatible receiver",
             )),
         }
     }
@@ -9046,6 +9094,10 @@ impl Vm {
                 }
                 self.execute_string_split(receiver, &args)
             }
+            HostFunction::StringIteratorThis => {
+                let receiver = self.coerce_this_string(this_arg)?;
+                self.create_string_iterator_from_value(receiver)
+            }
             HostFunction::StringToLowerCaseThis => {
                 let receiver = self.coerce_this_string(this_arg)?;
                 Ok(JsValue::String(receiver.to_lowercase()))
@@ -9863,6 +9915,17 @@ impl Vm {
             }
             HostFunction::ArrayIteratorNextThis => {
                 self.execute_array_iterator_next(this_arg, realm)
+            }
+            HostFunction::StringIteratorNextThis => self.execute_string_iterator_next(this_arg),
+            HostFunction::SymbolToString => {
+                let value = self.strict_this_symbol_primitive(this_arg)?;
+                Ok(JsValue::String(Self::symbol_primitive_display_string(
+                    &value,
+                )))
+            }
+            HostFunction::SymbolValueOf => {
+                let value = self.strict_this_symbol_primitive(this_arg)?;
+                Ok(JsValue::String(value))
             }
             HostFunction::ArrayReverseThis => {
                 self.execute_array_reverse_this(this_arg, realm, caller_strict)
@@ -12933,6 +12996,7 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
+        let iterator_prototype = self.get_or_create_function_prototype_property(closure_id)?;
         let next = self.create_host_function_value(HostFunction::GeneratorIteratorNextThis);
         let return_fn = self.create_host_function_value(HostFunction::GeneratorIteratorReturnThis);
         let throw_fn = self.create_host_function_value(HostFunction::GeneratorIteratorThrowThis);
@@ -12944,6 +13008,10 @@ impl Vm {
             .objects
             .get_mut(&iterator_id)
             .ok_or(VmError::UnknownObject(iterator_id))?;
+        if let JsValue::Object(prototype_id) = iterator_prototype {
+            object.prototype = Some(prototype_id);
+            object.prototype_value = None;
+        }
         object.properties.insert(
             GENERATOR_ITERATOR_MARKER_KEY.to_string(),
             JsValue::Bool(true),
@@ -13316,12 +13384,17 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
+        let iterator_prototype = self.map_iterator_prototype_value();
         let next = self.create_host_function_value(HostFunction::MapIteratorNextThis);
         let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let object = self
             .objects
             .get_mut(&iterator_id)
             .ok_or(VmError::UnknownObject(iterator_id))?;
+        if let JsValue::Object(prototype_id) = iterator_prototype {
+            object.prototype = Some(prototype_id);
+            object.prototype_value = None;
+        }
         object
             .properties
             .insert(MAP_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -13438,12 +13511,17 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
+        let iterator_prototype = self.set_iterator_prototype_value();
         let next = self.create_host_function_value(HostFunction::SetIteratorNextThis);
         let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let object = self
             .objects
             .get_mut(&iterator_id)
             .ok_or(VmError::UnknownObject(iterator_id))?;
+        if let JsValue::Object(prototype_id) = iterator_prototype {
+            object.prototype = Some(prototype_id);
+            object.prototype_value = None;
+        }
         object
             .properties
             .insert(SET_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -13564,12 +13642,17 @@ impl Vm {
             JsValue::Object(id) => id,
             _ => unreachable!(),
         };
+        let iterator_prototype = self.array_iterator_prototype_value();
         let next = self.create_host_function_value(HostFunction::ArrayIteratorNextThis);
         let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
         let object = self
             .objects
             .get_mut(&iterator_id)
             .ok_or(VmError::UnknownObject(iterator_id))?;
+        if let JsValue::Object(prototype_id) = iterator_prototype {
+            object.prototype = Some(prototype_id);
+            object.prototype_value = None;
+        }
         object
             .properties
             .insert(ARRAY_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
@@ -13675,6 +13758,117 @@ impl Vm {
             );
         }
         self.create_for_of_step_result(false, step_value)
+    }
+
+    fn create_string_iterator_from_value(&mut self, value: String) -> Result<JsValue, VmError> {
+        let iterator = self.create_object_value();
+        let iterator_id = match iterator {
+            JsValue::Object(id) => id,
+            _ => unreachable!(),
+        };
+        let iterator_prototype = self.string_iterator_prototype_value();
+        let next = self.create_host_function_value(HostFunction::StringIteratorNextThis);
+        let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+        let object = self
+            .objects
+            .get_mut(&iterator_id)
+            .ok_or(VmError::UnknownObject(iterator_id))?;
+        if let JsValue::Object(prototype_id) = iterator_prototype {
+            object.prototype = Some(prototype_id);
+            object.prototype_value = None;
+        }
+        object
+            .properties
+            .insert(STRING_ITERATOR_MARKER_KEY.to_string(), JsValue::Bool(true));
+        object.properties.insert(
+            STRING_ITERATOR_TARGET_KEY.to_string(),
+            JsValue::String(value),
+        );
+        object
+            .properties
+            .insert(STRING_ITERATOR_INDEX_KEY.to_string(), JsValue::Number(0.0));
+        object.properties.insert("next".to_string(), next);
+        object
+            .properties
+            .insert("Symbol.iterator".to_string(), iterator_method);
+        object.property_attributes.insert(
+            "next".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        object.property_attributes.insert(
+            "Symbol.iterator".to_string(),
+            PropertyAttributes {
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        Ok(JsValue::Object(iterator_id))
+    }
+
+    fn execute_string_iterator_next(
+        &mut self,
+        this_arg: Option<JsValue>,
+    ) -> Result<JsValue, VmError> {
+        let iterator_id = match this_arg.unwrap_or(JsValue::Undefined) {
+            JsValue::Object(object_id) => object_id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "String iterator next receiver must be object",
+                ));
+            }
+        };
+        let (target, index, is_string_iterator) = {
+            let iterator = self
+                .objects
+                .get(&iterator_id)
+                .ok_or(VmError::UnknownObject(iterator_id))?;
+            let is_string_iterator = iterator
+                .properties
+                .get(STRING_ITERATOR_MARKER_KEY)
+                .is_some_and(|value| matches!(value, JsValue::Bool(true)));
+            let target = iterator
+                .properties
+                .get(STRING_ITERATOR_TARGET_KEY)
+                .and_then(|value| match value {
+                    JsValue::String(string) => Some(string.clone()),
+                    _ => None,
+                });
+            let index = iterator
+                .properties
+                .get(STRING_ITERATOR_INDEX_KEY)
+                .map(|value| self.to_number(value))
+                .unwrap_or(0.0)
+                .max(0.0) as usize;
+            (target, index, is_string_iterator)
+        };
+        if !is_string_iterator {
+            return Err(VmError::TypeError("incompatible String iterator"));
+        }
+        let Some(target) = target else {
+            return self.create_for_of_step_result(true, JsValue::Undefined);
+        };
+        let values = self.js_string_iterator_values(&target);
+        if index >= values.len() {
+            if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+                iterator
+                    .properties
+                    .insert(STRING_ITERATOR_TARGET_KEY.to_string(), JsValue::Undefined);
+            }
+            return self.create_for_of_step_result(true, JsValue::Undefined);
+        }
+        let value = values[index].clone();
+        if let Some(iterator) = self.objects.get_mut(&iterator_id) {
+            iterator.properties.insert(
+                STRING_ITERATOR_INDEX_KEY.to_string(),
+                JsValue::Number((index + 1) as f64),
+            );
+        }
+        self.create_for_of_step_result(false, value)
     }
 
     fn execute_object_constructor(&mut self, args: &[JsValue]) -> JsValue {
@@ -21627,8 +21821,194 @@ impl Vm {
                         configurable: true,
                     },
                 );
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("GeneratorFunction".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
             }
             self.generator_function_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn generator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.generator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Generator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.generator_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn iterator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.iterator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let iterator_method = self.create_host_function_value(HostFunction::ObjectValueOf);
+            if let Some(object) = self.objects.get_mut(&id) {
+                object
+                    .properties
+                    .insert("Symbol.iterator".to_string(), iterator_method);
+                object.property_attributes.insert(
+                    "Symbol.iterator".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Iterator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.iterator_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn array_iterator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.array_iterator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        let iterator_prototype = self.iterator_prototype_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = None;
+                object.prototype_value = Some(iterator_prototype);
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Array Iterator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.array_iterator_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn map_iterator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.map_iterator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        let iterator_prototype = self.iterator_prototype_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = None;
+                object.prototype_value = Some(iterator_prototype);
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Map Iterator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.map_iterator_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn set_iterator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.set_iterator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        let iterator_prototype = self.iterator_prototype_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = None;
+                object.prototype_value = Some(iterator_prototype);
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Set Iterator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.set_iterator_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn string_iterator_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.string_iterator_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        let iterator_prototype = self.iterator_prototype_value();
+        if let JsValue::Object(id) = prototype {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.prototype = None;
+                object.prototype_value = Some(iterator_prototype);
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("String Iterator".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.string_iterator_prototype_id = Some(id);
         }
         prototype
     }
@@ -22001,6 +22381,7 @@ impl Vm {
             let strike = self.create_host_function_value(HostFunction::StringStrike);
             let sub = self.create_host_function_value(HostFunction::StringSub);
             let sup = self.create_host_function_value(HostFunction::StringSup);
+            let symbol_iterator = self.create_host_function_value(HostFunction::StringIteratorThis);
             self.set_builtin_function_length(&substr, 2.0);
             self.set_builtin_function_name(&substr, "substr");
             self.set_builtin_function_length(&anchor, 1.0);
@@ -22029,6 +22410,8 @@ impl Vm {
             self.set_builtin_function_name(&sub, "sub");
             self.set_builtin_function_length(&sup, 0.0);
             self.set_builtin_function_name(&sup, "sup");
+            self.set_builtin_function_length(&symbol_iterator, 0.0);
+            self.set_builtin_function_name(&symbol_iterator, "[Symbol.iterator]");
             self.set_builtin_function_length(&trim_start, 0.0);
             self.set_builtin_function_name(&trim_start, "trimStart");
             self.set_builtin_function_length(&trim_end, 0.0);
@@ -22096,6 +22479,7 @@ impl Vm {
                     ("strike", strike),
                     ("sub", sub),
                     ("sup", sup),
+                    ("Symbol.iterator", symbol_iterator),
                 ] {
                     object.properties.insert(name.to_string(), value);
                     object.property_attributes.insert(
@@ -22154,6 +22538,67 @@ impl Vm {
                 }
             }
             self.number_prototype_id = Some(id);
+        }
+        prototype
+    }
+
+    fn symbol_prototype_value(&mut self) -> JsValue {
+        if let Some(id) = self.symbol_prototype_id {
+            return JsValue::Object(id);
+        }
+        let prototype = self.create_object_value();
+        if let JsValue::Object(id) = prototype {
+            let to_string = self.create_host_function_value(HostFunction::SymbolToString);
+            let value_of = self.create_host_function_value(HostFunction::SymbolValueOf);
+            self.set_builtin_function_length(&to_string, 0.0);
+            self.set_builtin_function_name(&to_string, "toString");
+            self.set_builtin_function_length(&value_of, 0.0);
+            self.set_builtin_function_name(&value_of, "valueOf");
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.properties.insert(
+                    "constructor".to_string(),
+                    JsValue::NativeFunction(NativeFunction::SymbolConstructor),
+                );
+                object.property_attributes.insert(
+                    "constructor".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("toString".to_string(), to_string);
+                object.property_attributes.insert(
+                    "toString".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert("valueOf".to_string(), value_of);
+                object.property_attributes.insert(
+                    "valueOf".to_string(),
+                    PropertyAttributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Symbol".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
+            self.symbol_prototype_id = Some(id);
         }
         prototype
     }
@@ -22964,6 +23409,18 @@ impl Vm {
                         configurable: true,
                     },
                 );
+                object.properties.insert(
+                    "Symbol.toStringTag".to_string(),
+                    JsValue::String("Promise".to_string()),
+                );
+                object.property_attributes.insert(
+                    "Symbol.toStringTag".to_string(),
+                    PropertyAttributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
             }
             self.promise_prototype_id = Some(id);
         }
@@ -23356,60 +23813,123 @@ impl Vm {
         realm: &Realm,
     ) -> Result<String, VmError> {
         let value = this_arg.unwrap_or(JsValue::Undefined);
-        match value {
-            JsValue::Undefined | JsValue::Uninitialized => return Ok("Undefined".to_string()),
-            JsValue::Null => return Ok("Null".to_string()),
-            JsValue::Bool(_) => return Ok("Boolean".to_string()),
-            JsValue::Number(_) => return Ok("Number".to_string()),
-            JsValue::String(_) => return Ok("String".to_string()),
+        if matches!(value, JsValue::Undefined | JsValue::Uninitialized) {
+            return Ok("Undefined".to_string());
+        }
+        if matches!(value, JsValue::Null) {
+            return Ok("Null".to_string());
+        }
+
+        let (receiver, builtin_tag) = match value.clone() {
+            JsValue::Bool(_) => (self.box_primitive_receiver(value), "Boolean"),
+            JsValue::Number(_) => (self.box_primitive_receiver(value), "Number"),
+            JsValue::String(string) => {
+                let boxed = self.box_primitive_receiver(value);
+                if Self::is_symbol_primitive_string(&string) {
+                    (boxed, "Object")
+                } else {
+                    (boxed, "String")
+                }
+            }
             JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
-                return Ok("Function".to_string());
+                (value, "Function")
             }
             JsValue::Object(object_id) => {
-                if let Some(boxed) = self.boxed_primitive_value(object_id) {
-                    return Ok(match boxed {
+                let receiver = JsValue::Object(object_id);
+                let builtin_tag = if self.json_is_array_object(object_id)? {
+                    "Array"
+                } else if self.has_object_marker(object_id, ARGUMENTS_OBJECT_MARKER_KEY)? {
+                    "Arguments"
+                } else if self.is_callable_value_proxy_aware(&receiver)? {
+                    "Function"
+                } else if let Some(boxed) = self.boxed_primitive_value(object_id) {
+                    match boxed {
                         JsValue::Bool(_) => "Boolean",
                         JsValue::Number(_) => "Number",
-                        JsValue::String(_) => "String",
+                        JsValue::String(string) if !Self::is_symbol_primitive_string(&string) => {
+                            "String"
+                        }
                         _ => "Object",
                     }
-                    .to_string());
-                }
-                if self.has_object_marker(object_id, "__uint8ArrayTag")? {
-                    return Ok("Uint8Array".to_string());
-                }
-                if self.has_object_marker(object_id, ARGUMENTS_OBJECT_MARKER_KEY)? {
-                    return Ok("Arguments".to_string());
-                }
-                if self.has_object_marker(object_id, "__regexpTag")? {
-                    return Ok("RegExp".to_string());
-                }
-                if self.has_object_marker(object_id, DATE_OBJECT_MARKER_KEY)? {
-                    return Ok("Date".to_string());
-                }
-                if let Some(array_prototype_id) = self.array_prototype_id {
-                    if self.object_inherits_prototype(object_id, array_prototype_id)? {
-                        return Ok("Array".to_string());
-                    }
-                }
-                if let Some(error_prototype_id) = self.error_prototype_id {
+                } else if self.has_object_marker(object_id, "__regexpTag")? {
+                    "RegExp"
+                } else if self.has_object_marker(object_id, DATE_OBJECT_MARKER_KEY)? {
+                    "Date"
+                } else if self.has_object_marker(object_id, "__uint8ArrayTag")? {
+                    "Uint8Array"
+                } else if let Some(error_prototype_id) = self.error_prototype_id {
                     if self.object_inherits_prototype(object_id, error_prototype_id)? {
-                        return Ok("Error".to_string());
+                        "Error"
+                    } else {
+                        "Object"
                     }
-                }
-                let to_string_tag = self.get_property_from_receiver(
-                    JsValue::Object(object_id),
-                    "Symbol.toStringTag",
-                    realm,
-                )?;
-                if let JsValue::String(tag) = to_string_tag {
-                    if !tag.is_empty() {
-                        return Ok(tag);
-                    }
-                }
+                } else {
+                    "Object"
+                };
+                (receiver, builtin_tag)
             }
+            JsValue::Undefined | JsValue::Uninitialized | JsValue::Null => unreachable!(),
+        };
+
+        let to_string_tag =
+            self.get_property_from_receiver(receiver.clone(), "Symbol.toStringTag", realm)?;
+        if let JsValue::String(tag) = to_string_tag
+            && !Self::is_symbol_primitive_string(&tag)
+        {
+            return Ok(tag);
         }
-        Ok("Object".to_string())
+
+        if builtin_tag == "Function"
+            && self.is_async_function_like(&receiver)?
+            && !self.function_prototype_has_own_to_string_tag()
+        {
+            return Ok("AsyncFunction".to_string());
+        }
+
+        Ok(builtin_tag.to_string())
+    }
+
+    fn is_callable_value_proxy_aware(&mut self, value: &JsValue) -> Result<bool, VmError> {
+        match value {
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::HostFunction(_) => {
+                Ok(true)
+            }
+            JsValue::Object(object_id) => {
+                if let Some((target, _)) = self.object_proxy_slots(*object_id)? {
+                    if matches!(target, JsValue::Object(target_id) if target_id == *object_id) {
+                        return Ok(false);
+                    }
+                    return self.is_callable_value_proxy_aware(&target);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn is_async_function_like(&mut self, value: &JsValue) -> Result<bool, VmError> {
+        match value {
+            JsValue::Function(closure_id) => {
+                Ok(self.closure_is_async(*closure_id)?
+                    && !self.closure_is_generator(*closure_id)?)
+            }
+            JsValue::Object(object_id) => {
+                if let Some((target, _)) = self.object_proxy_slots(*object_id)? {
+                    if matches!(target, JsValue::Object(target_id) if target_id == *object_id) {
+                        return Ok(false);
+                    }
+                    return self.is_async_function_like(&target);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn function_prototype_has_own_to_string_tag(&mut self) -> bool {
+        let prototype = self.function_prototype_value();
+        self.has_own_property(&prototype, "Symbol.toStringTag")
+            .unwrap_or(false)
     }
 
     fn box_primitive_receiver(&mut self, primitive: JsValue) -> JsValue {
@@ -23427,10 +23947,19 @@ impl Vm {
                 JsValue::Object(id) => Some(id),
                 _ => None,
             },
-            JsValue::String(_) => match self.string_prototype_value() {
-                JsValue::Object(id) => Some(id),
-                _ => None,
-            },
+            JsValue::String(ref value) => {
+                if Self::is_symbol_primitive_string(value) {
+                    match self.symbol_prototype_value() {
+                        JsValue::Object(id) => Some(id),
+                        _ => None,
+                    }
+                } else {
+                    match self.string_prototype_value() {
+                        JsValue::Object(id) => Some(id),
+                        _ => None,
+                    }
+                }
+            }
             _ => None,
         };
         if let Some(object) = self.objects.get_mut(&object_id) {
@@ -23494,18 +24023,6 @@ impl Vm {
 
     fn function_is_generator(&self, function: &CompiledFunction) -> bool {
         self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
-    }
-
-    fn function_uses_yield_identifier(&self, function: &CompiledFunction) -> bool {
-        function.code.iter().any(|opcode| {
-            matches!(
-                opcode,
-                Opcode::LoadIdentifier(name)
-                    | Opcode::ResolveIdentifierReference(name)
-                    | Opcode::TypeofIdentifier(name)
-                    if name == "yield"
-            )
-        })
     }
 
     fn function_uses_lowered_generator_values_buffer(&self, function: &CompiledFunction) -> bool {
@@ -23582,18 +24099,6 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_is_async(function))
-    }
-
-    fn closure_uses_yield_identifier(&self, closure_id: u64) -> Result<bool, VmError> {
-        let closure = self
-            .closures
-            .get(&closure_id)
-            .ok_or(VmError::UnknownClosure(closure_id))?;
-        let function = closure
-            .functions
-            .get(closure.function_id)
-            .ok_or(VmError::UnknownFunction(closure.function_id))?;
-        Ok(self.function_uses_yield_identifier(function))
     }
 
     fn closure_uses_lowered_generator_values_buffer(
@@ -24913,7 +25418,17 @@ impl Vm {
 
         let prototype = self.create_object_value();
         if let JsValue::Object(prototype_id) = prototype {
+            let is_generator = self.closure_is_generator(closure_id)?;
+            let generator_prototype_value = if is_generator {
+                Some(self.generator_prototype_value())
+            } else {
+                None
+            };
             if let Some(prototype_object) = self.objects.get_mut(&prototype_id) {
+                if let Some(generator_prototype_value) = generator_prototype_value {
+                    prototype_object.prototype = None;
+                    prototype_object.prototype_value = Some(generator_prototype_value);
+                }
                 prototype_object
                     .properties
                     .insert("constructor".to_string(), JsValue::Function(closure_id));
@@ -26559,6 +27074,7 @@ impl Vm {
             "search" => self.create_host_function_value(HostFunction::StringSearchThis),
             "indexOf" => self.create_host_function_value(HostFunction::StringIndexOfThis),
             "split" => self.create_host_function_value(HostFunction::StringSplitThis),
+            "Symbol.iterator" => self.create_host_function_value(HostFunction::StringIteratorThis),
             "toLowerCase" => self.create_host_function_value(HostFunction::StringToLowerCaseThis),
             "toUpperCase" => self.create_host_function_value(HostFunction::StringToUpperCase),
             "toString" => self.create_host_function_value(HostFunction::StringToString),
@@ -26688,7 +27204,15 @@ impl Vm {
                     self.get_or_create_function_prototype_property(closure_id)
                 }
             }
-            "constructor" => Ok(JsValue::NativeFunction(NativeFunction::FunctionConstructor)),
+            "constructor" => {
+                if self.closure_is_generator(closure_id)? {
+                    Ok(JsValue::NativeFunction(
+                        NativeFunction::GeneratorFunctionConstructor,
+                    ))
+                } else {
+                    Ok(JsValue::NativeFunction(NativeFunction::FunctionConstructor))
+                }
+            }
             "toString" => Ok(
                 self.create_host_function_value(HostFunction::FunctionToString {
                     target: JsValue::Function(closure_id),
@@ -27135,7 +27659,7 @@ impl Vm {
                 self.uint8_array_prototype_value()
             }
             (NativeFunction::RegExpConstructor, "prototype") => self.regexp_prototype_value(),
-            (NativeFunction::SymbolConstructor, "prototype") => self.create_object_value(),
+            (NativeFunction::SymbolConstructor, "prototype") => self.symbol_prototype_value(),
             (NativeFunction::DateConstructor, "parse") => {
                 JsValue::NativeFunction(NativeFunction::DateParse)
             }
@@ -27152,43 +27676,43 @@ impl Vm {
                 revocable
             }
             (NativeFunction::SymbolConstructor, "iterator") => {
-                JsValue::String("Symbol.iterator".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.iterator"))
             }
             (NativeFunction::SymbolConstructor, "asyncIterator") => {
-                JsValue::String("Symbol.asyncIterator".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.asyncIterator"))
             }
             (NativeFunction::SymbolConstructor, "hasInstance") => {
-                JsValue::String("Symbol.hasInstance".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.hasInstance"))
             }
-            (NativeFunction::SymbolConstructor, "isConcatSpreadable") => {
-                JsValue::String("Symbol.isConcatSpreadable".to_string())
-            }
+            (NativeFunction::SymbolConstructor, "isConcatSpreadable") => JsValue::String(
+                Self::well_known_symbol_primitive("Symbol.isConcatSpreadable"),
+            ),
             (NativeFunction::SymbolConstructor, "match") => {
-                JsValue::String("Symbol.match".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.match"))
             }
             (NativeFunction::SymbolConstructor, "matchAll") => {
-                JsValue::String("Symbol.matchAll".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.matchAll"))
             }
             (NativeFunction::SymbolConstructor, "replace") => {
-                JsValue::String("Symbol.replace".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.replace"))
             }
             (NativeFunction::SymbolConstructor, "search") => {
-                JsValue::String("Symbol.search".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.search"))
             }
             (NativeFunction::SymbolConstructor, "species") => {
-                JsValue::String("Symbol.species".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.species"))
             }
             (NativeFunction::SymbolConstructor, "split") => {
-                JsValue::String("Symbol.split".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.split"))
             }
             (NativeFunction::SymbolConstructor, "toPrimitive") => {
-                JsValue::String("Symbol.toPrimitive".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.toPrimitive"))
             }
             (NativeFunction::SymbolConstructor, "toStringTag") => {
-                JsValue::String("Symbol.toStringTag".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.toStringTag"))
             }
             (NativeFunction::SymbolConstructor, "unscopables") => {
-                JsValue::String("Symbol.unscopables".to_string())
+                JsValue::String(Self::well_known_symbol_primitive("Symbol.unscopables"))
             }
             (NativeFunction::Assert, "sameValue") => {
                 self.create_host_function_value(HostFunction::AssertSameValue)
@@ -27631,6 +28155,31 @@ impl Vm {
         value.starts_with(SYMBOL_PRIMITIVE_MARKER_PREFIX)
     }
 
+    fn well_known_symbol_primitive(name: &str) -> String {
+        format!("{SYMBOL_PRIMITIVE_MARKER_PREFIX}{WELL_KNOWN_SYMBOL_MARKER_PREFIX}{name}")
+    }
+
+    fn well_known_symbol_name_from_marker(value: &str) -> Option<&'static str> {
+        let payload = value.strip_prefix(SYMBOL_PRIMITIVE_MARKER_PREFIX)?;
+        let name = payload.strip_prefix(WELL_KNOWN_SYMBOL_MARKER_PREFIX)?;
+        match name {
+            "Symbol.iterator" => Some("Symbol.iterator"),
+            "Symbol.asyncIterator" => Some("Symbol.asyncIterator"),
+            "Symbol.hasInstance" => Some("Symbol.hasInstance"),
+            "Symbol.isConcatSpreadable" => Some("Symbol.isConcatSpreadable"),
+            "Symbol.match" => Some("Symbol.match"),
+            "Symbol.matchAll" => Some("Symbol.matchAll"),
+            "Symbol.replace" => Some("Symbol.replace"),
+            "Symbol.search" => Some("Symbol.search"),
+            "Symbol.species" => Some("Symbol.species"),
+            "Symbol.split" => Some("Symbol.split"),
+            "Symbol.toPrimitive" => Some("Symbol.toPrimitive"),
+            "Symbol.toStringTag" => Some("Symbol.toStringTag"),
+            "Symbol.unscopables" => Some("Symbol.unscopables"),
+            _ => None,
+        }
+    }
+
     fn create_symbol_primitive_string(&mut self, description: &str) -> String {
         let symbol_id = self.next_symbol_id;
         self.next_symbol_id = self
@@ -27734,7 +28283,13 @@ impl Vm {
 
     fn coerce_to_property_key(&self, value: &JsValue) -> String {
         match value {
-            JsValue::String(text) => text.clone(),
+            JsValue::String(text) => {
+                if let Some(name) = Self::well_known_symbol_name_from_marker(text) {
+                    name.to_string()
+                } else {
+                    text.clone()
+                }
+            }
             other => self.coerce_to_string(other),
         }
     }
