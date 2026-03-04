@@ -942,3 +942,42 @@ fn default_with_comment_separator_parses_and_evaluates() {
     assert_eq!(expect_string(&exports, "namedType"), "function");
     assert_eq!(host.load_count("entry.js"), 1);
 }
+
+#[test]
+fn split_attributes_clause_body_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "entry.js",
+            "import { value } from './dep.js' assert\n{ type: 'json' };\nexport { value as answer };\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("split attributes clause body should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn split_reexport_attributes_clause_body_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\n")
+        .with_module(
+            "bridge.js",
+            "export { value as answer } from './dep.js' assert\n{ type: 'json' };\n",
+        )
+        .with_module(
+            "entry.js",
+            "import { answer } from './bridge.js';\nexport const total = answer;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("split re-export attributes clause body should evaluate");
+    assert_eq!(expect_number(&exports, "total"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}

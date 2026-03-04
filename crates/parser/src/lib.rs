@@ -551,9 +551,12 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             return true;
         }
         if rest.starts_with('\'') || rest.starts_with('"') {
-            return false;
+            return module_string_literal_has_incomplete_attributes(rest);
         }
-        return split_module_from_clause(rest).is_none();
+        let Some((_clause, raw_specifier)) = split_module_from_clause(rest) else {
+            return true;
+        };
+        return module_string_literal_has_incomplete_attributes(raw_specifier);
     }
 
     let Some(export_line) = normalize_module_declaration_keyword(source, "export", &['{', '*'])
@@ -574,7 +577,13 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             return true;
         };
         let suffix = export_body[closing_brace + 1..].trim();
-        return !suffix.is_empty() && strip_module_from_keyword(suffix).is_none();
+        if suffix.is_empty() {
+            return false;
+        }
+        let Some(raw_specifier) = strip_module_from_keyword(suffix) else {
+            return true;
+        };
+        return module_string_literal_has_incomplete_attributes(raw_specifier);
     }
 
     if export_body.starts_with('*') {
@@ -583,7 +592,8 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             .expect("prefix checked")
             .trim_start();
         if strip_module_from_keyword(after_star).is_some() {
-            return false;
+            return strip_module_from_keyword(after_star)
+                .is_some_and(module_string_literal_has_incomplete_attributes);
         }
         if let Some(after_as) = after_star.strip_prefix("as") {
             if !(after_as.chars().next().is_some_and(char::is_whitespace)
@@ -599,7 +609,10 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             if !consumed_separator {
                 return false;
             }
-            return split_module_from_clause(after_as).is_none();
+            let Some((_exported, raw_specifier)) = split_module_from_clause(after_as) else {
+                return true;
+            };
+            return module_string_literal_has_incomplete_attributes(raw_specifier);
         }
         return true;
     }
@@ -1456,6 +1469,17 @@ fn parse_braced_clause_inner(clause: &str) -> Result<String, ParseError> {
 }
 
 fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
+    let (literal, trailing) = split_module_string_literal_parts(source)?;
+    if !trailing.is_empty() && !is_supported_module_attributes_clause(trailing) {
+        return Err(ParseError {
+            message: "unsupported module attributes clause".to_string(),
+            position: 0,
+        });
+    }
+    Ok(literal.to_string())
+}
+
+fn split_module_string_literal_parts(source: &str) -> Result<(&str, &str), ParseError> {
     let source = source.trim();
     let quote = source.chars().next().ok_or(ParseError {
         message: "expected module specifier".to_string(),
@@ -1490,14 +1514,9 @@ fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
             position: 0,
         });
     };
+    let literal = &source[quote.len_utf8()..closing_index];
     let trailing = source[closing_index + quote.len_utf8()..].trim();
-    if !trailing.is_empty() && !is_supported_module_attributes_clause(trailing) {
-        return Err(ParseError {
-            message: "unsupported module attributes clause".to_string(),
-            position: 0,
-        });
-    }
-    Ok(source[quote.len_utf8()..closing_index].to_string())
+    Ok((literal, trailing))
 }
 
 fn is_supported_module_attributes_clause(source: &str) -> bool {
@@ -1592,6 +1611,21 @@ fn is_supported_module_attributes_clause(source: &str) -> bool {
         return false;
     };
     clause[closing_index + 1..].trim().is_empty()
+}
+
+fn module_string_literal_has_incomplete_attributes(source: &str) -> bool {
+    let Ok((_literal, trailing)) = split_module_string_literal_parts(source) else {
+        return false;
+    };
+    if trailing.is_empty() {
+        return false;
+    }
+    let Some((normalized, _)) = strip_module_keyword_leading_separators(trailing) else {
+        return false;
+    };
+    let starts_with_attributes_keyword =
+        normalized.starts_with("assert") || normalized.starts_with("with");
+    starts_with_attributes_keyword && !is_supported_module_attributes_clause(normalized)
 }
 
 fn parse_module_import_name(name: &str) -> Result<String, ParseError> {

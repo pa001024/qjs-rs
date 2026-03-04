@@ -778,3 +778,34 @@ fn module_parse_default_with_comment_separator() {
         local: "namedType".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_split_attributes_clause_body() {
+    let source =
+        "import { value } from './dep.js' assert\n{ type: 'json' };\nexport { value as answer };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "value".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_split_reexport_attributes_clause_body() {
+    let source = "export { value as answer } from './dep.js' assert\n{ type: 'json' };\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "value");
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "$__qjs_module_reexport_0__$".to_string(),
+    }));
+}
