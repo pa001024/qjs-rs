@@ -2258,6 +2258,97 @@ impl Vm {
             .cloned()
     }
 
+    /// 调用任意可调用值（函数/host 函数/native 函数）。
+    pub fn call_value(
+        &mut self,
+        callee: JsValue,
+        this_arg: Option<JsValue>,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        self.execute_callable(callee, this_arg, args, realm, caller_strict)
+    }
+
+    /// 调用全局可调用值（`globalThis[name](...args)`）。
+    pub fn call_global(
+        &mut self,
+        name: &str,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let callee = self
+            .global_property(name)
+            .ok_or(VmError::TypeError("global callable not found"))?;
+        self.execute_callable(callee, None, args, realm, caller_strict)
+    }
+
+    /// 以构造方式调用任意构造器值（`new callee(...args)`）。
+    pub fn construct_value(
+        &mut self,
+        callee: JsValue,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        self.execute_construct_value(callee, args, realm, caller_strict)
+    }
+
+    /// 以构造方式调用全局构造器（`new globalThis[name](...args)`）。
+    pub fn construct_global(
+        &mut self,
+        name: &str,
+        args: Vec<JsValue>,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<JsValue, VmError> {
+        let callee = self
+            .global_property(name)
+            .ok_or(VmError::TypeError("global constructor not found"))?;
+        self.execute_construct_value(callee, args, realm, caller_strict)
+    }
+
+    /// 创建一个普通对象（`{}`）。
+    pub fn create_object(&mut self) -> JsValue {
+        self.create_object_value()
+    }
+
+    /// 读取对象属性（等价 JS `target[key]`）。
+    pub fn get_property(
+        &mut self,
+        target: JsValue,
+        key: &str,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.get_property_from_receiver(target, key, realm)
+    }
+
+    /// 设置对象属性（等价 JS `target[key] = value`）。
+    pub fn set_property(
+        &mut self,
+        target: JsValue,
+        key: impl Into<String>,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        self.set_property_on_receiver(target, key.into(), value, realm)
+    }
+
+    /// 设置全局属性（等价 JS `globalThis[name] = value`）。
+    pub fn set_global_property(
+        &mut self,
+        name: impl Into<String>,
+        value: JsValue,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let global = self
+            .global_object_id
+            .map(JsValue::Object)
+            .ok_or(VmError::TypeError("global object unavailable"))?;
+        self.set_property_on_receiver(global, name.into(), value, realm)
+    }
+
     pub fn enqueue_host_promise_job(
         &mut self,
         value: JsValue,

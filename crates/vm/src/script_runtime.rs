@@ -250,18 +250,27 @@ impl ScriptRuntime {
     }
 
     pub fn execute_source(&mut self, source: &str) -> Result<ScriptRunOutput, ScriptRuntimeError> {
+        let mut output = self.execute_source_without_drain(source)?;
+        output.drained_promise_jobs = self.drain_all_promise_jobs()?;
+        Ok(output)
+    }
+
+    /// 执行脚本源码但不主动 drain Promise job 队列。
+    pub fn execute_source_without_drain(
+        &mut self,
+        source: &str,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError> {
         let script = parse_script(source).map_err(|err| ScriptRuntimeError::Parse(err.message))?;
         let chunk = compile_script(&script);
         let value = self
             .vm
             .execute_in_realm_persistent(&chunk, &self.realm)
             .map_err(ScriptRuntimeError::Vm)?;
-        let drained_promise_jobs = self.drain_all_promise_jobs()?;
-        let result_text = script_result_text(&value);
+        let result_text = script_result_text_runtime(&mut self.vm, &value, &self.realm);
         Ok(ScriptRunOutput {
             value,
             result_text,
-            drained_promise_jobs,
+            drained_promise_jobs: 0,
         })
     }
 
@@ -277,6 +286,24 @@ impl ScriptRuntime {
             ))
         })?;
         self.execute_source(&source)
+    }
+
+    /// 执行脚本文件但不主动 drain Promise job 队列。
+    pub fn execute_file_without_drain<P>(
+        &mut self,
+        script_path: P,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError>
+    where
+        P: AsRef<Path>,
+    {
+        let normalized = normalize_script_path(script_path)?;
+        let source = fs::read_to_string(&normalized).map_err(|err| {
+            ScriptRuntimeError::Io(format!(
+                "读取脚本失败：{}，错误信息：{err}",
+                normalized.display()
+            ))
+        })?;
+        self.execute_source_without_drain(&source)
     }
 
     /// 按预算 drain Promise jobs，返回本次处理的 job 数量。
@@ -345,6 +372,23 @@ pub fn script_result_text(value: &JsValue) -> String {
         JsValue::Bool(flag) => flag.to_string(),
         JsValue::Number(number) => format_js_number(*number),
         _ => format!("{value:?}"),
+    }
+}
+
+fn script_result_text_runtime(vm: &mut Vm, value: &JsValue, realm: &Realm) -> String {
+    match value {
+        JsValue::Undefined | JsValue::Null => String::new(),
+        JsValue::String(text) => text.clone(),
+        JsValue::Bool(flag) => flag.to_string(),
+        JsValue::Number(number) => format_js_number(*number),
+        other => {
+            let output = vm.call_global("String", vec![other.clone()], realm, false);
+            match output {
+                Ok(JsValue::String(text)) => text,
+                Ok(other) => script_result_text(&other),
+                Err(_) => script_result_text(other),
+            }
+        }
     }
 }
 
@@ -499,6 +543,21 @@ mod tests {
             .execute_source("globalThis.__qjs_script_runner_value;")
             .expect("readback should execute");
         assert_eq!(read_back.value, JsValue::Number(7.0));
+    }
+
+    #[test]
+    fn result_text_uses_js_string_coercion_for_objects() {
+        let mut runtime = ScriptRuntime::new();
+
+        let plain_object = runtime
+            .execute_source("({ foo: 1 });")
+            .expect("plain object source should execute");
+        assert_eq!(plain_object.result_text, "[object Object]");
+
+        let boxed_number = runtime
+            .execute_source("Object(64);")
+            .expect("boxed number source should execute");
+        assert_eq!(boxed_number.result_text, "64");
     }
 
     #[test]

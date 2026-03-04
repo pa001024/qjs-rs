@@ -25,7 +25,7 @@ pub type HostClassConstructor<T> =
 
 /// Host class 实例同步方法回调。
 pub type HostClassInstanceMethod<T> =
-    dyn FnMut(&mut T, Vec<JsValue>) -> Result<JsValue, VmError> + 'static;
+    dyn FnMut(&mut crate::Vm, &mut T, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError> + 'static;
 
 /// Host class 实例异步方法回调。
 pub type HostClassAsyncInstanceMethod<T> =
@@ -49,7 +49,8 @@ impl<T> HostClassMethodRegistration<T> {
     /// 创建实例同步方法注册项。
     pub fn new<F>(name: impl Into<String>, length: f64, callback: F) -> Self
     where
-        F: FnMut(&mut T, Vec<JsValue>) -> Result<JsValue, VmError> + 'static,
+        F: FnMut(&mut crate::Vm, &mut T, Vec<JsValue>, &Realm, bool) -> Result<JsValue, VmError>
+            + 'static,
     {
         Self {
             name: name.into(),
@@ -273,12 +274,14 @@ impl ScriptRuntime {
             self.register_host_callback(ScriptHostCallbackRegistration::function(
                 hidden_name.clone(),
                 method_length,
-                move |vm, this_arg, args, _realm, _strict| {
+                move |vm, this_arg, args, realm, strict| {
                     let this_value = this_arg.ok_or(VmError::TypeError("HostClass:MissingThis"))?;
-                    let instance = vm
-                        .opaque_data_mut::<T>(&this_value)
+                    let mut instance = vm
+                        .take_opaque_data::<T>(&this_value)
                         .ok_or(VmError::TypeError("HostClass:MissingInstance"))?;
-                    method_callback(instance, args)
+                    let result = method_callback(vm, &mut instance, args, realm, strict);
+                    let _ = vm.bind_opaque_data(&this_value, instance);
+                    result
                 },
             ))?;
             let method_name_js = js_string_literal(&method_name)?;
@@ -533,6 +536,14 @@ impl BoaLikeHostAdapter {
         self.runtime.execute_source(source)
     }
 
+    /// 运行脚本源码但不主动 drain Promise jobs。
+    pub fn run_script_source_without_drain(
+        &mut self,
+        source: &str,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError> {
+        self.runtime.execute_source_without_drain(source)
+    }
+
     /// 运行脚本文件。
     pub fn run_script_file<P>(
         &mut self,
@@ -542,6 +553,17 @@ impl BoaLikeHostAdapter {
         P: AsRef<Path>,
     {
         self.runtime.execute_file(script_path)
+    }
+
+    /// 运行脚本文件但不主动 drain Promise jobs。
+    pub fn run_script_file_without_drain<P>(
+        &mut self,
+        script_path: P,
+    ) -> Result<ScriptRunOutput, ScriptRuntimeError>
+    where
+        P: AsRef<Path>,
+    {
+        self.runtime.execute_file_without_drain(script_path)
     }
 
     /// 手动 drain Promise jobs。
