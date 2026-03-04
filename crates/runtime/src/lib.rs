@@ -17,6 +17,7 @@ pub enum NativeFunction {
     ObjectGetOwnPropertySymbols,
     ObjectCreate,
     ObjectAssign,
+    ObjectFromEntries,
     ObjectSetPrototypeOf,
     ObjectDefineProperty,
     ObjectDefineProperties,

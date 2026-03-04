@@ -10209,6 +10209,7 @@ impl Vm {
             }
             NativeFunction::ObjectCreate => self.execute_object_create(&args, realm),
             NativeFunction::ObjectAssign => self.execute_object_assign(&args, realm),
+            NativeFunction::ObjectFromEntries => self.execute_object_from_entries(&args, realm),
             NativeFunction::ObjectSetPrototypeOf => self.execute_object_set_prototype_of(&args),
             NativeFunction::ObjectDefineProperty => {
                 self.execute_object_define_property(&args, realm)
@@ -16209,6 +16210,14 @@ impl Vm {
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
         object_builtins::execute_object_values(self, args, realm)
+    }
+
+    fn execute_object_from_entries(
+        &mut self,
+        args: &[JsValue],
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        object_builtins::execute_object_from_entries(self, args, realm)
     }
 
     fn execute_object_get_own_property_names(
@@ -24389,6 +24398,7 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "getOwnPropertySymbols")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "assign")
+                | (NativeFunction::ObjectConstructor, "fromEntries")
                 | (NativeFunction::ObjectConstructor, "hasOwn")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "preventExtensions")
@@ -25961,6 +25971,7 @@ impl Vm {
             NativeFunction::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
             NativeFunction::ObjectCreate => "create",
             NativeFunction::ObjectAssign => "assign",
+            NativeFunction::ObjectFromEntries => "fromEntries",
             NativeFunction::ObjectSetPrototypeOf => "setPrototypeOf",
             NativeFunction::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
             NativeFunction::ObjectGetOwnPropertyDescriptors => "getOwnPropertyDescriptors",
@@ -26207,6 +26218,9 @@ impl Vm {
             }
             (NativeFunction::ObjectConstructor, "assign") => {
                 JsValue::NativeFunction(NativeFunction::ObjectAssign)
+            }
+            (NativeFunction::ObjectConstructor, "fromEntries") => {
+                JsValue::NativeFunction(NativeFunction::ObjectFromEntries)
             }
             (NativeFunction::ObjectConstructor, "hasOwn") => {
                 let has_own = self.create_host_function_value(HostFunction::ObjectHasOwn);
@@ -26457,6 +26471,7 @@ impl Vm {
             | (NativeFunction::ObjectKeys, "length")
             | (NativeFunction::ObjectEntries, "length")
             | (NativeFunction::ObjectValues, "length")
+            | (NativeFunction::ObjectFromEntries, "length")
             | (NativeFunction::ObjectGetOwnPropertyNames, "length")
             | (NativeFunction::ObjectGetOwnPropertySymbols, "length")
             | (NativeFunction::ObjectPreventExtensions, "length")

@@ -84,6 +84,68 @@ pub(super) fn execute_object_assign(
     Ok(target)
 }
 
+pub(super) fn execute_object_from_entries(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+    let target = vm.create_object_value();
+    let iterator_record = vm.create_for_of_runtime_iterator_record(iterable, realm)?;
+
+    loop {
+        let step = vm.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+        let done = vm
+            .get_property_from_receiver(step.clone(), "done", realm)
+            .map(|value| vm.is_truthy(&value))?;
+        if done {
+            break;
+        }
+
+        let next = match vm.get_property_from_receiver(step, "value", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if !Vm::is_object_like_value(&next) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(VmError::TypeError(
+                "Object.fromEntries iterable entries must be object",
+            ));
+        }
+
+        let key = match vm.get_property_from_receiver(next.clone(), "0", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let value = match vm.get_property_from_receiver(next, "1", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key = match vm.coerce_to_property_key_runtime(key, realm, false) {
+            Ok(key) => key,
+            Err(err) => {
+                let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if let Err(err) = vm.create_data_property_or_throw(target.clone(), key, value, realm) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(err);
+        }
+    }
+
+    Ok(target)
+}
+
 fn collect_object_assign_keys(
     vm: &mut Vm,
     source_object: JsValue,
