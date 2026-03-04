@@ -1,20 +1,18 @@
 /*---
-description: object spread evaluates source properties in key order
+description: object spread evaluates source expressions in left-to-right order
 ---*/
 
 var log = "";
-var source = {
-  get a() {
-    log += "a";
-    return 1;
-  },
-  get b() {
-    log += "b";
-    return 2;
-  }
-};
+function first() {
+  log += "a";
+  return { a: 1 };
+}
+function second() {
+  log += "b";
+  return { b: 2 };
+}
 
-var out = { ...source };
+var out = { ...first(), ...second() };
 
 assert.sameValue(log, "ab");
 assert.sameValue(out.a, 1);
