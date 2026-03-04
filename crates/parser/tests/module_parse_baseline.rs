@@ -679,3 +679,36 @@ fn module_parse_reexport_with_comments_around_from_keyword() {
         local: "$__qjs_module_reexport_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_namespace_import_with_comment_after_as() {
+    let source = "import * as/* gap */ns from './dep.js';\nexport const answer = ns.value;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(
+        parsed.imports[0].bindings,
+        vec![ModuleImportBinding {
+            imported: "*".to_string(),
+            local: "ns".to_string(),
+        }]
+    );
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_export_star_namespace_with_comment_after_as() {
+    let source = "export * as/* gap */ns from './dep.js';\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports[0].specifier, "./dep.js");
+    assert_eq!(parsed.imports[0].bindings.len(), 1);
+    assert_eq!(parsed.imports[0].bindings[0].imported, "*");
+    assert_eq!(parsed.exports.len(), 1);
+    assert_eq!(parsed.exports[0].exported, "ns");
+}

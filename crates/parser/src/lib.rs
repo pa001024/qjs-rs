@@ -586,10 +586,20 @@ fn module_declaration_needs_followup(source: &str) -> bool {
             return false;
         }
         if let Some(after_as) = after_star.strip_prefix("as") {
-            if !after_as.chars().next().is_some_and(char::is_whitespace) {
+            if !(after_as.chars().next().is_some_and(char::is_whitespace)
+                || after_as.starts_with('/'))
+            {
                 return false;
             }
-            return split_module_from_clause(after_as.trim_start()).is_none();
+            let Some((after_as, consumed_separator)) =
+                strip_module_keyword_leading_separators(after_as)
+            else {
+                return true;
+            };
+            if !consumed_separator {
+                return false;
+            }
+            return split_module_from_clause(after_as).is_none();
         }
         return true;
     }
@@ -979,10 +989,17 @@ fn parse_namespace_import_binding(clause: &str) -> Result<Option<ModuleImportBin
     let Some(after_as) = after_star.strip_prefix("as") else {
         return Ok(None);
     };
-    if !after_as.chars().next().is_some_and(char::is_whitespace) {
+    if !(after_as.chars().next().is_some_and(char::is_whitespace) || after_as.starts_with('/')) {
         return Ok(None);
     }
-    let local = parse_module_binding_identifier(after_as.trim_start())?;
+    let Some((after_as, consumed_separator)) = strip_module_keyword_leading_separators(after_as)
+    else {
+        return Ok(None);
+    };
+    if !consumed_separator {
+        return Ok(None);
+    }
+    let local = parse_module_binding_identifier(after_as)?;
     Ok(Some(ModuleImportBinding {
         imported: "*".to_string(),
         local,
@@ -1008,10 +1025,16 @@ fn parse_export_star_clause(clause: &str) -> Result<Option<ExportStarClause>, Pa
     let Some(after_as) = after_star.strip_prefix("as") else {
         return Ok(None);
     };
-    if !after_as.chars().next().is_some_and(char::is_whitespace) {
+    if !(after_as.chars().next().is_some_and(char::is_whitespace) || after_as.starts_with('/')) {
         return Ok(None);
     }
-    let after_as = after_as.trim_start();
+    let Some((after_as, consumed_separator)) = strip_module_keyword_leading_separators(after_as)
+    else {
+        return Ok(None);
+    };
+    if !consumed_separator {
+        return Ok(None);
+    }
     let Some((raw_exported, raw_specifier)) = split_module_from_clause(after_as) else {
         return Err(ParseError {
             message: "unsupported export form".to_string(),

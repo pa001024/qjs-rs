@@ -1095,6 +1095,42 @@ fn module_reexport_with_comments_around_from_keyword_parses_and_evaluates() {
 }
 
 #[test]
+fn module_namespace_import_with_comment_after_as_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\nexport default 7;\n")
+        .with_module(
+            "entry.js",
+            "import * as/* gap */ns from './dep.js';\nexport const answer = ns.value + ns.default;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("namespace import with comment after as should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 49.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
+fn module_export_star_namespace_with_comment_after_as_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default()
+        .with_module("dep.js", "export const value = 42;\nexport default 7;\n")
+        .with_module("bridge.js", "export * as/* gap */ns from './dep.js';\n")
+        .with_module(
+            "entry.js",
+            "import { ns } from './bridge.js';\nexport const answer = ns.value + ns.default;\n",
+        );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("export-star namespace with comment after as should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 49.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+    assert_eq!(host.load_count("bridge.js"), 1);
+    assert_eq!(host.load_count("dep.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");
