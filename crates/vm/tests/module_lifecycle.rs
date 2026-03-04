@@ -758,6 +758,36 @@ fn module_multiline_default_export_expression_parses_and_evaluates() {
 }
 
 #[test]
+fn module_default_named_function_declaration_binding_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "export default function Named() { return 41; }\n\
+         export const answer = Named() + 1;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default named function declaration export should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
+fn module_default_named_class_declaration_binding_parses_and_evaluates() {
+    let mut host = MemoryModuleHost::default().with_module(
+        "entry.js",
+        "export default class Counter { static base() { return 41; } }\n\
+         export const answer = Counter.base() + 1;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default named class declaration export should evaluate");
+    assert_eq!(load_number_export(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
 fn module_cache_gc_root_integrity() {
     let mut host =
         MemoryModuleHost::default().with_module("entry.js", "export const answer = 42;\n");

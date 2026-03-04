@@ -201,16 +201,29 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
             }
             if let Some(default_expr) = strip_module_export_default_prefix(export_body) {
                 let default_expr = default_expr.trim();
-                let expr = trim_module_declaration_terminator(default_expr);
-                if expr.is_empty() {
+                if default_expr.is_empty() {
                     return Err(ParseError {
                         message: "export default requires an expression".to_string(),
                         position: 0,
                     });
                 }
-                let local = format!("$__qjs_module_default_export_{default_export_index}__$");
-                default_export_index += 1;
-                transformed_lines.push(format!("const {local} = {expr};"));
+                let local = if let Some(binding) = parse_named_default_export_binding(default_expr)?
+                {
+                    transformed_lines.push(ensure_module_statement_terminated(default_expr));
+                    binding
+                } else {
+                    let expr = trim_module_declaration_terminator(default_expr);
+                    if expr.is_empty() {
+                        return Err(ParseError {
+                            message: "export default requires an expression".to_string(),
+                            position: 0,
+                        });
+                    }
+                    let local = format!("$__qjs_module_default_export_{default_export_index}__$");
+                    default_export_index += 1;
+                    transformed_lines.push(format!("const {local} = {expr};"));
+                    local
+                };
                 register_module_export(
                     &mut exports,
                     &mut exported_names,
@@ -876,6 +889,43 @@ fn parse_module_export_function_name(declaration: &str) -> Result<Option<String>
         });
     }
     Ok(Some(parse_leading_identifier(rest)?))
+}
+
+fn parse_named_default_export_binding(declaration: &str) -> Result<Option<String>, ParseError> {
+    if let Some(rest) = declaration.strip_prefix("function") {
+        return parse_named_default_export_function_binding(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("async function") {
+        return parse_named_default_export_function_binding(rest);
+    }
+    if let Some(rest) = declaration.strip_prefix("class") {
+        let rest = rest.trim_start();
+        if !starts_with_module_identifier_start(rest) {
+            return Ok(None);
+        }
+        return Ok(Some(parse_leading_identifier(rest)?));
+    }
+    Ok(None)
+}
+
+fn parse_named_default_export_function_binding(rest: &str) -> Result<Option<String>, ParseError> {
+    let rest = rest.trim_start();
+    let rest = if let Some(rest) = rest.strip_prefix('*') {
+        rest.trim_start()
+    } else {
+        rest
+    };
+    if !starts_with_module_identifier_start(rest) {
+        return Ok(None);
+    }
+    Ok(Some(parse_leading_identifier(rest)?))
+}
+
+fn starts_with_module_identifier_start(source: &str) -> bool {
+    source
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphabetic())
 }
 
 fn trim_module_declaration_terminator(source: &str) -> &str {

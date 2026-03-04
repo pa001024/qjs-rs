@@ -372,3 +372,34 @@ fn module_parse_multiline_default_export_expression() {
         local: "$__qjs_module_default_export_0__$".to_string(),
     }));
 }
+
+#[test]
+fn module_parse_default_named_function_declaration_binding() {
+    let source =
+        "export default function Named() { return 41; }\nexport const answer = Named() + 1;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Named".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}
+
+#[test]
+fn module_parse_default_named_class_declaration_binding() {
+    let source = "export default class Counter { static base() { return 41; } }\nexport const answer = Counter.base() + 1;\n";
+    let parsed = parse_module(source).expect("module parsing should succeed");
+
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "default".to_string(),
+        local: "Counter".to_string(),
+    }));
+    assert!(parsed.exports.contains(&ModuleExport {
+        exported: "answer".to_string(),
+        local: "answer".to_string(),
+    }));
+}

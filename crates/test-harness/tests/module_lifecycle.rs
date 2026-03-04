@@ -510,3 +510,33 @@ fn multiline_default_export_expression_parses_and_evaluates() {
     assert_eq!(host.load_count("entry.js"), 1);
     assert_eq!(host.load_count("dep.js"), 1);
 }
+
+#[test]
+fn default_named_function_declaration_binding_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export default function Named() { return 41; }\n\
+         export const answer = Named() + 1;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default named function declaration export should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
+
+#[test]
+fn default_named_class_declaration_binding_parses_and_evaluates() {
+    let mut host = HarnessModuleHost::default().with_module(
+        "entry.js",
+        "export default class Counter { static base() { return 41; } }\n\
+         export const answer = Counter.base() + 1;\n",
+    );
+    let mut vm = Vm::default();
+    let exports = vm
+        .evaluate_module_entry("entry.js", &mut host)
+        .expect("default named class declaration export should evaluate");
+    assert_eq!(expect_number(&exports, "answer"), 42.0);
+    assert_eq!(host.load_count("entry.js"), 1);
+}
