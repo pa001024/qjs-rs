@@ -646,7 +646,7 @@ fn parse_named_reexport_clause(
     clause: &str,
 ) -> Result<Option<(String, Vec<(String, String)>)>, ParseError> {
     let body = trim_module_declaration_terminator(clause);
-    let Some(closing_brace) = body.rfind('}') else {
+    let Some(closing_brace) = find_matching_brace_end(body) else {
         return Err(ParseError {
             message: "unsupported export re-export form".to_string(),
             position: 0,
@@ -666,6 +666,74 @@ fn parse_named_reexport_clause(
     let specifier = parse_module_string_literal(raw_specifier.trim())?;
     let bindings = parse_named_reexport_bindings(named_clause)?;
     Ok(Some((specifier, bindings)))
+}
+
+fn find_matching_brace_end(source: &str) -> Option<usize> {
+    if !source.trim_start().starts_with('{') {
+        return None;
+    }
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut depth = 0usize;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '{' {
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
 }
 
 fn parse_named_reexport_bindings(clause: &str) -> Result<Vec<(String, String)>, ParseError> {
@@ -1060,13 +1128,131 @@ fn parse_module_string_literal(source: &str) -> Result<String, ParseError> {
             position: 0,
         });
     }
-    if !source.ends_with(quote) || source.len() < 2 {
+
+    let mut escaped = false;
+    let mut closing_index = None;
+    for (index, ch) in source.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            closing_index = Some(index);
+            break;
+        }
+    }
+    let Some(closing_index) = closing_index else {
         return Err(ParseError {
             message: "unterminated module specifier literal".to_string(),
             position: 0,
         });
+    };
+    let trailing = source[closing_index + quote.len_utf8()..].trim();
+    if !trailing.is_empty() && !is_supported_module_attributes_clause(trailing) {
+        return Err(ParseError {
+            message: "unsupported module attributes clause".to_string(),
+            position: 0,
+        });
     }
-    Ok(source[1..source.len() - 1].to_string())
+    Ok(source[quote.len_utf8()..closing_index].to_string())
+}
+
+fn is_supported_module_attributes_clause(source: &str) -> bool {
+    let source = source.trim_start();
+    let after_keyword = if let Some(rest) = source.strip_prefix("assert") {
+        rest
+    } else if let Some(rest) = source.strip_prefix("with") {
+        rest
+    } else {
+        return false;
+    };
+
+    if let Some(first) = after_keyword.chars().next()
+        && !(first.is_whitespace() || first == '{')
+    {
+        return false;
+    }
+    let clause = if after_keyword.starts_with('{') {
+        after_keyword
+    } else {
+        after_keyword.trim_start()
+    };
+    if !clause.starts_with('{') {
+        return false;
+    }
+
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut depth = 0usize;
+    let mut closing_index = None;
+    let mut chars = clause.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' {
+            if chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_line_comment = true;
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '{' {
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                closing_index = Some(index);
+                break;
+            }
+        }
+    }
+
+    let Some(closing_index) = closing_index else {
+        return false;
+    };
+    clause[closing_index + 1..].trim().is_empty()
 }
 
 fn parse_module_import_name(name: &str) -> Result<String, ParseError> {
