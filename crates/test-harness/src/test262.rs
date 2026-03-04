@@ -205,6 +205,7 @@ const UNSUPPORTED_TEST262_FEATURES: &[&str] = &[
     "Temporal",
     "WeakRef",
     "Atomics",
+    "resizable-arraybuffer",
 ];
 
 fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
