@@ -146,7 +146,7 @@ pub(super) fn execute_object_from_entries(
     Ok(target)
 }
 
-fn collect_object_assign_keys(
+pub(super) fn collect_object_assign_keys(
     vm: &mut Vm,
     source_object: JsValue,
     realm: &Realm,
@@ -185,7 +185,7 @@ fn collect_object_assign_keys(
     Ok(keys)
 }
 
-fn object_assign_get_own_property_descriptor(
+pub(super) fn object_assign_get_own_property_descriptor(
     vm: &mut Vm,
     source_object: JsValue,
     key: &str,

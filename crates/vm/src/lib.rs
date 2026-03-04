@@ -17313,6 +17313,69 @@ impl Vm {
         }
     }
 
+    fn materialize_boxed_string_index_properties(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), VmError> {
+        let Some(JsValue::String(value)) = self.boxed_primitive_value(object_id) else {
+            return Ok(());
+        };
+        let object = self
+            .objects
+            .get_mut(&object_id)
+            .ok_or(VmError::UnknownObject(object_id))?;
+        for (index, ch) in value.chars().enumerate() {
+            let key = index.to_string();
+            if object.properties.contains_key(&key) {
+                continue;
+            }
+            object.properties.insert(key.clone(), JsValue::String(ch.to_string()));
+            object.property_attributes.entry(key).or_default();
+        }
+        Ok(())
+    }
+
+    fn define_integrity_property_on_target(
+        &mut self,
+        target: JsValue,
+        key: String,
+        descriptor: JsValue,
+        realm: &Realm,
+    ) -> Result<(), VmError> {
+        if let JsValue::Object(object_id) = target.clone()
+            && let Some((proxy_target, proxy_handler)) = self.object_proxy_slots(object_id)?
+        {
+            let trap =
+                self.get_property_from_receiver(proxy_handler.clone(), "defineProperty", realm)?;
+            if matches!(trap, JsValue::Undefined) {
+                if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+                    return Ok(());
+                }
+                let _ = self.execute_object_define_property(
+                    &[proxy_target, JsValue::String(key), descriptor],
+                    realm,
+                )?;
+                return Ok(());
+            }
+            if !Self::is_callable_value(&trap) {
+                return Err(VmError::TypeError("Proxy defineProperty trap must be callable"));
+            }
+            let trap_result = self.execute_callable(
+                trap,
+                Some(proxy_handler),
+                vec![proxy_target, JsValue::String(key), descriptor],
+                realm,
+                false,
+            )?;
+            if !self.is_truthy(&trap_result) {
+                return Err(VmError::TypeError("Proxy defineProperty trap returned false"));
+            }
+            return Ok(());
+        }
+        let _ = self.execute_object_define_property(&[target, JsValue::String(key), descriptor], realm)?;
+        Ok(())
+    }
+
     fn execute_object_is_sealed(
         &mut self,
         args: &[JsValue],
@@ -17384,8 +17447,40 @@ impl Vm {
         match target {
             JsValue::Object(object_id) => {
                 if self.has_object_marker(object_id, PROXY_OBJECT_MARKER_KEY)? {
-                    return Ok(JsValue::Object(object_id));
+                    let realm = Realm::default();
+                    let proxy = JsValue::Object(object_id);
+                    let keys =
+                        object_builtins::collect_object_assign_keys(self, proxy.clone(), &realm)?;
+                    for key in keys {
+                        let Some(current_desc) = object_builtins::object_assign_get_own_property_descriptor(
+                            self,
+                            proxy.clone(),
+                            &key,
+                            &realm,
+                        )?
+                        else {
+                            continue;
+                        };
+                        let is_accessor = self.has_property_on_receiver(&current_desc, "get", &realm)?
+                            || self.has_property_on_receiver(&current_desc, "set", &realm)?;
+                        let descriptor = if is_accessor {
+                            self.create_descriptor_object(vec![("configurable", JsValue::Bool(false))])
+                        } else {
+                            self.create_descriptor_object(vec![
+                                ("configurable", JsValue::Bool(false)),
+                                ("writable", JsValue::Bool(false)),
+                            ])
+                        };
+                        self.define_integrity_property_on_target(
+                            proxy.clone(),
+                            key,
+                            descriptor,
+                            &realm,
+                        )?;
+                    }
+                    return Ok(proxy);
                 }
+                self.materialize_boxed_string_index_properties(object_id)?;
                 let object = self
                     .objects
                     .get_mut(&object_id)
