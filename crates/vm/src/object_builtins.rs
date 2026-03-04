@@ -155,6 +155,17 @@ pub(super) fn execute_object_get_own_property_names(
     vm.create_array_from_string_keys(keys)
 }
 
+pub(super) fn execute_object_get_own_property_symbols(
+    vm: &mut Vm,
+    args: &[JsValue],
+) -> Result<JsValue, VmError> {
+    let _target = vm.coerce_object_for_object_builtins(
+        args.first().cloned().unwrap_or(JsValue::Undefined),
+        "Object.getOwnPropertySymbols target must be object",
+    )?;
+    vm.create_array_from_values(Vec::new())
+}
+
 pub(super) fn execute_object_define_properties(
     vm: &mut Vm,
     args: &[JsValue],

@@ -712,6 +712,7 @@ enum HostFunction {
     ObjectToLocaleString,
     ObjectPropertyIsEnumerable,
     ObjectValueOf,
+    ObjectHasOwn,
     ErrorToStringThis,
     AssertSameValue,
     AssertNotSameValue,
@@ -743,6 +744,233 @@ struct JsonStringifyContext {
     replacer_function: Option<JsValue>,
     property_list: Option<Vec<String>>,
     gap: String,
+}
+
+#[derive(Debug, Clone)]
+struct JsonReviverSourceEntry {
+    value: JsValue,
+    source: String,
+}
+
+type JsonReviverSourceMap = HashMap<ObjectId, HashMap<String, JsonReviverSourceEntry>>;
+
+#[derive(Debug, Clone)]
+enum JsonSourceNode {
+    Primitive { value: JsonValue, source: String },
+    Array(Vec<JsonSourceNode>),
+    Object(Vec<(String, JsonSourceNode)>),
+}
+
+struct JsonSourceParser<'a> {
+    source: &'a str,
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> JsonSourceParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            bytes: source.as_bytes(),
+            cursor: 0,
+        }
+    }
+
+    fn parse(mut self) -> Option<JsonSourceNode> {
+        self.skip_whitespace();
+        let node = self.parse_value()?;
+        self.skip_whitespace();
+        (self.cursor == self.bytes.len()).then_some(node)
+    }
+
+    fn parse_value(&mut self) -> Option<JsonSourceNode> {
+        self.skip_whitespace();
+        match self.peek()? {
+            b'{' => self.parse_object(),
+            b'[' => self.parse_array(),
+            b'"' => self.parse_string_primitive(),
+            b't' => self.parse_literal(b"true", JsonValue::Bool(true)),
+            b'f' => self.parse_literal(b"false", JsonValue::Bool(false)),
+            b'n' => self.parse_literal(b"null", JsonValue::Null),
+            b'-' | b'0'..=b'9' => self.parse_number(),
+            _ => None,
+        }
+    }
+
+    fn parse_object(&mut self) -> Option<JsonSourceNode> {
+        self.expect_byte(b'{')?;
+        self.skip_whitespace();
+        let mut entries = Vec::new();
+        if self.consume_byte(b'}') {
+            return Some(JsonSourceNode::Object(entries));
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.parse_string_literal()?;
+            self.skip_whitespace();
+            self.expect_byte(b':')?;
+            let value = self.parse_value()?;
+            entries.push((key, value));
+            self.skip_whitespace();
+            if self.consume_byte(b'}') {
+                break;
+            }
+            self.expect_byte(b',')?;
+        }
+        Some(JsonSourceNode::Object(entries))
+    }
+
+    fn parse_array(&mut self) -> Option<JsonSourceNode> {
+        self.expect_byte(b'[')?;
+        self.skip_whitespace();
+        let mut entries = Vec::new();
+        if self.consume_byte(b']') {
+            return Some(JsonSourceNode::Array(entries));
+        }
+        loop {
+            entries.push(self.parse_value()?);
+            self.skip_whitespace();
+            if self.consume_byte(b']') {
+                break;
+            }
+            self.expect_byte(b',')?;
+        }
+        Some(JsonSourceNode::Array(entries))
+    }
+
+    fn parse_string_literal(&mut self) -> Option<String> {
+        let (start, end) = self.scan_string_span()?;
+        serde_json::from_str::<String>(&self.source[start..end]).ok()
+    }
+
+    fn parse_string_primitive(&mut self) -> Option<JsonSourceNode> {
+        let (start, end) = self.scan_string_span()?;
+        let source = self.source[start..end].to_string();
+        let value = serde_json::from_str::<String>(&source).ok()?;
+        Some(JsonSourceNode::Primitive {
+            value: JsonValue::String(value),
+            source,
+        })
+    }
+
+    fn parse_number(&mut self) -> Option<JsonSourceNode> {
+        let start = self.cursor;
+        if self.consume_byte(b'-') && !matches!(self.peek(), Some(b'0'..=b'9')) {
+            return None;
+        }
+        match self.peek()? {
+            b'0' => {
+                self.cursor += 1;
+            }
+            b'1'..=b'9' => {
+                self.cursor += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.cursor += 1;
+                }
+            }
+            _ => return None,
+        }
+        if self.consume_byte(b'.') {
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return None;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.cursor += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.cursor += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.cursor += 1;
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return None;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.cursor += 1;
+            }
+        }
+        let source = self.source[start..self.cursor].to_string();
+        let value = serde_json::from_str::<JsonValue>(&source).ok()?;
+        if !value.is_number() {
+            return None;
+        }
+        Some(JsonSourceNode::Primitive { value, source })
+    }
+
+    fn parse_literal(&mut self, literal: &[u8], value: JsonValue) -> Option<JsonSourceNode> {
+        let start = self.cursor;
+        let end = start.checked_add(literal.len())?;
+        if end > self.bytes.len() || &self.bytes[start..end] != literal {
+            return None;
+        }
+        self.cursor = end;
+        Some(JsonSourceNode::Primitive {
+            value,
+            source: self.source[start..end].to_string(),
+        })
+    }
+
+    fn scan_string_span(&mut self) -> Option<(usize, usize)> {
+        let start = self.cursor;
+        self.expect_byte(b'"')?;
+        while self.cursor < self.bytes.len() {
+            match self.bytes[self.cursor] {
+                b'"' => {
+                    self.cursor += 1;
+                    return Some((start, self.cursor));
+                }
+                b'\\' => {
+                    self.cursor += 1;
+                    let escaped = *self.bytes.get(self.cursor)?;
+                    match escaped {
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                            self.cursor += 1;
+                        }
+                        b'u' => {
+                            for _ in 0..4 {
+                                self.cursor += 1;
+                                let digit = *self.bytes.get(self.cursor)?;
+                                if !(digit as char).is_ascii_hexdigit() {
+                                    return None;
+                                }
+                            }
+                            self.cursor += 1;
+                        }
+                        _ => return None,
+                    }
+                }
+                b'\x00'..=b'\x1F' => return None,
+                _ => {
+                    self.cursor += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.cursor += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.cursor).copied()
+    }
+
+    fn consume_byte(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_byte(&mut self, expected: u8) -> Option<()> {
+        self.consume_byte(expected).then_some(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2862,6 +3090,7 @@ impl Vm {
             | HostFunction::ObjectToLocaleString
             | HostFunction::ObjectPropertyIsEnumerable
             | HostFunction::ObjectValueOf
+            | HostFunction::ObjectHasOwn
             | HostFunction::ReflectDefineProperty
             | HostFunction::ReflectConstruct
             | HostFunction::ReflectGetOwnPropertyDescriptor
@@ -9598,6 +9827,18 @@ impl Vm {
                 )?;
                 Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
             }
+            HostFunction::ObjectHasOwn => {
+                let target = self.coerce_object_for_object_builtins(
+                    args.first().cloned().unwrap_or(JsValue::Undefined),
+                    "Object.hasOwn target must be object",
+                )?;
+                let key = self.coerce_to_property_key_runtime(
+                    args.get(1).cloned().unwrap_or(JsValue::Undefined),
+                    realm,
+                    caller_strict,
+                )?;
+                Ok(JsValue::Bool(self.has_own_property(&target, &key)?))
+            }
             HostFunction::IsPrototypeOf { .. } => {
                 let target = self.object_prototype_this_object(
                     this_arg,
@@ -9902,6 +10143,9 @@ impl Vm {
             NativeFunction::ObjectValues => self.execute_object_values(&args, realm),
             NativeFunction::ObjectGetOwnPropertyNames => {
                 self.execute_object_get_own_property_names(&args)
+            }
+            NativeFunction::ObjectGetOwnPropertySymbols => {
+                self.execute_object_get_own_property_symbols(&args)
             }
             NativeFunction::ObjectCreate => self.execute_object_create(&args, realm),
             NativeFunction::ObjectAssign => self.execute_object_assign(&args, realm),
@@ -14662,8 +14906,10 @@ impl Vm {
                     "entries",
                     "values",
                     "getOwnPropertyNames",
+                    "getOwnPropertySymbols",
                     "create",
                     "assign",
+                    "hasOwn",
                     "setPrototypeOf",
                     "preventExtensions",
                     "__forInKeys",
@@ -15829,6 +16075,13 @@ impl Vm {
         args: &[JsValue],
     ) -> Result<JsValue, VmError> {
         object_builtins::execute_object_get_own_property_names(self, args)
+    }
+
+    fn execute_object_get_own_property_symbols(
+        &mut self,
+        args: &[JsValue],
+    ) -> Result<JsValue, VmError> {
+        object_builtins::execute_object_get_own_property_symbols(self, args)
     }
 
     fn execute_object_define_properties(
@@ -23971,8 +24224,10 @@ impl Vm {
                 | (NativeFunction::ObjectConstructor, "entries")
                 | (NativeFunction::ObjectConstructor, "values")
                 | (NativeFunction::ObjectConstructor, "getOwnPropertyNames")
+                | (NativeFunction::ObjectConstructor, "getOwnPropertySymbols")
                 | (NativeFunction::ObjectConstructor, "create")
                 | (NativeFunction::ObjectConstructor, "assign")
+                | (NativeFunction::ObjectConstructor, "hasOwn")
                 | (NativeFunction::ObjectConstructor, "setPrototypeOf")
                 | (NativeFunction::ObjectConstructor, "preventExtensions")
                 | (NativeFunction::ObjectConstructor, "__forInKeys")
@@ -25762,11 +26017,20 @@ impl Vm {
             (NativeFunction::ObjectConstructor, "getOwnPropertyNames") => {
                 JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertyNames)
             }
+            (NativeFunction::ObjectConstructor, "getOwnPropertySymbols") => {
+                JsValue::NativeFunction(NativeFunction::ObjectGetOwnPropertySymbols)
+            }
             (NativeFunction::ObjectConstructor, "create") => {
                 JsValue::NativeFunction(NativeFunction::ObjectCreate)
             }
             (NativeFunction::ObjectConstructor, "assign") => {
                 JsValue::NativeFunction(NativeFunction::ObjectAssign)
+            }
+            (NativeFunction::ObjectConstructor, "hasOwn") => {
+                let has_own = self.create_host_function_value(HostFunction::ObjectHasOwn);
+                self.set_builtin_function_length(&has_own, 2.0);
+                self.set_builtin_function_name(&has_own, "hasOwn");
+                has_own
             }
             (NativeFunction::ObjectConstructor, "setPrototypeOf") => {
                 JsValue::NativeFunction(NativeFunction::ObjectSetPrototypeOf)
@@ -26012,6 +26276,7 @@ impl Vm {
             | (NativeFunction::ObjectEntries, "length")
             | (NativeFunction::ObjectValues, "length")
             | (NativeFunction::ObjectGetOwnPropertyNames, "length")
+            | (NativeFunction::ObjectGetOwnPropertySymbols, "length")
             | (NativeFunction::ObjectPreventExtensions, "length")
             | (NativeFunction::ObjectIsExtensible, "length")
             | (NativeFunction::ObjectIsSealed, "length")
@@ -26595,7 +26860,27 @@ impl Vm {
         if Self::is_callable_value(&reviver) {
             let holder = self.create_object_value();
             self.create_data_property_or_throw(holder.clone(), String::new(), result, realm)?;
-            result = self.json_internalize_property(holder, "", reviver, realm, caller_strict)?;
+            let mut source_map = None;
+            if let Some(source_node) = JsonSourceParser::new(&source).parse() {
+                let mut map: JsonReviverSourceMap = Default::default();
+                self.json_collect_reviver_source_map(
+                    holder.clone(),
+                    "",
+                    source_node,
+                    &mut map,
+                    realm,
+                    caller_strict,
+                )?;
+                source_map = Some(map);
+            }
+            result = self.json_internalize_property(
+                holder,
+                "",
+                reviver,
+                source_map.as_ref(),
+                realm,
+                caller_strict,
+            )?;
         }
         Ok(result)
     }
@@ -26702,7 +26987,8 @@ impl Vm {
                         .get_mut(&object_id)
                         .ok_or(VmError::UnknownObject(object_id))?;
                     target.properties.insert(key.clone(), converted);
-                    target.property_attributes.entry(key).or_default();
+                    target.property_attributes.entry(key.clone()).or_default();
+                    Self::update_object_property_order(target, &key, true);
                 }
                 Ok(JsValue::Object(object_id))
             }
@@ -26714,6 +27000,7 @@ impl Vm {
         holder: JsValue,
         key: &str,
         reviver: JsValue,
+        source_map: Option<&JsonReviverSourceMap>,
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
@@ -26732,6 +27019,7 @@ impl Vm {
                         value.clone(),
                         &entry_key,
                         reviver.clone(),
+                        source_map,
                         realm,
                         caller_strict,
                     )?;
@@ -26745,6 +27033,7 @@ impl Vm {
                         value.clone(),
                         &entry_key,
                         reviver.clone(),
+                        source_map,
                         realm,
                         caller_strict,
                     )?;
@@ -26753,13 +27042,106 @@ impl Vm {
             }
             value = JsValue::Object(object_id);
         }
+        let context = self.json_create_reviver_context(&holder, key, &value, source_map, realm)?;
         self.execute_callable(
             reviver,
             Some(holder),
-            vec![JsValue::String(key.to_string()), value],
+            vec![JsValue::String(key.to_string()), value, context],
             realm,
             caller_strict,
         )
+    }
+
+    fn json_collect_reviver_source_map(
+        &mut self,
+        holder: JsValue,
+        key: &str,
+        node: JsonSourceNode,
+        source_map: &mut JsonReviverSourceMap,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<(), VmError> {
+        let value = self.json_get_property(holder.clone(), key, realm, caller_strict)?;
+        match node {
+            JsonSourceNode::Primitive {
+                value: primitive_value,
+                source,
+            } => {
+                let expected_value = self.json_value_to_js_value(primitive_value)?;
+                if let JsValue::Object(holder_id) = holder {
+                    source_map.entry(holder_id).or_default().insert(
+                        key.to_string(),
+                        JsonReviverSourceEntry {
+                            value: expected_value,
+                            source,
+                        },
+                    );
+                }
+            }
+            JsonSourceNode::Array(elements) => {
+                if !matches!(value, JsValue::Object(_)) {
+                    return Ok(());
+                }
+                for (index, child) in elements.into_iter().enumerate() {
+                    self.json_collect_reviver_source_map(
+                        value.clone(),
+                        &index.to_string(),
+                        child,
+                        source_map,
+                        realm,
+                        caller_strict,
+                    )?;
+                }
+            }
+            JsonSourceNode::Object(entries) => {
+                if !matches!(value, JsValue::Object(_)) {
+                    return Ok(());
+                }
+                for (child_key, child) in entries {
+                    self.json_collect_reviver_source_map(
+                        value.clone(),
+                        &child_key,
+                        child,
+                        source_map,
+                        realm,
+                        caller_strict,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn json_create_reviver_context(
+        &mut self,
+        holder: &JsValue,
+        key: &str,
+        value: &JsValue,
+        source_map: Option<&JsonReviverSourceMap>,
+        realm: &Realm,
+    ) -> Result<JsValue, VmError> {
+        let context = self.create_object_value();
+        let Some(source_map) = source_map else {
+            return Ok(context);
+        };
+        let JsValue::Object(holder_id) = holder else {
+            return Ok(context);
+        };
+        let Some(entry) = source_map
+            .get(holder_id)
+            .and_then(|entries| entries.get(key))
+        else {
+            return Ok(context);
+        };
+        if self.same_value(value, &entry.value) {
+            self.create_data_property_or_throw(
+                context.clone(),
+                "source".to_string(),
+                JsValue::String(entry.source.clone()),
+                realm,
+            )?;
+        }
+        Ok(context)
     }
 
     fn json_define_or_remove_property(
