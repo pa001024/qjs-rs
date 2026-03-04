@@ -142,6 +142,7 @@ pub enum ObjectPropertyKey {
     Static(String),
     ProtoSetter,
     Computed(Box<Expr>),
+    Spread,
     AccessorGet(String),
     AccessorSet(String),
     AccessorGetComputed(Box<Expr>),

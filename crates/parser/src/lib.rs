@@ -2054,6 +2054,7 @@ fn validate_expression_strict_mode(expr: &Expr, strict: bool) -> Result<(), Pars
                     }
                     ObjectPropertyKey::Static(_)
                     | ObjectPropertyKey::ProtoSetter
+                    | ObjectPropertyKey::Spread
                     | ObjectPropertyKey::AccessorGet(_)
                     | ObjectPropertyKey::AccessorSet(_) => {}
                 }
@@ -6368,7 +6369,8 @@ impl Parser {
                     has_escape: false,
                 }),
                 ObjectPropertyKey::Computed(expr) => *expr,
-                ObjectPropertyKey::AccessorGet(_)
+                ObjectPropertyKey::Spread
+                | ObjectPropertyKey::AccessorGet(_)
                 | ObjectPropertyKey::AccessorSet(_)
                 | ObjectPropertyKey::AccessorGetComputed(_)
                 | ObjectPropertyKey::AccessorSetComputed(_) => {
@@ -8486,6 +8488,7 @@ impl Parser {
                             ObjectPropertyKey::Computed(key_expr) => ObjectPropertyKey::Computed(
                                 Box::new(Self::rewrite_constructor_super_property_expr(*key_expr)),
                             ),
+                            ObjectPropertyKey::Spread => ObjectPropertyKey::Spread,
                             ObjectPropertyKey::AccessorGet(name) => {
                                 ObjectPropertyKey::AccessorGet(name)
                             }
@@ -9104,6 +9107,20 @@ impl Parser {
             return Ok(Expr::ObjectLiteral(properties));
         }
         loop {
+            if self.matches(&TokenKind::Ellipsis) {
+                let spread_source = self.parse_expression_inner()?;
+                properties.push(ObjectProperty {
+                    key: ObjectPropertyKey::Spread,
+                    value: spread_source,
+                });
+                if self.matches(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
             if let Some(async_method) = self.try_parse_async_object_method()? {
                 properties.push(async_method);
                 if self.matches(&TokenKind::Comma) {
@@ -9173,6 +9190,9 @@ impl Parser {
                     | ObjectPropertyKey::AccessorGetComputed(_)
                     | ObjectPropertyKey::AccessorSetComputed(_) => {
                         return Err(self.error_current("unexpected accessor in object literal"));
+                    }
+                    ObjectPropertyKey::Spread => {
+                        return Err(self.error_current("unexpected spread in object literal"));
                     }
                     ObjectPropertyKey::ProtoSetter => {
                         return Err(
@@ -9923,6 +9943,27 @@ export default value;\n";
                 },
             ])),
         };
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parses_object_literal_with_spread_properties() {
+        let parsed =
+            parse_expression("({ answer: 1, ...rest, tail: 2 })").expect("parser should succeed");
+        let expected = Expr::ObjectLiteral(vec![
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("answer".to_string()),
+                value: Expr::Number(1.0),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Spread,
+                value: Expr::Identifier(Identifier("rest".to_string())),
+            },
+            ObjectProperty {
+                key: ObjectPropertyKey::Static("tail".to_string()),
+                value: Expr::Number(2.0),
+            },
+        ]);
         assert_eq!(parsed, expected);
     }
 

@@ -3845,6 +3845,22 @@ impl Vm {
                     );
                     self.stack.push(JsValue::Object(object_id));
                 }
+                Opcode::CopyDataProperties => {
+                    let spread_source = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    let result = {
+                        let args = [receiver.clone(), spread_source];
+                        self.execute_object_assign(&args, realm)
+                    };
+                    match result {
+                        Ok(target) => self.stack.push(target),
+                        Err(err) => {
+                            let target = self.route_runtime_error_to_handler(err, code.len())?;
+                            pc = target;
+                            continue;
+                        }
+                    }
+                }
                 Opcode::SetProperty(name) => {
                     let value = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let receiver = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -29599,6 +29615,22 @@ mod tests {
             vm.execute(&chunk),
             Err(VmError::TypeError("right-hand side of 'in' expects object"))
         );
+    }
+
+    #[test]
+    fn object_literal_spread_copies_own_properties_without_object_assign_lookup() {
+        let script = parse_script(
+            "var called = false;\
+             Object.assign = function() { called = true; return {}; };\
+             var source = { value: 40 };\
+             var out = { answer: 2, ...source };\
+             var out2 = { ...null, ...undefined, ok: 1 };\
+             out.answer === 2 && out.value === 40 && out2.ok === 1 && called === false;",
+        )
+        .expect("script should parse");
+        let chunk = compile_script(&script);
+        let mut vm = Vm::default();
+        assert_eq!(vm.execute(&chunk), Ok(JsValue::Bool(true)));
     }
 
     #[test]
