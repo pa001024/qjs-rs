@@ -1,11 +1,11 @@
 use bytecode::{Chunk, Opcode};
 use runtime::JsValue;
 use rustc_hash::FxHashMap as HashMap;
+use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -124,7 +124,9 @@ impl Vm {
             .expect("external host callback id overflow");
         self.external_host_callbacks.entries.insert(
             callback_id,
-            Rc::new(RefCell::new(ExternalHostCallbackEntry::Sync(Box::new(callback)))),
+            Rc::new(RefCell::new(ExternalHostCallbackEntry::Sync(Box::new(
+                callback,
+            )))),
         );
         let function = self.create_host_function_value(HostFunction::ExternalCallback {
             callback_id,

@@ -47,8 +47,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -619,9 +619,13 @@ enum HostFunction {
         constructable: bool,
     },
     /// Promise 构造器创建的 resolve 回调（避免每次构造都注册 external callback，显著降低 tight loop 开销）。
-    PromiseConstructorResolve { promise_id: ObjectId },
+    PromiseConstructorResolve {
+        promise_id: ObjectId,
+    },
     /// Promise 构造器创建的 reject 回调（避免每次构造都注册 external callback，显著降低 tight loop 开销）。
-    PromiseConstructorReject { promise_id: ObjectId },
+    PromiseConstructorReject {
+        promise_id: ObjectId,
+    },
     GeneratorFactory {
         producer: JsValue,
     },
@@ -1354,7 +1358,6 @@ impl AsyncHostCallbackQueue {
             guard = self.cv.wait(guard).ok()?;
         }
     }
-
 }
 
 #[derive(Default)]
@@ -1377,7 +1380,9 @@ fn async_host_callback_scheduler_slot() -> &'static Mutex<Option<AsyncHostCallba
     ASYNC_HOST_CALLBACK_SCHEDULER.get_or_init(|| Mutex::new(None))
 }
 
-fn ensure_async_host_callback_scheduler(tokio_handle: tokio::runtime::Handle) -> AsyncHostCallbackScheduler {
+fn ensure_async_host_callback_scheduler(
+    tokio_handle: tokio::runtime::Handle,
+) -> AsyncHostCallbackScheduler {
     if let Ok(guard) = async_host_callback_scheduler_slot().lock()
         && let Some(scheduler) = guard.as_ref()
     {
@@ -1393,15 +1398,17 @@ fn ensure_async_host_callback_scheduler(tokio_handle: tokio::runtime::Handle) ->
         let tokio_handle = tokio_handle.clone();
         let _ = thread::Builder::new()
             .name("qjs-rs-host-async-worker".to_string())
-            .spawn(move || loop {
-                let Some(task) = queue.pop() else {
-                    break;
-                };
-                let result = tokio_handle.block_on(task.future);
-                let _ = task.completion_sender.send(AsyncHostCallbackCompletion {
-                    task_id: task.task_id,
-                    result,
-                });
+            .spawn(move || {
+                loop {
+                    let Some(task) = queue.pop() else {
+                        break;
+                    };
+                    let result = tokio_handle.block_on(task.future);
+                    let _ = task.completion_sender.send(AsyncHostCallbackCompletion {
+                        task_id: task.task_id,
+                        result,
+                    });
+                }
             });
     }
 
@@ -3102,11 +3109,7 @@ impl Vm {
             return Err(VmError::TypeError("Promise:InvalidPromiseObject"));
         };
         let mut hooks = NoopPromiseJobHostHooks;
-        self.settle_promise_with_hooks(
-            promise_id,
-            PromiseSettlement::Fulfilled(value),
-            &mut hooks,
-        )
+        self.settle_promise_with_hooks(promise_id, PromiseSettlement::Fulfilled(value), &mut hooks)
     }
 
     pub fn drain_promise_jobs(
@@ -4061,9 +4064,7 @@ impl Vm {
                 let host_processed = self.run_runtime_host_tick_hook(budget, realm, strict)?;
                 let remaining = budget.saturating_sub(host_processed);
                 let _ = self.drain_async_host_callback_completions_with_budget(
-                    remaining,
-                    false,
-                    &mut hooks,
+                    remaining, false, &mut hooks,
                 )?;
             }
             if self.runtime_gc_enabled && self.auto_gc_enabled {
@@ -6789,8 +6790,8 @@ impl Vm {
                         );
                     }
                     if self.closure_uses_lowered_generator_values_buffer(closure_id)? {
-                        let mut produced_values =
-                            self.execute_closure_call_from_slice(closure_id, args, this_arg, realm)?;
+                        let mut produced_values = self
+                            .execute_closure_call_from_slice(closure_id, args, this_arg, realm)?;
                         if is_async_generator {
                             produced_values = self.resolve_async_generator_values_buffer(
                                 produced_values,
@@ -8535,9 +8536,12 @@ impl Vm {
                         }
                     };
                 }
-                if let Err(err) =
-                    self.create_array_index_data_property_or_throw(result.clone(), index, value, realm)
-                {
+                if let Err(err) = self.create_array_index_data_property_or_throw(
+                    result.clone(),
+                    index,
+                    value,
+                    realm,
+                ) {
                     let _ = self
                         .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
                     return Err(err);
@@ -8682,11 +8686,13 @@ impl Vm {
             let Some(object) = self.objects.get(&object_id) else {
                 return Ok(false);
             };
-            let valid_length_descriptor = object.property_attributes.get("length").is_some_and(
-                |attributes| {
-                    attributes.writable && !attributes.enumerable && !attributes.configurable
-                },
-            );
+            let valid_length_descriptor =
+                object
+                    .property_attributes
+                    .get("length")
+                    .is_some_and(|attributes| {
+                        attributes.writable && !attributes.enumerable && !attributes.configurable
+                    });
             object.is_array_object
                 && !object.is_proxy_object
                 && object.prototype_value.is_none()
@@ -8757,12 +8763,13 @@ impl Vm {
         let Some(object) = self.objects.get(&object_id) else {
             return false;
         };
-        let valid_length_descriptor = object
-            .property_attributes
-            .get("length")
-            .is_some_and(|attributes| {
-                attributes.writable && !attributes.enumerable && !attributes.configurable
-            });
+        let valid_length_descriptor =
+            object
+                .property_attributes
+                .get("length")
+                .is_some_and(|attributes| {
+                    attributes.writable && !attributes.enumerable && !attributes.configurable
+                });
         object.is_array_object
             && !object.is_proxy_object
             && object.prototype_value.is_none()
@@ -9597,7 +9604,12 @@ impl Vm {
                     caller_strict,
                 )?
             };
-            self.create_array_index_data_property_or_throw(result.clone(), index as usize, mapped, realm)?;
+            self.create_array_index_data_property_or_throw(
+                result.clone(),
+                index as usize,
+                mapped,
+                realm,
+            )?;
         }
         Ok(result)
     }

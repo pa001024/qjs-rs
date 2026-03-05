@@ -730,7 +730,9 @@ mod tests {
         });
 
         let err = runtime
-            .execute_source("async function main() { while (true) { await Promise.resolve(); } } main();")
+            .execute_source(
+                "async function main() { while (true) { await Promise.resolve(); } } main();",
+            )
             .expect_err("async promise loop should be interrupted");
         assert!(matches!(
             err,
@@ -766,7 +768,9 @@ mod tests {
         });
 
         let err = runtime
-            .execute_source("async function main() { while (true) { await rustSleepTick(); } } main();")
+            .execute_source(
+                "async function main() { while (true) { await rustSleepTick(); } } main();",
+            )
             .expect_err("async host callback loop should be interrupted");
         assert!(matches!(
             err,
@@ -790,7 +794,9 @@ mod tests {
 
         let started = Instant::now();
         let err = runtime
-            .execute_source("const data = Array.from({ length: 5000000 }).map((_, i) => i); data.length;")
+            .execute_source(
+                "const data = Array.from({ length: 5000000 }).map((_, i) => i); data.length;",
+            )
             .expect_err("large Array.from/map should be interruptible");
         let elapsed = started.elapsed();
         assert!(matches!(
