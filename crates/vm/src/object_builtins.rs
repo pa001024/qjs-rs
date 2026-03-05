@@ -1,4 +1,5 @@
 use runtime::{JsValue, Realm};
+use std::collections::HashSet;
 
 use crate::{BOXED_PRIMITIVE_VALUE_KEY, Vm, VmError};
 
@@ -64,9 +65,18 @@ pub(super) fn execute_object_assign(
         }
         let source_object =
             vm.coerce_object_for_object_builtins(source, "Object.assign source must be coercible")?;
-        let keys = vm.collect_own_property_keys(&source_object, true)?;
+        let keys = collect_object_assign_keys(vm, source_object.clone(), realm)?;
 
         for key in keys {
+            let Some(descriptor) =
+                object_assign_get_own_property_descriptor(vm, source_object.clone(), &key, realm)?
+            else {
+                continue;
+            };
+            let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+            if !vm.is_truthy(&enumerable) {
+                continue;
+            }
             let value = vm.get_property_from_receiver(source_object.clone(), &key, realm)?;
             vm.ensure_assign_target_writable(&target, &key)?;
             let _ = vm.set_property_on_receiver(target.clone(), key, value, realm)?;
@@ -75,22 +85,439 @@ pub(super) fn execute_object_assign(
     Ok(target)
 }
 
-pub(super) fn execute_object_keys(vm: &mut Vm, args: &[JsValue]) -> Result<JsValue, VmError> {
+pub(super) fn execute_object_from_entries(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let iterable = args.first().cloned().unwrap_or(JsValue::Undefined);
+    let target = vm.create_object_value();
+    let iterator_record = vm.create_for_of_runtime_iterator_record(iterable, realm)?;
+
+    loop {
+        let step = vm.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+        let done = vm
+            .get_property_from_receiver(step.clone(), "done", realm)
+            .map(|value| vm.is_truthy(&value))?;
+        if done {
+            break;
+        }
+
+        let next = match vm.get_property_from_receiver(step, "value", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if !Vm::is_object_like_value(&next) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(VmError::TypeError(
+                "Object.fromEntries iterable entries must be object",
+            ));
+        }
+
+        let key = match vm.get_property_from_receiver(next.clone(), "0", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let value = match vm.get_property_from_receiver(next, "1", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key = match vm.coerce_to_property_key_runtime(key, realm, false) {
+            Ok(key) => key,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if let Err(err) = vm.create_data_property_or_throw(target.clone(), key, value, realm) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(err);
+        }
+    }
+
+    Ok(target)
+}
+
+fn append_group_by_item(
+    vm: &mut Vm,
+    bucket: JsValue,
+    value: JsValue,
+    realm: &Realm,
+) -> Result<(), VmError> {
+    if !Vm::is_object_like_value(&bucket) {
+        return Err(VmError::TypeError("Object.groupBy bucket must be object"));
+    }
+    let length_value = vm.get_property_from_receiver(bucket.clone(), "length", realm)?;
+    let length_number = vm.coerce_number_runtime(length_value, realm, false)?;
+    let length = Vm::to_length_from_number(length_number).max(0);
+    vm.create_data_property_or_throw(bucket, length.to_string(), value, realm)
+}
+
+pub(super) fn execute_object_group_by(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let items = args.first().cloned().unwrap_or(JsValue::Undefined);
+    let callback = args.get(1).cloned().unwrap_or(JsValue::Undefined);
+    if !Vm::is_callable_value(&callback) {
+        return Err(VmError::NotCallable);
+    }
+
+    let groups = vm.create_object_value();
+    let groups_id = match groups {
+        JsValue::Object(id) => id,
+        _ => unreachable!(),
+    };
+    let groups_object = vm
+        .objects
+        .get_mut(&groups_id)
+        .ok_or(VmError::UnknownObject(groups_id))?;
+    groups_object.prototype = None;
+    groups_object.prototype_value = None;
+
+    let iterator_record = match items {
+        JsValue::String(value) => {
+            vm.create_for_of_snapshot_record(vm.js_string_iterator_values(&value))?
+        }
+        JsValue::Null | JsValue::Undefined => {
+            return Err(VmError::TypeError("for-of expects iterable"));
+        }
+        value if Vm::is_object_like_value(&value) => {
+            vm.create_for_of_runtime_iterator_record(value, realm)?
+        }
+        primitive => {
+            let boxed = vm.box_primitive_receiver(primitive);
+            vm.create_for_of_runtime_iterator_record(boxed, realm)?
+        }
+    };
+    let mut index: usize = 0;
+    loop {
+        let step = vm.execute_object_for_of_step(std::slice::from_ref(&iterator_record), realm)?;
+        let done = vm
+            .get_property_from_receiver(step.clone(), "done", realm)
+            .map(|value| vm.is_truthy(&value))?;
+        if done {
+            break;
+        }
+
+        let next = match vm.get_property_from_receiver(step, "value", realm) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key_value = match vm.execute_callable(
+            callback.clone(),
+            Some(JsValue::Undefined),
+            vec![next.clone(), JsValue::Number(index as f64)],
+            realm,
+            false,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        let key = match vm.coerce_to_property_key_runtime(key_value, realm, false) {
+            Ok(key) => key,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+
+        let bucket = match vm.get_property_from_receiver(groups.clone(), &key, realm) {
+            Ok(JsValue::Undefined) => {
+                let array = match vm.create_array_from_values(Vec::new()) {
+                    Ok(array) => array,
+                    Err(err) => {
+                        let _ = vm.execute_object_for_of_close(
+                            std::slice::from_ref(&iterator_record),
+                            realm,
+                        );
+                        return Err(err);
+                    }
+                };
+                if let Err(err) =
+                    vm.set_property_on_receiver(groups.clone(), key.clone(), array.clone(), realm)
+                {
+                    let _ = vm
+                        .execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                    return Err(err);
+                }
+                array
+            }
+            Ok(existing) => existing,
+            Err(err) => {
+                let _ =
+                    vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+                return Err(err);
+            }
+        };
+        if let Err(err) = append_group_by_item(vm, bucket, next, realm) {
+            let _ = vm.execute_object_for_of_close(std::slice::from_ref(&iterator_record), realm);
+            return Err(err);
+        }
+        index += 1;
+    }
+
+    Ok(groups)
+}
+
+pub(super) fn collect_object_assign_keys(
+    vm: &mut Vm,
+    source_object: JsValue,
+    realm: &Realm,
+) -> Result<Vec<String>, VmError> {
+    let JsValue::Object(object_id) = source_object.clone() else {
+        return vm.collect_own_property_keys(&source_object, false);
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        return vm.collect_own_property_keys(&source_object, false);
+    };
+    let trap = get_property_with_proxy_trap(vm, proxy_handler.clone(), "ownKeys", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(Vec::new());
+        }
+        return collect_object_assign_keys(vm, proxy_target, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError("Proxy ownKeys trap must be callable"));
+    }
+    let trap_result = vm.execute_callable(
+        trap,
+        Some(proxy_handler),
+        vec![proxy_target.clone()],
+        realm,
+        false,
+    )?;
+    let keys = collect_proxy_trap_keys(vm, trap_result, realm)?;
+    validate_proxy_own_keys_invariants(vm, proxy_target, &keys, realm)?;
+    Ok(keys)
+}
+
+fn collect_proxy_trap_keys(
+    vm: &mut Vm,
+    trap_result: JsValue,
+    realm: &Realm,
+) -> Result<Vec<String>, VmError> {
+    if !Vm::is_object_like_value(&trap_result) {
+        return Err(VmError::TypeError("Proxy ownKeys trap must return object"));
+    }
+    let length_value = vm.get_property_from_receiver(trap_result.clone(), "length", realm)?;
+    let length_number = vm.coerce_number_runtime(length_value, realm, false)?;
+    let length = Vm::to_length_from_number(length_number).max(0) as usize;
+    let mut keys = Vec::with_capacity(length);
+    let mut seen = HashSet::with_capacity(length);
+    for index in 0..length {
+        let key_value =
+            vm.get_property_from_receiver(trap_result.clone(), &index.to_string(), realm)?;
+        let key = vm.coerce_to_property_key_runtime(key_value, realm, false)?;
+        if !seen.insert(key.clone()) {
+            return Err(VmError::TypeError(
+                "Proxy ownKeys trap result contains duplicate keys",
+            ));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn validate_proxy_own_keys_invariants(
+    vm: &mut Vm,
+    proxy_target: JsValue,
+    trap_keys: &[String],
+    realm: &Realm,
+) -> Result<(), VmError> {
+    let target_keys = collect_object_assign_keys(vm, proxy_target.clone(), realm)?;
+    let mut unchecked_keys: HashSet<String> = trap_keys.iter().cloned().collect();
+    let mut target_configurable_keys = Vec::new();
+
+    for key in target_keys {
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, proxy_target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let configurable = vm.get_property_from_receiver(descriptor, "configurable", realm)?;
+        if vm.is_truthy(&configurable) {
+            target_configurable_keys.push(key);
+            continue;
+        }
+        if !unchecked_keys.remove(&key) {
+            return Err(VmError::TypeError(
+                "Proxy ownKeys trap result is missing a non-configurable key",
+            ));
+        }
+    }
+
+    let target_extensible =
+        match vm.execute_object_is_extensible(std::slice::from_ref(&proxy_target))? {
+            JsValue::Bool(value) => value,
+            _ => false,
+        };
+    if target_extensible {
+        return Ok(());
+    }
+
+    for key in target_configurable_keys {
+        if !unchecked_keys.remove(&key) {
+            return Err(VmError::TypeError(
+                "Proxy ownKeys trap result is missing a key for a non-extensible target",
+            ));
+        }
+    }
+    if !unchecked_keys.is_empty() {
+        return Err(VmError::TypeError(
+            "Proxy ownKeys trap result has extra keys for a non-extensible target",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn object_assign_get_own_property_descriptor(
+    vm: &mut Vm,
+    source_object: JsValue,
+    key: &str,
+    realm: &Realm,
+) -> Result<Option<JsValue>, VmError> {
+    let JsValue::Object(object_id) = source_object.clone() else {
+        let descriptor = vm.execute_object_get_own_property_descriptor(
+            &[source_object, JsValue::String(key.to_string())],
+            realm,
+        )?;
+        return Ok((!matches!(descriptor, JsValue::Undefined)).then_some(descriptor));
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        let descriptor = vm.execute_object_get_own_property_descriptor(
+            &[JsValue::Object(object_id), JsValue::String(key.to_string())],
+            realm,
+        )?;
+        return Ok((!matches!(descriptor, JsValue::Undefined)).then_some(descriptor));
+    };
+    let trap =
+        get_property_with_proxy_trap(vm, proxy_handler.clone(), "getOwnPropertyDescriptor", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(None);
+        }
+        return object_assign_get_own_property_descriptor(vm, proxy_target, key, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError(
+            "Proxy getOwnPropertyDescriptor trap must be callable",
+        ));
+    }
+    let descriptor = vm.execute_callable(
+        trap,
+        Some(proxy_handler),
+        vec![proxy_target, JsValue::String(key.to_string())],
+        realm,
+        false,
+    )?;
+    if matches!(descriptor, JsValue::Undefined) {
+        return Ok(None);
+    }
+    if !Vm::is_object_like_value(&descriptor) {
+        return Err(VmError::TypeError(
+            "Proxy getOwnPropertyDescriptor trap must return object or undefined",
+        ));
+    }
+    Ok(Some(descriptor))
+}
+
+fn collect_enumerable_own_string_keys(
+    vm: &mut Vm,
+    target: JsValue,
+    realm: &Realm,
+) -> Result<Vec<String>, VmError> {
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
+    let mut keys = Vec::with_capacity(snapshot.len());
+    for key in snapshot {
+        if Vm::is_symbol_primitive_string(&key) {
+            continue;
+        }
+        if Vm::is_hidden_runtime_property_key(&key) {
+            continue;
+        }
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if vm.is_truthy(&enumerable) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn get_property_with_proxy_trap(
+    vm: &mut Vm,
+    receiver: JsValue,
+    property_name: &str,
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let JsValue::Object(object_id) = receiver.clone() else {
+        return vm.get_property_from_receiver(receiver, property_name, realm);
+    };
+    let Some((proxy_target, proxy_handler)) = vm.object_proxy_slots(object_id)? else {
+        return vm.get_property_from_receiver(receiver, property_name, realm);
+    };
+    let trap = vm.get_property_from_receiver(proxy_handler.clone(), "get", realm)?;
+    if matches!(trap, JsValue::Undefined) {
+        if matches!(proxy_target, JsValue::Object(target_id) if target_id == object_id) {
+            return Ok(JsValue::Undefined);
+        }
+        return get_property_with_proxy_trap(vm, proxy_target, property_name, realm);
+    }
+    if !Vm::is_callable_value(&trap) {
+        return Err(VmError::TypeError("Proxy get trap must be callable"));
+    }
+    vm.execute_callable(
+        trap,
+        Some(proxy_handler),
+        vec![
+            proxy_target,
+            JsValue::String(property_name.to_string()),
+            receiver,
+        ],
+        realm,
+        false,
+    )
+}
+
+pub(super) fn execute_object_keys(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
     let target = vm.coerce_object_for_object_builtins(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.keys target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
-    let mut keys = Vec::new();
-    for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
-            continue;
-        }
-        if !vm.own_property_is_enumerable(&target, &key)? {
-            continue;
-        }
-        keys.push(key);
-    }
+    let keys = collect_enumerable_own_string_keys(vm, target, realm)?;
     vm.create_array_from_string_keys(keys)
 }
 
@@ -103,16 +530,25 @@ pub(super) fn execute_object_entries(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.entries target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
     let mut entries = Vec::with_capacity(snapshot.len());
     for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
+        if Vm::is_symbol_primitive_string(&key) {
             continue;
         }
-        if !vm.own_property_is_enumerable(&target, &key)? {
+        if Vm::is_hidden_runtime_property_key(&key) {
             continue;
         }
-        let value = vm.get_property_from_receiver(target.clone(), &key, realm)?;
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
+            continue;
+        }
+        let value = get_property_with_proxy_trap(vm, target.clone(), &key, realm)?;
         let entry = vm.create_array_from_values(vec![JsValue::String(key), value])?;
         entries.push(entry);
     }
@@ -128,16 +564,30 @@ pub(super) fn execute_object_values(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.values target must be object",
     )?;
-    let snapshot = vm.collect_own_property_keys(&target, false)?;
+    let snapshot = collect_object_assign_keys(vm, target.clone(), realm)?;
     let mut values = Vec::with_capacity(snapshot.len());
     for key in snapshot {
-        if !vm.has_own_property(&target, &key)? {
+        if Vm::is_symbol_primitive_string(&key) {
             continue;
         }
-        if !vm.own_property_is_enumerable(&target, &key)? {
+        if Vm::is_hidden_runtime_property_key(&key) {
             continue;
         }
-        values.push(vm.get_property_from_receiver(target.clone(), &key, realm)?);
+        let Some(descriptor) =
+            object_assign_get_own_property_descriptor(vm, target.clone(), &key, realm)?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
+            continue;
+        }
+        values.push(get_property_with_proxy_trap(
+            vm,
+            target.clone(),
+            &key,
+            realm,
+        )?);
     }
     vm.create_array_from_values(values)
 }
@@ -145,14 +595,39 @@ pub(super) fn execute_object_values(
 pub(super) fn execute_object_get_own_property_names(
     vm: &mut Vm,
     args: &[JsValue],
+    realm: &Realm,
 ) -> Result<JsValue, VmError> {
     let target = vm.coerce_object_for_object_builtins(
         args.first().cloned().unwrap_or(JsValue::Undefined),
         "Object.getOwnPropertyNames target must be object",
     )?;
-    let mut keys = vm.collect_own_property_keys(&target, false)?;
-    keys.retain(|key| key != BOXED_PRIMITIVE_VALUE_KEY);
+    let mut keys = collect_object_assign_keys(vm, target, realm)?;
+    keys.retain(|key| {
+        key != BOXED_PRIMITIVE_VALUE_KEY
+            && !Vm::is_symbol_primitive_string(key)
+            && !Vm::is_hidden_runtime_property_key(key)
+    });
     vm.create_array_from_string_keys(keys)
+}
+
+pub(super) fn execute_object_get_own_property_symbols(
+    vm: &mut Vm,
+    args: &[JsValue],
+    realm: &Realm,
+) -> Result<JsValue, VmError> {
+    let target = vm.coerce_object_for_object_builtins(
+        args.first().cloned().unwrap_or(JsValue::Undefined),
+        "Object.getOwnPropertySymbols target must be object",
+    )?;
+    let keys = collect_object_assign_keys(vm, target, realm)?;
+    let symbols = keys
+        .into_iter()
+        .filter(|key| {
+            Vm::is_symbol_primitive_string(key) && !Vm::is_hidden_runtime_property_key(key)
+        })
+        .map(JsValue::String)
+        .collect();
+    vm.create_array_from_values(symbols)
 }
 
 pub(super) fn execute_object_define_properties(
@@ -170,9 +645,22 @@ pub(super) fn execute_object_define_properties(
         args.get(1).cloned().unwrap_or(JsValue::Undefined),
         "Object.defineProperties descriptors must be object",
     )?;
-    let descriptor_keys = vm.collect_own_property_keys(&descriptors, true)?;
+    let descriptor_keys = collect_object_assign_keys(vm, descriptors.clone(), realm)?;
     let mut normalized_descriptors = Vec::with_capacity(descriptor_keys.len());
     for property_name in descriptor_keys {
+        let Some(own_descriptor) = object_assign_get_own_property_descriptor(
+            vm,
+            descriptors.clone(),
+            &property_name,
+            realm,
+        )?
+        else {
+            continue;
+        };
+        let enumerable = vm.get_property_from_receiver(own_descriptor, "enumerable", realm)?;
+        if !vm.is_truthy(&enumerable) {
+            continue;
+        }
         let descriptor =
             vm.get_property_from_receiver(descriptors.clone(), &property_name, realm)?;
         let parsed = vm.parse_property_descriptor(descriptor, realm)?;

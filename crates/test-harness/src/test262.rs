@@ -205,6 +205,7 @@ const UNSUPPORTED_TEST262_FEATURES: &[&str] = &[
     "Temporal",
     "WeakRef",
     "Atomics",
+    "resizable-arraybuffer",
 ];
 
 fn has_unsupported_features(frontmatter: &Test262Frontmatter) -> bool {
@@ -225,21 +226,26 @@ fn resolve_suite_root(root: &Path) -> PathBuf {
 }
 
 fn infer_harness_root(root: &Path, suite_root: &Path) -> Option<PathBuf> {
-    let direct_candidate = root.join("harness");
-    if direct_candidate.is_dir() {
-        return Some(direct_candidate);
+    let find_harness = |start: &Path| -> Option<PathBuf> {
+        let mut fallback: Option<PathBuf> = None;
+        for ancestor in start.ancestors() {
+            let candidate = ancestor.join("harness");
+            if candidate.is_dir() {
+                if candidate.join("assert.js").is_file() {
+                    return Some(candidate);
+                }
+                fallback = fallback.or(Some(candidate));
+            }
+        }
+        fallback
+    };
+
+    if let Some(found) = find_harness(root) {
+        return Some(found);
     }
 
-    if let Some(candidate) = suite_root.parent().map(|parent| parent.join("harness"))
-        && candidate.is_dir()
-    {
-        return Some(candidate);
-    }
-
-    if let Some(candidate) = root.parent().map(|parent| parent.join("harness"))
-        && candidate.is_dir()
-    {
-        return Some(candidate);
+    if let Some(found) = find_harness(suite_root) {
+        return Some(found);
     }
 
     None
@@ -308,6 +314,38 @@ if (typeof $262.createRealm !== "function") {
     otherGlobal.Error = Error;
     otherGlobal.AggregateError = AggregateError;
     otherGlobal.Reflect = Reflect;
+    otherGlobal.Proxy = Proxy;
+    otherGlobal.Symbol = function Symbol(description) {
+      return hostGlobal.Symbol(description);
+    };
+    otherGlobal.Symbol.prototype = hostGlobal.Symbol.prototype;
+    otherGlobal.Symbol.for = function (key) {
+      return hostGlobal.Symbol.for(key);
+    };
+    otherGlobal.Symbol.keyFor = function (sym) {
+      return hostGlobal.Symbol.keyFor(sym);
+    };
+    var symbolValueNames = [
+      "iterator",
+      "asyncIterator",
+      "hasInstance",
+      "isConcatSpreadable",
+      "match",
+      "matchAll",
+      "replace",
+      "search",
+      "species",
+      "split",
+      "toPrimitive",
+      "toStringTag",
+      "unscopables",
+      "dispose",
+      "asyncDispose"
+    ];
+    for (var symbolIndex = 0; symbolIndex < symbolValueNames.length; symbolIndex++) {
+      var symbolName = symbolValueNames[symbolIndex];
+      otherGlobal.Symbol[symbolName] = hostGlobal.Symbol[symbolName];
+    }
     otherGlobal.TypeError = function TypeError(message) {
       var err = new hostGlobal.TypeError(message);
       Object.setPrototypeOf(err, otherGlobal.TypeError.prototype);
@@ -434,11 +472,38 @@ globalThis.$DONE = function (error) {
 };
 "#;
 
+const IS_CONSTRUCTOR_HELPER_PRELUDE: &str = r#"
+if (typeof isConstructor !== "function") {
+  var isConstructor = function (argument) {
+    if (typeof argument !== "function") {
+      throw new Test262Error("isConstructor requires a function argument");
+    }
+    var fnTag = Object.prototype.toString.call(argument);
+    if (fnTag === "[object GeneratorFunction]" ||
+        fnTag === "[object AsyncFunction]" ||
+        fnTag === "[object AsyncGeneratorFunction]") {
+      return false;
+    }
+    try {
+      Reflect.construct(function () {}, [], argument);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+}
+"#;
+
 fn build_case_source(
     case: &Test262Case<'_>,
     harness_root: Option<&Path>,
 ) -> Result<String, String> {
     let includes_source = load_includes_source(&case.frontmatter, harness_root)?;
+    let needs_is_constructor_helper = case
+        .frontmatter
+        .includes
+        .iter()
+        .any(|include| include == "isConstructor.js");
     let needs_harness_262 = requires_unsupported_harness_globals(case.body)
         || requires_unsupported_harness_globals(&includes_source);
     let needs_only_strict = case
@@ -448,7 +513,12 @@ fn build_case_source(
         .any(|flag| flag == "onlyStrict");
     let needs_async_done = case.frontmatter.flags.iter().any(|flag| flag == "async");
     let is_module = case.frontmatter.flags.iter().any(|flag| flag == "module");
-    if includes_source.is_empty() && !needs_harness_262 && !needs_only_strict && !needs_async_done {
+    if includes_source.is_empty()
+        && !needs_harness_262
+        && !needs_only_strict
+        && !needs_async_done
+        && !needs_is_constructor_helper
+    {
         return Ok(case.body.to_string());
     }
 
@@ -463,6 +533,10 @@ fn build_case_source(
     }
     if needs_async_done {
         source.push_str(ASYNC_DONE_PRELUDE);
+        source.push('\n');
+    }
+    if needs_is_constructor_helper {
+        source.push_str(IS_CONSTRUCTOR_HELPER_PRELUDE);
         source.push('\n');
     }
     if !includes_source.is_empty() {
@@ -1344,6 +1418,34 @@ import "x";
         fs::write(
             test_root.join("includes-pass.js"),
             "/*---\nincludes: [sta.js]\n---*/\nhelper() + 2;\n",
+        )
+        .expect("case file should be written");
+
+        let summary = run_suite(&test_root, SuiteOptions::default()).expect("suite should run");
+        assert_eq!(summary.executed, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_categories.requires_includes, 0);
+
+        fs::remove_dir_all(&root).expect("temporary fixture dir should be removable");
+    }
+
+    #[test]
+    fn injects_is_constructor_helper_when_include_requires_it() {
+        let root = unique_temp_dir();
+        let test_root = root.join("test");
+        let harness_root = root.join("harness");
+        fs::create_dir_all(&test_root).expect("temporary test dir should exist");
+        fs::create_dir_all(&harness_root).expect("temporary harness dir should exist");
+
+        fs::write(
+            harness_root.join("isConstructor.js"),
+            "if (typeof isConstructor !== 'function') { throw new Error('missing helper'); }\n",
+        )
+        .expect("isConstructor include file should be written");
+        fs::write(
+            test_root.join("is-constructor-include-pass.js"),
+            "/*---\nincludes: [isConstructor.js]\n---*/\nif (!isConstructor(Array) || isConstructor(Array.prototype.map)) { throw new Error('bad helper'); }\n",
         )
         .expect("case file should be written");
 
