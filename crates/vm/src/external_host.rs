@@ -1,9 +1,11 @@
 use bytecode::{Chunk, Opcode};
 use runtime::JsValue;
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -61,7 +63,7 @@ impl fmt::Debug for ExternalHostCallbackEntry {
 #[derive(Default)]
 pub(super) struct ExternalHostCallbacks {
     pub(super) next_id: u64,
-    pub(super) entries: BTreeMap<u64, ExternalHostCallbackEntry>,
+    pub(super) entries: HashMap<u64, Rc<RefCell<ExternalHostCallbackEntry>>>,
 }
 
 impl fmt::Debug for ExternalHostCallbacks {
@@ -122,7 +124,7 @@ impl Vm {
             .expect("external host callback id overflow");
         self.external_host_callbacks.entries.insert(
             callback_id,
-            ExternalHostCallbackEntry::Sync(Box::new(callback)),
+            Rc::new(RefCell::new(ExternalHostCallbackEntry::Sync(Box::new(callback)))),
         );
         let function = self.create_host_function_value(HostFunction::ExternalCallback {
             callback_id,
@@ -153,10 +155,12 @@ impl Vm {
             .expect("external host callback id overflow");
         self.external_host_callbacks.entries.insert(
             callback_id,
-            ExternalHostCallbackEntry::Async(Box::new(move |vm, this_arg, args, realm, strict| {
-                callback(vm, this_arg, args, realm, strict)
-                    .map(|future| Box::pin(future) as ExternalHostCallbackFuture)
-            })),
+            Rc::new(RefCell::new(ExternalHostCallbackEntry::Async(Box::new(
+                move |vm, this_arg, args, realm, strict| {
+                    callback(vm, this_arg, args, realm, strict)
+                        .map(|future| Box::pin(future) as ExternalHostCallbackFuture)
+                },
+            )))),
         );
         let function = self.create_host_function_value(HostFunction::ExternalCallback {
             callback_id,
@@ -182,7 +186,7 @@ impl Vm {
         if self.global_object_id.is_none() || self.scopes.is_empty() {
             let bootstrap = Chunk {
                 code: vec![Opcode::LoadUndefined, Opcode::Halt],
-                functions: Vec::new(),
+                functions: Rc::new(Vec::new()),
             };
             let _ = self.execute_in_realm(&bootstrap, realm)?;
         }
@@ -219,7 +223,7 @@ impl Vm {
         if self.global_object_id.is_none() || self.scopes.is_empty() {
             let bootstrap = Chunk {
                 code: vec![Opcode::LoadUndefined, Opcode::Halt],
-                functions: Vec::new(),
+                functions: Rc::new(Vec::new()),
             };
             let _ = self.execute_in_realm(&bootstrap, realm)?;
         }
@@ -249,12 +253,16 @@ impl Vm {
         realm: &Realm,
         caller_strict: bool,
     ) -> Result<JsValue, VmError> {
-        let mut callback = self
+        let callback = self
             .external_host_callbacks
             .entries
-            .remove(&callback_id)
+            .get(&callback_id)
+            .cloned()
             .ok_or(VmError::TypeError("HostCallback:Missing"))?;
-        let result = match &mut callback {
+        let mut callback = callback
+            .try_borrow_mut()
+            .map_err(|_| VmError::TypeError("HostCallback:Reentrant"))?;
+        match &mut *callback {
             ExternalHostCallbackEntry::Sync(callback) => {
                 callback(self, this_arg, args, realm, caller_strict)
             }
@@ -262,11 +270,7 @@ impl Vm {
                 let future = callback(self, this_arg, args, realm, caller_strict);
                 self.spawn_async_host_callback_promise(future)
             }
-        };
-        self.external_host_callbacks
-            .entries
-            .insert(callback_id, callback);
-        result
+        }
     }
 
     pub(super) fn host_function_is_constructable(&self, host_id: u64) -> bool {

@@ -17,6 +17,9 @@ pub(super) struct OpaqueBindings {
     pub(super) entries: HashMap<OpaqueBindingTarget, Box<dyn Any>>,
 }
 
+#[derive(Debug, Default)]
+struct OpaqueBindingHole;
+
 impl fmt::Debug for OpaqueBindings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpaqueBindings")
@@ -56,6 +59,39 @@ impl Vm {
             .entries
             .remove(&target)
             .and_then(|entry| entry.downcast::<T>().ok().map(|boxed| *boxed))
+    }
+
+    /// 从 opaque bindings 中取出数据，但保留 key（用洞值占位），避免高频 remove/insert 带来的哈希表抖动。
+    ///
+    /// 语义：与 `take_opaque_data` 一致，在回填前读取同 key 会返回 None（与 remove 后一致）。
+    pub fn take_opaque_data_fast<T: Any>(&mut self, value: &JsValue) -> Option<T> {
+        let target = Self::opaque_binding_target(value)?;
+        let entry = self.opaque_bindings.entries.get_mut(&target)?;
+        let boxed = std::mem::replace(entry, Box::new(OpaqueBindingHole));
+        match boxed.downcast::<T>() {
+            Ok(payload) => Some(*payload),
+            Err(original) => {
+                *entry = original;
+                None
+            }
+        }
+    }
+
+    /// 回填 opaque data（配合 `take_opaque_data_fast` 使用）。
+    pub fn restore_opaque_data_fast<T: Any>(
+        &mut self,
+        value: &JsValue,
+        data: T,
+    ) -> Result<(), VmError> {
+        let Some(target) = Self::opaque_binding_target(value) else {
+            return Err(VmError::TypeError(TYPE_ERROR_OPAQUE_UNSUPPORTED_VALUE));
+        };
+        if let Some(entry) = self.opaque_bindings.entries.get_mut(&target) {
+            *entry = Box::new(data);
+            return Ok(());
+        }
+        self.opaque_bindings.entries.insert(target, Box::new(data));
+        Ok(())
     }
 
     pub fn clear_opaque_data(&mut self, value: &JsValue) -> bool {

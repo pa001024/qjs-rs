@@ -6,6 +6,7 @@ use ast::{
     SwitchCase, UnaryOp, UpdateTarget, VariableDeclaration, take_script_statement_locations,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 const NON_SIMPLE_PARAMS_MARKER: &str = "$__qjs_non_simple_params__$";
 const ARROW_FUNCTION_MARKER: &str = "$__qjs_arrow_function__$";
@@ -169,10 +170,19 @@ pub struct CompiledFunction {
     pub code: Vec<Opcode>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Chunk {
     pub code: Vec<Opcode>,
-    pub functions: Vec<CompiledFunction>,
+    pub functions: Rc<Vec<CompiledFunction>>,
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self {
+            code: Vec::new(),
+            functions: Rc::new(Vec::new()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,7 +284,7 @@ pub fn compile_script_with_debug(script: &Script) -> (Chunk, CompiledDebugInfo) 
     (
         Chunk {
             code,
-            functions: compiler.functions,
+            functions: Rc::new(compiler.functions),
         },
         debug_info,
     )
@@ -287,7 +297,7 @@ pub fn compile_expression(expr: &Expr) -> Chunk {
     code.push(Opcode::Halt);
     Chunk {
         code,
-        functions: compiler.functions,
+        functions: Rc::new(compiler.functions),
     }
 }
 
@@ -2875,6 +2885,7 @@ mod tests {
         ObjectProperty, ObjectPropertyKey, Script, Stmt, StringLiteral, SwitchCase, UnaryOp,
         UpdateTarget, VariableDeclaration,
     };
+    use std::rc::Rc;
 
     #[test]
     fn compiles_binary_with_precedence() {
@@ -2898,7 +2909,7 @@ mod tests {
                 Opcode::Add,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -2919,7 +2930,7 @@ mod tests {
                 Opcode::Pow,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3004,7 +3015,7 @@ mod tests {
                 Opcode::LoadNumber(1.0),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3017,7 +3028,7 @@ mod tests {
             bool_chunk,
             Chunk {
                 code: vec![Opcode::LoadBool(true), Opcode::Halt],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -3026,7 +3037,7 @@ mod tests {
             null_chunk,
             Chunk {
                 code: vec![Opcode::LoadNull, Opcode::Halt],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -3038,7 +3049,7 @@ mod tests {
             string_chunk,
             Chunk {
                 code: vec![Opcode::LoadString("ok".to_string()), Opcode::Halt],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
     }
@@ -3066,7 +3077,7 @@ mod tests {
                 Opcode::DefineProperty("key".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3092,7 +3103,7 @@ mod tests {
                 Opcode::Pop,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3126,7 +3137,7 @@ mod tests {
                 Opcode::DefineProperty("tail".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3174,7 +3185,7 @@ mod tests {
                 Opcode::Pop,
                 Opcode::Halt,
             ],
-            functions: vec![
+            functions: Rc::new(vec![
                 CompiledFunction {
                     name: "<anonymous>".to_string(),
                     length: 0,
@@ -3192,7 +3203,7 @@ mod tests {
                     params: vec!["v".to_string()],
                     code: vec![Opcode::LoadUndefined, Opcode::Return],
                 },
-            ],
+            ]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3209,7 +3220,7 @@ mod tests {
         let chunk = compile_expression(&expr);
         let expected = Chunk {
             code: vec![Opcode::LoadFunction(0), Opcode::Halt],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "<anonymous>".to_string(),
                 length: 1,
                 params: vec!["x".to_string()],
@@ -3219,7 +3230,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3237,7 +3248,7 @@ mod tests {
                 Opcode::ArrayAppend,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3256,7 +3267,7 @@ mod tests {
                 Opcode::ArrayAppend,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3280,7 +3291,7 @@ mod tests {
                 Opcode::ArrayAppend,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3301,7 +3312,7 @@ mod tests {
                 Opcode::SetProperty("value".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3323,7 +3334,7 @@ mod tests {
                 Opcode::SetPropertyByValue,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3345,7 +3356,7 @@ mod tests {
                 Opcode::StoreVariable("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3377,7 +3388,7 @@ mod tests {
                 Opcode::Pop,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3424,7 +3435,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3450,7 +3461,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3506,7 +3517,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3548,7 +3559,7 @@ mod tests {
                 },
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "add".to_string(),
                 length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
@@ -3560,7 +3571,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
 
         assert_eq!(chunk, expected);
@@ -3599,7 +3610,7 @@ mod tests {
                 Opcode::Nop,
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "id".to_string(),
                 length: 1,
                 params: vec!["x".to_string()],
@@ -3609,7 +3620,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
 
         assert_eq!(chunk, expected);
@@ -3637,7 +3648,7 @@ mod tests {
                 Opcode::CallMethod(1),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3698,7 +3709,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3755,7 +3766,7 @@ mod tests {
                 Opcode::LoadIdentifier("x".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3786,7 +3797,7 @@ mod tests {
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -3811,7 +3822,7 @@ mod tests {
                 Opcode::LoadUndefined,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3873,7 +3884,7 @@ mod tests {
                 Opcode::ExitScope,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3914,7 +3925,7 @@ mod tests {
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -3980,7 +3991,7 @@ mod tests {
                 Opcode::ExitScope,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -4026,7 +4037,7 @@ mod tests {
                 Opcode::ExitScope,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -4078,7 +4089,7 @@ mod tests {
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -4122,7 +4133,7 @@ mod tests {
                 Opcode::LoadIdentifier("$__loop_completion_0".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
 
         assert_eq!(chunk, expected);
@@ -4153,7 +4164,7 @@ mod tests {
                 Opcode::Ge,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -4176,7 +4187,7 @@ mod tests {
                 Opcode::In,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -4196,7 +4207,7 @@ mod tests {
                 Opcode::InstanceOf,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -4211,7 +4222,7 @@ mod tests {
             typeof_ident,
             Chunk {
                 code: vec![Opcode::TypeofIdentifier("x".to_string()), Opcode::Halt],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -4228,7 +4239,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Halt
                 ],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -4240,7 +4251,7 @@ mod tests {
             delete_expr,
             Chunk {
                 code: vec![Opcode::DeleteIdentifier("x".to_string()), Opcode::Halt],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -4259,7 +4270,7 @@ mod tests {
                     Opcode::DeleteProperty("x".to_string()),
                     Opcode::Halt,
                 ],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -4279,7 +4290,7 @@ mod tests {
                     Opcode::DeletePropertyByValue,
                     Opcode::Halt,
                 ],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
 
@@ -4295,7 +4306,7 @@ mod tests {
                     Opcode::Await,
                     Opcode::Halt,
                 ],
-                functions: vec![],
+                functions: Rc::new(vec![]),
             }
         );
     }
@@ -4321,7 +4332,7 @@ mod tests {
                 Opcode::StrictNe,
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -4343,7 +4354,7 @@ mod tests {
                 Opcode::LoadIdentifier("b".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }
@@ -4366,7 +4377,7 @@ mod tests {
                 Opcode::LoadIdentifier("b".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![],
+            functions: Rc::new(vec![]),
         };
         assert_eq!(chunk, expected);
     }

@@ -48,6 +48,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -142,6 +144,14 @@ const AWAIT_DRAIN_MAX_CYCLES: usize = 20_000;
 const ASYNC_HOST_CALLBACK_RECV_TIMEOUT: Duration = Duration::from_millis(5);
 const LONG_LOOP_INTERRUPT_POLL_MASK: usize = 1024 - 1;
 const ARRAY_FROM_ASYNC_IMPL_GLOBAL: &str = "$__qjs_array_from_async_impl__$";
+/// Promise job drain 周期内的宿主 tick 钩子（用于驱动宿主宏任务，如 timer）。
+pub type PromiseJobHostTickHook = fn(&mut Vm, &Realm, bool, usize) -> Result<usize, VmError>;
+static PROMISE_JOB_HOST_TICK_HOOK: OnceLock<Mutex<Option<PromiseJobHostTickHook>>> =
+    OnceLock::new();
+
+/// VM 执行循环内的宿主 tick 钩子（用于 tight loop 场景泵 timer/异步回调，避免饿死）。
+pub type RuntimeHostTickHook = fn(&mut Vm, &Realm, bool, usize) -> Result<usize, VmError>;
+static RUNTIME_HOST_TICK_HOOK: OnceLock<Mutex<Option<RuntimeHostTickHook>>> = OnceLock::new();
 const ARRAY_FROM_ASYNC_IMPL_SOURCE: &str = r#"(function(items, mapfn, thisArg, hasMapFn, useConstructor) {
   var C = this;
   var asyncIteratorKey = "Symbol.asyncIterator";
@@ -592,6 +602,10 @@ enum HostFunction {
         callback_id: u64,
         constructable: bool,
     },
+    /// Promise 构造器创建的 resolve 回调（避免每次构造都注册 external callback，显著降低 tight loop 开销）。
+    PromiseConstructorResolve { promise_id: ObjectId },
+    /// Promise 构造器创建的 reject 回调（避免每次构造都注册 external callback，显著降低 tight loop 开销）。
+    PromiseConstructorReject { promise_id: ObjectId },
     GeneratorFactory {
         producer: JsValue,
     },
@@ -949,6 +963,13 @@ pub struct GcStats {
 }
 
 #[derive(Debug, Default)]
+struct GcMarkResult {
+    objects: BTreeSet<ObjectId>,
+    closures: BTreeSet<u64>,
+    hosts: BTreeSet<u64>,
+}
+
+#[derive(Debug, Default)]
 struct GcShadowRoots {
     stack: Vec<JsValue>,
     scopes: Vec<ScopeRef>,
@@ -1021,12 +1042,101 @@ struct AsyncHostCallbackCompletion {
     result: Result<JsValue, VmError>,
 }
 
+struct AsyncHostCallbackTask {
+    task_id: u64,
+    future: ExternalHostCallbackFuture,
+    completion_sender: Sender<AsyncHostCallbackCompletion>,
+}
+
+#[derive(Default)]
+struct AsyncHostCallbackQueue {
+    closed: AtomicBool,
+    inner: Mutex<VecDeque<AsyncHostCallbackTask>>,
+    cv: Condvar,
+}
+
+impl AsyncHostCallbackQueue {
+    fn push(&self, task: AsyncHostCallbackTask) -> bool {
+        if self.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.push_back(task);
+            self.cv.notify_one();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn pop(&self) -> Option<AsyncHostCallbackTask> {
+        let mut guard = self.inner.lock().ok()?;
+        loop {
+            if let Some(task) = guard.pop_front() {
+                return Some(task);
+            }
+            if self.closed.load(Ordering::Relaxed) {
+                return None;
+            }
+            guard = self.cv.wait(guard).ok()?;
+        }
+    }
+
+}
+
 #[derive(Default)]
 struct AsyncHostCallbackState {
     sender: Option<Sender<AsyncHostCallbackCompletion>>,
     receiver: Option<Receiver<AsyncHostCallbackCompletion>>,
     pending_promises: BTreeMap<u64, ObjectId>,
     next_task_id: u64,
+}
+
+#[derive(Clone)]
+struct AsyncHostCallbackScheduler {
+    queue: Arc<AsyncHostCallbackQueue>,
+}
+
+static ASYNC_HOST_CALLBACK_SCHEDULER: OnceLock<Mutex<Option<AsyncHostCallbackScheduler>>> =
+    OnceLock::new();
+
+fn async_host_callback_scheduler_slot() -> &'static Mutex<Option<AsyncHostCallbackScheduler>> {
+    ASYNC_HOST_CALLBACK_SCHEDULER.get_or_init(|| Mutex::new(None))
+}
+
+fn ensure_async_host_callback_scheduler(tokio_handle: tokio::runtime::Handle) -> AsyncHostCallbackScheduler {
+    if let Ok(guard) = async_host_callback_scheduler_slot().lock()
+        && let Some(scheduler) = guard.as_ref()
+    {
+        return scheduler.clone();
+    }
+
+    let queue = Arc::new(AsyncHostCallbackQueue::default());
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 4))
+        .unwrap_or(2);
+    for _ in 0..worker_count {
+        let queue = Arc::clone(&queue);
+        let tokio_handle = tokio_handle.clone();
+        let _ = thread::Builder::new()
+            .name("qjs-rs-host-async-worker".to_string())
+            .spawn(move || loop {
+                let Some(task) = queue.pop() else {
+                    break;
+                };
+                let result = tokio_handle.block_on(task.future);
+                let _ = task.completion_sender.send(AsyncHostCallbackCompletion {
+                    task_id: task.task_id,
+                    result,
+                });
+            });
+    }
+
+    let scheduler = AsyncHostCallbackScheduler { queue };
+    if let Ok(mut guard) = async_host_callback_scheduler_slot().lock() {
+        *guard = Some(scheduler.clone());
+    }
+    scheduler
 }
 
 impl fmt::Debug for AsyncHostCallbackState {
@@ -1487,7 +1597,7 @@ impl Vm {
         if self.global_object_id.is_none() || self.scopes.is_empty() {
             let bootstrap = Chunk {
                 code: vec![Opcode::LoadUndefined, Opcode::Halt],
-                functions: Vec::new(),
+                functions: Rc::new(Vec::new()),
             };
             let _ = self.execute_in_realm(&bootstrap, realm)?;
         }
@@ -2544,6 +2654,44 @@ impl Vm {
         self.set_property_on_receiver(global, name.into(), value, realm)
     }
 
+    fn run_promise_job_host_tick_hook(
+        &mut self,
+        budget: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<usize, VmError> {
+        if budget == 0 {
+            return Ok(0);
+        }
+        let hook = promise_job_host_tick_hook_slot()
+            .lock()
+            .ok()
+            .and_then(|guard| *guard);
+        match hook {
+            Some(callback) => callback(self, realm, caller_strict, budget),
+            None => Ok(0),
+        }
+    }
+
+    fn run_runtime_host_tick_hook(
+        &mut self,
+        budget: usize,
+        realm: &Realm,
+        caller_strict: bool,
+    ) -> Result<usize, VmError> {
+        if budget == 0 {
+            return Ok(0);
+        }
+        let hook = runtime_host_tick_hook_slot()
+            .lock()
+            .ok()
+            .and_then(|guard| *guard);
+        match hook {
+            Some(callback) => callback(self, realm, caller_strict, budget),
+            None => Ok(0),
+        }
+    }
+
     pub fn enqueue_host_promise_job(
         &mut self,
         value: JsValue,
@@ -2556,6 +2704,29 @@ impl Vm {
                 capture_handles: vec![handle],
             },
             hooks,
+        )
+    }
+
+    /// 创建一个 pending Promise 对象（用于宿主侧返回 Promise 并自行 settle）。
+    pub fn create_pending_promise_value(&mut self) -> Result<JsValue, VmError> {
+        let object_id = self.create_pending_promise()?;
+        Ok(JsValue::Object(object_id))
+    }
+
+    /// 将 pending Promise fulfill 为指定值（幂等：已 settle 则忽略）。
+    pub fn fulfill_pending_promise_value(
+        &mut self,
+        promise: JsValue,
+        value: JsValue,
+    ) -> Result<(), VmError> {
+        let JsValue::Object(promise_id) = promise else {
+            return Err(VmError::TypeError("Promise:InvalidPromiseObject"));
+        };
+        let mut hooks = NoopPromiseJobHostHooks;
+        self.settle_promise_with_hooks(
+            promise_id,
+            PromiseSettlement::Fulfilled(value),
+            &mut hooks,
         )
     }
 
@@ -2630,8 +2801,17 @@ impl Vm {
                 let _ = self.call_promise_hook(hooks, PromiseHook::DrainEnd(&report));
                 return Err(err);
             }
+            let host_budget = budget.saturating_sub(processed);
+            let host_processed =
+                self.run_promise_job_host_tick_hook(host_budget, realm, caller_strict)?;
+            processed = processed.saturating_add(host_processed);
+            if processed == budget {
+                stop_reason = PromiseJobDrainStopReason::BudgetExhausted;
+                break;
+            }
             let async_budget = budget.saturating_sub(processed);
-            let wait_for_async_completion = self.promise_job_queue.jobs.is_empty();
+            let wait_for_async_completion =
+                processed == 0 && self.promise_job_queue.jobs.is_empty();
             let async_processed = self.drain_async_host_callback_completions_with_budget(
                 async_budget,
                 wait_for_async_completion,
@@ -2717,10 +2897,12 @@ impl Vm {
         let objects_before = self.objects.len();
         let roots = self.collect_roots(realm);
         let mark_started = Instant::now();
-        let marked_objects = self.mark_from_roots(&roots);
+        let marked = self.mark_from_roots(&roots);
         let mark_duration_ns = mark_started.elapsed().as_nanos();
         let sweep_started = Instant::now();
-        let reclaimed = self.sweep_unreachable(&marked_objects);
+        let reclaimed = self.sweep_unreachable(&marked.objects);
+        let _ = self.sweep_unreachable_closures(&marked.closures);
+        let _ = self.sweep_unreachable_host_functions(&marked.hosts);
         let sweep_duration_ns = sweep_started.elapsed().as_nanos();
         self.gc_reclaimed_objects_total = self
             .gc_reclaimed_objects_total
@@ -2729,7 +2911,7 @@ impl Vm {
         let stats = GcStats {
             roots: roots.len(),
             objects_before,
-            marked_objects: marked_objects.len(),
+            marked_objects: marked.objects.len(),
             reclaimed_objects: self.gc_reclaimed_objects_total,
             remaining_objects: self.objects.len(),
             peak_objects: self.gc_peak_objects,
@@ -2892,6 +3074,9 @@ impl Vm {
         if let Some(host_id) = self.function_prototype_host_id {
             roots.push(JsValue::HostFunction(host_id));
         }
+        if let Some(host_id) = self.object_to_string_host_id {
+            roots.push(JsValue::HostFunction(host_id));
+        }
         if let Some(getter) = &self.function_prototype_prototype_getter {
             roots.push(getter.clone());
         }
@@ -2901,45 +3086,10 @@ impl Vm {
         }
         roots.extend(self.module_cache_root_candidates.values().cloned());
         roots.extend(self.pending_job_root_candidates.values().cloned());
-        self.collect_pending_promise_record_roots(&mut roots);
         self.collect_deferred_async_call_roots(&mut roots);
         roots.extend(self.template_cache.values().cloned());
-        roots.extend(self.closures.keys().copied().map(JsValue::Function));
-        roots.extend(
-            self.host_functions
-                .keys()
-                .copied()
-                .map(JsValue::HostFunction),
-        );
         roots.extend(self.host_pins.values().cloned());
         roots
-    }
-
-    fn collect_pending_promise_record_roots(&self, roots: &mut Vec<JsValue>) {
-        for (promise_id, record) in &self.pending_promise_records {
-            roots.push(JsValue::Object(*promise_id));
-            for reaction in &record.reactions {
-                roots.push(JsValue::Object(reaction.result_promise_id));
-                match &reaction.kind {
-                    PromiseReactionKind::Then {
-                        on_fulfilled,
-                        on_rejected,
-                    } => {
-                        if let Some(handler) = on_fulfilled {
-                            roots.push(handler.clone());
-                        }
-                        if let Some(handler) = on_rejected {
-                            roots.push(handler.clone());
-                        }
-                    }
-                    PromiseReactionKind::Finally { on_finally } => {
-                        if let Some(handler) = on_finally {
-                            roots.push(handler.clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn collect_deferred_async_call_roots(&self, roots: &mut Vec<JsValue>) {
@@ -2973,7 +3123,7 @@ impl Vm {
         }
     }
 
-    fn mark_from_roots(&mut self, roots: &[JsValue]) -> BTreeSet<ObjectId> {
+    fn mark_from_roots(&mut self, roots: &[JsValue]) -> GcMarkResult {
         let mut marked_objects = BTreeSet::new();
         let mut marked_closures = BTreeSet::new();
         let mut marked_hosts = BTreeSet::new();
@@ -2987,7 +3137,11 @@ impl Vm {
                 &mut marked_hosts,
             );
         }
-        marked_objects
+        GcMarkResult {
+            objects: marked_objects,
+            closures: marked_closures,
+            hosts: marked_hosts,
+        }
     }
 
     fn mark_value(
@@ -3049,6 +3203,35 @@ impl Vm {
         if let Some(object) = self.objects.get(&object_id).cloned() {
             self.enqueue_object_values(object);
         }
+        self.enqueue_pending_promise_record_edges(object_id);
+    }
+
+    fn enqueue_pending_promise_record_edges(&mut self, promise_id: ObjectId) {
+        let Some(record) = self.pending_promise_records.get(&promise_id) else {
+            return;
+        };
+        for reaction in &record.reactions {
+            self.gc_mark_stack
+                .push(JsValue::Object(reaction.result_promise_id));
+            match &reaction.kind {
+                PromiseReactionKind::Then {
+                    on_fulfilled,
+                    on_rejected,
+                } => {
+                    if let Some(handler) = on_fulfilled {
+                        self.gc_mark_stack.push(handler.clone());
+                    }
+                    if let Some(handler) = on_rejected {
+                        self.gc_mark_stack.push(handler.clone());
+                    }
+                }
+                PromiseReactionKind::Finally { on_finally } => {
+                    if let Some(handler) = on_finally {
+                        self.gc_mark_stack.push(handler.clone());
+                    }
+                }
+            }
+        }
     }
 
     fn enqueue_object_values(&mut self, object: JsObject) {
@@ -3079,6 +3262,10 @@ impl Vm {
                 self.gc_mark_stack.push(target);
                 self.gc_mark_stack.push(this_arg);
                 self.gc_mark_stack.extend(bound_args);
+            }
+            HostFunction::PromiseConstructorResolve { promise_id }
+            | HostFunction::PromiseConstructorReject { promise_id } => {
+                self.gc_mark_stack.push(JsValue::Object(promise_id));
             }
             HostFunction::GeneratorFactory { producer } => {
                 self.gc_mark_stack.push(producer);
@@ -3248,6 +3435,51 @@ impl Vm {
             self.free_object_slots.push(Self::object_id_slot(id));
             self.clear_opaque_data_for_object(id);
         }
+        // Promise 内部记录不应作为 GC root；当 promise 对象不可达时，需要在 sweep 阶段同步清理其记录，
+        // 否则会形成“pending promise 永久存活”的泄漏（例如 tight loop 里不断 `new Promise(()=>{})`）。
+        self.pending_promise_records
+            .retain(|promise_id, _| marked_objects.contains(promise_id));
+        reclaimed
+    }
+
+    fn sweep_unreachable_closures(&mut self, marked_closures: &BTreeSet<u64>) -> usize {
+        let unreached: Vec<_> = self
+            .closures
+            .keys()
+            .copied()
+            .filter(|id| !marked_closures.contains(id))
+            .collect();
+        let reclaimed = unreached.len();
+        for id in unreached {
+            self.closures.remove(&id);
+            self.closure_objects.remove(&id);
+        }
+        reclaimed
+    }
+
+    fn sweep_unreachable_host_functions(&mut self, marked_hosts: &BTreeSet<u64>) -> usize {
+        let unreached: Vec<_> = self
+            .host_functions
+            .keys()
+            .copied()
+            .filter(|id| !marked_hosts.contains(id))
+            .collect();
+        let reclaimed = unreached.len();
+        for id in unreached {
+            if let Some(host) = self.host_functions.remove(&id) {
+                if let HostFunction::ExternalCallback { callback_id, .. } = host {
+                    let _ = self.external_host_callbacks.entries.remove(&callback_id);
+                }
+            }
+            self.host_function_objects.remove(&id);
+            // 清理内部缓存，避免指向已回收的 host id。
+            if self.object_to_string_host_id == Some(id) {
+                self.object_to_string_host_id = None;
+            }
+            if self.function_prototype_host_id == Some(id) {
+                self.function_prototype_host_id = None;
+            }
+        }
         reclaimed
     }
 
@@ -3374,7 +3606,7 @@ impl Vm {
     fn execute_code(
         &mut self,
         code: &[Opcode],
-        functions: &[CompiledFunction],
+        functions: &Rc<Vec<CompiledFunction>>,
         realm: &Realm,
         allow_return: bool,
         strict: bool,
@@ -3411,6 +3643,20 @@ impl Vm {
             {
                 self.enforce_runtime_limits()?;
             }
+            // Tight loop 支持：在 VM 执行中周期性泵宿主 tick（timer/async completion），避免 setTimeout 等被饿死。
+            if self.interrupt_state.handler.is_some()
+                && ((self.interrupt_state.tick as usize) & LONG_LOOP_INTERRUPT_POLL_MASK) == 0
+            {
+                let mut hooks = NoopPromiseJobHostHooks;
+                let budget = 16usize;
+                let host_processed = self.run_runtime_host_tick_hook(budget, realm, strict)?;
+                let remaining = budget.saturating_sub(host_processed);
+                let _ = self.drain_async_host_callback_completions_with_budget(
+                    remaining,
+                    false,
+                    &mut hooks,
+                )?;
+            }
             if self.runtime_gc_enabled && self.auto_gc_enabled {
                 self.runtime_gc_tick = self.runtime_gc_tick.saturating_add(1);
                 if self.runtime_gc_tick % check_interval == 0 {
@@ -3433,7 +3679,8 @@ impl Vm {
                     self.stack.push(array);
                 }
                 Opcode::LoadFunction(function_id) => {
-                    let function = self.instantiate_function(*function_id, functions, strict)?;
+                    let function =
+                        self.instantiate_function(*function_id, Rc::clone(functions), strict)?;
                     self.stack.push(function);
                 }
                 Opcode::LoadIdentifier(name) => {
@@ -3600,7 +3847,7 @@ impl Vm {
                 Opcode::DefineFunction { name, function_id } => {
                     let scope_index = self.scopes.len().saturating_sub(1);
                     let function_value =
-                        self.instantiate_function(*function_id, functions, strict)?;
+                        self.instantiate_function(*function_id, Rc::clone(functions), strict)?;
                     let function_value_for_annex_b = function_value.clone();
                     let existing_binding_id = {
                         let scope_ref = self.current_scope_ref()?;
@@ -6373,7 +6620,7 @@ impl Vm {
         };
         let signal = self.execute_code(
             &function.code,
-            functions.as_ref(),
+            &functions,
             realm,
             true,
             closure_strict,
@@ -9520,6 +9767,26 @@ impl Vm {
             }
             HostFunction::ExternalCallback { callback_id, .. } => self
                 .execute_external_host_callback(callback_id, this_arg, args, realm, caller_strict),
+            HostFunction::PromiseConstructorResolve { promise_id } => {
+                let resolved_value = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let mut hooks = NoopPromiseJobHostHooks;
+                self.settle_promise_with_hooks(
+                    promise_id,
+                    PromiseSettlement::Fulfilled(resolved_value),
+                    &mut hooks,
+                )?;
+                Ok(JsValue::Undefined)
+            }
+            HostFunction::PromiseConstructorReject { promise_id } => {
+                let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
+                let mut hooks = NoopPromiseJobHostHooks;
+                self.settle_promise_with_hooks(
+                    promise_id,
+                    PromiseSettlement::Rejected(reason),
+                    &mut hooks,
+                )?;
+                Ok(JsValue::Undefined)
+            }
             HostFunction::GeneratorFactory { producer } => {
                 let produced_values = self.execute_callable(
                     producer,
@@ -14696,63 +14963,14 @@ impl Vm {
             return Err(VmError::TypeError("Promise executor must be callable"));
         }
         let object_id = self.create_pending_promise()?;
-        let settled_state = Rc::new(RefCell::new(false));
-
-        let resolve_state = Rc::clone(&settled_state);
-        let resolve = self.register_host_callback_function(
-            "__qjs_promise_constructor_resolve__",
-            1.0,
-            false,
-            move |vm, _this_arg, args, _realm, _strict| {
-                let resolved_value = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let should_settle = {
-                    let mut settled = resolve_state.borrow_mut();
-                    if *settled {
-                        false
-                    } else {
-                        *settled = true;
-                        true
-                    }
-                };
-                if should_settle {
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        object_id,
-                        PromiseSettlement::Fulfilled(resolved_value),
-                        &mut hooks,
-                    )?;
-                }
-                Ok(JsValue::Undefined)
-            },
-        );
-
-        let reject_state = Rc::clone(&settled_state);
-        let reject = self.register_host_callback_function(
-            "__qjs_promise_constructor_reject__",
-            1.0,
-            false,
-            move |vm, _this_arg, args, _realm, _strict| {
-                let reason = args.first().cloned().unwrap_or(JsValue::Undefined);
-                let should_settle = {
-                    let mut settled = reject_state.borrow_mut();
-                    if *settled {
-                        false
-                    } else {
-                        *settled = true;
-                        true
-                    }
-                };
-                if should_settle {
-                    let mut hooks = NoopPromiseJobHostHooks;
-                    vm.settle_promise_with_hooks(
-                        object_id,
-                        PromiseSettlement::Rejected(reason),
-                        &mut hooks,
-                    )?;
-                }
-                Ok(JsValue::Undefined)
-            },
-        );
+        // 性能关键：Promise constructor 在 tight loop 中会被频繁调用。
+        // 使用专用 HostFunction 代替 external callback 注册，避免 Box<dyn FnMut> 分配与 BTreeMap 管理开销。
+        let resolve = self.create_host_function_value(HostFunction::PromiseConstructorResolve {
+            promise_id: object_id,
+        });
+        let reject = self.create_host_function_value(HostFunction::PromiseConstructorReject {
+            promise_id: object_id,
+        });
 
         if let Err(err) = self.execute_callable(
             executor,
@@ -14761,26 +14979,15 @@ impl Vm {
             realm,
             caller_strict,
         ) {
-            let should_settle = {
-                let mut settled = settled_state.borrow_mut();
-                if *settled {
-                    false
-                } else {
-                    *settled = true;
-                    true
-                }
+            let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone()) else {
+                return Err(err);
             };
-            if should_settle {
-                let Some(rejection) = self.promise_rejection_from_runtime_error(err.clone()) else {
-                    return Err(err);
-                };
-                let mut hooks = NoopPromiseJobHostHooks;
-                self.settle_promise_with_hooks(
-                    object_id,
-                    PromiseSettlement::Rejected(rejection),
-                    &mut hooks,
-                )?;
-            }
+            let mut hooks = NoopPromiseJobHostHooks;
+            self.settle_promise_with_hooks(
+                object_id,
+                PromiseSettlement::Rejected(rejection),
+                &mut hooks,
+            )?;
         }
         Ok(JsValue::Object(object_id))
     }
@@ -14976,7 +15183,10 @@ impl Vm {
 
     fn create_pending_promise(&mut self) -> Result<ObjectId, VmError> {
         let object_id = self.create_promise_object()?;
-        self.pending_promise_records.entry(object_id).or_default();
+        // 延迟分配 pending promise record：
+        // 新建 Promise 在没有任何 then/catch/finally/await 链接之前，不需要 reaction 列表。
+        // 这类 Promise 在 tight loop 中出现频率极高（例如 `new Promise(() => {})`），
+        // 若每次都插入 record（BTreeMap）会产生显著开销并拖垮吞吐。
         Ok(object_id)
     }
 
@@ -15008,14 +15218,15 @@ impl Vm {
         self.async_host_callbacks
             .pending_promises
             .insert(task_id, promise_id);
+
         let sender = self.ensure_async_host_callback_sender();
         let spawned = if let Some(tokio_handle) = get_async_host_tokio_runtime_handle() {
-            let sender = sender.clone();
-            tokio_handle.spawn(async move {
-                let result = future.await;
-                let _ = sender.send(AsyncHostCallbackCompletion { task_id, result });
-            });
-            true
+            let scheduler = ensure_async_host_callback_scheduler(tokio_handle);
+            scheduler.queue.push(AsyncHostCallbackTask {
+                task_id,
+                future,
+                completion_sender: sender.clone(),
+            })
         } else {
             thread::Builder::new()
                 .name(format!("qjs-rs-host-async-{task_id}"))
@@ -18674,7 +18885,7 @@ impl Vm {
     fn instantiate_function(
         &mut self,
         function_id: usize,
-        functions: &[CompiledFunction],
+        functions: Rc<Vec<CompiledFunction>>,
         enclosing_strict: bool,
     ) -> Result<JsValue, VmError> {
         let function = functions
@@ -18696,28 +18907,11 @@ impl Vm {
             name_scope.insert(function.name.clone(), function_name_binding);
             captured_scopes.push(Rc::new(RefCell::new(name_scope)));
         }
-        let parent_functions_key = Self::functions_key(functions);
-        let inherited_debug_locations = self
-            .debug_function_tables
-            .get(&parent_functions_key)
-            .cloned();
-        let cloned_functions = Rc::new(functions.to_vec());
-        if let Some(debug_locations) = inherited_debug_locations {
-            self.debug_function_tables.insert(
-                Self::functions_key(cloned_functions.as_slice()),
-                Rc::clone(&debug_locations),
-            );
-            for (index, compiled_function) in cloned_functions.iter().enumerate() {
-                if let Some(locations) = debug_locations.get(index) {
-                    self.register_debug_code_locations(&compiled_function.code, locations);
-                }
-            }
-        }
         self.closures.insert(
             closure_id,
             Closure {
                 function_id,
-                functions: cloned_functions,
+                functions: Rc::clone(&functions),
                 captured_scopes,
                 captured_with_objects,
                 strict,
@@ -26542,9 +26736,11 @@ impl Vm {
         property: &str,
         realm: &Realm,
     ) -> Result<JsValue, VmError> {
-        if !self.host_functions.contains_key(&host_id) {
-            return Err(VmError::UnknownHostFunction(host_id));
-        }
+        let host = self
+            .host_functions
+            .get(&host_id)
+            .cloned()
+            .ok_or(VmError::UnknownHostFunction(host_id))?;
 
         let (data_value, getter_value, has_setter, has_shadow_object) = self
             .host_function_objects
@@ -26607,7 +26803,11 @@ impl Vm {
                     Ok(JsValue::Undefined)
                 }
             }
-            "length" => Ok(JsValue::Number(0.0)),
+            "length" => match host {
+                HostFunction::PromiseConstructorResolve { .. }
+                | HostFunction::PromiseConstructorReject { .. } => Ok(JsValue::Number(1.0)),
+                _ => Ok(JsValue::Number(0.0)),
+            },
             "toString" => Ok(
                 self.create_host_function_value(HostFunction::FunctionToString {
                     target: JsValue::HostFunction(host_id),
@@ -28865,6 +29065,7 @@ mod tests {
     use parser::parse_script;
     use regex::RegexBuilder;
     use runtime::{JsValue, NativeFunction, Realm};
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -28873,7 +29074,7 @@ mod tests {
     fn empty_chunk(code: Vec<Opcode>) -> Chunk {
         Chunk {
             code,
-            functions: vec![],
+            functions: Rc::new(vec![]),
         }
     }
 
@@ -29201,12 +29402,12 @@ mod tests {
                 Opcode::LoadIdentifier("f".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "f".to_string(),
                 length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadUndefined, Opcode::Return],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Function(0)));
@@ -29216,12 +29417,12 @@ mod tests {
     fn loads_function_value_and_calls_it() {
         let chunk = Chunk {
             code: vec![Opcode::LoadFunction(0), Opcode::Call(0), Opcode::Halt],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "<anonymous>".to_string(),
                 length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadNumber(3.0), Opcode::Return],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(3.0)));
@@ -29236,7 +29437,7 @@ mod tests {
                 Opcode::GetProperty("answer".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "Ctor".to_string(),
                 length: 0,
                 params: vec![],
@@ -29248,7 +29449,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
@@ -29270,12 +29471,12 @@ mod tests {
                 Opcode::LoadIdentifier("f".to_string()),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "f".to_string(),
                 length: 0,
                 params: vec![],
                 code: vec![Opcode::LoadUndefined, Opcode::Return],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Function(0)));
@@ -29461,7 +29662,7 @@ mod tests {
                 Opcode::Call(2),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "add".to_string(),
                 length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
@@ -29473,7 +29674,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
@@ -29551,7 +29752,7 @@ mod tests {
                 Opcode::Call(2),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "sum".to_string(),
                 length: 2,
                 params: vec!["a".to_string(), "b".to_string()],
@@ -29567,7 +29768,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(42.0)));
@@ -29717,7 +29918,7 @@ mod tests {
                 Opcode::Call(1),
                 Opcode::Halt,
             ],
-            functions: vec![CompiledFunction {
+            functions: Rc::new(vec![CompiledFunction {
                 name: "add".to_string(),
                 length: 1,
                 params: vec!["v".to_string()],
@@ -29729,7 +29930,7 @@ mod tests {
                     Opcode::LoadUndefined,
                     Opcode::Return,
                 ],
-            }],
+            }]),
         };
         let mut vm = Vm::default();
         assert_eq!(vm.execute(&chunk), Ok(JsValue::Number(21.0)));
@@ -34645,3 +34846,24 @@ pub fn set_async_host_tokio_runtime_handle(handle: tokio::runtime::Handle) {
     set_async_host_tokio_runtime_handle_inner(handle);
 }
 
+fn promise_job_host_tick_hook_slot() -> &'static Mutex<Option<PromiseJobHostTickHook>> {
+    PROMISE_JOB_HOST_TICK_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+/// 注册 Promise job drain 周期内的宿主 tick 钩子（可用于驱动 timer 等宏任务）。
+pub fn set_promise_job_host_tick_hook(hook: Option<PromiseJobHostTickHook>) {
+    if let Ok(mut guard) = promise_job_host_tick_hook_slot().lock() {
+        *guard = hook;
+    }
+}
+
+fn runtime_host_tick_hook_slot() -> &'static Mutex<Option<RuntimeHostTickHook>> {
+    RUNTIME_HOST_TICK_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+/// 注册 VM 执行循环内的宿主 tick 钩子（tight loop 场景用）。
+pub fn set_runtime_host_tick_hook(hook: Option<RuntimeHostTickHook>) {
+    if let Ok(mut guard) = runtime_host_tick_hook_slot().lock() {
+        *guard = hook;
+    }
+}

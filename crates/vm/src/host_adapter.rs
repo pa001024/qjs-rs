@@ -277,10 +277,10 @@ impl ScriptRuntime {
                 move |vm, this_arg, args, realm, strict| {
                     let this_value = this_arg.ok_or(VmError::TypeError("HostClass:MissingThis"))?;
                     let mut instance = vm
-                        .take_opaque_data::<T>(&this_value)
+                        .take_opaque_data_fast::<T>(&this_value)
                         .ok_or(VmError::TypeError("HostClass:MissingInstance"))?;
                     let result = method_callback(vm, &mut instance, args, realm, strict);
-                    let _ = vm.bind_opaque_data(&this_value, instance);
+                    let _ = vm.restore_opaque_data_fast(&this_value, instance);
                     result
                 },
             ))?;
