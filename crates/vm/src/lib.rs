@@ -16370,6 +16370,11 @@ impl Vm {
         let reject = self.create_host_function_value(HostFunction::PromiseConstructorReject {
             promise_id: object_id,
         });
+        // CreateBuiltinFunction key order: length before name.
+        self.set_builtin_function_length(&resolve, 1.0);
+        self.set_builtin_function_name(&resolve, "resolve");
+        self.set_builtin_function_length(&reject, 1.0);
+        self.set_builtin_function_name(&reject, "reject");
 
         if let Err(err) = self.execute_callable(
             executor,
@@ -26309,6 +26314,18 @@ impl Vm {
         self.code_has_marker(&function.code, GENERATOR_FUNCTION_MARKER)
     }
 
+    fn function_uses_yield_identifier(&self, function: &CompiledFunction) -> bool {
+        function.code.iter().any(|opcode| {
+            matches!(
+                opcode,
+                Opcode::LoadIdentifier(name)
+                    | Opcode::ResolveIdentifierReference(name)
+                    | Opcode::TypeofIdentifier(name)
+                    if name == "yield"
+            )
+        })
+    }
+
     fn function_uses_lowered_generator_values_buffer(&self, function: &CompiledFunction) -> bool {
         function.code.iter().any(|opcode| {
             matches!(
@@ -26441,6 +26458,18 @@ impl Vm {
             .get(closure.function_id)
             .ok_or(VmError::UnknownFunction(closure.function_id))?;
         Ok(self.function_is_async(function))
+    }
+
+    fn closure_uses_yield_identifier(&self, closure_id: u64) -> Result<bool, VmError> {
+        let closure = self
+            .closures
+            .get(&closure_id)
+            .ok_or(VmError::UnknownClosure(closure_id))?;
+        let function = closure
+            .functions
+            .get(closure.function_id)
+            .ok_or(VmError::UnknownFunction(closure.function_id))?;
+        Ok(self.function_uses_yield_identifier(function))
     }
 
     fn closure_uses_lowered_generator_values_buffer(
@@ -26953,6 +26982,7 @@ impl Vm {
         object
             .properties
             .insert("length".to_string(), JsValue::Number(length));
+        Self::update_object_property_order(object, "length", true);
         object.property_attributes.insert(
             "length".to_string(),
             PropertyAttributes {
@@ -26971,6 +27001,7 @@ impl Vm {
         object
             .properties
             .insert("name".to_string(), JsValue::String(name.to_string()));
+        Self::update_object_property_order(object, "name", true);
         object.property_attributes.insert(
             "name".to_string(),
             PropertyAttributes {
